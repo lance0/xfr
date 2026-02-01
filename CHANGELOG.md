@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protocol version checking uses proper comparison function
 
 ### Added
+- CSV output format (`--csv`)
+- JSON streaming output (`--json-stream`) for real-time per-interval JSON
+- Quiet mode (`-q/--quiet`) to suppress interval output
+- Custom report interval (`-i/--interval`)
+- Omit option (`--omit`) to skip initial TCP ramp-up seconds
+- Server max duration (`--max-duration`) for server-side test limits
+- Environment variable support: `XFR_PORT` and `XFR_DURATION`
 - mDNS service registration on server start for discovery
 - Integration tests for UDP, download, bidir, and multi-client modes
 - send_data_half/receive_data_half for split socket operations
