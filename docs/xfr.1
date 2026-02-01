@@ -1,4 +1,4 @@
-.TH XFR 1 "January 2026" "xfr 0.2.0" "User Commands"
+.TH XFR 1 "February 2026" "xfr 0.3.0" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -17,17 +17,20 @@ xfr \- modern network bandwidth testing with TUI
 .B xfr
 is a fast, modern network bandwidth testing tool with a terminal user interface.
 It is designed as a replacement for iperf with additional features like live TUI,
-multi-client server support, and result comparison.
+multi-client server support, QUIC transport, and result comparison.
 .SH CLIENT OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
-Server port (default: 5201)
+Server port (default: 5201). Environment: XFR_PORT
 .TP
 .BI \-t ", " \-\-time " DURATION"
-Test duration (default: 10s). Supports units: s, m, h (e.g., 30s, 1m30s)
+Test duration (default: 10s). Supports units: s, m, h. Environment: XFR_DURATION
 .TP
 .B \-u ", " \-\-udp
 Use UDP instead of TCP
+.TP
+.B \-\-quic
+Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
 .BI \-b ", " \-\-bitrate " RATE"
 Target bitrate for UDP mode (e.g., 1G, 100M, 10K)
@@ -44,27 +47,108 @@ Bidirectional test (both upload and download)
 .B \-\-json
 Output results as JSON
 .TP
+.B \-\-json\-stream
+JSON streaming output (one JSON object per line per interval)
+.TP
+.B \-\-csv
+CSV output format
+.TP
+.B \-q ", " \-\-quiet
+Quiet mode \- suppress interval output, show only summary
+.TP
 .BI \-o ", " \-\-output " FILE"
 Save results to file
 .TP
 .B \-\-no\-tui
 Disable terminal UI, use plain text output
 .TP
+.BI \-\-theme " THEME"
+Color theme: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized
+.TP
+.BI \-i ", " \-\-interval " SECS"
+Report interval in seconds (default: 1.0)
+.TP
+.BI \-\-omit " N"
+Omit first N seconds from interval output (TCP ramp-up)
+.TP
 .B \-\-tcp\-nodelay
 Disable Nagle algorithm (TCP_NODELAY)
 .TP
 .BI \-\-window " SIZE"
 TCP window size (e.g., 512K, 1M, 4M)
+.TP
+.BI \-\-timestamp\-format " FORMAT"
+Timestamp format: relative (default), iso8601, unix
+.TP
+.BI \-\-log\-file " PATH"
+Log file path (e.g., ~/.config/xfr/xfr.log)
+.TP
+.BI \-\-log\-level " LEVEL"
+Log level: error, warn, info, debug, trace
+.TP
+.BI \-\-psk " KEY"
+Pre-shared key for server authentication. Environment: XFR_PSK
+.TP
+.BI \-\-psk\-file " FILE"
+Read PSK from file
+.TP
+.B \-4 ", " \-\-ipv4
+Force IPv4 only
+.TP
+.B \-6 ", " \-\-ipv6
+Force IPv6 only
+.TP
+.BI \-\-completions " SHELL"
+Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
-Listen port (default: 5201)
+Listen port (default: 5201). Environment: XFR_PORT
 .TP
 .B \-\-one\-off
 Exit after a single test
 .TP
-.BI \-\-prometheus " PORT"
-Enable Prometheus metrics on specified port (requires prometheus feature)
+.B \-\-tui
+Enable TUI dashboard showing active tests
+.TP
+.BI \-\-max\-duration " DURATION"
+Maximum test duration (server-side limit)
+.TP
+.BI \-\-push\-gateway " URL"
+Prometheus push gateway URL (e.g., http://pushgateway:9091)
+.TP
+.BI \-\-log\-file " PATH"
+Log file path
+.TP
+.BI \-\-log\-level " LEVEL"
+Log level: error, warn, info, debug, trace
+.TP
+.BI \-\-psk " KEY"
+Pre-shared key for authentication. Environment: XFR_PSK
+.TP
+.BI \-\-psk\-file " FILE"
+Read PSK from file
+.TP
+.BI \-\-rate\-limit " N"
+Max concurrent tests per IP
+.TP
+.BI \-\-rate\-limit\-window " DURATION"
+Rate limit time window (default: 60s)
+.TP
+.BI \-\-allow " IP/SUBNET"
+Allow IP or subnet (can be repeated)
+.TP
+.BI \-\-deny " IP/SUBNET"
+Deny IP or subnet (can be repeated)
+.TP
+.BI \-\-acl\-file " FILE"
+Load ACL rules from file
+.TP
+.B \-4 ", " \-\-ipv4
+Force IPv4 only
+.TP
+.B \-6 ", " \-\-ipv6
+Force IPv6 only
 .SH DIFF OPTIONS
 .TP
 .BI \-\-threshold " PERCENT"
@@ -76,7 +160,7 @@ Discovery timeout (default: 5s)
 .SH CONFIGURATION
 .B xfr
 reads configuration from \fI~/.config/xfr/config.toml\fR if present.
-CLI arguments override config file values.
+CLI arguments override config file values. Environment variables override config file.
 .PP
 Example config:
 .RS
@@ -84,15 +168,41 @@ Example config:
 [client]
 duration_secs = 30
 parallel_streams = 4
+theme = "dracula"
 
 [server]
-prometheus_port = 9090
+port = 5201
+psk = "secret"
+rate_limit = 5
+allow = ["192.168.0.0/16"]
 .fi
 .RE
+.SH ENVIRONMENT
+.TP
+.B XFR_PORT
+Server/client port
+.TP
+.B XFR_DURATION
+Test duration
+.TP
+.B XFR_PSK
+Pre-shared key
+.TP
+.B XFR_PUSH_GATEWAY
+Prometheus push gateway URL
+.TP
+.B XFR_LOG_FILE
+Log file path
+.TP
+.B XFR_LOG_LEVEL
+Log level
+.TP
+.B XFR_TIMESTAMP_FORMAT
+Timestamp format
 .SH EXAMPLES
 .TP
 .B xfr 192.168.1.1
-Run a 10-second TCP upload test to 192.168.1.1
+Run a 10-second TCP upload test
 .TP
 .B xfr 192.168.1.1 \-t 30s \-P 4
 30-second test with 4 parallel streams
@@ -103,11 +213,23 @@ Download test (server sends to client)
 .B xfr 192.168.1.1 \-u \-b 1G
 UDP test at 1 Gbps
 .TP
+.B xfr 192.168.1.1 \-\-quic
+QUIC encrypted test
+.TP
+.B xfr 192.168.1.1 \-\-json \-\-no\-tui
+JSON output for scripting
+.TP
 .B xfr serve
 Start server on default port 5201
 .TP
-.B xfr serve \-\-prometheus 9090
-Start server with Prometheus metrics on port 9090
+.B xfr serve \-\-tui
+Start server with live dashboard
+.TP
+.B xfr serve \-\-psk secret \-\-rate\-limit 2
+Authenticated server with rate limiting
+.TP
+.B xfr serve \-\-allow 192.168.0.0/16 \-\-deny 0.0.0.0/0
+Server with IP access control
 .TP
 .B xfr diff baseline.json current.json \-\-threshold 5
 Compare results, fail if throughput drops more than 5%
@@ -121,10 +243,19 @@ Success
 .TP
 .B 1
 Error or regression detected (with diff command)
+.TP
+.B 2
+Invalid arguments
+.TP
+.B 3
+Server rejected test (auth, rate limit, ACL)
 .SH FILES
 .TP
 .I ~/.config/xfr/config.toml
 User configuration file
+.TP
+.I ~/.config/xfr/prefs.toml
+User preferences (theme)
 .SH SEE ALSO
 .BR iperf3 (1)
 .SH BUGS
