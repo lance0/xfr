@@ -6,22 +6,21 @@
 //!
 //! xfr can be used as a library for embedding bandwidth tests in your application:
 //!
-//! ```no_run
-//! use xfr::{Client, ClientConfig, Server, ServerConfig};
-//! use std::net::SocketAddr;
+//! ```ignore
+//! use xfr::{Client, ClientConfig};
+//! use std::time::Duration;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Run a client test
 //!     let config = ClientConfig {
-//!         server: "192.168.1.1:5201".parse()?,
-//!         duration_secs: 10,
-//!         parallel_streams: 4,
+//!         host: "192.168.1.1".to_string(),
+//!         streams: 4,
+//!         duration: Duration::from_secs(10),
 //!         ..Default::default()
 //!     };
 //!
 //!     let client = Client::new(config);
-//!     let result = client.run().await?;
+//!     let result = client.run(None).await?;
 //!
 //!     println!("Throughput: {:.2} Mbps", result.throughput_mbps);
 //!     Ok(())
