@@ -18,6 +18,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress};
+use xfr::config::Config;
 use xfr::diff::{DiffConfig, run_diff};
 use xfr::output::{output_json, output_plain};
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol};
@@ -171,6 +172,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Load config file (falls back to defaults if not found)
+    let file_config = Config::load().unwrap_or_default();
+
     match cli.command {
         Some(Commands::Serve {
             port,
@@ -178,11 +182,23 @@ async fn main() -> Result<()> {
             #[cfg(feature = "prometheus")]
             prometheus,
         }) => {
+            // Use CLI values, falling back to config file, then defaults
+            let server_port = if port != DEFAULT_PORT {
+                port
+            } else {
+                file_config.server.port.unwrap_or(DEFAULT_PORT)
+            };
+
+            let server_one_off = one_off || file_config.server.one_off.unwrap_or(false);
+
+            #[cfg(feature = "prometheus")]
+            let prom_port = prometheus.or(file_config.server.prometheus_port);
+
             let config = ServerConfig {
-                port,
-                one_off,
+                port: server_port,
+                one_off: server_one_off,
                 #[cfg(feature = "prometheus")]
-                prometheus_port: prometheus,
+                prometheus_port: prom_port,
             };
             let server = Server::new(config);
             server.run().await?;
@@ -242,21 +258,51 @@ async fn main() -> Result<()> {
                 Protocol::Tcp
             };
 
+            // Apply config file defaults where CLI didn't override
+            let duration = if cli.time != Duration::from_secs(10) {
+                cli.time
+            } else {
+                file_config
+                    .client
+                    .duration_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or(cli.time)
+            };
+
+            let streams = if cli.parallel != 1 {
+                cli.parallel
+            } else {
+                file_config.client.parallel_streams.unwrap_or(cli.parallel)
+            };
+
+            let tcp_nodelay = cli.tcp_nodelay || file_config.client.tcp_nodelay.unwrap_or(false);
+
+            let window_size = cli.window.or_else(|| {
+                file_config
+                    .client
+                    .window_size
+                    .as_ref()
+                    .and_then(|s| parse_size(s).ok())
+            });
+
+            let json_output = cli.json || file_config.client.json_output.unwrap_or(false);
+            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
+
             let config = ClientConfig {
                 host: host.clone(),
                 port: cli.port,
                 protocol,
-                streams: cli.parallel,
-                duration: cli.time,
+                streams,
+                duration,
                 direction,
                 bitrate: cli.bitrate,
-                tcp_nodelay: cli.tcp_nodelay,
-                window_size: cli.window,
+                tcp_nodelay,
+                window_size,
             };
 
-            if cli.no_tui || cli.json {
+            if no_tui || json_output {
                 // Plain/JSON mode
-                run_client_plain(config, cli.json, cli.output).await?;
+                run_client_plain(config, json_output, cli.output).await?;
             } else {
                 // TUI mode
                 run_client_tui(config, cli.output).await?;

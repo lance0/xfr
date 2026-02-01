@@ -15,27 +15,21 @@
 - [x] Diff command for comparing test results
 - [x] Published to crates.io
 
-## v0.2 - Polish & Platform Support
-
-### Windows Support
-- [ ] Basic TCP/UDP testing (no TCP_INFO)
-- [ ] TUI compatibility with Windows Terminal
-- [ ] Pre-built binaries for Windows
+## Completed (v0.2.0)
 
 ### Prometheus Metrics
-- [ ] Full `/metrics` endpoint implementation
-- [ ] Grafana dashboard template
+- [x] Full `/metrics` endpoint implementation
+- [x] Grafana dashboard template
 - [ ] Push gateway support
 
 ### Configuration
-- [ ] Config file support (`~/.config/xfr/config.toml`)
-- [ ] Server presets (bandwidth limits, allowed clients)
+- [x] Config file support (`~/.config/xfr/config.toml`)
+- [x] Server presets (bandwidth limits, allowed clients)
 - [ ] Environment variable overrides
 
 ### Documentation
-- [ ] man page
-- [ ] README with examples and screenshots
-- [ ] Contributing guide
+- [x] man page
+- [x] Contributing guide
 
 ## v0.3 - Security & Enterprise
 
@@ -69,10 +63,15 @@
 - **Cloud integration**: AWS/GCP/Azure endpoint discovery
 - **Mobile apps**: iOS/Android clients for field testing
 
+### Windows Support (Low Priority)
+- [ ] Basic TCP/UDP testing (no TCP_INFO)
+- [ ] TUI compatibility with Windows Terminal
+- [ ] Pre-built binaries for Windows
+
 ## Testing Improvements
 
 - [ ] Performance regression CI (ensure 10G+ capability)
-- [ ] Cross-platform CI (Linux, macOS, Windows)
+- [x] Cross-platform CI (Linux, macOS)
 - [ ] Long-duration stability tests (1+ hour)
 - [ ] High packet loss scenarios (UDP)
 - [ ] Real hardware testing (10G NICs)

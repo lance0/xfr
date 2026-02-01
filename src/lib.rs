@@ -3,6 +3,7 @@
 //! A fast, beautiful iperf replacement built in Rust.
 
 pub mod client;
+pub mod config;
 pub mod diff;
 pub mod discover;
 pub mod output;

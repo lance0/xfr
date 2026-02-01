@@ -1,6 +1,6 @@
 [package]
 name = "xfr"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Modern network bandwidth testing with TUI"
@@ -33,6 +33,10 @@ http-body-util = { version = "0.1", optional = true }
 # Discovery
 mdns-sd = { version = "0.11", optional = true }
 
+# Config
+toml = "0.8"
+dirs = "5"
+
 # Misc
 anyhow = "1"
 thiserror = "1"
@@ -44,6 +48,7 @@ bytesize = "1"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 hostname = "0.4"
+once_cell = "1"
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]

@@ -1,0 +1,41 @@
+# xfr configuration file
+# Place at ~/.config/xfr/config.toml
+
+[client]
+# Default test duration in seconds
+duration_secs = 10
+
+# Default number of parallel streams
+parallel_streams = 1
+
+# Enable TCP_NODELAY by default
+tcp_nodelay = false
+
+# Default TCP window size
+# window_size = "1M"
+
+# Default to JSON output
+json_output = false
+
+# Disable TUI by default
+no_tui = false
+
+[server]
+# Default port
+port = 5201
+
+# Exit after one test
+one_off = false
+
+# Prometheus metrics port (requires --features prometheus)
+# prometheus_port = 9090
+
+# Server presets - use with: xfr serve --preset limited
+[[presets]]
+name = "limited"
+bandwidth_limit = "100M"
+max_duration_secs = 60
+
+[[presets]]
+name = "internal"
+allowed_clients = ["192.168.0.0/16", "10.0.0.0/8"]

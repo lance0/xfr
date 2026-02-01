@@ -62,6 +62,19 @@ impl Server {
         let listener = TcpListener::bind(&addr).await?;
         info!("xfr server listening on {}", addr);
 
+        // Spawn Prometheus metrics server if enabled
+        #[cfg(feature = "prometheus")]
+        if let Some(prom_port) = self.config.prometheus_port {
+            use crate::output::prometheus::{MetricsServer, register_metrics};
+            register_metrics();
+            let metrics_server = MetricsServer::new(prom_port);
+            tokio::spawn(async move {
+                if let Err(e) = metrics_server.run().await {
+                    error!("Prometheus metrics server error: {}", e);
+                }
+            });
+        }
+
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             info!("Client connected: {}", peer_addr);
@@ -175,6 +188,10 @@ async fn handle_client(
                     },
                 );
             }
+
+            // Notify metrics that test started
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_start();
 
             // Spawn data stream handlers
             let duration = Duration::from_secs(duration_secs as u64);
@@ -298,6 +315,10 @@ async fn handle_client(
             writer
                 .write_all(format!("{}\n", result.serialize()?).as_bytes())
                 .await?;
+
+            // Notify metrics that test completed
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_complete(&stats);
 
             // Cleanup
             active_tests.lock().await.remove(&id);

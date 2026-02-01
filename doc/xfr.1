@@ -1,0 +1,133 @@
+.TH XFR 1 "January 2026" "xfr 0.2.0" "User Commands"
+.SH NAME
+xfr \- modern network bandwidth testing with TUI
+.SH SYNOPSIS
+.B xfr
+[\fIOPTIONS\fR] \fIHOST\fR
+.br
+.B xfr serve
+[\fIOPTIONS\fR]
+.br
+.B xfr diff
+\fIBASELINE\fR \fICURRENT\fR [\fIOPTIONS\fR]
+.br
+.B xfr discover
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B xfr
+is a fast, modern network bandwidth testing tool with a terminal user interface.
+It is designed as a replacement for iperf with additional features like live TUI,
+multi-client server support, and result comparison.
+.SH CLIENT OPTIONS
+.TP
+.BI \-p ", " \-\-port " PORT"
+Server port (default: 5201)
+.TP
+.BI \-t ", " \-\-time " DURATION"
+Test duration (default: 10s). Supports units: s, m, h (e.g., 30s, 1m30s)
+.TP
+.B \-u ", " \-\-udp
+Use UDP instead of TCP
+.TP
+.BI \-b ", " \-\-bitrate " RATE"
+Target bitrate for UDP mode (e.g., 1G, 100M, 10K)
+.TP
+.BI \-P ", " \-\-parallel " N"
+Number of parallel streams (default: 1)
+.TP
+.B \-R ", " \-\-reverse
+Reverse direction (server sends to client, i.e., download test)
+.TP
+.B \-\-bidir
+Bidirectional test (both upload and download)
+.TP
+.B \-\-json
+Output results as JSON
+.TP
+.BI \-o ", " \-\-output " FILE"
+Save results to file
+.TP
+.B \-\-no\-tui
+Disable terminal UI, use plain text output
+.TP
+.B \-\-tcp\-nodelay
+Disable Nagle algorithm (TCP_NODELAY)
+.TP
+.BI \-\-window " SIZE"
+TCP window size (e.g., 512K, 1M, 4M)
+.SH SERVER OPTIONS
+.TP
+.BI \-p ", " \-\-port " PORT"
+Listen port (default: 5201)
+.TP
+.B \-\-one\-off
+Exit after a single test
+.TP
+.BI \-\-prometheus " PORT"
+Enable Prometheus metrics on specified port (requires prometheus feature)
+.SH DIFF OPTIONS
+.TP
+.BI \-\-threshold " PERCENT"
+Regression threshold percentage (default: 0)
+.SH DISCOVER OPTIONS
+.TP
+.BI \-\-timeout " DURATION"
+Discovery timeout (default: 5s)
+.SH CONFIGURATION
+.B xfr
+reads configuration from \fI~/.config/xfr/config.toml\fR if present.
+CLI arguments override config file values.
+.PP
+Example config:
+.RS
+.nf
+[client]
+duration_secs = 30
+parallel_streams = 4
+
+[server]
+prometheus_port = 9090
+.fi
+.RE
+.SH EXAMPLES
+.TP
+.B xfr 192.168.1.1
+Run a 10-second TCP upload test to 192.168.1.1
+.TP
+.B xfr 192.168.1.1 \-t 30s \-P 4
+30-second test with 4 parallel streams
+.TP
+.B xfr 192.168.1.1 \-R
+Download test (server sends to client)
+.TP
+.B xfr 192.168.1.1 \-u \-b 1G
+UDP test at 1 Gbps
+.TP
+.B xfr serve
+Start server on default port 5201
+.TP
+.B xfr serve \-\-prometheus 9090
+Start server with Prometheus metrics on port 9090
+.TP
+.B xfr diff baseline.json current.json \-\-threshold 5
+Compare results, fail if throughput drops more than 5%
+.TP
+.B xfr discover
+Find xfr servers on the local network via mDNS
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Error or regression detected (with diff command)
+.SH FILES
+.TP
+.I ~/.config/xfr/config.toml
+User configuration file
+.SH SEE ALSO
+.BR iperf3 (1)
+.SH BUGS
+Report bugs at: https://github.com/lance0/xfr/issues
+.SH AUTHOR
+lance0

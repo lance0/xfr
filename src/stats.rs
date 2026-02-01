@@ -49,6 +49,19 @@ impl StreamStats {
         self.bytes_sent.load(Ordering::Relaxed) + self.bytes_received.load(Ordering::Relaxed)
     }
 
+    pub fn retransmits(&self) -> u64 {
+        self.retransmits.load(Ordering::Relaxed)
+    }
+
+    pub fn throughput_mbps(&self) -> f64 {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            (self.total_bytes() as f64 * 8.0) / (elapsed * 1_000_000.0)
+        } else {
+            0.0
+        }
+    }
+
     pub fn record_interval(&self) -> IntervalStats {
         let now = Instant::now();
         let total_bytes = self.total_bytes();
