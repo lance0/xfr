@@ -274,8 +274,8 @@ pub fn update_metrics(stats: &TestStats) {
             .inc_by(retransmits as f64);
     }
 
-    // TCP info
-    if let Some(ref tcp_info) = *stats.tcp_info.lock() {
+    // TCP info (use aggregated/first stream info)
+    if let Some(ref tcp_info) = stats.get_tcp_info() {
         m.tcp_rtt_microseconds
             .with_label_values(&[test_id])
             .set(tcp_info.rtt_us as f64);
