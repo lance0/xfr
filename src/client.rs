@@ -84,12 +84,13 @@ impl Client {
         let peer_addr = stream.peer_addr()?;
         info!("Connected to {}", peer_addr);
 
-        self.run_test(stream, progress_tx).await
+        self.run_test(stream, peer_addr, progress_tx).await
     }
 
     async fn run_test(
         &self,
         stream: TcpStream,
+        server_ip: SocketAddr,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         let (reader, mut writer) = stream.into_split();
@@ -170,18 +171,14 @@ impl Client {
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
         *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
-        // Connect data streams
-        let server_addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid host '{}': {}", self.config.host, e))?;
-
+        // Connect data streams using the resolved IP from control connection
         match self.config.protocol {
             Protocol::Tcp => {
-                self.spawn_tcp_streams(&data_ports, server_addr, stats.clone(), cancel_rx.clone())
+                self.spawn_tcp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
                     .await?;
             }
             Protocol::Udp => {
-                self.spawn_udp_streams(&data_ports, server_addr, stats.clone(), cancel_rx.clone())
+                self.spawn_udp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
                     .await?;
             }
         }

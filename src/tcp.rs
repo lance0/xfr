@@ -46,25 +46,33 @@ impl TcpConfig {
 #[cfg(unix)]
 fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
+    use tracing::debug;
 
     let fd = stream.as_raw_fd();
     let size = buffer_size as libc::c_int;
 
     unsafe {
-        libc::setsockopt(
+        let ret = libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_SNDBUF,
             &size as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
-        libc::setsockopt(
+        if ret != 0 {
+            debug!("Failed to set SO_SNDBUF to {}: {}", buffer_size, std::io::Error::last_os_error());
+        }
+
+        let ret = libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_RCVBUF,
             &size as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
+        if ret != 0 {
+            debug!("Failed to set SO_RCVBUF to {}: {}", buffer_size, std::io::Error::last_os_error());
+        }
     }
 
     Ok(())
