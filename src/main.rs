@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -515,11 +516,12 @@ async fn run_tui_loop(
         config.bitrate,
     );
 
-    let client = Client::new(config);
+    let client = Arc::new(Client::new(config));
+    let client_for_task = client.clone();
     let (progress_tx, mut progress_rx) = mpsc::channel::<TestProgress>(100);
 
     // Start the test
-    let test_handle = tokio::spawn(async move { client.run(Some(progress_tx)).await });
+    let test_handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
 
     app.on_connected();
 
@@ -533,6 +535,8 @@ async fn run_tui_loop(
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') => {
+                            // Cancel the test on server before exiting
+                            let _ = client.cancel();
                             return Ok(app.result);
                         }
                         KeyCode::Char('p') => {
