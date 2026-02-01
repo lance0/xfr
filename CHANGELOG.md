@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **QUIC transport** (`--quic`) via quinn crate - built-in TLS 1.3 encryption, stream multiplexing
+- **Documentation overhaul:**
+  - `docs/COMPARISON.md` - Feature matrix vs iperf3/iperf2/rperf/nperf, migration guide
+  - `docs/SCRIPTING.md` - CI/CD examples, Docker usage, Prometheus integration
+  - `docs/FEATURES.md` - Comprehensive feature reference
+  - `docs/ARCHITECTURE.md` - Module structure, data flow, threading model
+  - Real-world use cases section in README
+  - Enhanced module-level rustdoc for lib.rs, protocol.rs, quic.rs
+- `install.sh` - Cross-platform installer script (Linux/macOS)
+- `.github/FUNDING.yml` - Ko-fi sponsor link
 - QUIC supports upload, download, bidirectional, and multi-stream modes
 - QUIC works with PSK authentication
 

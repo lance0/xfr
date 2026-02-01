@@ -1,3 +1,41 @@
+//! Control protocol for xfr client-server communication
+//!
+//! The control channel uses length-prefixed JSON messages over TCP:
+//!
+//! ```text
+//! ┌──────────┬─────────────────────────────────────────┐
+//! │ 4 bytes  │ JSON payload                            │
+//! │ (length) │                                         │
+//! └──────────┴─────────────────────────────────────────┘
+//! ```
+//!
+//! # Protocol Versioning
+//!
+//! Protocol version follows semver conventions:
+//! - Major version changes break compatibility
+//! - Minor version changes are backwards compatible
+//!
+//! Use [`versions_compatible`] to check compatibility.
+//!
+//! # Message Flow
+//!
+//! ```text
+//! Client                          Server
+//!   │                               │
+//!   │──────── Hello ───────────────>│
+//!   │<─────── Hello (+ auth?) ──────│
+//!   │──────── AuthResponse? ───────>│
+//!   │<─────── AuthSuccess? ─────────│
+//!   │──────── TestStart ───────────>│
+//!   │<─────── TestAck ──────────────│
+//!   │                               │
+//!   │      [Data Transfer]          │
+//!   │                               │
+//!   │<─────── Interval ─────────────│ (periodic)
+//!   │<─────── Result ───────────────│
+//!   │                               │
+//! ```
+
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: &str = "1.0";

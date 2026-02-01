@@ -48,9 +48,55 @@ xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 | LAN discovery | No | `xfr discover` |
 | Config file | No | Yes |
 
+## Real-World Use Cases
+
+### VPN Tunnel Testing
+Measure actual throughput through your VPN:
+```bash
+# On VPN server
+xfr serve
+
+# From client, through VPN
+xfr 10.8.0.1 -t 30s
+```
+
+### UDP Congestion Detection
+Test UDP at your expected rate to detect packet loss:
+```bash
+xfr host -u -b 500M -t 60s    # Watch for loss percentage in TUI
+```
+
+### Before/After Comparison
+Quantify the impact of network changes:
+```bash
+xfr host --json -o before.json
+# ... make changes ...
+xfr host --json -o after.json
+xfr diff before.json after.json --threshold 5%
+```
+
+### Multi-Stream for Bonded Connections
+Test aggregate bandwidth across bonded/LACP interfaces:
+```bash
+xfr host -P 8 -t 30s          # 8 streams to utilize all links
+```
+
+### Prometheus Monitoring
+Continuous performance monitoring:
+```bash
+xfr serve --prometheus-port 9090 --push-gateway http://pushgateway:9091
+# Scrape metrics or view in Grafana
+```
+
 ## Installation
 
-### From crates.io (Recommended)
+### Quick Install (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
+```
+
+### From crates.io
 
 ```bash
 cargo install xfr
@@ -307,6 +353,10 @@ Ensure the server is running and the port is not blocked by a firewall.
 
 ## Documentation
 
+- [Comparison with iperf3](docs/COMPARISON.md) - Feature matrix and migration guide
+- [Scripting & CI/CD](docs/SCRIPTING.md) - Automation, Docker, Prometheus
+- [Features Reference](docs/FEATURES.md) - Detailed feature documentation
+- [Architecture](docs/ARCHITECTURE.md) - For contributors
 - [Changelog](CHANGELOG.md) - Release history
 - [Roadmap](ROADMAP.md) - Planned features
 - [Contributing](CONTRIBUTING.md) - Development guidelines

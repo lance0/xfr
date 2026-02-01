@@ -4,6 +4,34 @@
 //! - Built-in TLS 1.3 encryption
 //! - Multiplexed streams over a single connection
 //! - Stream 0 for control, streams 1-N for data
+//!
+//! # Connection Flow
+//!
+//! ```text
+//! Client                                 Server
+//!   │                                      │
+//!   │── QUIC handshake (TLS 1.3) ─────────>│
+//!   │<─────────────────────────────────────│
+//!   │                                      │
+//!   │== Stream 0 (bidirectional) =========│  Control channel
+//!   │   Hello, TestStart, Interval, etc.  │
+//!   │                                      │
+//!   │== Stream 1 (unidirectional) ========│  Data stream 1
+//!   │== Stream 2 (unidirectional) ========│  Data stream 2
+//!   │== ...                               │
+//!   │                                      │
+//! ```
+//!
+//! # Security Model
+//!
+//! QUIC provides transport encryption via TLS 1.3, but xfr uses self-signed
+//! certificates by default (server identity is not verified). For authenticated
+//! connections, combine with PSK authentication (`--psk`) to prevent MITM attacks.
+//!
+//! The self-signed approach is chosen because:
+//! 1. xfr is typically used on trusted networks (LAN, VPN)
+//! 2. PSK authentication provides mutual authentication when needed
+//! 3. CA infrastructure is impractical for ephemeral test servers
 
 use std::net::SocketAddr;
 use std::sync::Arc;

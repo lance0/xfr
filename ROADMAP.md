@@ -182,6 +182,18 @@
 
 ---
 
+## Documentation (Completed)
+
+- [x] `docs/COMPARISON.md` - Feature matrix vs iperf3/iperf2/rperf/nperf
+- [x] `docs/SCRIPTING.md` - CI/CD, Docker, Prometheus integration
+- [x] `docs/FEATURES.md` - Comprehensive feature reference
+- [x] `docs/ARCHITECTURE.md` - Module structure, data flow, threading model
+- [x] `install.sh` - Cross-platform installer
+- [x] Enhanced README with real-world use cases
+- [x] Module-level rustdoc (lib.rs, protocol.rs, quic.rs)
+
+---
+
 ## Competitive Landscape
 
 | Tool | Language | Multi-client | TUI | QUIC | Active Development |
@@ -191,6 +203,22 @@
 | rperf | Rust | Yes | No | No | Active |
 | nperf | Rust | ? | No | Yes | Active |
 | **xfr** | Rust | Yes | Yes | Yes | Active |
+
+---
+
+## Scope Creep / Non-Goals
+
+xfr is a **CLI bandwidth testing tool**. The following are explicitly out of scope:
+
+- **Web UI** - xfr is CLI-only. Use Prometheus + Grafana for dashboards.
+- **Traceroute / path analysis** - Use [ttl](https://github.com/lance0/ttl) instead.
+- **Packet capture** - Use tcpdump, Wireshark, or similar tools.
+- **Network scanning** - Use nmap or masscan.
+- **Historical database** - Use external storage. `xfr diff` covers basic comparison.
+- **Scheduled tests** - Use cron or CI/CD schedulers.
+- **Configuration management** - Manage config files with your preferred tools.
+
+If you need these features, combine xfr with purpose-built tools.
 
 ---
 
