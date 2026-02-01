@@ -78,59 +78,69 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let title = format!(
-        " xfr {} {}:{}",
-        match app.state {
-            AppState::Connecting => "connecting to",
-            AppState::Running => "→",
-            AppState::Paused => "(paused) →",
-            AppState::Completed => "✓",
-            AppState::Error => "✗",
-        },
-        app.host,
-        app.port
-    );
+    // Build title with separators like ttl: "xfr ─── host:port ─── status"
+    let status = match app.state {
+        AppState::Connecting => "connecting...",
+        AppState::Running => "running",
+        AppState::Paused => "paused",
+        AppState::Completed => "complete ✓",
+        AppState::Error => "error ✗",
+    };
+
+    let title_line = Line::from(vec![
+        Span::styled(" xfr ", Style::default().fg(theme.header).add_modifier(Modifier::BOLD)),
+        Span::styled("─── ", Style::default().fg(theme.border)),
+        Span::styled(format!("{}:{}", app.host, app.port), Style::default().fg(theme.text)),
+        Span::styled(" ─── ", Style::default().fg(theme.border)),
+        Span::styled(status, Style::default().fg(match app.state {
+            AppState::Completed => theme.success,
+            AppState::Error => theme.error,
+            AppState::Paused => theme.warning,
+            _ => theme.text_dim,
+        })),
+    ]);
 
     let block = Block::default()
-        .title(title)
+        .title(title_line)
         .borders(Borders::ALL)
         .style(Style::default().fg(theme.border));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Build info line with styled spans
     let bitrate_str = app.bitrate.map(|b| {
         if b >= 1_000_000_000 {
-            format!("{}G", b / 1_000_000_000)
+            format!("{}Gbps", b / 1_000_000_000)
         } else if b >= 1_000_000 {
-            format!("{}M", b / 1_000_000)
+            format!("{}Mbps", b / 1_000_000)
         } else {
-            format!("{}K", b / 1_000)
+            format!("{}Kbps", b / 1_000)
         }
     });
 
-    let info = if let Some(br) = bitrate_str {
-        format!(
-            "Protocol: {} @ {}bps    Streams: {}    Direction: {}    Elapsed: {}s / {}s",
-            app.protocol,
-            br,
-            app.streams_count,
-            app.direction,
-            app.elapsed.as_secs(),
-            app.duration.as_secs()
-        )
-    } else {
-        format!(
-            "Protocol: {}    Streams: {}    Direction: {}    Elapsed: {}s / {}s",
-            app.protocol,
-            app.streams_count,
-            app.direction,
-            app.elapsed.as_secs(),
-            app.duration.as_secs()
-        )
-    };
+    let mut info_spans = vec![
+        Span::styled("Protocol ", Style::default().fg(theme.text_dim)),
+        Span::styled(format!("{}", app.protocol), Style::default().fg(theme.accent)),
+    ];
 
-    let info_widget = Paragraph::new(info).style(Style::default().fg(theme.text_dim));
+    if let Some(br) = bitrate_str {
+        info_spans.push(Span::styled(format!(" @ {}", br), Style::default().fg(theme.text_dim)));
+    }
+
+    info_spans.extend(vec![
+        Span::styled("    Streams ", Style::default().fg(theme.text_dim)),
+        Span::styled(format!("{}", app.streams_count), Style::default().fg(theme.accent)),
+        Span::styled("    Direction ", Style::default().fg(theme.text_dim)),
+        Span::styled(format!("{}", app.direction), Style::default().fg(theme.accent)),
+        Span::styled("    Elapsed ", Style::default().fg(theme.text_dim)),
+        Span::styled(
+            format!("{}s / {}s", app.elapsed.as_secs(), app.duration.as_secs()),
+            Style::default().fg(theme.text),
+        ),
+    ]);
+
+    let info_widget = Paragraph::new(Line::from(info_spans));
     frame.render_widget(info_widget, inner);
 }
 
@@ -164,8 +174,8 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Throughput sparkline
-            Constraint::Length(1), // Current throughput
+            Constraint::Length(4), // Throughput section (label + sparkline)
+            Constraint::Length(1), // Progress bar
             Constraint::Length(1), // Separator
             Constraint::Min(4),    // Streams
             Constraint::Length(1), // Separator
@@ -174,18 +184,20 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         .margin(1)
         .split(area);
 
-    // Throughput label
-    let label = Paragraph::new("Throughput")
-        .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
-    frame.render_widget(label, chunks[0]);
+    // Throughput section header
+    let throughput_header = Line::from(vec![
+        Span::styled("▸ ", Style::default().fg(theme.accent)),
+        Span::styled("Throughput", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+    ]);
+    frame.render_widget(Paragraph::new(throughput_header), chunks[0]);
 
-    // Sparkline
+    // Sparkline with 2 rows for better visibility
     if !app.throughput_history.is_empty() {
         let sparkline_area = Rect {
             x: chunks[0].x,
             y: chunks[0].y + 1,
-            width: chunks[0].width.saturating_sub(20),
-            height: 1,
+            width: chunks[0].width.saturating_sub(18),
+            height: 2,
         };
         let data: Vec<f64> = app.throughput_history.iter().cloned().collect();
         let sparkline = Sparkline::new(&data)
@@ -193,14 +205,20 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             .style(Style::default().fg(theme.graph_primary));
         frame.render_widget(sparkline, sparkline_area);
 
-        // Current value
+        // Current value with peak
         let value_area = Rect {
             x: sparkline_area.x + sparkline_area.width + 1,
             y: sparkline_area.y,
-            width: 18,
-            height: 1,
+            width: 16,
+            height: 2,
         };
-        let value = Paragraph::new(mbps_to_human(app.current_throughput_mbps)).style(
+        let max_val = app.max_throughput();
+        let value_text = format!(
+            "{}\npeak {}",
+            mbps_to_human(app.current_throughput_mbps),
+            mbps_to_human(max_val)
+        );
+        let value = Paragraph::new(value_text).style(
             Style::default()
                 .fg(theme.graph_primary)
                 .add_modifier(Modifier::BOLD),
@@ -213,10 +231,12 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         .filled_style(Style::default().fg(theme.graph_secondary));
     frame.render_widget(progress, chunks[1]);
 
-    // Streams label
-    let streams_label = Paragraph::new("Streams")
-        .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
-    frame.render_widget(streams_label, chunks[3]);
+    // Streams section header
+    let streams_header = Line::from(vec![
+        Span::styled("▸ ", Style::default().fg(theme.accent)),
+        Span::styled("Streams", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+    ]);
+    frame.render_widget(Paragraph::new(streams_header), chunks[3]);
 
     // Stream bars
     let max_throughput = app
@@ -406,19 +426,33 @@ fn draw_summary(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let keys = match app.state {
-        AppState::Completed => "Test complete - [q] Quit   [t] Theme   [j] JSON   [?] Help",
-        AppState::Error => "[q] Quit   [r] Retry   [?] Help",
-        _ => "[q] Quit   [p] Pause   [t] Theme   [j] JSON   [?] Help",
+    let keys: Vec<(&str, &str)> = match app.state {
+        AppState::Completed => vec![("q", "quit"), ("t", "theme"), ("j", "json"), ("?", "help")],
+        AppState::Error => vec![("q", "quit"), ("?", "help")],
+        _ => vec![("q", "quit"), ("p", "pause"), ("t", "theme"), ("j", "json"), ("?", "help")],
     };
 
-    let footer = Paragraph::new(keys).style(Style::default().fg(theme.text_dim));
+    let mut spans = Vec::new();
+    if app.state == AppState::Completed {
+        spans.push(Span::styled("✓ complete ", Style::default().fg(theme.success)));
+        spans.push(Span::styled("─── ", Style::default().fg(theme.border)));
+    }
+
+    for (i, (key, action)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        spans.push(Span::styled(*key, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(format!(" {}", action), Style::default().fg(theme.text_dim)));
+    }
+
+    let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, area);
 }
 
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let help_width = 50;
-    let help_height = 12;
+    let help_width = 40;
+    let help_height = 14;
     let help_area = Rect {
         x: (area.width.saturating_sub(help_width)) / 2,
         y: (area.height.saturating_sub(help_height)) / 2,
@@ -427,42 +461,55 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
     };
 
     let help_text = vec![
+        Line::from(""),
         Line::from(vec![
-            Span::styled("q", Style::default().fg(theme.accent)),
-            Span::raw(" - Quit"),
+            Span::styled("  q", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", Style::default().fg(theme.border)),
+            Span::styled("Quit", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
-            Span::styled("p", Style::default().fg(theme.accent)),
-            Span::raw(" - Pause/Resume"),
+            Span::styled("  p", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", Style::default().fg(theme.border)),
+            Span::styled("Pause / Resume", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
-            Span::styled("t", Style::default().fg(theme.accent)),
-            Span::raw(" - Cycle theme"),
+            Span::styled("  t", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", Style::default().fg(theme.border)),
+            Span::styled("Cycle theme", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
-            Span::styled("j", Style::default().fg(theme.accent)),
-            Span::raw(" - Output JSON"),
+            Span::styled("  j", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", Style::default().fg(theme.border)),
+            Span::styled("Print JSON result", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
-            Span::styled("?", Style::default().fg(theme.accent)),
-            Span::raw(" - Toggle help"),
+            Span::styled("  ?", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled("  ·  ", Style::default().fg(theme.border)),
+            Span::styled("Toggle help", Style::default().fg(theme.text)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::raw("Press "),
-            Span::styled("Esc", Style::default().fg(theme.accent)),
-            Span::raw(" to close"),
+            Span::styled("  ───────────────────────────", Style::default().fg(theme.border)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Press ", Style::default().fg(theme.text_dim)),
+            Span::styled("Esc", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(" to close", Style::default().fg(theme.text_dim)),
         ]),
     ];
+
+    let title_line = Line::from(vec![
+        Span::styled(" Keybindings ", Style::default().fg(theme.header).add_modifier(Modifier::BOLD)),
+    ]);
 
     let help = Paragraph::new(help_text)
         .block(
             Block::default()
-                .title(" Help ")
+                .title(title_line)
                 .borders(Borders::ALL)
-                .style(Style::default().fg(theme.text).bg(Color::Black)),
-        )
-        .style(Style::default().bg(Color::Black));
+                .style(Style::default().fg(theme.border)),
+        );
 
     // Clear the area first
     frame.render_widget(ratatui::widgets::Clear, help_area);
