@@ -36,7 +36,6 @@ impl std::str::FromStr for AddressFamily {
 }
 
 impl AddressFamily {
-
     /// Get the bind address for this family
     pub fn bind_addr(&self, port: u16) -> SocketAddr {
         match self {
@@ -289,8 +288,14 @@ mod tests {
         assert_eq!("ipv4".parse::<AddressFamily>(), Ok(AddressFamily::V4Only));
         assert_eq!("6".parse::<AddressFamily>(), Ok(AddressFamily::V6Only));
         assert_eq!("ipv6".parse::<AddressFamily>(), Ok(AddressFamily::V6Only));
-        assert_eq!("dual".parse::<AddressFamily>(), Ok(AddressFamily::DualStack));
-        assert_eq!("both".parse::<AddressFamily>(), Ok(AddressFamily::DualStack));
+        assert_eq!(
+            "dual".parse::<AddressFamily>(),
+            Ok(AddressFamily::DualStack)
+        );
+        assert_eq!(
+            "both".parse::<AddressFamily>(),
+            Ok(AddressFamily::DualStack)
+        );
         assert_eq!("invalid".parse::<AddressFamily>(), Err(()));
     }
 
