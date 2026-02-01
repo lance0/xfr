@@ -55,9 +55,7 @@ impl DiffResult {
         {
             output.push_str(&format!(
                 "Retransmits: {} → {} ({:+.1}%)",
-                baseline_tcp.retransmits,
-                current_tcp.retransmits,
-                self.retransmit_change_percent
+                baseline_tcp.retransmits, current_tcp.retransmits, self.retransmit_change_percent
             ));
             if self.retransmit_change_percent > 50.0 {
                 output.push_str(" ✗");
@@ -102,13 +100,12 @@ pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -
         0.0
     };
 
-    let retransmit_change_percent =
-        match (&baseline.tcp_info, &current.tcp_info) {
-            (Some(b), Some(c)) if b.retransmits > 0 => {
-                ((c.retransmits as f64 - b.retransmits as f64) / b.retransmits as f64) * 100.0
-            }
-            _ => 0.0,
-        };
+    let retransmit_change_percent = match (&baseline.tcp_info, &current.tcp_info) {
+        (Some(b), Some(c)) if b.retransmits > 0 => {
+            ((c.retransmits as f64 - b.retransmits as f64) / b.retransmits as f64) * 100.0
+        }
+        _ => 0.0,
+    };
 
     let rtt_change_percent = match (&baseline.tcp_info, &current.tcp_info) {
         (Some(b), Some(c)) if b.rtt_us > 0 => {
@@ -129,7 +126,11 @@ pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -
     }
 }
 
-pub fn run_diff(baseline_path: &Path, current_path: &Path, config: &DiffConfig) -> anyhow::Result<DiffResult> {
+pub fn run_diff(
+    baseline_path: &Path,
+    current_path: &Path,
+    config: &DiffConfig,
+) -> anyhow::Result<DiffResult> {
     let baseline = load_result(baseline_path)?;
     let current = load_result(current_path)?;
     Ok(compare(baseline, current, config))

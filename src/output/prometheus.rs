@@ -2,8 +2,6 @@
 
 #[cfg(feature = "prometheus")]
 use std::net::SocketAddr;
-#[cfg(feature = "prometheus")]
-use std::sync::Arc;
 
 #[cfg(feature = "prometheus")]
 use http_body_util::Full;
@@ -100,9 +98,13 @@ pub fn register_metrics() {
 
 #[cfg(feature = "prometheus")]
 pub fn update_metrics(stats: &TestStats) {
-    use prometheus::{counter, gauge};
+    let bytes_total = prometheus::Counter::with_opts(prometheus::Opts::new(
+        "xfr_bytes_total",
+        "Total bytes transferred",
+    ))
+    .unwrap();
 
-    if let Ok(c) = counter!("xfr_bytes_total") {
-        c.inc_by(stats.total_bytes() as f64);
-    }
+    // Try to register, ignore if already registered
+    let _ = prometheus::register(Box::new(bytes_total.clone()));
+    bytes_total.inc_by(stats.total_bytes() as f64);
 }

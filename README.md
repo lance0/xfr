@@ -1,5 +1,9 @@
 # xfr
 
+[![Crates.io](https://img.shields.io/crates/v/xfr.svg)](https://crates.io/crates/xfr)
+[![License](https://img.shields.io/crates/l/xfr.svg)](https://github.com/lance0/xfr#license)
+[![CI](https://github.com/lance0/xfr/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/xfr/actions/workflows/ci.yml)
+
 A fast, modern network bandwidth testing tool with TUI. Built in Rust as an iperf replacement.
 
 ## Install
@@ -67,6 +71,14 @@ xfr discover                 # Find xfr servers on LAN
 | LAN discovery | No | `xfr discover` |
 | Install | Package manager | `cargo install xfr` |
 
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| Linux | Full support, TCP_INFO stats |
+| macOS | Full support, TCP_INFO stats |
+| Windows | Via WSL |
+
 ## Flags
 
 | Flag | Short | Default | Description |
@@ -83,6 +95,26 @@ xfr discover                 # Find xfr servers on LAN
 | `--no-tui` | | false | Disable TUI |
 | `--tcp-nodelay` | | false | Disable Nagle |
 | `--window` | | OS default | TCP window size |
+
+## Troubleshooting
+
+### Permission denied on port 5201
+
+Use a port above 1024 or run with elevated privileges:
+
+```bash
+xfr serve -p 9000
+```
+
+### Connection refused
+
+Ensure the server is running and the port is not blocked by a firewall.
+
+### Low throughput
+
+- Try multiple parallel streams: `-P 4`
+- Disable Nagle's algorithm: `--tcp-nodelay`
+- Increase TCP window size: `--window 4M`
 
 ## License
 

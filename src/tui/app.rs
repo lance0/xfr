@@ -116,9 +116,9 @@ impl App {
         for interval in &progress.streams {
             if let Some(stream) = self.streams.get_mut(interval.id as usize) {
                 stream.bytes = interval.bytes;
-                stream.throughput_mbps =
-                    (interval.bytes as f64 * 8.0) / (progress.elapsed_ms as f64 / 1000.0)
-                        / 1_000_000.0;
+                stream.throughput_mbps = (interval.bytes as f64 * 8.0)
+                    / (progress.elapsed_ms as f64 / 1000.0)
+                    / 1_000_000.0;
                 stream.retransmits = interval.retransmits.unwrap_or(0);
             }
         }

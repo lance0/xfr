@@ -1,10 +1,10 @@
 //! TUI rendering
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use super::app::{App, AppState};
 use super::widgets::{ProgressBar, Sparkline, StreamBar};
@@ -73,8 +73,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
 
     match app.state {
         AppState::Connecting => {
-            let msg = Paragraph::new("Connecting...")
-                .style(Style::default().fg(Color::Yellow));
+            let msg = Paragraph::new("Connecting...").style(Style::default().fg(Color::Yellow));
             frame.render_widget(msg, inner);
         }
         AppState::Error => {
@@ -103,8 +102,11 @@ fn draw_test_content(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // Throughput label
-    let label = Paragraph::new("Throughput")
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let label = Paragraph::new("Throughput").style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(label, chunks[0]);
 
     // Sparkline
@@ -128,8 +130,11 @@ fn draw_test_content(frame: &mut Frame, app: &App, area: Rect) {
             width: 18,
             height: 1,
         };
-        let value = Paragraph::new(mbps_to_human(app.current_throughput_mbps))
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        let value = Paragraph::new(mbps_to_human(app.current_throughput_mbps)).style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
         frame.render_widget(value, value_area);
     }
 
@@ -139,12 +144,20 @@ fn draw_test_content(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(progress, chunks[1]);
 
     // Streams label
-    let streams_label = Paragraph::new("Streams")
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let streams_label = Paragraph::new("Streams").style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(streams_label, chunks[3]);
 
     // Stream bars
-    let max_throughput = app.streams.iter().map(|s| s.throughput_mbps).fold(0.0f64, f64::max).max(100.0);
+    let max_throughput = app
+        .streams
+        .iter()
+        .map(|s| s.throughput_mbps)
+        .fold(0.0f64, f64::max)
+        .max(100.0);
 
     for (i, stream) in app.streams.iter().enumerate() {
         if i as u16 + 1 >= chunks[3].height {
@@ -156,7 +169,12 @@ fn draw_test_content(frame: &mut Frame, app: &App, area: Rect) {
             width: chunks[3].width,
             height: 1,
         };
-        let bar = StreamBar::new(stream.id, stream.throughput_mbps, max_throughput, stream.retransmits);
+        let bar = StreamBar::new(
+            stream.id,
+            stream.throughput_mbps,
+            max_throughput,
+            stream.retransmits,
+        );
         frame.render_widget(bar, stream_area);
     }
 
@@ -179,8 +197,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         _ => "[q] Quit   [p] Pause   [r] Restart   [j] JSON   [?] Help",
     };
 
-    let footer = Paragraph::new(keys)
-        .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(keys).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, area);
 }
 

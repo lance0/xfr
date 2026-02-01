@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
-    ControlMessage, Direction, Protocol, StreamInterval, TestResult, PROTOCOL_VERSION,
+    ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
 };
 use crate::stats::{StreamStats, TestStats};
 use crate::tcp::{self, TcpConfig};
@@ -243,21 +243,26 @@ async fn handle_client(
 
                 // Check for cancel message
                 line.clear();
-                let read_result = tokio::time::timeout(
-                    Duration::from_millis(10),
-                    reader.read_line(&mut line)
-                ).await;
+                let read_result =
+                    tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
+                        .await;
 
                 if let Ok(Ok(n)) = read_result {
                     if n > 0 {
-                        if let Ok(ControlMessage::Cancel { id: cancel_id, reason }) = ControlMessage::deserialize(line.trim()) {
+                        if let Ok(ControlMessage::Cancel {
+                            id: cancel_id,
+                            reason,
+                        }) = ControlMessage::deserialize(line.trim())
+                        {
                             if cancel_id == id {
                                 info!("Test {} cancelled: {}", id, reason);
                                 if let Some(test) = active_tests.lock().await.get(&id) {
                                     let _ = test.cancel_tx.send(true);
                                 }
                                 let cancelled = ControlMessage::Cancelled { id: id.clone() };
-                                writer.write_all(format!("{}\n", cancelled.serialize()?).as_bytes()).await?;
+                                writer
+                                    .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                                    .await?;
                                 break;
                             }
                         }
@@ -341,15 +346,19 @@ async fn spawn_tcp_handlers(
                 match direction {
                     Direction::Upload => {
                         // Server receives data
-                        let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
+                        let _ =
+                            tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
                     }
                     Direction::Download => {
                         // Server sends data
-                        let _ = tcp::send_data(stream, stream_stats.clone(), duration, config, cancel).await;
+                        let _ =
+                            tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
+                                .await;
                     }
                     Direction::Bidir => {
                         // Both directions - needs split
-                        let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
+                        let _ =
+                            tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
                     }
                 }
 
@@ -390,8 +399,14 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Download => {
                     // Server sends UDP
-                    let _ =
-                        udp::send_udp_paced(socket, bitrate, duration, stream_stats.clone(), cancel).await;
+                    let _ = udp::send_udp_paced(
+                        socket,
+                        bitrate,
+                        duration,
+                        stream_stats.clone(),
+                        cancel,
+                    )
+                    .await;
                 }
                 Direction::Bidir => {
                     let _ = udp::receive_udp(socket, stream_stats.clone(), cancel).await;

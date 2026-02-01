@@ -39,13 +39,9 @@ impl Widget for Sparkline<'_> {
             return;
         }
 
-        let max = self.max.unwrap_or_else(|| {
-            self.data
-                .iter()
-                .cloned()
-                .fold(0.0f64, f64::max)
-                .max(1.0)
-        });
+        let max = self
+            .max
+            .unwrap_or_else(|| self.data.iter().cloned().fold(0.0f64, f64::max).max(1.0));
 
         let data_len = self.data.len();
         let width = area.width as usize;

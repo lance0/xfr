@@ -6,21 +6,23 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
-use ratatui::backend::CrosstermBackend;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress};
-use xfr::diff::{run_diff, DiffConfig};
+use xfr::diff::{DiffConfig, run_diff};
 use xfr::output::{output_json, output_plain};
-use xfr::protocol::{Direction, Protocol, DEFAULT_PORT};
+use xfr::protocol::{DEFAULT_PORT, Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
-use xfr::tui::{draw, App};
+use xfr::tui::{App, draw};
 
 #[derive(Parser)]
 #[command(name = "xfr")]

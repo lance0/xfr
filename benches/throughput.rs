@@ -1,6 +1,6 @@
 //! Throughput benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use xfr::stats::StreamStats;
 use xfr::udp::UdpPacketHeader;
@@ -38,11 +38,14 @@ fn bench_udp_header_decode(c: &mut Criterion) {
     header.encode(&mut buffer);
 
     c.bench_function("udp_header_decode", |b| {
-        b.iter(|| {
-            UdpPacketHeader::decode(black_box(&buffer))
-        })
+        b.iter(|| UdpPacketHeader::decode(black_box(&buffer)))
     });
 }
 
-criterion_group!(benches, bench_stats_add_bytes, bench_udp_header_encode, bench_udp_header_decode);
+criterion_group!(
+    benches,
+    bench_stats_add_bytes,
+    bench_udp_header_encode,
+    bench_udp_header_decode
+);
 criterion_main!(benches);

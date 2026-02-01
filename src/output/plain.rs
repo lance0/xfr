@@ -17,7 +17,10 @@ pub fn output_plain(result: &TestResult) -> String {
         "  Duration:    {:.2}s\n",
         result.duration_ms as f64 / 1000.0
     ));
-    output.push_str(&format!("  Transfer:    {}\n", bytes_to_human(result.bytes_total)));
+    output.push_str(&format!(
+        "  Transfer:    {}\n",
+        bytes_to_human(result.bytes_total)
+    ));
     output.push_str(&format!(
         "  Throughput:  {}\n",
         mbps_to_human(result.throughput_mbps)
@@ -27,7 +30,10 @@ pub fn output_plain(result: &TestResult) -> String {
     if let Some(ref tcp_info) = result.tcp_info {
         output.push_str("  TCP Info:\n");
         output.push_str(&format!("    Retransmits: {}\n", tcp_info.retransmits));
-        output.push_str(&format!("    RTT:         {:.2}ms\n", tcp_info.rtt_us as f64 / 1000.0));
+        output.push_str(&format!(
+            "    RTT:         {:.2}ms\n",
+            tcp_info.rtt_us as f64 / 1000.0
+        ));
         output.push_str(&format!(
             "    RTT Var:     {:.2}ms\n",
             tcp_info.rtt_var_us as f64 / 1000.0
@@ -38,11 +44,26 @@ pub fn output_plain(result: &TestResult) -> String {
 
     if let Some(ref udp_stats) = result.udp_stats {
         output.push_str("  UDP Stats:\n");
-        output.push_str(&format!("    Packets Sent:     {}\n", udp_stats.packets_sent));
-        output.push_str(&format!("    Packets Received: {}\n", udp_stats.packets_received));
-        output.push_str(&format!("    Lost:             {} ({:.2}%)\n", udp_stats.lost, udp_stats.lost_percent));
-        output.push_str(&format!("    Jitter:           {:.2}ms\n", udp_stats.jitter_ms));
-        output.push_str(&format!("    Out of Order:     {}\n", udp_stats.out_of_order));
+        output.push_str(&format!(
+            "    Packets Sent:     {}\n",
+            udp_stats.packets_sent
+        ));
+        output.push_str(&format!(
+            "    Packets Received: {}\n",
+            udp_stats.packets_received
+        ));
+        output.push_str(&format!(
+            "    Lost:             {} ({:.2}%)\n",
+            udp_stats.lost, udp_stats.lost_percent
+        ));
+        output.push_str(&format!(
+            "    Jitter:           {:.2}ms\n",
+            udp_stats.jitter_ms
+        ));
+        output.push_str(&format!(
+            "    Out of Order:     {}\n",
+            udp_stats.out_of_order
+        ));
         output.push('\n');
     }
 

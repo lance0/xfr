@@ -2,6 +2,7 @@
 name = "xfr"
 version = "0.1.2"
 edition = "2024"
+rust-version = "1.85"
 description = "Modern network bandwidth testing with TUI"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lance0/xfr"

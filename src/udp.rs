@@ -3,8 +3,8 @@
 //! Implements paced UDP sending to avoid buffer saturation and provides
 //! jitter/loss calculation per RFC 3550.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -264,7 +264,8 @@ pub async fn receive_udp(
         }
     }
 
-    let (lost, out_of_order, _) = packet_tracker.stats(packets_received + packet_tracker.lost.load(Ordering::Relaxed));
+    let (lost, out_of_order, _) =
+        packet_tracker.stats(packets_received + packet_tracker.lost.load(Ordering::Relaxed));
     let packets_sent = packets_received + lost;
     let loss_percent = if packets_sent > 0 {
         (lost as f64 / packets_sent as f64) * 100.0

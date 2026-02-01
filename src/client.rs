@@ -12,7 +12,7 @@ use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::protocol::{
-    ControlMessage, Direction, Protocol, StreamInterval, TestResult, PROTOCOL_VERSION,
+    ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
 };
 use crate::stats::{StreamStats, TestStats};
 use crate::tcp::{self, TcpConfig};

@@ -35,10 +35,8 @@ mod mdns_impl {
                 break;
             }
 
-            let event = tokio::time::timeout(Duration::from_millis(100), async {
-                receiver.recv()
-            })
-            .await;
+            let event =
+                tokio::time::timeout(Duration::from_millis(100), async { receiver.recv() }).await;
 
             match event {
                 Ok(Ok(ServiceEvent::ServiceResolved(info))) => {
