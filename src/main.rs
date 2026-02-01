@@ -204,6 +204,14 @@ struct Cli {
     /// Read PSK from file
     #[arg(long)]
     psk_file: Option<PathBuf>,
+
+    /// Force IPv4 only
+    #[arg(short = '4', long = "ipv4")]
+    ipv4_only: bool,
+
+    /// Force IPv6 only
+    #[arg(short = '6', long = "ipv6")]
+    ipv6_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -295,6 +303,14 @@ enum Commands {
         /// Audit log format (json, text)
         #[arg(long, default_value = "json")]
         audit_format: String,
+
+        /// Force IPv4 only
+        #[arg(short = '4', long = "ipv4")]
+        ipv4_only: bool,
+
+        /// Force IPv6 only
+        #[arg(short = '6', long = "ipv6")]
+        ipv6_only: bool,
     },
 
     /// Compare two test results
@@ -452,6 +468,8 @@ async fn main() -> Result<()> {
             acl_file,
             audit_log,
             audit_format,
+            ipv4_only,
+            ipv6_only,
         }) => {
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
@@ -518,6 +536,17 @@ async fn main() -> Result<()> {
                 format: audit_format.parse().unwrap_or_default(),
             };
 
+            // Determine address family
+            let address_family = if ipv4_only {
+                xfr::net::AddressFamily::V4Only
+            } else if ipv6_only {
+                xfr::net::AddressFamily::V6Only
+            } else if let Some(ref af) = file_config.server.address_family {
+                xfr::net::AddressFamily::from_str(af).unwrap_or_default()
+            } else {
+                xfr::net::AddressFamily::default()
+            };
+
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
@@ -530,6 +559,7 @@ async fn main() -> Result<()> {
                 acl: acl_config,
                 rate_limit: rate_limit_config,
                 audit: audit_config,
+                address_family,
             };
             let server = Server::new(config);
             if server_tui {
@@ -637,6 +667,17 @@ async fn main() -> Result<()> {
                 cli.psk.clone().or_else(|| file_config.client.psk.clone())
             };
 
+            // Determine address family
+            let client_address_family = if cli.ipv4_only {
+                xfr::net::AddressFamily::V4Only
+            } else if cli.ipv6_only {
+                xfr::net::AddressFamily::V6Only
+            } else if let Some(ref af) = file_config.client.address_family {
+                xfr::net::AddressFamily::from_str(af).unwrap_or_default()
+            } else {
+                xfr::net::AddressFamily::default()
+            };
+
             let config = ClientConfig {
                 host: host.clone(),
                 port: cli.port,
@@ -649,6 +690,7 @@ async fn main() -> Result<()> {
                 window_size,
                 psk: client_psk,
                 tls: xfr::tls::TlsClientConfig::default(),
+                address_family: client_address_family,
             };
 
             // Determine output format

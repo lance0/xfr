@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod diff;
 pub mod discover;
+pub mod net;
 pub mod output;
 pub mod prefs;
 pub mod protocol;

@@ -69,6 +69,9 @@ rand = "0.8"
 dashmap = "6"
 ipnetwork = "0.20"
 
+# Socket control (IPv6 dual-stack, flow labels)
+socket2 = { version = "0.5", features = ["all"] }
+
 # Platform-specific
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

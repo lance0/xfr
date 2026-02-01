@@ -68,6 +68,9 @@ pub struct ClientDefaults {
 
     /// TUI color theme
     pub theme: Option<String>,
+
+    /// Address family preference (ipv4, ipv6, dual)
+    pub address_family: Option<String>,
 }
 
 /// Default settings for server mode
@@ -126,6 +129,9 @@ pub struct ServerDefaults {
 
     /// Audit log format (json, text)
     pub audit_format: Option<String>,
+
+    /// Address family preference (ipv4, ipv6, dual)
+    pub address_family: Option<String>,
 }
 
 /// Server preset for quick configuration

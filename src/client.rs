@@ -13,6 +13,7 @@ use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::auth;
+use crate::net::{self, AddressFamily};
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
     versions_compatible,
@@ -37,6 +38,8 @@ pub struct ClientConfig {
     pub psk: Option<String>,
     /// TLS configuration
     pub tls: TlsClientConfig,
+    /// Address family preference
+    pub address_family: AddressFamily,
 }
 
 impl Default for ClientConfig {
@@ -53,6 +56,7 @@ impl Default for ClientConfig {
             window_size: None,
             psk: None,
             tls: TlsClientConfig::default(),
+            address_family: AddressFamily::default(),
         }
     }
 }
@@ -85,12 +89,14 @@ impl Client {
         &self,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
-        let addr = format!("{}:{}", self.config.host, self.config.port);
-        info!("Connecting to {}...", addr);
+        info!("Connecting to {}:{}...", self.config.host, self.config.port);
 
-        let stream = TcpStream::connect(&addr).await?;
-        let peer_addr = stream.peer_addr()?;
-        info!("Connected to {}", peer_addr);
+        let (stream, peer_addr) = net::connect_tcp(
+            &self.config.host,
+            self.config.port,
+            self.config.address_family,
+        )
+        .await?;
 
         self.run_test(stream, peer_addr, progress_tx).await
     }

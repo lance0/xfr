@@ -52,6 +52,7 @@ async fn test_tcp_single_stream() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -86,6 +87,7 @@ async fn test_tcp_multi_stream() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -113,6 +115,7 @@ async fn test_connection_refused() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -140,6 +143,7 @@ async fn test_tcp_download() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -172,6 +176,7 @@ async fn test_tcp_bidir() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -204,6 +209,7 @@ async fn test_udp_upload() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -236,6 +242,7 @@ async fn test_udp_download() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -266,6 +273,7 @@ async fn test_multi_client_concurrent() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let config2 = ClientConfig {
@@ -280,6 +288,7 @@ async fn test_multi_client_concurrent() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client1 = Client::new(config1);
@@ -360,6 +369,7 @@ async fn test_psk_auth_success() {
         window_size: None,
         psk: Some(psk),
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -396,6 +406,7 @@ async fn test_psk_auth_failure() {
         window_size: None,
         psk: Some("wrong-secret".to_string()),
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -432,6 +443,7 @@ async fn test_psk_auth_missing_client_key() {
         window_size: None,
         psk: None, // No PSK provided
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -466,6 +478,7 @@ async fn test_acl_allow() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client = Client::new(config);
@@ -497,6 +510,7 @@ async fn test_rate_limit() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client1 = Client::new(config1.clone());
@@ -518,6 +532,7 @@ async fn test_rate_limit() {
         window_size: None,
         psk: None,
         tls: TlsClientConfig::default(),
+        address_family: xfr::net::AddressFamily::default(),
     };
 
     let client2 = Client::new(config2);

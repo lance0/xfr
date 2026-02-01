@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::acl::{Acl, AclConfig};
 use crate::audit::{AuditConfig, AuditEvent, AuditLogger};
 use crate::auth::{self, AuthConfig};
+use crate::net::{self, AddressFamily};
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
     versions_compatible,
@@ -52,6 +53,8 @@ pub struct ServerConfig {
     pub rate_limit: RateLimitConfig,
     /// Audit logging configuration
     pub audit: AuditConfig,
+    /// Address family (IPv4, IPv6, dual-stack)
+    pub address_family: AddressFamily,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +71,7 @@ impl Default for ServerConfig {
             acl: AclConfig::default(),
             rate_limit: RateLimitConfig::default(),
             audit: AuditConfig::default(),
+            address_family: AddressFamily::default(),
         }
     }
 }
@@ -79,6 +83,7 @@ struct SecurityContext {
     rate_limiter: Option<Arc<RateLimiter>>,
     audit: Option<Arc<AuditLogger>>,
     tls_acceptor: Option<TlsAcceptor>,
+    address_family: AddressFamily,
 }
 
 struct ActiveTest {
@@ -104,9 +109,8 @@ impl Server {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        let addr = format!("0.0.0.0:{}", self.config.port);
-        let listener = TcpListener::bind(&addr).await?;
-        info!("xfr server listening on {}", addr);
+        let listener =
+            net::create_tcp_listener(self.config.port, self.config.address_family).await?;
 
         // Initialize security context
         let acl = self.config.acl.build()?;
@@ -139,6 +143,7 @@ impl Server {
             rate_limiter: rate_limiter.clone(),
             audit,
             tls_acceptor,
+            address_family: self.config.address_family,
         });
 
         // Start rate limiter cleanup task if enabled
@@ -560,6 +565,7 @@ async fn handle_test_request(
                 direction,
                 bitrate,
                 active_tests.clone(),
+                security.address_family,
             )
             .await;
 
@@ -609,6 +615,7 @@ async fn run_test(
     direction: Direction,
     bitrate: Option<u64>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
+    address_family: AddressFamily,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -620,7 +627,7 @@ async fn run_test(
         Protocol::Tcp => {
             let mut listeners = Vec::new();
             for _ in 0..streams {
-                let listener = TcpListener::bind("0.0.0.0:0").await?;
+                let listener = net::create_tcp_listener(0, address_family).await?;
                 data_ports.push(listener.local_addr()?.port());
                 debug!("Data port {} allocated", data_ports.last().unwrap());
                 listeners.push(listener);
@@ -630,7 +637,7 @@ async fn run_test(
         Protocol::Udp => {
             let mut sockets = Vec::new();
             for _ in 0..streams {
-                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                let socket = net::create_udp_socket(0, address_family).await?;
                 data_ports.push(socket.local_addr()?.port());
                 debug!("UDP port {} allocated", data_ports.last().unwrap());
                 sockets.push(Arc::new(socket));

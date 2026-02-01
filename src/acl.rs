@@ -7,6 +7,20 @@ use std::path::Path;
 
 use ipnetwork::IpNetwork;
 
+/// Normalize IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to IPv4
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                ip
+            }
+        }
+        _ => ip,
+    }
+}
+
 /// Access control list for IP filtering
 #[derive(Debug, Clone, Default)]
 pub struct Acl {
@@ -88,7 +102,13 @@ impl Acl {
     /// 2. If allow list is empty, accept (no allowlist configured)
     /// 3. If IP matches any allow rule, accept
     /// 4. Otherwise reject (default deny when allowlist exists)
+    ///
+    /// Note: IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) are normalized to IPv4
+    /// for matching against IPv4 rules.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
+        // Normalize IPv4-mapped IPv6 to IPv4 for matching
+        let ip = normalize_ip(ip);
+
         // Check deny list first
         for network in &self.deny {
             if network.contains(ip) {
