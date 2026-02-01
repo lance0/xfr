@@ -59,6 +59,7 @@ pub struct App {
     pub show_help: bool,
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
+    pub theme_index: usize,
 }
 
 impl App {
@@ -113,7 +114,55 @@ impl App {
             show_help: false,
             timestamp_format,
             theme,
+            theme_index: 0,
         }
+    }
+
+    /// Create app with theme by name, setting theme_index appropriately
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_theme_name(
+        host: String,
+        port: u16,
+        protocol: Protocol,
+        direction: Direction,
+        streams: u8,
+        duration: Duration,
+        bitrate: Option<u64>,
+        timestamp_format: TimestampFormat,
+        theme_name: &str,
+    ) -> Self {
+        let theme_list = Theme::list();
+        let theme_index = theme_list
+            .iter()
+            .position(|&t| t == theme_name)
+            .unwrap_or(0);
+        let theme = Theme::by_name(theme_name);
+
+        let mut app = Self::new(
+            host,
+            port,
+            protocol,
+            direction,
+            streams,
+            duration,
+            bitrate,
+            timestamp_format,
+            theme,
+        );
+        app.theme_index = theme_index;
+        app
+    }
+
+    /// Cycle to the next theme
+    pub fn cycle_theme(&mut self) {
+        let theme_list = Theme::list();
+        self.theme_index = (self.theme_index + 1) % theme_list.len();
+        self.theme = Theme::by_name(theme_list[self.theme_index]);
+    }
+
+    /// Get current theme name
+    pub fn theme_name(&self) -> &str {
+        self.theme.name()
     }
 
     pub fn on_connected(&mut self) {

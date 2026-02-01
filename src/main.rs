@@ -666,18 +666,18 @@ async fn main() -> Result<()> {
                 // Plain/JSON/CSV mode
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {
-                // TUI mode - CLI theme takes precedence over config
-                let theme_name = if cli.theme != "default" {
-                    cli.theme.clone()
-                } else {
-                    file_config
-                        .client
-                        .theme
-                        .clone()
-                        .unwrap_or_else(|| "default".to_string())
-                };
-                let theme = xfr::tui::Theme::by_name(&theme_name);
-                run_client_tui(config, cli.output, timestamp_format, theme).await?;
+                // TUI mode - load prefs with overrides
+                // Priority: CLI flag > config file > saved prefs > default
+                let prefs = xfr::prefs::Prefs::load()
+                    .with_overrides(Some(&cli.theme), file_config.client.theme.as_deref());
+
+                let final_prefs =
+                    run_client_tui(config, cli.output, timestamp_format, prefs.clone()).await?;
+
+                // Save prefs if changed
+                if final_prefs.theme != prefs.theme {
+                    let _ = final_prefs.save();
+                }
             }
         }
     }
@@ -807,8 +807,8 @@ async fn run_client_tui(
     config: ClientConfig,
     output: Option<PathBuf>,
     timestamp_format: TimestampFormat,
-    theme: xfr::tui::Theme,
-) -> Result<()> {
+    prefs: xfr::prefs::Prefs,
+) -> Result<xfr::prefs::Prefs> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -816,40 +816,40 @@ async fn run_client_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format, theme).await;
+    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format, prefs).await;
 
     // Restore terminal
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     match result {
-        Ok(Some(test_result)) => {
-            println!("{}", output_plain(&test_result));
+        Ok((test_result, final_prefs)) => {
+            if let Some(test_result) = test_result {
+                println!("{}", output_plain(&test_result));
 
-            if let Some(path) = output {
-                xfr::output::json::save_json(&test_result, &path)?;
-                println!("Results saved to {}", path.display());
+                if let Some(path) = output {
+                    xfr::output::json::save_json(&test_result, &path)?;
+                    println!("Results saved to {}", path.display());
+                }
+            } else {
+                println!("Test cancelled.");
             }
-        }
-        Ok(None) => {
-            println!("Test cancelled.");
+            Ok(final_prefs)
         }
         Err(e) => {
             eprintln!("Error: {}", e);
-            return Err(e);
+            Err(e)
         }
     }
-
-    Ok(())
 }
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     config: ClientConfig,
     timestamp_format: TimestampFormat,
-    theme: xfr::tui::Theme,
-) -> Result<Option<xfr::protocol::TestResult>> {
-    let mut app = App::new(
+    mut prefs: xfr::prefs::Prefs,
+) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs)> {
+    let mut app = App::with_theme_name(
         config.host.clone(),
         config.port,
         config.protocol,
@@ -858,7 +858,7 @@ async fn run_tui_loop(
         config.duration,
         config.bitrate,
         timestamp_format,
-        theme,
+        prefs.theme_name(),
     );
 
     let client = Arc::new(Client::new(config));
@@ -883,10 +883,14 @@ async fn run_tui_loop(
                 KeyCode::Char('q') => {
                     // Cancel the test on server before exiting
                     let _ = client.cancel();
-                    return Ok(app.result);
+                    prefs.theme = Some(app.theme_name().to_string());
+                    return Ok((app.result, prefs));
                 }
                 KeyCode::Char('p') => {
                     app.toggle_pause();
+                }
+                KeyCode::Char('t') => {
+                    app.cycle_theme();
                 }
                 KeyCode::Char('?') | KeyCode::F(1) => {
                     app.toggle_help();
@@ -927,7 +931,12 @@ async fn run_tui_loop(
                         {
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => {
-                                    return Ok(app.result);
+                                    prefs.theme = Some(app.theme_name().to_string());
+                                    return Ok((app.result, prefs));
+                                }
+                                KeyCode::Char('t') => {
+                                    app.cycle_theme();
+                                    terminal.draw(|f| draw(f, &app))?;
                                 }
                                 _ => {}
                             }
@@ -945,6 +954,7 @@ async fn run_tui_loop(
                             && key.kind == KeyEventKind::Press
                             && key.code == KeyCode::Char('q')
                         {
+                            prefs.theme = Some(app.theme_name().to_string());
                             return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
                         }
                     }

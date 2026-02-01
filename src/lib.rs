@@ -10,6 +10,7 @@ pub mod config;
 pub mod diff;
 pub mod discover;
 pub mod output;
+pub mod prefs;
 pub mod protocol;
 pub mod rate_limit;
 pub mod serve;

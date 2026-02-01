@@ -225,9 +225,9 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let keys = match app.state {
-        AppState::Completed => "[q] Quit   [j] JSON   [?] Help",
+        AppState::Completed => "[q] Quit   [t] Theme   [j] JSON   [?] Help",
         AppState::Error => "[q] Quit   [r] Retry   [?] Help",
-        _ => "[q] Quit   [p] Pause   [r] Restart   [j] JSON   [?] Help",
+        _ => "[q] Quit   [p] Pause   [t] Theme   [j] JSON   [?] Help",
     };
 
     let footer = Paragraph::new(keys).style(Style::default().fg(theme.text_dim));
@@ -254,8 +254,8 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
             Span::raw(" - Pause/Resume"),
         ]),
         Line::from(vec![
-            Span::styled("r", Style::default().fg(theme.accent)),
-            Span::raw(" - Restart test"),
+            Span::styled("t", Style::default().fg(theme.accent)),
+            Span::raw(" - Cycle theme"),
         ]),
         Line::from(vec![
             Span::styled("j", Style::default().fg(theme.accent)),
