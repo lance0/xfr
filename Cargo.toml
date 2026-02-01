@@ -1,9 +1,9 @@
 [package]
 name = "xfr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Modern network bandwidth testing with TUI"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/lance0/xfr"
 keywords = ["network", "bandwidth", "iperf", "benchmark", "tui"]
 categories = ["command-line-utilities", "network-programming"]
