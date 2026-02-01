@@ -20,7 +20,16 @@ use tracing_subscriber::EnvFilter;
 use xfr::client::{Client, ClientConfig, TestProgress};
 use xfr::config::Config;
 use xfr::diff::{DiffConfig, run_diff};
-use xfr::output::{output_json, output_plain};
+use xfr::output::{output_csv, output_json, output_plain};
+
+/// Output format options
+struct OutputOptions {
+    json: bool,
+    json_stream: bool,
+    csv: bool,
+    quiet: bool,
+    omit_secs: u64,
+}
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
 use xfr::tui::{App, draw};
@@ -37,11 +46,11 @@ struct Cli {
     host: Option<String>,
 
     /// Server/client port
-    #[arg(short, long, default_value_t = DEFAULT_PORT)]
+    #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
     port: u16,
 
     /// Test duration
-    #[arg(short = 't', long, default_value = "10s", value_parser = parse_duration)]
+    #[arg(short = 't', long, default_value = "10s", value_parser = parse_duration, env = "XFR_DURATION")]
     time: Duration,
 
     /// UDP mode
@@ -68,6 +77,18 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// JSON streaming output (one object per line)
+    #[arg(long)]
+    json_stream: bool,
+
+    /// CSV output
+    #[arg(long)]
+    csv: bool,
+
+    /// Quiet mode - suppress interval output, show only summary
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
     /// Output file
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -75,6 +96,14 @@ struct Cli {
     /// Disable TUI
     #[arg(long)]
     no_tui: bool,
+
+    /// Report interval in seconds
+    #[arg(short = 'i', long, default_value = "1.0")]
+    interval: f64,
+
+    /// Omit first N seconds from results (TCP ramp-up)
+    #[arg(long, default_value = "0")]
+    omit: u64,
 
     /// Disable Nagle algorithm
     #[arg(long)]
@@ -90,12 +119,16 @@ enum Commands {
     /// Start server mode
     Serve {
         /// Server port
-        #[arg(short, long, default_value_t = DEFAULT_PORT)]
+        #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
         port: u16,
 
         /// Exit after one test
         #[arg(long)]
         one_off: bool,
+
+        /// Maximum test duration (server-side limit)
+        #[arg(long, value_parser = parse_duration)]
+        max_duration: Option<Duration>,
 
         /// Prometheus metrics port
         #[cfg(feature = "prometheus")]
@@ -179,6 +212,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve {
             port,
             one_off,
+            max_duration,
             #[cfg(feature = "prometheus")]
             prometheus,
         }) => {
@@ -197,6 +231,7 @@ async fn main() -> Result<()> {
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
+                max_duration,
                 #[cfg(feature = "prometheus")]
                 prometheus_port: prom_port,
             };
@@ -300,9 +335,18 @@ async fn main() -> Result<()> {
                 window_size,
             };
 
-            if no_tui || json_output {
-                // Plain/JSON mode
-                run_client_plain(config, json_output, cli.output).await?;
+            // Determine output format
+            let output_opts = OutputOptions {
+                json: json_output,
+                json_stream: cli.json_stream,
+                csv: cli.csv,
+                quiet: cli.quiet,
+                omit_secs: cli.omit,
+            };
+
+            if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet {
+                // Plain/JSON/CSV mode
+                run_client_plain(config, output_opts, cli.output).await?;
             } else {
                 // TUI mode
                 run_client_tui(config, cli.output).await?;
@@ -313,24 +357,76 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_client_plain(config: ClientConfig, json: bool, output: Option<PathBuf>) -> Result<()> {
+async fn run_client_plain(
+    config: ClientConfig,
+    opts: OutputOptions,
+    output: Option<PathBuf>,
+) -> Result<()> {
     let client = Client::new(config.clone());
 
     let (tx, mut rx) = mpsc::channel::<TestProgress>(100);
 
+    // Print CSV header if needed
+    if opts.csv && !opts.quiet {
+        print!("{}", xfr::output::csv::csv_interval_header());
+        let _ = io::stdout().flush();
+    }
+
+    let omit_secs = opts.omit_secs;
+    let quiet = opts.quiet;
+    let json_stream = opts.json_stream;
+    let csv = opts.csv;
+
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
-            if !json {
-                let interval_output = xfr::output::plain::output_interval_plain(
-                    progress.elapsed_ms as f64 / 1000.0,
+            let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
+
+            // Skip omitted seconds
+            if elapsed_secs <= omit_secs as f64 {
+                continue;
+            }
+
+            // Skip if quiet mode
+            if quiet {
+                continue;
+            }
+
+            let retransmits = progress.streams.first().and_then(|s| s.retransmits);
+            let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
+            let lost = progress.streams.first().and_then(|s| s.lost);
+
+            let interval_output = if json_stream {
+                format!(
+                    "{}\n",
+                    xfr::output::json::output_interval_json(
+                        elapsed_secs,
+                        progress.throughput_mbps,
+                        progress.total_bytes,
+                        retransmits,
+                        jitter_ms,
+                        lost,
+                    )
+                )
+            } else if csv {
+                xfr::output::csv::output_interval_csv(
+                    elapsed_secs,
                     progress.throughput_mbps,
                     progress.total_bytes,
-                    progress.streams.first().and_then(|s| s.retransmits),
-                );
-                print!("{}", interval_output);
-                let _ = io::stdout().flush();
-            }
+                    retransmits,
+                    jitter_ms,
+                    lost,
+                )
+            } else {
+                xfr::output::plain::output_interval_plain(
+                    elapsed_secs,
+                    progress.throughput_mbps,
+                    progress.total_bytes,
+                    retransmits,
+                )
+            };
+            print!("{}", interval_output);
+            let _ = io::stdout().flush();
         }
     });
 
@@ -340,8 +436,10 @@ async fn run_client_plain(config: ClientConfig, json: bool, output: Option<PathB
     let _ = print_handle.await;
 
     // Output result
-    let output_str = if json {
+    let output_str = if opts.json || opts.json_stream {
         output_json(&result)
+    } else if opts.csv {
+        output_csv(&result)
     } else {
         output_plain(&result)
     };

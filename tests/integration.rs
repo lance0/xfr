@@ -19,6 +19,7 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
     let config = ServerConfig {
         port,
         one_off: false, // Keep running for tests
+        max_duration: None,
         #[cfg(feature = "prometheus")]
         prometheus_port: None,
     };

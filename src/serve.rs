@@ -23,6 +23,8 @@ use crate::udp;
 pub struct ServerConfig {
     pub port: u16,
     pub one_off: bool,
+    /// Maximum test duration (server-side limit)
+    pub max_duration: Option<Duration>,
     #[cfg(feature = "prometheus")]
     pub prometheus_port: Option<u16>,
 }
@@ -32,6 +34,7 @@ impl Default for ServerConfig {
         Self {
             port: crate::protocol::DEFAULT_PORT,
             one_off: false,
+            max_duration: None,
             #[cfg(feature = "prometheus")]
             prometheus_port: None,
         }
