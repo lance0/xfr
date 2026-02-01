@@ -52,6 +52,10 @@ impl StreamStats {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    pub fn add_retransmits(&self, count: u64) {
+        self.retransmits.fetch_add(count, Ordering::Relaxed);
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.bytes_sent.load(Ordering::Relaxed) + self.bytes_received.load(Ordering::Relaxed)
     }

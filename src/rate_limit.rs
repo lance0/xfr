@@ -52,18 +52,34 @@ impl RateLimiter {
             })
             .clone();
 
-        let current = state.count.load(Ordering::SeqCst);
-        if current >= self.max_per_ip {
-            return Err(RateLimitError {
-                ip,
-                current,
-                max: self.max_per_ip,
-            });
-        }
+        // Use compare_exchange loop for atomic check-and-increment
+        loop {
+            let current = state.count.load(Ordering::SeqCst);
+            if current >= self.max_per_ip {
+                return Err(RateLimitError {
+                    ip,
+                    current,
+                    max: self.max_per_ip,
+                });
+            }
 
-        state.count.fetch_add(1, Ordering::SeqCst);
-        *state.last_access.lock() = Instant::now();
-        Ok(())
+            // Try to atomically increment from current to current+1
+            match state.count.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    *state.last_access.lock() = Instant::now();
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Another thread modified the count, retry
+                    continue;
+                }
+            }
+        }
     }
 
     /// Release a slot when a test completes

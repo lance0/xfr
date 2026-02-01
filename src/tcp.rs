@@ -168,6 +168,11 @@ pub async fn send_data(
         }
     }
 
+    // Capture final TCP_INFO for retransmit count
+    if let Some(info) = get_stream_tcp_info(&stream) {
+        stats.add_retransmits(info.retransmits);
+    }
+
     stream.shutdown().await?;
     debug!(
         "Stream {} send complete: {} bytes",
@@ -211,6 +216,11 @@ pub async fn receive_data(
                 return Err(e.into());
             }
         }
+    }
+
+    // Capture final TCP_INFO for retransmit count
+    if let Some(info) = get_stream_tcp_info(&stream) {
+        stats.add_retransmits(info.retransmits);
     }
 
     debug!(
