@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **QUIC transport** (`--quic`) via quinn crate - built-in TLS 1.3 encryption, stream multiplexing
+- **TUI visual overhaul** - cleaner design inspired by ttl:
+  - Styled title bar with status indicators (●, ⏸, ✓, ✗)
+  - Completion results shown as centered modal overlay
+  - Color-coded metrics (retransmits, loss, jitter, RTT)
+  - Simplified layout with single outer border
 - **Documentation overhaul:**
   - `docs/COMPARISON.md` - Feature matrix vs iperf3/iperf2/rperf/nperf, migration guide
   - `docs/SCRIPTING.md` - CI/CD examples, Docker usage, Prometheus integration
@@ -27,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Use VecDeque for interval history to avoid O(n) removal on every interval
 - Report per-interval retransmit deltas instead of cumulative totals
+- Suppress console logging in TUI mode to prevent log messages corrupting display
 
 ## [0.3.0] - 2026-01-31
 

@@ -40,9 +40,11 @@ use xfr::tui::{App, draw};
 
 /// Initialize logging with optional file output
 /// Returns the WorkerGuard if file logging is enabled - must be held until program exit
+/// When suppress_console is true, no console output is produced (for TUI mode)
 fn init_logging(
     log_file: Option<&str>,
     log_level: Option<&str>,
+    suppress_console: bool,
 ) -> anyhow::Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -50,55 +52,78 @@ fn init_logging(
     let level = log_level.unwrap_or("info");
     let env_filter = EnvFilter::from_default_env().add_directive(format!("xfr={}", level).parse()?);
 
-    let console_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .without_time();
-
-    if let Some(file_path) = log_file {
-        // Expand tilde to home directory
-        let expanded_path = if file_path.starts_with("~/") {
-            dirs::home_dir()
-                .map(|home| home.join(&file_path[2..]))
-                .unwrap_or_else(|| PathBuf::from(file_path))
-        } else {
-            PathBuf::from(file_path)
-        };
-
-        // Ensure parent directory exists
-        if let Some(parent) = expanded_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    match (log_file, suppress_console) {
+        (Some(file_path), true) => {
+            // TUI mode with file logging: file only, no console
+            let expanded_path = expand_log_path(file_path);
+            if let Some(parent) = expanded_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file_appender = tracing_appender::rolling::daily(
+                expanded_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+                expanded_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
+            );
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(non_blocking)
+                .with_ansi(false);
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(file_layer)
+                .init();
+            Ok(Some(guard))
         }
+        (Some(file_path), false) => {
+            // Normal mode with file logging: console + file
+            let expanded_path = expand_log_path(file_path);
+            if let Some(parent) = expanded_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file_appender = tracing_appender::rolling::daily(
+                expanded_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+                expanded_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
+            );
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(non_blocking)
+                .with_ansi(false);
+            let console_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .without_time();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(console_layer)
+                .with(file_layer)
+                .init();
+            Ok(Some(guard))
+        }
+        (None, true) => {
+            // TUI mode without file logging: no logging at all (silent)
+            Ok(None)
+        }
+        (None, false) => {
+            // Normal mode: console logging only
+            let console_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .without_time();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(console_layer)
+                .init();
+            Ok(None)
+        }
+    }
+}
 
-        // Create non-blocking file appender with daily rotation
-        let file_appender = tracing_appender::rolling::daily(
-            expanded_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-            expanded_path
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
-        );
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_writer(non_blocking)
-            .with_ansi(false);
-
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(console_layer)
-            .with(file_layer)
-            .init();
-
-        Ok(Some(guard))
+fn expand_log_path(file_path: &str) -> PathBuf {
+    if file_path.starts_with("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(&file_path[2..]))
+            .unwrap_or_else(|| PathBuf::from(file_path))
     } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(console_layer)
-            .init();
-
-        Ok(None)
+        PathBuf::from(file_path)
     }
 }
 
@@ -393,10 +418,11 @@ async fn main() -> Result<()> {
     let file_config = Config::load().unwrap_or_default();
 
     // Determine logging config based on command (server vs client)
-    let (effective_log_file, effective_log_level) = match &cli.command {
+    let (effective_log_file, effective_log_level, tui_enabled) = match &cli.command {
         Some(Commands::Serve {
             log_file,
             log_level,
+            tui: server_tui,
             ..
         }) => {
             let file = log_file
@@ -409,9 +435,9 @@ async fn main() -> Result<()> {
                 .or(file_config.server.log_level.as_ref())
                 .or(cli.log_level.as_ref())
                 .or(file_config.client.log_level.as_ref());
-            (file, level)
+            (file, level, *server_tui)
         }
-        _ => {
+        Some(Commands::Diff { .. }) | Some(Commands::Discover { .. }) => {
             let file = cli
                 .log_file
                 .as_ref()
@@ -420,13 +446,28 @@ async fn main() -> Result<()> {
                 .log_level
                 .as_ref()
                 .or(file_config.client.log_level.as_ref());
-            (file, level)
+            (file, level, false)
+        }
+        _ => {
+            // Client mode: TUI enabled by default unless --no-tui
+            let file = cli
+                .log_file
+                .as_ref()
+                .or(file_config.client.log_file.as_ref());
+            let level = cli
+                .log_level
+                .as_ref()
+                .or(file_config.client.log_level.as_ref());
+            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
+            (file, level, !no_tui)
         }
     };
     // Hold the logging guard until program exit to ensure all logs are flushed
+    // Suppress console logging when TUI is active to prevent log messages from corrupting the display
     let _log_guard = init_logging(
         effective_log_file.map(|s| s.as_str()),
         effective_log_level.map(|s| s.as_str()),
+        tui_enabled,
     )?;
 
     match cli.command {
