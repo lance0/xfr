@@ -384,16 +384,41 @@ async fn main() -> Result<()> {
     // Load config file (falls back to defaults if not found)
     let file_config = Config::load().unwrap_or_default();
 
-    // Initialize logging (with file support)
-    let log_file = cli
-        .log_file
-        .as_ref()
-        .or(file_config.client.log_file.as_ref());
-    let log_level = cli
-        .log_level
-        .as_ref()
-        .or(file_config.client.log_level.as_ref());
-    init_logging(log_file.map(|s| s.as_str()), log_level.map(|s| s.as_str()))?;
+    // Determine logging config based on command (server vs client)
+    let (effective_log_file, effective_log_level) = match &cli.command {
+        Some(Commands::Serve {
+            log_file,
+            log_level,
+            ..
+        }) => {
+            let file = log_file
+                .as_ref()
+                .or(file_config.server.log_file.as_ref())
+                .or(cli.log_file.as_ref())
+                .or(file_config.client.log_file.as_ref());
+            let level = log_level
+                .as_ref()
+                .or(file_config.server.log_level.as_ref())
+                .or(cli.log_level.as_ref())
+                .or(file_config.client.log_level.as_ref());
+            (file, level)
+        }
+        _ => {
+            let file = cli
+                .log_file
+                .as_ref()
+                .or(file_config.client.log_file.as_ref());
+            let level = cli
+                .log_level
+                .as_ref()
+                .or(file_config.client.log_level.as_ref());
+            (file, level)
+        }
+    };
+    init_logging(
+        effective_log_file.map(|s| s.as_str()),
+        effective_log_level.map(|s| s.as_str()),
+    )?;
 
     match cli.command {
         Some(Commands::Serve {
@@ -403,8 +428,8 @@ async fn main() -> Result<()> {
             #[cfg(feature = "prometheus")]
             prometheus,
             push_gateway,
-            log_file: serve_log_file,
-            log_level: serve_log_level,
+            log_file: _serve_log_file,
+            log_level: _serve_log_level,
             psk,
             psk_file,
             tls,
@@ -419,20 +444,6 @@ async fn main() -> Result<()> {
             audit_log,
             audit_format,
         }) => {
-            // Re-initialize logging for server mode with server-specific settings if provided
-            let server_log_file = serve_log_file
-                .as_ref()
-                .or(file_config.server.log_file.as_ref())
-                .or(log_file);
-            let server_log_level = serve_log_level
-                .as_ref()
-                .or(file_config.server.log_level.as_ref())
-                .or(log_level);
-            init_logging(
-                server_log_file.map(|s| s.as_str()),
-                server_log_level.map(|s| s.as_str()),
-            )?;
-
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
                 port
