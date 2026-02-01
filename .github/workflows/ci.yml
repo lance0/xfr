@@ -20,8 +20,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
         run: cargo test --all-features
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --features discovery,prometheus
 
   clippy:
     name: Clippy
