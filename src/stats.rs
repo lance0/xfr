@@ -1,4 +1,5 @@
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -13,7 +14,7 @@ pub struct StreamStats {
     pub bytes_sent: AtomicU64,
     pub bytes_received: AtomicU64,
     pub start_time: Instant,
-    pub intervals: Mutex<Vec<IntervalStats>>,
+    pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
     pub last_bytes: AtomicU64,
 }
@@ -35,7 +36,7 @@ impl StreamStats {
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
             start_time: Instant::now(),
-            intervals: Mutex::new(Vec::new()),
+            intervals: Mutex::new(VecDeque::new()),
             retransmits: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
         }
@@ -74,7 +75,7 @@ impl StreamStats {
 
         let elapsed = now.duration_since(self.start_time);
         let intervals = self.intervals.lock();
-        let interval_duration = if let Some(last) = intervals.last() {
+        let interval_duration = if let Some(last) = intervals.back() {
             now.duration_since(last.timestamp)
         } else {
             elapsed
@@ -97,10 +98,10 @@ impl StreamStats {
         };
 
         let mut intervals = self.intervals.lock();
-        intervals.push(stats.clone());
+        intervals.push_back(stats.clone());
         // Keep only last MAX_INTERVAL_HISTORY intervals to bound memory
         if intervals.len() > MAX_INTERVAL_HISTORY {
-            intervals.remove(0);
+            intervals.pop_front();
         }
         drop(intervals);
         stats
