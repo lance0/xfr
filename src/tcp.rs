@@ -187,7 +187,7 @@ pub async fn send_data(
 pub async fn receive_data(
     mut stream: TcpStream,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
     config: TcpConfig,
 ) -> anyhow::Result<()> {
     configure_stream(&stream, &config)?;
@@ -195,25 +195,30 @@ pub async fn receive_data(
     let mut buffer = vec![0u8; config.buffer_size];
 
     loop {
-        if *cancel.borrow() {
-            debug!("Receive cancelled for stream {}", stats.stream_id);
-            break;
-        }
-
-        match stream.read(&mut buffer).await {
-            Ok(0) => {
-                debug!("Stream {} EOF", stats.stream_id);
-                break;
-            }
-            Ok(n) => {
-                stats.add_bytes_received(n as u64);
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    continue;
+        tokio::select! {
+            result = stream.read(&mut buffer) => {
+                match result {
+                    Ok(0) => {
+                        debug!("Stream {} EOF", stats.stream_id);
+                        break;
+                    }
+                    Ok(n) => {
+                        stats.add_bytes_received(n as u64);
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            continue;
+                        }
+                        warn!("Receive error on stream {}: {}", stats.stream_id, e);
+                        return Err(e.into());
+                    }
                 }
-                warn!("Receive error on stream {}: {}", stats.stream_id, e);
-                return Err(e.into());
+            }
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    debug!("Receive cancelled for stream {}", stats.stream_id);
+                    break;
+                }
             }
         }
     }
@@ -287,31 +292,36 @@ pub async fn send_data_half(
 pub async fn receive_data_half(
     mut read_half: OwnedReadHalf,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
     config: TcpConfig,
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
 
     loop {
-        if *cancel.borrow() {
-            debug!("Receive cancelled for stream {}", stats.stream_id);
-            break;
-        }
-
-        match read_half.read(&mut buffer).await {
-            Ok(0) => {
-                debug!("Stream {} EOF", stats.stream_id);
-                break;
-            }
-            Ok(n) => {
-                stats.add_bytes_received(n as u64);
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    continue;
+        tokio::select! {
+            result = read_half.read(&mut buffer) => {
+                match result {
+                    Ok(0) => {
+                        debug!("Stream {} EOF", stats.stream_id);
+                        break;
+                    }
+                    Ok(n) => {
+                        stats.add_bytes_received(n as u64);
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            continue;
+                        }
+                        warn!("Receive error on stream {}: {}", stats.stream_id, e);
+                        return Err(e.into());
+                    }
                 }
-                warn!("Receive error on stream {}: {}", stats.stream_id, e);
-                return Err(e.into());
+            }
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    debug!("Receive cancelled for stream {}", stats.stream_id);
+                    break;
+                }
             }
         }
     }

@@ -198,19 +198,24 @@ pub async fn send_quic_data(
 pub async fn receive_quic_data(
     mut recv: RecvStream,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut buffer = vec![0u8; 128 * 1024];
 
     loop {
-        if *cancel.borrow() {
-            debug!("QUIC receive cancelled");
-            break;
-        }
-
-        match recv.read(&mut buffer).await? {
-            Some(n) => stats.add_bytes_received(n as u64),
-            None => break, // Stream finished
+        tokio::select! {
+            result = recv.read(&mut buffer) => {
+                match result? {
+                    Some(n) => stats.add_bytes_received(n as u64),
+                    None => break, // Stream finished
+                }
+            }
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    debug!("QUIC receive cancelled");
+                    break;
+                }
+            }
         }
     }
 
