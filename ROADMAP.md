@@ -96,13 +96,14 @@
 
 ## Future Ideas
 
-### High-Speed Optimization (10G+)
-- [ ] **io_uring on Linux** - for kernel bypass at 10G+
+### High-Speed Optimization (10-25G)
+
+*Target: Saturate 10G home lab and 25G data center links.*
+
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
-- [ ] **CPU affinity options** - pin to specific cores/NUMA nodes
-- [ ] **Zerocopy send/receive** - MSG_ZEROCOPY, MSG_TRUNC
-- [ ] **Multi-queue NIC support** - leverage hardware parallelism
+- [ ] **CPU affinity options** (`--affinity`) - pin to specific cores
+- [ ] **Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed
 
 ---
 
@@ -153,6 +154,14 @@
 - [ ] Baseline management
 
 *Rationale: Use external tools (cron, databases). `xfr diff` covers basic comparison.*
+
+### 100G+ Optimization
+- [ ] io_uring on Linux
+- [ ] Zerocopy send/receive (MSG_ZEROCOPY)
+- [ ] Multi-queue NIC support
+- [ ] AF_XDP kernel bypass
+
+*Rationale: Diminishing returns. Most users have 1-25G. 100G+ needs specialized hardware and often dedicated tools like DPDK.*
 
 ---
 
