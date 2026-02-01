@@ -135,13 +135,12 @@ fn is_uring_available() -> bool {
     // Check kernel version >= 5.10
     if let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
         let parts: Vec<&str> = release.trim().split('.').collect();
-        if parts.len() >= 2 {
-            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if major > 5 || (major == 5 && minor >= 10) {
-                    // Try to create a test ring to verify io_uring works
-                    return true; // Simplified - actual check would probe io_uring
-                }
-            }
+        if parts.len() >= 2
+            && let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+            && (major > 5 || (major == 5 && minor >= 10))
+        {
+            // Try to create a test ring to verify io_uring works
+            return true; // Simplified - actual check would probe io_uring
         }
     }
     false
