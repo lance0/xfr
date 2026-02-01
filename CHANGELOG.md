@@ -16,8 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dynamic port allocation prevents multi-client port collisions
 - Hostname parsing provides proper error messages
 - Interval history bounded to 60 entries to prevent memory growth
-- Client cancel() method now functional
+- Client cancel() method now functional and sends Cancel to server
 - Protocol version checking uses proper comparison function
+- Hostname resolution uses resolved IP from control connection for data streams
+- TUI stream throughput uses correct 1-second interval calculation
+- CSV header columns now match data format
+- Socket buffer tuning logs failures at debug level
+
+### Security
+- Bounded control channel read to prevent memory DoS (max 8KB lines)
+- Validate stream count against MAX_STREAMS (128)
+- Enforce MAX_TEST_DURATION (1 hour) and server max_duration
+- Add 10s timeout on TCP data connection accept
+
+### Removed
+- Unused dependencies: thiserror, bytesize, rand
 
 ### Added
 - CSV output format (`--csv`)
