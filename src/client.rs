@@ -158,7 +158,7 @@ impl Client {
         // Connect data streams
         let server_addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
-            .unwrap();
+            .map_err(|e| anyhow::anyhow!("Invalid host '{}': {}", self.config.host, e))?;
 
         match self.config.protocol {
             Protocol::Tcp => {
@@ -171,10 +171,31 @@ impl Client {
             }
         }
 
-        // Read interval updates and final result
+        // Read interval updates and final result with timeout
+        let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
+
         loop {
             line.clear();
-            reader.read_line(&mut line).await?;
+            let read_result = tokio::time::timeout_at(deadline, reader.read_line(&mut line)).await;
+
+            match read_result {
+                Ok(Ok(0)) => {
+                    // EOF
+                    break;
+                }
+                Ok(Ok(_)) => {
+                    // Got data, process it
+                }
+                Ok(Err(e)) => {
+                    let _ = cancel_tx.send(true);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    // Timeout
+                    let _ = cancel_tx.send(true);
+                    return Err(anyhow::anyhow!("Timeout waiting for server response"));
+                }
+            }
 
             if line.is_empty() {
                 break;
@@ -264,13 +285,49 @@ impl Client {
                                 }
                             }
                             Direction::Bidir => {
-                                // Client sends (receive handled elsewhere)
-                                if let Err(e) =
-                                    tcp::send_data(stream, stream_stats, duration, config, cancel)
-                                        .await
-                                {
-                                    error!("Send error: {}", e);
-                                }
+                                // Split socket for concurrent send/receive
+                                let (read_half, write_half) = stream.into_split();
+
+                                let send_stats = stream_stats.clone();
+                                let recv_stats = stream_stats.clone();
+                                let send_cancel = cancel.clone();
+                                let recv_cancel = cancel;
+
+                                let send_config = TcpConfig {
+                                    buffer_size: config.buffer_size,
+                                    nodelay: config.nodelay,
+                                    window_size: config.window_size,
+                                };
+                                let recv_config = config;
+
+                                let send_handle = tokio::spawn(async move {
+                                    if let Err(e) = tcp::send_data_half(
+                                        write_half,
+                                        send_stats,
+                                        duration,
+                                        send_config,
+                                        send_cancel,
+                                    )
+                                    .await
+                                    {
+                                        error!("Bidir send error: {}", e);
+                                    }
+                                });
+
+                                let recv_handle = tokio::spawn(async move {
+                                    if let Err(e) = tcp::receive_data_half(
+                                        read_half,
+                                        recv_stats,
+                                        recv_cancel,
+                                        recv_config,
+                                    )
+                                    .await
+                                    {
+                                        error!("Bidir receive error: {}", e);
+                                    }
+                                });
+
+                                let _ = tokio::join!(send_handle, recv_handle);
                             }
                         }
                     }
@@ -339,17 +396,37 @@ impl Client {
                         }
                     }
                     Direction::Bidir => {
-                        if let Err(e) = udp::send_udp_paced(
-                            socket,
-                            stream_bitrate,
-                            duration,
-                            stream_stats,
-                            cancel,
-                        )
-                        .await
-                        {
-                            error!("UDP send error: {}", e);
-                        }
+                        // UDP can send/receive concurrently on same socket
+                        let send_socket = socket.clone();
+                        let recv_socket = socket;
+                        let send_stats = stream_stats.clone();
+                        let recv_stats = stream_stats;
+                        let send_cancel = cancel.clone();
+                        let recv_cancel = cancel;
+
+                        let send_handle = tokio::spawn(async move {
+                            if let Err(e) = udp::send_udp_paced(
+                                send_socket,
+                                stream_bitrate,
+                                duration,
+                                send_stats,
+                                send_cancel,
+                            )
+                            .await
+                            {
+                                error!("UDP bidir send error: {}", e);
+                            }
+                        });
+
+                        let recv_handle = tokio::spawn(async move {
+                            if let Err(e) =
+                                udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
+                            {
+                                error!("UDP bidir receive error: {}", e);
+                            }
+                        });
+
+                        let _ = tokio::join!(send_handle, recv_handle);
                     }
                 }
             });

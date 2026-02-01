@@ -1,8 +1,9 @@
 use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot};
+use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpStats};
 
 pub struct StreamStats {
     pub stream_id: u8,
@@ -128,20 +129,28 @@ impl StreamStats {
 
 pub struct TestStats {
     pub test_id: String,
-    pub streams: Vec<StreamStats>,
+    pub streams: Vec<Arc<StreamStats>>,
     pub start_time: Instant,
     pub tcp_info: Mutex<Option<TcpInfoSnapshot>>,
+    pub udp_stats: Mutex<Option<UdpStats>>,
 }
 
 impl TestStats {
     pub fn new(test_id: String, num_streams: u8) -> Self {
-        let streams = (0..num_streams).map(StreamStats::new).collect();
+        let streams = (0..num_streams)
+            .map(|i| Arc::new(StreamStats::new(i)))
+            .collect();
         Self {
             test_id,
             streams,
             start_time: Instant::now(),
             tcp_info: Mutex::new(None),
+            udp_stats: Mutex::new(None),
         }
+    }
+
+    pub fn update_udp_stats(&self, stats: UdpStats) {
+        *self.udp_stats.lock() = Some(stats);
     }
 
     pub fn elapsed_ms(&self) -> u64 {

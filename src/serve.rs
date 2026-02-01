@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
 };
-use crate::stats::{StreamStats, TestStats};
+use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::udp;
 
@@ -103,7 +104,7 @@ async fn handle_client(
     stream: TcpStream,
     _peer_addr: SocketAddr,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    base_port: u16,
+    _base_port: u16,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -160,10 +161,35 @@ async fn handle_client(
                 protocol, streams, direction, duration_secs
             );
 
-            // Allocate data ports
-            let data_ports: Vec<u16> = (0..streams).map(|i| base_port + 1 + i as u16).collect();
+            // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
+            let mut data_ports = Vec::new();
+            let duration = Duration::from_secs(duration_secs as u64);
 
-            // Send test ack
+            // Pre-bind listeners/sockets to get actual ports
+            let (tcp_listeners, udp_sockets) = match protocol {
+                Protocol::Tcp => {
+                    let mut listeners = Vec::new();
+                    for _ in 0..streams {
+                        let listener = TcpListener::bind("0.0.0.0:0").await?;
+                        data_ports.push(listener.local_addr()?.port());
+                        debug!("Data port {} allocated", data_ports.last().unwrap());
+                        listeners.push(listener);
+                    }
+                    (listeners, Vec::new())
+                }
+                Protocol::Udp => {
+                    let mut sockets = Vec::new();
+                    for _ in 0..streams {
+                        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                        data_ports.push(socket.local_addr()?.port());
+                        debug!("UDP port {} allocated", data_ports.last().unwrap());
+                        sockets.push(Arc::new(socket));
+                    }
+                    (Vec::new(), sockets)
+                }
+            };
+
+            // Send test ack with allocated ports
             let ack = ControlMessage::TestAck {
                 id: id.clone(),
                 data_ports: data_ports.clone(),
@@ -194,34 +220,29 @@ async fn handle_client(
             crate::output::prometheus::on_test_start();
 
             // Spawn data stream handlers
-            let duration = Duration::from_secs(duration_secs as u64);
-            let (interval_tx, mut interval_rx) = mpsc::channel(100);
-
-            match protocol {
+            let handles: Vec<JoinHandle<()>> = match protocol {
                 Protocol::Tcp => {
                     spawn_tcp_handlers(
-                        &data_ports,
+                        tcp_listeners,
                         stats.clone(),
                         direction,
                         duration,
                         cancel_rx.clone(),
-                        interval_tx,
                     )
-                    .await?;
+                    .await
                 }
                 Protocol::Udp => {
                     spawn_udp_handlers(
-                        &data_ports,
+                        udp_sockets,
                         stats.clone(),
                         direction,
                         duration,
-                        bitrate.unwrap_or(1_000_000_000), // 1 Gbps default
+                        bitrate.unwrap_or(1_000_000_000),
                         cancel_rx.clone(),
-                        interval_tx,
                     )
-                    .await?;
+                    .await
                 }
-            }
+            };
 
             // Send interval updates
             let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
@@ -252,9 +273,6 @@ async fn handle_client(
                             warn!("Failed to send interval, client may have disconnected");
                             break;
                         }
-                    }
-                    Some(_) = interval_rx.recv() => {
-                        // Data handler completed
                     }
                 }
 
@@ -287,8 +305,8 @@ async fn handle_client(
                 }
             }
 
-            // Wait for data handlers to finish
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for all data handlers to complete
+            futures::future::join_all(handles).await;
 
             // Send final result
             let duration_ms = stats.elapsed_ms();
@@ -309,7 +327,7 @@ async fn handle_client(
                 throughput_mbps,
                 streams: stream_results,
                 tcp_info: stats.tcp_info.lock().clone(),
-                udp_stats: None,
+                udp_stats: stats.udp_stats.lock().clone(),
             });
 
             writer
@@ -339,30 +357,27 @@ async fn handle_client(
 }
 
 async fn spawn_tcp_handlers(
-    data_ports: &[u16],
+    listeners: Vec<TcpListener>,
     stats: Arc<TestStats>,
     direction: Direction,
     duration: Duration,
     cancel: watch::Receiver<bool>,
-    _interval_tx: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-    // Pre-bind all listeners first
-    let mut listeners = Vec::new();
-    for &port in data_ports {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        debug!("Data port {} listening", port);
-        listeners.push(listener);
-    }
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
 
     for (i, listener) in listeners.into_iter().enumerate() {
         let cancel = cancel.clone();
-        let stats = stats.clone();
+        let stream_stats = stats.streams[i].clone();
+        let test_stats = stats.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
                 let config = TcpConfig::default();
-                // Use a new StreamStats that we can track
-                let stream_stats = Arc::new(StreamStats::new(i as u8));
+
+                // Capture TCP_INFO before transfer starts
+                if let Some(info) = tcp::get_stream_tcp_info(&stream) {
+                    test_stats.update_tcp_info(info);
+                }
 
                 match direction {
                     Direction::Upload => {
@@ -377,70 +392,118 @@ async fn spawn_tcp_handlers(
                                 .await;
                     }
                     Direction::Bidir => {
-                        // Both directions - needs split
-                        let _ =
-                            tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
-                    }
-                }
+                        // Split socket for concurrent send/receive
+                        let (read_half, write_half) = stream.into_split();
 
-                // Copy the bytes to the main stats after transfer completes
-                let bytes = stream_stats.total_bytes();
-                if let Some(main_stream) = stats.streams.get(i) {
-                    main_stream.add_bytes_received(bytes);
+                        let send_stats = stream_stats.clone();
+                        let recv_stats = stream_stats.clone();
+                        let send_cancel = cancel.clone();
+                        let recv_cancel = cancel;
+
+                        let send_config = TcpConfig {
+                            buffer_size: config.buffer_size,
+                            nodelay: config.nodelay,
+                            window_size: config.window_size,
+                        };
+                        let recv_config = config;
+
+                        let send_handle = tokio::spawn(async move {
+                            let _ = tcp::send_data_half(
+                                write_half,
+                                send_stats,
+                                duration,
+                                send_config,
+                                send_cancel,
+                            )
+                            .await;
+                        });
+
+                        let recv_handle = tokio::spawn(async move {
+                            let _ = tcp::receive_data_half(
+                                read_half,
+                                recv_stats,
+                                recv_cancel,
+                                recv_config,
+                            )
+                            .await;
+                        });
+
+                        let _ = tokio::join!(send_handle, recv_handle);
+                    }
                 }
             }
         });
+        handles.push(handle);
     }
 
-    Ok(())
+    handles
 }
 
 async fn spawn_udp_handlers(
-    data_ports: &[u16],
+    sockets: Vec<Arc<UdpSocket>>,
     stats: Arc<TestStats>,
     direction: Direction,
     duration: Duration,
     bitrate: u64,
     cancel: watch::Receiver<bool>,
-    _interval_tx: mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-    for (i, &port) in data_ports.iter().enumerate() {
-        let stream_stats = Arc::new(StreamStats::new(i as u8));
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
+
+    for (i, socket) in sockets.into_iter().enumerate() {
+        let stream_stats = stats.streams[i].clone();
+        let test_stats = stats.clone();
         let cancel = cancel.clone();
-        let stats = stats.clone();
 
-        let socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", port)).await?);
-        debug!("UDP port {} bound", port);
-
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match direction {
                 Direction::Upload => {
-                    // Server receives UDP
-                    let _ = udp::receive_udp(socket, stream_stats.clone(), cancel).await;
+                    // Server receives UDP - capture stats
+                    if let Ok((udp_stats, _bytes)) =
+                        udp::receive_udp(socket, stream_stats, cancel).await
+                    {
+                        test_stats.update_udp_stats(udp_stats);
+                    }
                 }
                 Direction::Download => {
                     // Server sends UDP
-                    let _ = udp::send_udp_paced(
-                        socket,
-                        bitrate,
-                        duration,
-                        stream_stats.clone(),
-                        cancel,
-                    )
-                    .await;
+                    let _ =
+                        udp::send_udp_paced(socket, bitrate, duration, stream_stats, cancel).await;
                 }
                 Direction::Bidir => {
-                    let _ = udp::receive_udp(socket, stream_stats.clone(), cancel).await;
+                    // UDP can send/receive concurrently on same socket
+                    let send_socket = socket.clone();
+                    let recv_socket = socket;
+                    let send_stats = stream_stats.clone();
+                    let recv_stats = stream_stats;
+                    let send_cancel = cancel.clone();
+                    let recv_cancel = cancel;
+                    let test_stats_copy = test_stats.clone();
+
+                    let send_handle = tokio::spawn(async move {
+                        let _ = udp::send_udp_paced(
+                            send_socket,
+                            bitrate,
+                            duration,
+                            send_stats,
+                            send_cancel,
+                        )
+                        .await;
+                    });
+
+                    let recv_handle = tokio::spawn(async move {
+                        if let Ok((udp_stats, _bytes)) =
+                            udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
+                        {
+                            test_stats_copy.update_udp_stats(udp_stats);
+                        }
+                    });
+
+                    let _ = tokio::join!(send_handle, recv_handle);
                 }
             }
-
-            // Copy the bytes to the main stats
-            let bytes = stream_stats.total_bytes();
-            if let Some(main_stream) = stats.streams.get(i) {
-                main_stream.add_bytes_received(bytes);
-            }
         });
+        handles.push(handle);
     }
 
-    Ok(())
+    handles
 }

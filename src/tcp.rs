@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
@@ -177,6 +178,92 @@ pub async fn receive_data(
 /// Get TCP stats from the socket
 pub fn get_stream_tcp_info(stream: &TcpStream) -> Option<crate::protocol::TcpInfoSnapshot> {
     get_tcp_info(stream).ok()
+}
+
+/// Send data on a split socket write half (for bidir mode)
+pub async fn send_data_half(
+    mut write_half: OwnedWriteHalf,
+    stats: Arc<StreamStats>,
+    duration: Duration,
+    config: TcpConfig,
+    cancel: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let buffer = vec![0u8; config.buffer_size];
+    let deadline = tokio::time::Instant::now() + duration;
+
+    loop {
+        if *cancel.borrow() {
+            debug!("Send cancelled for stream {}", stats.stream_id);
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        match write_half.write(&buffer).await {
+            Ok(n) => {
+                stats.add_bytes_sent(n as u64);
+            }
+            Err(e) => {
+                error!("Send error on stream {}: {}", stats.stream_id, e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    write_half.shutdown().await?;
+    debug!(
+        "Stream {} send complete: {} bytes",
+        stats.stream_id,
+        stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    Ok(())
+}
+
+/// Receive data on a split socket read half (for bidir mode)
+pub async fn receive_data_half(
+    mut read_half: OwnedReadHalf,
+    stats: Arc<StreamStats>,
+    cancel: watch::Receiver<bool>,
+    config: TcpConfig,
+) -> anyhow::Result<()> {
+    let mut buffer = vec![0u8; config.buffer_size];
+
+    loop {
+        if *cancel.borrow() {
+            debug!("Receive cancelled for stream {}", stats.stream_id);
+            break;
+        }
+
+        match read_half.read(&mut buffer).await {
+            Ok(0) => {
+                debug!("Stream {} EOF", stats.stream_id);
+                break;
+            }
+            Ok(n) => {
+                stats.add_bytes_received(n as u64);
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    continue;
+                }
+                warn!("Receive error on stream {}: {}", stats.stream_id, e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    debug!(
+        "Stream {} receive complete: {} bytes",
+        stats.stream_id,
+        stats
+            .bytes_received
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

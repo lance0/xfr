@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "network-programming"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "net", "time", "sync", "rt-multi-thread", "macros"] }
+futures = "0.3"
 
 # TUI
 ratatui = "0.29"
