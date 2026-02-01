@@ -87,6 +87,8 @@
 ### QUIC Support
 - [ ] **QUIC transport via `quinn` crate** - battle-tested implementation
 
+*Note: QUIC provides encrypted data path, solving the current TLS limitation where only the control channel is encrypted.*
+
 ### TUI Enhancements
 - [x] **Theme system** - 11 built-in themes, `t` to cycle
 - [x] **Preferences persistence** (`~/.config/xfr/prefs.toml`)
@@ -194,7 +196,7 @@ These features are partially implemented and documented for transparency:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| TLS data transfer | Handshake only | Control channel TLS works, data path uses plain sockets |
+| TLS data transfer | Control channel only | Data path uses plain sockets; QUIC will solve this |
 
 ---
 

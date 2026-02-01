@@ -17,6 +17,7 @@ pub struct StreamStats {
     pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
     pub last_bytes: AtomicU64,
+    pub last_retransmits: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ impl StreamStats {
             intervals: Mutex::new(VecDeque::new()),
             retransmits: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
+            last_retransmits: AtomicU64::new(0),
         }
     }
 
@@ -73,6 +75,10 @@ impl StreamStats {
         let last_bytes = self.last_bytes.swap(total_bytes, Ordering::Relaxed);
         let interval_bytes = total_bytes.saturating_sub(last_bytes);
 
+        let total_retransmits = self.retransmits.load(Ordering::Relaxed);
+        let last_retransmits = self.last_retransmits.swap(total_retransmits, Ordering::Relaxed);
+        let interval_retransmits = total_retransmits.saturating_sub(last_retransmits);
+
         let elapsed = now.duration_since(self.start_time);
         let intervals = self.intervals.lock();
         let interval_duration = if let Some(last) = intervals.back() {
@@ -92,7 +98,7 @@ impl StreamStats {
             timestamp: now,
             bytes: interval_bytes,
             throughput_mbps,
-            retransmits: self.retransmits.load(Ordering::Relaxed),
+            retransmits: interval_retransmits,
             jitter_ms: 0.0,
             lost: 0,
         };
