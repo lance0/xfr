@@ -63,6 +63,10 @@ impl Server {
         let listener = TcpListener::bind(&addr).await?;
         info!("xfr server listening on {}", addr);
 
+        // Register mDNS service for discovery
+        #[cfg(feature = "discovery")]
+        let _mdns = register_mdns_service(self.config.port);
+
         // Spawn Prometheus metrics server if enabled
         #[cfg(feature = "prometheus")]
         if let Some(prom_port) = self.config.prometheus_port {
@@ -305,6 +309,11 @@ async fn handle_client(
                 }
             }
 
+            // Signal handlers to stop
+            if let Some(test) = active_tests.lock().await.get(&id) {
+                let _ = test.cancel_tx.send(true);
+            }
+
             // Wait for all data handlers to complete
             futures::future::join_all(handles).await;
 
@@ -506,4 +515,51 @@ async fn spawn_udp_handlers(
     }
 
     handles
+}
+
+/// Register mDNS service for server discovery
+#[cfg(feature = "discovery")]
+fn register_mdns_service(port: u16) -> Option<mdns_sd::ServiceDaemon> {
+    use mdns_sd::{ServiceDaemon, ServiceInfo};
+
+    let mdns = match ServiceDaemon::new() {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("Failed to create mDNS daemon: {}", e);
+            return None;
+        }
+    };
+
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "xfr-server".to_string());
+
+    let service_type = "_xfr._tcp.local.";
+    let instance_name = hostname.clone();
+
+    match ServiceInfo::new(
+        service_type,
+        &instance_name,
+        &format!("{}.", hostname),
+        (),
+        port,
+        None,
+    ) {
+        Ok(service) => {
+            if let Err(e) = mdns.register(service) {
+                warn!("Failed to register mDNS service: {}", e);
+                return None;
+            }
+            info!(
+                "Registered mDNS service: {}.{}",
+                instance_name, service_type
+            );
+            Some(mdns)
+        }
+        Err(e) => {
+            warn!("Failed to create mDNS service info: {}", e);
+            None
+        }
+    }
 }

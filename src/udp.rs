@@ -237,13 +237,14 @@ pub async fn receive_udp(
             break;
         }
 
-        let recv_future = socket.recv(&mut buffer);
+        // Use recv_from for unconnected sockets, recv for connected
+        let recv_future = socket.recv_from(&mut buffer);
         let timeout_future = tokio::time::sleep(Duration::from_millis(100));
 
         tokio::select! {
             result = recv_future => {
                 match result {
-                    Ok(n) => {
+                    Ok((n, _addr)) => {
                         let recv_time = Instant::now();
                         stats.add_bytes_received(n as u64);
                         packets_received += 1;

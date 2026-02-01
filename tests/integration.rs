@@ -111,3 +111,170 @@ async fn test_connection_refused() {
 
     assert!(result.is_err(), "Should fail to connect");
 }
+
+#[tokio::test]
+async fn test_tcp_download() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "Download test should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_tcp_bidir() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Bidir,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Bidir test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "Bidir test should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_udp_upload() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000), // 100 Mbps
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "UDP test should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_udp_download() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: Some(100_000_000), // 100 Mbps
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP download should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "UDP download should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_multi_client_concurrent() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Spawn two clients concurrently
+    let config1 = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let config2 = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+    };
+
+    let client1 = Client::new(config1);
+    let client2 = Client::new(config2);
+
+    let (result1, result2) = tokio::join!(
+        timeout(Duration::from_secs(10), client1.run(None)),
+        timeout(Duration::from_secs(10), client2.run(None))
+    );
+
+    assert!(result1.is_ok(), "Client 1 should complete");
+    assert!(result2.is_ok(), "Client 2 should complete");
+
+    let result1 = result1.unwrap();
+    let result2 = result2.unwrap();
+
+    assert!(result1.is_ok(), "Client 1 should succeed: {:?}", result1);
+    assert!(result2.is_ok(), "Client 2 should succeed: {:?}", result2);
+}
