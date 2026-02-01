@@ -3,6 +3,17 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: &str = "1.0";
 pub const DEFAULT_PORT: u16 = 5201;
 
+/// Check if two protocol versions are compatible.
+///
+/// Compatibility rules:
+/// - Major versions must match exactly
+/// - Minor version differences are allowed (backwards compatible)
+pub fn versions_compatible(version_a: &str, version_b: &str) -> bool {
+    let major_a = version_a.split('.').next().unwrap_or("0");
+    let major_b = version_b.split('.').next().unwrap_or("0");
+    major_a == major_b
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {

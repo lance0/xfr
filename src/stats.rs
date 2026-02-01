@@ -5,6 +5,9 @@ use std::time::Instant;
 
 use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpStats};
 
+/// Maximum number of intervals to keep in history (1 minute at 1-second intervals)
+const MAX_INTERVAL_HISTORY: usize = 60;
+
 pub struct StreamStats {
     pub stream_id: u8,
     pub bytes_sent: AtomicU64,
@@ -93,7 +96,13 @@ impl StreamStats {
             lost: 0,
         };
 
-        self.intervals.lock().push(stats.clone());
+        let mut intervals = self.intervals.lock();
+        intervals.push(stats.clone());
+        // Keep only last MAX_INTERVAL_HISTORY intervals to bound memory
+        if intervals.len() > MAX_INTERVAL_HISTORY {
+            intervals.remove(0);
+        }
+        drop(intervals);
         stats
     }
 

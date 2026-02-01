@@ -2,6 +2,7 @@
 //!
 //! Connects to a server and runs bandwidth tests.
 
+use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,8 +14,9 @@ use uuid::Uuid;
 
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
+    versions_compatible,
 };
-use crate::stats::{StreamStats, TestStats};
+use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::udp;
 
@@ -56,11 +58,15 @@ pub struct TestProgress {
 
 pub struct Client {
     config: ClientConfig,
+    cancel_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
 }
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cancel_tx: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub async fn run(
@@ -102,7 +108,7 @@ impl Client {
                 capabilities,
                 ..
             } => {
-                if !version.starts_with(PROTOCOL_VERSION.split('.').next().unwrap_or("1")) {
+                if !versions_compatible(&version, PROTOCOL_VERSION) {
                     return Err(anyhow::anyhow!(
                         "Incompatible protocol version: {} (client: {})",
                         version,
@@ -154,6 +160,9 @@ impl Client {
         // Create stats
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        // Store cancel sender for external cancellation
+        *self.cancel_tx.lock() = Some(cancel_tx.clone());
 
         // Connect data streams
         let server_addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
@@ -245,12 +254,12 @@ impl Client {
         &self,
         data_ports: &[u16],
         server_addr: SocketAddr,
-        _stats: Arc<TestStats>,
+        stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         for (i, &port) in data_ports.iter().enumerate() {
             let addr = SocketAddr::new(server_addr.ip(), port);
-            let stream_stats = Arc::new(StreamStats::new(i as u8));
+            let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
@@ -347,14 +356,14 @@ impl Client {
         &self,
         data_ports: &[u16],
         server_addr: SocketAddr,
-        _stats: Arc<TestStats>,
+        stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
 
         for (i, &port) in data_ports.iter().enumerate() {
             let server_port = SocketAddr::new(server_addr.ip(), port);
-            let stream_stats = Arc::new(StreamStats::new(i as u8));
+            let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
@@ -436,8 +445,16 @@ impl Client {
         Ok(())
     }
 
-    pub async fn cancel(&self) -> anyhow::Result<()> {
-        // TODO: Implement cancel via control channel
-        Ok(())
+    /// Cancel a running test.
+    ///
+    /// This signals the data stream handlers to stop. Note that the test
+    /// result from the server may still be received after cancellation.
+    pub fn cancel(&self) -> anyhow::Result<()> {
+        if let Some(tx) = self.cancel_tx.lock().as_ref() {
+            let _ = tx.send(true);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("No test is currently running"))
+        }
     }
 }

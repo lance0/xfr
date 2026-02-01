@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
+    versions_compatible,
 };
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
@@ -120,7 +121,7 @@ async fn handle_client(
 
     match msg {
         ControlMessage::Hello { version, .. } => {
-            if !version.starts_with(PROTOCOL_VERSION.split('.').next().unwrap_or("1")) {
+            if !versions_compatible(&version, PROTOCOL_VERSION) {
                 let error = ControlMessage::error(format!(
                     "Incompatible protocol version: {} (server: {})",
                     version, PROTOCOL_VERSION

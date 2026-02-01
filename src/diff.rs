@@ -42,11 +42,11 @@ impl DiffResult {
         ));
 
         if self.throughput_change_percent < -5.0 {
-            output.push_str(" ✗");
+            output.push_str(" [FAIL]");
         } else if self.throughput_change_percent < 0.0 {
-            output.push_str(" ⚠");
+            output.push_str(" [WARN]");
         } else {
-            output.push_str(" ✓");
+            output.push_str(" [OK]");
         }
         output.push('\n');
 
@@ -58,9 +58,9 @@ impl DiffResult {
                 baseline_tcp.retransmits, current_tcp.retransmits, self.retransmit_change_percent
             ));
             if self.retransmit_change_percent > 50.0 {
-                output.push_str(" ✗");
+                output.push_str(" [FAIL]");
             } else if self.retransmit_change_percent > 20.0 {
-                output.push_str(" ⚠");
+                output.push_str(" [WARN]");
             }
             output.push('\n');
 
@@ -71,7 +71,7 @@ impl DiffResult {
                 baseline_rtt_ms, current_rtt_ms, self.rtt_change_percent
             ));
             if self.rtt_change_percent > 20.0 {
-                output.push_str(" ⚠");
+                output.push_str(" [WARN]");
             }
             output.push('\n');
         }
