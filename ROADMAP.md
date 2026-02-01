@@ -99,7 +99,7 @@
 - [x] **Server TUI dashboard** (`xfr serve --tui`) - live view of active tests
 - [x] **Completion summary panel** - clear final stats display with throughput graph
 - [x] **Color-coded metrics** - green/yellow/red for retransmits, loss, jitter, RTT
-- [ ] **Enhanced sparkline** - taller graph with scale markers
+- [x] **Enhanced sparkline** - 2-row graph with peak value display
 - [ ] **Per-stream expandable view** - collapse/expand for multi-stream tests
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
