@@ -29,6 +29,7 @@ struct OutputOptions {
     csv: bool,
     quiet: bool,
     omit_secs: u64,
+    interval_secs: f64,
 }
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
@@ -101,7 +102,7 @@ struct Cli {
     #[arg(short = 'i', long, default_value = "1.0")]
     interval: f64,
 
-    /// Omit first N seconds from results (TCP ramp-up)
+    /// Omit first N seconds from interval output (TCP ramp-up)
     #[arg(long, default_value = "0")]
     omit: u64,
 
@@ -342,6 +343,7 @@ async fn main() -> Result<()> {
                 csv: cli.csv,
                 quiet: cli.quiet,
                 omit_secs: cli.omit,
+                interval_secs: cli.interval,
             };
 
             if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet {
@@ -376,9 +378,12 @@ async fn run_client_plain(
     let quiet = opts.quiet;
     let json_stream = opts.json_stream;
     let csv = opts.csv;
+    let interval_secs = opts.interval_secs;
 
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
+        let mut last_printed_interval: i64 = -1;
+
         while let Some(progress) = rx.recv().await {
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
 
@@ -391,6 +396,13 @@ async fn run_client_plain(
             if quiet {
                 continue;
             }
+
+            // Only print at configured intervals (e.g., every 2 seconds if interval_secs=2.0)
+            let current_interval = (elapsed_secs / interval_secs).floor() as i64;
+            if current_interval <= last_printed_interval {
+                continue;
+            }
+            last_printed_interval = current_interval;
 
             let retransmits = progress.streams.first().and_then(|s| s.retransmits);
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);

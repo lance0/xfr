@@ -7,11 +7,11 @@ pub fn output_csv(result: &TestResult) -> String {
     let mut output = String::new();
 
     // Header
-    output.push_str("timestamp,interval,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent\n");
+    output.push_str("test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent\n");
 
     // Summary row
     output.push_str(&format!(
-        "{},{:.2},{},{:.2},{},{},{},{:.2}\n",
+        "{},{:.2},{},{:.2},{},{:.2},{},{:.2}\n",
         result.id,
         result.duration_ms as f64 / 1000.0,
         result.bytes_total,

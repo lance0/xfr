@@ -20,6 +20,13 @@ use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::udp;
 
+/// Maximum control message line length to prevent memory DoS
+const MAX_LINE_LENGTH: usize = 8192;
+/// Maximum streams a client can request
+const MAX_STREAMS: u8 = 128;
+/// Maximum test duration a client can request (1 hour)
+const MAX_TEST_DURATION: Duration = Duration::from_secs(3600);
+
 pub struct ServerConfig {
     pub port: u16,
     pub one_off: bool,
@@ -90,9 +97,10 @@ impl Server {
 
             let active_tests = self.active_tests.clone();
             let base_port = self.config.port;
+            let max_duration = self.config.max_duration;
 
             let handle = tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, peer_addr, active_tests, base_port).await {
+                if let Err(e) = handle_client(stream, peer_addr, active_tests, base_port, max_duration).await {
                     error!("Client error {}: {}", peer_addr, e);
                 }
             });
@@ -108,18 +116,49 @@ impl Server {
     }
 }
 
+/// Read a line with bounded length to prevent memory DoS
+async fn read_bounded_line(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>, buf: &mut String) -> anyhow::Result<usize> {
+    buf.clear();
+    let mut total = 0;
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return Ok(total);
+        }
+
+        if let Some(newline_pos) = bytes.iter().position(|&b| b == b'\n') {
+            let to_read = newline_pos + 1;
+            if total + to_read > MAX_LINE_LENGTH {
+                return Err(anyhow::anyhow!("Line exceeds maximum length"));
+            }
+            buf.push_str(std::str::from_utf8(&bytes[..to_read])?);
+            reader.consume(to_read);
+            return Ok(total + to_read);
+        }
+
+        let len = bytes.len();
+        if total + len > MAX_LINE_LENGTH {
+            return Err(anyhow::anyhow!("Line exceeds maximum length"));
+        }
+        buf.push_str(std::str::from_utf8(bytes)?);
+        reader.consume(len);
+        total += len;
+    }
+}
+
 async fn handle_client(
     stream: TcpStream,
     _peer_addr: SocketAddr,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     _base_port: u16,
+    server_max_duration: Option<Duration>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
 
-    // Read client hello
-    reader.read_line(&mut line).await?;
+    // Read client hello with bounded length
+    read_bounded_line(&mut reader, &mut line).await?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -150,9 +189,8 @@ async fn handle_client(
         }
     }
 
-    // Read test request
-    line.clear();
-    reader.read_line(&mut line).await?;
+    // Read test request with bounded length
+    read_bounded_line(&mut reader, &mut line).await?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -164,14 +202,36 @@ async fn handle_client(
             direction,
             bitrate,
         } => {
+            // Validate stream count
+            if streams > MAX_STREAMS {
+                let error = ControlMessage::error(format!(
+                    "Requested {} streams exceeds maximum of {}",
+                    streams, MAX_STREAMS
+                ));
+                writer.write_all(format!("{}\n", error.serialize()?).as_bytes()).await?;
+                return Err(anyhow::anyhow!("Stream count exceeds maximum"));
+            }
+
+            // Calculate effective duration (respect server max)
+            let mut duration = Duration::from_secs(duration_secs as u64);
+            if duration > MAX_TEST_DURATION {
+                duration = MAX_TEST_DURATION;
+                warn!("Client requested {}s, capped to {}s", duration_secs, MAX_TEST_DURATION.as_secs());
+            }
+            if let Some(max_dur) = server_max_duration {
+                if duration > max_dur {
+                    duration = max_dur;
+                    warn!("Client requested {}s, capped to server max {}s", duration_secs, max_dur.as_secs());
+                }
+            }
+
             info!(
                 "Test requested: {} {} streams, {} mode, {}s",
-                protocol, streams, direction, duration_secs
+                protocol, streams, direction, duration.as_secs()
             );
 
             // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
             let mut data_ports = Vec::new();
-            let duration = Duration::from_secs(duration_secs as u64);
 
             // Pre-bind listeners/sockets to get actual ports
             let (tcp_listeners, udp_sockets) = match protocol {
@@ -384,65 +444,78 @@ async fn spawn_tcp_handlers(
         let test_stats = stats.clone();
 
         let handle = tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                let config = TcpConfig::default();
+            // Timeout on accept to prevent blocking forever if client never connects
+            let accept_result = tokio::time::timeout(
+                Duration::from_secs(10),
+                listener.accept()
+            ).await;
 
-                // Capture TCP_INFO before transfer starts
-                if let Some(info) = tcp::get_stream_tcp_info(&stream) {
-                    test_stats.update_tcp_info(info);
+            let stream = match accept_result {
+                Ok(Ok((stream, _))) => stream,
+                Ok(Err(e)) => {
+                    warn!("Accept error: {}", e);
+                    return;
                 }
+                Err(_) => {
+                    warn!("Accept timeout - client never connected to data port");
+                    return;
+                }
+            };
 
-                match direction {
-                    Direction::Upload => {
-                        // Server receives data
-                        let _ =
-                            tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
-                    }
-                    Direction::Download => {
-                        // Server sends data
-                        let _ =
-                            tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
-                                .await;
-                    }
-                    Direction::Bidir => {
-                        // Split socket for concurrent send/receive
-                        let (read_half, write_half) = stream.into_split();
+            let config = TcpConfig::default();
 
-                        let send_stats = stream_stats.clone();
-                        let recv_stats = stream_stats.clone();
-                        let send_cancel = cancel.clone();
-                        let recv_cancel = cancel;
+            // Capture TCP_INFO before transfer starts
+            if let Some(info) = tcp::get_stream_tcp_info(&stream) {
+                test_stats.update_tcp_info(info);
+            }
 
-                        let send_config = TcpConfig {
-                            buffer_size: config.buffer_size,
-                            nodelay: config.nodelay,
-                            window_size: config.window_size,
-                        };
-                        let recv_config = config;
+            match direction {
+                Direction::Upload => {
+                    // Server receives data
+                    let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
+                }
+                Direction::Download => {
+                    // Server sends data
+                    let _ = tcp::send_data(stream, stream_stats.clone(), duration, config, cancel).await;
+                }
+                Direction::Bidir => {
+                    // Split socket for concurrent send/receive
+                    let (read_half, write_half) = stream.into_split();
 
-                        let send_handle = tokio::spawn(async move {
-                            let _ = tcp::send_data_half(
-                                write_half,
-                                send_stats,
-                                duration,
-                                send_config,
-                                send_cancel,
-                            )
-                            .await;
-                        });
+                    let send_stats = stream_stats.clone();
+                    let recv_stats = stream_stats.clone();
+                    let send_cancel = cancel.clone();
+                    let recv_cancel = cancel;
 
-                        let recv_handle = tokio::spawn(async move {
-                            let _ = tcp::receive_data_half(
-                                read_half,
-                                recv_stats,
-                                recv_cancel,
-                                recv_config,
-                            )
-                            .await;
-                        });
+                    let send_config = TcpConfig {
+                        buffer_size: config.buffer_size,
+                        nodelay: config.nodelay,
+                        window_size: config.window_size,
+                    };
+                    let recv_config = config;
 
-                        let _ = tokio::join!(send_handle, recv_handle);
-                    }
+                    let send_handle = tokio::spawn(async move {
+                        let _ = tcp::send_data_half(
+                            write_half,
+                            send_stats,
+                            duration,
+                            send_config,
+                            send_cancel,
+                        )
+                        .await;
+                    });
+
+                    let recv_handle = tokio::spawn(async move {
+                        let _ = tcp::receive_data_half(
+                            read_half,
+                            recv_stats,
+                            recv_cancel,
+                            recv_config,
+                        )
+                        .await;
+                    });
+
+                    let _ = tokio::join!(send_handle, recv_handle);
                 }
             }
         });
@@ -524,45 +597,11 @@ async fn spawn_udp_handlers(
 /// Register mDNS service for server discovery
 #[cfg(feature = "discovery")]
 fn register_mdns_service(port: u16) -> Option<mdns_sd::ServiceDaemon> {
-    use mdns_sd::{ServiceDaemon, ServiceInfo};
-
-    let mdns = match ServiceDaemon::new() {
-        Ok(m) => m,
+    // Use the shared registration from discover module
+    match crate::discover::register_server(port) {
+        Ok(mdns) => Some(mdns),
         Err(e) => {
-            warn!("Failed to create mDNS daemon: {}", e);
-            return None;
-        }
-    };
-
-    let hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "xfr-server".to_string());
-
-    let service_type = "_xfr._tcp.local.";
-    let instance_name = hostname.clone();
-
-    match ServiceInfo::new(
-        service_type,
-        &instance_name,
-        &format!("{}.", hostname),
-        (),
-        port,
-        None,
-    ) {
-        Ok(service) => {
-            if let Err(e) = mdns.register(service) {
-                warn!("Failed to register mDNS service: {}", e);
-                return None;
-            }
-            info!(
-                "Registered mDNS service: {}.{}",
-                instance_name, service_type
-            );
-            Some(mdns)
-        }
-        Err(e) => {
-            warn!("Failed to create mDNS service info: {}", e);
+            warn!("Failed to register mDNS service: {}", e);
             None
         }
     }

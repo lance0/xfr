@@ -58,7 +58,10 @@ pub struct TestProgress {
 
 pub struct Client {
     config: ClientConfig,
+    /// Signals data stream handlers to stop
     cancel_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    /// Signals the control loop to send a Cancel message to server
+    cancel_request_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
 }
 
 impl Client {
@@ -66,6 +69,7 @@ impl Client {
         Self {
             config,
             cancel_tx: Arc::new(Mutex::new(None)),
+            cancel_request_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -160,9 +164,11 @@ impl Client {
         // Create stats
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
 
-        // Store cancel sender for external cancellation
+        // Store cancel senders for external cancellation
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
+        *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
         // Connect data streams
         let server_addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
@@ -185,29 +191,45 @@ impl Client {
 
         loop {
             line.clear();
-            let read_result = tokio::time::timeout_at(deadline, reader.read_line(&mut line)).await;
 
-            match read_result {
-                Ok(Ok(0)) => {
-                    // EOF
-                    break;
+            // Check for external cancel request while waiting for server messages
+            tokio::select! {
+                read_result = tokio::time::timeout_at(deadline, reader.read_line(&mut line)) => {
+                    match read_result {
+                        Ok(Ok(0)) => {
+                            // EOF
+                            break;
+                        }
+                        Ok(Ok(_)) => {
+                            // Got data, process it below
+                        }
+                        Ok(Err(e)) => {
+                            let _ = cancel_tx.send(true);
+                            return Err(e.into());
+                        }
+                        Err(_) => {
+                            // Timeout
+                            let _ = cancel_tx.send(true);
+                            return Err(anyhow::anyhow!("Timeout waiting for server response"));
+                        }
+                    }
                 }
-                Ok(Ok(_)) => {
-                    // Got data, process it
-                }
-                Ok(Err(e)) => {
-                    let _ = cancel_tx.send(true);
-                    return Err(e.into());
-                }
-                Err(_) => {
-                    // Timeout
-                    let _ = cancel_tx.send(true);
-                    return Err(anyhow::anyhow!("Timeout waiting for server response"));
+                _ = cancel_request_rx.changed() => {
+                    if *cancel_request_rx.borrow() {
+                        // Send cancel message to server
+                        let cancel_msg = ControlMessage::Cancel {
+                            id: test_id.clone(),
+                            reason: "User requested cancellation".to_string(),
+                        };
+                        let _ = writer.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
+                        let _ = cancel_tx.send(true);
+                        // Continue loop to receive Cancelled response
+                    }
                 }
             }
 
             if line.is_empty() {
-                break;
+                continue;
             }
 
             let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
@@ -239,6 +261,7 @@ impl Client {
                     return Err(anyhow::anyhow!("Server error: {}", message));
                 }
                 ControlMessage::Cancelled { .. } => {
+                    let _ = cancel_tx.send(true);
                     return Err(anyhow::anyhow!("Test was cancelled"));
                 }
                 _ => {
@@ -447,10 +470,11 @@ impl Client {
 
     /// Cancel a running test.
     ///
-    /// This signals the data stream handlers to stop. Note that the test
-    /// result from the server may still be received after cancellation.
+    /// This sends a Cancel message to the server and signals local data stream
+    /// handlers to stop. The server will respond with a Cancelled message.
     pub fn cancel(&self) -> anyhow::Result<()> {
-        if let Some(tx) = self.cancel_tx.lock().as_ref() {
+        // Signal the control loop to send a Cancel message to server
+        if let Some(tx) = self.cancel_request_tx.lock().as_ref() {
             let _ = tx.send(true);
             Ok(())
         } else {
