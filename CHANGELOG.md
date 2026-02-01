@@ -83,6 +83,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Unused dependencies: thiserror, bytesize, rand
 
+### Dependencies
+- ratatui 0.29 → 0.30 (fixes lru and paste warnings)
+- crossterm 0.28 → 0.29
+- prometheus 0.13 → 0.14 (fixes protobuf vulnerability RUSTSEC-2024-0437)
+- mdns-sd 0.11 → 0.17
+- toml 0.8 → 0.9
+- dirs 5 → 6
+- webpki-roots 0.26 → 1.0
+- rand 0.8 → 0.9
+- ipnetwork 0.20 → 0.21
+- criterion 0.5 → 0.6
+
 ## [0.2.0] - 2026-01-31
 
 ### Added
