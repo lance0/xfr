@@ -1,5 +1,9 @@
 # xfr
 
+<p align="center">
+  <img src="xfr-logo.png" alt="xfr logo" width="200">
+</p>
+
 [![Crates.io](https://img.shields.io/crates/v/xfr.svg)](https://crates.io/crates/xfr)
 [![License](https://img.shields.io/crates/l/xfr.svg)](https://github.com/lance0/xfr#license)
 [![CI](https://github.com/lance0/xfr/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/xfr/actions/workflows/ci.yml)
