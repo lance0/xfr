@@ -215,6 +215,10 @@ enum Commands {
         #[arg(long)]
         one_off: bool,
 
+        /// Enable TUI dashboard
+        #[arg(long)]
+        tui: bool,
+
         /// Maximum test duration (server-side limit)
         #[arg(long, value_parser = parse_duration)]
         max_duration: Option<Duration>,
@@ -424,6 +428,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve {
             port,
             one_off,
+            tui: server_tui,
             max_duration,
             #[cfg(feature = "prometheus")]
             prometheus,
@@ -523,6 +528,11 @@ async fn main() -> Result<()> {
                 audit: audit_config,
             };
             let server = Server::new(config);
+            if server_tui {
+                // TODO: Run server with TUI dashboard
+                // This requires refactoring the server to use channels for updates
+                eprintln!("Server TUI is not yet implemented. Running without TUI.");
+            }
             server.run().await?;
         }
 
