@@ -12,6 +12,9 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
+/// Maximum control message line length to prevent memory DoS
+const MAX_LINE_LENGTH: usize = 8192;
+
 use crate::auth;
 use crate::net::{self, AddressFamily};
 use crate::protocol::{
@@ -119,8 +122,8 @@ impl Client {
             .write_all(format!("{}\n", hello.serialize()?).as_bytes())
             .await?;
 
-        // Read server hello
-        reader.read_line(&mut line).await?;
+        // Read server hello (bounded to prevent DoS)
+        read_bounded_line(&mut reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -154,8 +157,7 @@ impl Client {
                         .await?;
 
                     // Read auth result
-                    line.clear();
-                    reader.read_line(&mut line).await?;
+                    read_bounded_line(&mut reader, &mut line).await?;
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
@@ -194,8 +196,7 @@ impl Client {
             .await?;
 
         // Read test ack
-        line.clear();
-        reader.read_line(&mut line).await?;
+        read_bounded_line(&mut reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         let data_ports = match msg {
@@ -242,11 +243,9 @@ impl Client {
         let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
 
         loop {
-            line.clear();
-
             // Check for external cancel request while waiting for server messages
             tokio::select! {
-                read_result = tokio::time::timeout_at(deadline, reader.read_line(&mut line)) => {
+                read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut reader, &mut line)) => {
                     match read_result {
                         Ok(Ok(0)) => {
                             // EOF
@@ -257,7 +256,7 @@ impl Client {
                         }
                         Ok(Err(e)) => {
                             let _ = cancel_tx.send(true);
-                            return Err(e.into());
+                            return Err(e);
                         }
                         Err(_) => {
                             // Timeout
@@ -526,7 +525,7 @@ impl Client {
         &self,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::io::BufReader;
 
         // Create QUIC endpoint and connect
         let endpoint = quic::create_client_endpoint(self.config.address_family)?;
@@ -553,8 +552,8 @@ impl Client {
             .write_all(format!("{}\n", hello.serialize()?).as_bytes())
             .await?;
 
-        // Read server hello
-        ctrl_reader.read_line(&mut line).await?;
+        // Read server hello (bounded to prevent DoS)
+        read_bounded_line(&mut ctrl_reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -588,8 +587,7 @@ impl Client {
                         .await?;
 
                     // Read auth result
-                    line.clear();
-                    ctrl_reader.read_line(&mut line).await?;
+                    read_bounded_line(&mut ctrl_reader, &mut line).await?;
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
@@ -628,8 +626,7 @@ impl Client {
             .await?;
 
         // Read test ack
-        line.clear();
-        ctrl_reader.read_line(&mut line).await?;
+        read_bounded_line(&mut ctrl_reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -731,16 +728,14 @@ impl Client {
         let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
 
         loop {
-            line.clear();
-
             tokio::select! {
-                read_result = tokio::time::timeout_at(deadline, ctrl_reader.read_line(&mut line)) => {
+                read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut ctrl_reader, &mut line)) => {
                     match read_result {
                         Ok(Ok(0)) => break,
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
                             let _ = cancel_tx.send(true);
-                            return Err(e.into());
+                            return Err(e);
                         }
                         Err(_) => {
                             let _ = cancel_tx.send(true);
@@ -818,5 +813,38 @@ impl Client {
         } else {
             Err(anyhow::anyhow!("No test is currently running"))
         }
+    }
+}
+
+/// Read a line with bounded length to prevent memory DoS from malicious server
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+) -> anyhow::Result<usize> {
+    buf.clear();
+    let mut total = 0;
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return Ok(total);
+        }
+
+        if let Some(newline_pos) = bytes.iter().position(|&b| b == b'\n') {
+            let to_read = newline_pos + 1;
+            if total + to_read > MAX_LINE_LENGTH {
+                return Err(anyhow::anyhow!("Line exceeds maximum length"));
+            }
+            buf.push_str(std::str::from_utf8(&bytes[..to_read])?);
+            reader.consume(to_read);
+            return Ok(total + to_read);
+        }
+
+        let len = bytes.len();
+        if total + len > MAX_LINE_LENGTH {
+            return Err(anyhow::anyhow!("Line exceeds maximum length"));
+        }
+        buf.push_str(std::str::from_utf8(bytes)?);
+        reader.consume(len);
+        total += len;
     }
 }

@@ -120,6 +120,8 @@ xfr 192.168.1.1 --quic -R    # QUIC download test
 
 QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single connection.
 
+**Security Note:** QUIC encrypts traffic but does not verify server identity by default. For authenticated connections, use `--psk` on both client and server to prevent MITM attacks.
+
 ### Output Formats
 
 ```bash
