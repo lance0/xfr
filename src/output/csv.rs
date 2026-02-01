@@ -17,9 +17,17 @@ pub fn output_csv(result: &TestResult) -> String {
         result.bytes_total,
         result.throughput_mbps,
         result.tcp_info.as_ref().map(|t| t.retransmits).unwrap_or(0),
-        result.udp_stats.as_ref().map(|u| u.jitter_ms).unwrap_or(0.0),
+        result
+            .udp_stats
+            .as_ref()
+            .map(|u| u.jitter_ms)
+            .unwrap_or(0.0),
         result.udp_stats.as_ref().map(|u| u.lost).unwrap_or(0),
-        result.udp_stats.as_ref().map(|u| u.lost_percent).unwrap_or(0.0),
+        result
+            .udp_stats
+            .as_ref()
+            .map(|u| u.lost_percent)
+            .unwrap_or(0.0),
     ));
 
     output

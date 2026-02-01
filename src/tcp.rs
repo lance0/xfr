@@ -60,7 +60,11 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         if ret != 0 {
-            debug!("Failed to set SO_SNDBUF to {}: {}", buffer_size, std::io::Error::last_os_error());
+            debug!(
+                "Failed to set SO_SNDBUF to {}: {}",
+                buffer_size,
+                std::io::Error::last_os_error()
+            );
         }
 
         let ret = libc::setsockopt(
@@ -71,7 +75,11 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         if ret != 0 {
-            debug!("Failed to set SO_RCVBUF to {}: {}", buffer_size, std::io::Error::last_os_error());
+            debug!(
+                "Failed to set SO_RCVBUF to {}: {}",
+                buffer_size,
+                std::io::Error::last_os_error()
+            );
         }
     }
 

@@ -100,7 +100,9 @@ impl Server {
             let max_duration = self.config.max_duration;
 
             let handle = tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, peer_addr, active_tests, base_port, max_duration).await {
+                if let Err(e) =
+                    handle_client(stream, peer_addr, active_tests, base_port, max_duration).await
+                {
                     error!("Client error {}: {}", peer_addr, e);
                 }
             });
@@ -117,7 +119,10 @@ impl Server {
 }
 
 /// Read a line with bounded length to prevent memory DoS
-async fn read_bounded_line(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>, buf: &mut String) -> anyhow::Result<usize> {
+async fn read_bounded_line(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    buf: &mut String,
+) -> anyhow::Result<usize> {
     buf.clear();
     let mut total = 0;
     loop {
@@ -208,7 +213,9 @@ async fn handle_client(
                     "Requested {} streams exceeds maximum of {}",
                     streams, MAX_STREAMS
                 ));
-                writer.write_all(format!("{}\n", error.serialize()?).as_bytes()).await?;
+                writer
+                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                    .await?;
                 return Err(anyhow::anyhow!("Stream count exceeds maximum"));
             }
 
@@ -216,18 +223,29 @@ async fn handle_client(
             let mut duration = Duration::from_secs(duration_secs as u64);
             if duration > MAX_TEST_DURATION {
                 duration = MAX_TEST_DURATION;
-                warn!("Client requested {}s, capped to {}s", duration_secs, MAX_TEST_DURATION.as_secs());
+                warn!(
+                    "Client requested {}s, capped to {}s",
+                    duration_secs,
+                    MAX_TEST_DURATION.as_secs()
+                );
             }
             if let Some(max_dur) = server_max_duration {
                 if duration > max_dur {
                     duration = max_dur;
-                    warn!("Client requested {}s, capped to server max {}s", duration_secs, max_dur.as_secs());
+                    warn!(
+                        "Client requested {}s, capped to server max {}s",
+                        duration_secs,
+                        max_dur.as_secs()
+                    );
                 }
             }
 
             info!(
                 "Test requested: {} {} streams, {} mode, {}s",
-                protocol, streams, direction, duration.as_secs()
+                protocol,
+                streams,
+                direction,
+                duration.as_secs()
             );
 
             // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
@@ -445,10 +463,8 @@ async fn spawn_tcp_handlers(
 
         let handle = tokio::spawn(async move {
             // Timeout on accept to prevent blocking forever if client never connects
-            let accept_result = tokio::time::timeout(
-                Duration::from_secs(10),
-                listener.accept()
-            ).await;
+            let accept_result =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
 
             let stream = match accept_result {
                 Ok(Ok((stream, _))) => stream,
@@ -476,7 +492,8 @@ async fn spawn_tcp_handlers(
                 }
                 Direction::Download => {
                     // Server sends data
-                    let _ = tcp::send_data(stream, stream_stats.clone(), duration, config, cancel).await;
+                    let _ = tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
+                        .await;
                 }
                 Direction::Bidir => {
                     // Split socket for concurrent send/receive
@@ -506,13 +523,9 @@ async fn spawn_tcp_handlers(
                     });
 
                     let recv_handle = tokio::spawn(async move {
-                        let _ = tcp::receive_data_half(
-                            read_half,
-                            recv_stats,
-                            recv_cancel,
-                            recv_config,
-                        )
-                        .await;
+                        let _ =
+                            tcp::receive_data_half(read_half, recv_stats, recv_cancel, recv_config)
+                                .await;
                     });
 
                     let _ = tokio::join!(send_handle, recv_handle);
