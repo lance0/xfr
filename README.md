@@ -146,8 +146,24 @@ xfr discover --timeout 10s   # Extended search
 |-----|--------|
 | `q` | Quit (cancels test) |
 | `p` | Pause/Resume display |
+| `t` | Cycle color theme |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |
+
+## Themes
+
+xfr includes 11 built-in color themes. Select with `--theme` or press `t` during a test:
+
+```bash
+xfr host --theme dracula     # Dark purple theme
+xfr host --theme matrix      # Green on black hacker style
+xfr host --theme catppuccin  # Soothing pastels
+xfr host --theme nord        # Arctic blue tones
+```
+
+Available themes: `default`, `kawaii`, `cyber`, `dracula`, `monochrome`, `matrix`, `nord`, `gruvbox`, `catppuccin`, `tokyo_night`, `solarized`
+
+Your theme preference is auto-saved to `~/.config/xfr/prefs.toml`.
 
 ## Configuration
 
@@ -160,6 +176,7 @@ parallel_streams = 1
 tcp_nodelay = false
 json_output = false
 no_tui = false
+theme = "default"  # or dracula, catppuccin, nord, matrix, etc.
 timestamp_format = "relative"  # or "iso8601", "unix"
 log_file = "~/.config/xfr/xfr.log"
 log_level = "info"
@@ -219,6 +236,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--omit` | | 0 | Omit first N seconds |
 | `--output` | `-o` | stdout | Output file |
 | `--no-tui` | | false | Disable TUI |
+| `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
 | `--window` | | OS default | TCP window size |
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |

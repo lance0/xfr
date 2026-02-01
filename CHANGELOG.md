@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Per-IP rate limiting (`--rate-limit`, `--rate-limit-window`)
   - IP access control lists (`--allow`, `--deny`, `--acl-file`)
   - Audit logging with JSON/text formats (`--audit-log`, `--audit-format`)
+- **TUI Improvements:**
+  - 11 color themes: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized
+  - Theme selection via `--theme` flag or config file
+  - Press `t` to cycle themes during TUI session
+  - UDP-specific stats display (jitter, packet loss %) in TUI
+  - Target bitrate shown in header for UDP mode
+- **Preferences persistence** (`~/.config/xfr/prefs.toml`)
+  - Auto-saves last used theme
+  - Remembers user preferences across sessions
+- Server TUI module scaffolded (dashboard showing active tests, bandwidth, security stats)
 
 ### Fixed
 - Stats now shared correctly between handlers and TestStats (real-time intervals)
