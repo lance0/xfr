@@ -225,7 +225,7 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let keys = match app.state {
-        AppState::Completed => "[q] Quit   [t] Theme   [j] JSON   [?] Help",
+        AppState::Completed => "Test complete - [q] Quit   [t] Theme   [j] JSON   [?] Help",
         AppState::Error => "[q] Quit   [r] Retry   [?] Help",
         _ => "[q] Quit   [p] Pause   [t] Theme   [j] JSON   [?] Help",
     };

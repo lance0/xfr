@@ -217,6 +217,7 @@ impl App {
 
     pub fn on_result(&mut self, result: TestResult) {
         self.state = AppState::Completed;
+        self.elapsed = self.duration; // Show full duration on completion
         if let Some(tcp_info) = &result.tcp_info {
             self.total_retransmits = tcp_info.retransmits;
             self.rtt_us = tcp_info.rtt_us;
