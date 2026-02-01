@@ -44,7 +44,7 @@ mod mdns_impl {
 
                     for addr in info.get_addresses() {
                         let server = DiscoveredServer {
-                            ip: *addr,
+                            ip: addr.to_ip_addr(),
                             port: info.get_port(),
                             hostname: Some(info.get_hostname().to_string()),
                             version: info

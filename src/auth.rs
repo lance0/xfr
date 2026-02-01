@@ -12,8 +12,8 @@ const NONCE_LENGTH: usize = 32;
 
 /// Generate a random nonce for authentication challenge
 pub fn generate_nonce() -> String {
-    let mut rng = rand::thread_rng();
-    let nonce: Vec<u8> = (0..NONCE_LENGTH).map(|_| rng.r#gen()).collect();
+    let mut rng = rand::rng();
+    let nonce: Vec<u8> = (0..NONCE_LENGTH).map(|_| rng.random()).collect();
     hex::encode(nonce)
 }
 
