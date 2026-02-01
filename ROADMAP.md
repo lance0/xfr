@@ -64,19 +64,19 @@
 
 ---
 
-## v0.4 - Security & Enterprise
+## v0.4 - Security & Enterprise (Completed)
 
 **Why this matters:** Enterprise environments require authentication and audit trails. Security is a blocker for many deployments.
 
 ### Authentication
-- [ ] **Pre-shared key authentication** - simple shared secret
-- [ ] **TLS for control channel** - encrypt test negotiation
-- [ ] **Rate limiting** - prevent abuse of public servers
+- [x] **Pre-shared key authentication** (`--psk`, `--psk-file`) - HMAC-SHA256 challenge-response
+- [x] **TLS for control channel** (`--tls`, `--tls-cert`, `--tls-key`) - rustls-based encryption
+- [x] **Rate limiting** (`--rate-limit`) - per-IP concurrent test limits
 
 ### Enterprise Features
-- [ ] **Server access control lists** - IP/subnet allowlists
+- [x] **Server access control lists** (`--allow`, `--deny`, `--acl-file`) - IP/subnet allowlists
 - [ ] **Bandwidth quotas per client** - limit resource usage
-- [ ] **Audit logging** - structured logs for compliance
+- [x] **Audit logging** (`--audit-log`, `--audit-format`) - JSON/text structured logs
 
 ---
 

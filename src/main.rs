@@ -192,9 +192,18 @@ struct Cli {
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, env = "XFR_LOG_LEVEL")]
     log_level: Option<String>,
+
+    /// Pre-shared key for server authentication
+    #[arg(long, env = "XFR_PSK")]
+    psk: Option<String>,
+
+    /// Read PSK from file
+    #[arg(long)]
+    psk_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Start server mode
     Serve {
@@ -226,6 +235,58 @@ enum Commands {
         /// Log level (error, warn, info, debug, trace)
         #[arg(long, env = "XFR_LOG_LEVEL")]
         log_level: Option<String>,
+
+        /// Pre-shared key for authentication
+        #[arg(long, env = "XFR_PSK")]
+        psk: Option<String>,
+
+        /// Read PSK from file
+        #[arg(long)]
+        psk_file: Option<PathBuf>,
+
+        /// Enable TLS
+        #[arg(long)]
+        tls: bool,
+
+        /// TLS certificate file (PEM)
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key file (PEM)
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+
+        /// TLS CA file for client certificate verification
+        #[arg(long)]
+        tls_ca: Option<PathBuf>,
+
+        /// Max concurrent tests per IP (rate limiting)
+        #[arg(long)]
+        rate_limit: Option<u32>,
+
+        /// Rate limit time window
+        #[arg(long, default_value = "60s", value_parser = parse_duration)]
+        rate_limit_window: Duration,
+
+        /// Allow IP/subnet (can be repeated)
+        #[arg(long = "allow", action = clap::ArgAction::Append)]
+        allow: Vec<String>,
+
+        /// Deny IP/subnet (can be repeated)
+        #[arg(long = "deny", action = clap::ArgAction::Append)]
+        deny: Vec<String>,
+
+        /// ACL rules file
+        #[arg(long)]
+        acl_file: Option<PathBuf>,
+
+        /// Audit log file
+        #[arg(long)]
+        audit_log: Option<PathBuf>,
+
+        /// Audit log format (json, text)
+        #[arg(long, default_value = "json")]
+        audit_format: String,
     },
 
     /// Compare two test results
@@ -344,6 +405,19 @@ async fn main() -> Result<()> {
             push_gateway,
             log_file: serve_log_file,
             log_level: serve_log_level,
+            psk,
+            psk_file,
+            tls,
+            tls_cert,
+            tls_key,
+            tls_ca,
+            rate_limit,
+            rate_limit_window,
+            allow,
+            deny,
+            acl_file,
+            audit_log,
+            audit_format,
         }) => {
             // Re-initialize logging for server mode with server-specific settings if provided
             let server_log_file = serve_log_file
@@ -373,6 +447,57 @@ async fn main() -> Result<()> {
 
             let push_gateway_url = push_gateway.or_else(|| file_config.server.push_gateway.clone());
 
+            // Build PSK (CLI > file > config)
+            let effective_psk = if let Some(psk_path) = psk_file {
+                Some(xfr::auth::read_psk_file(&psk_path)?)
+            } else {
+                psk.or_else(|| file_config.server.psk.clone())
+            };
+
+            // Build security configs
+            let auth_config = xfr::auth::AuthConfig { psk: effective_psk };
+
+            let tls_config = xfr::tls::TlsServerConfig {
+                enabled: tls || file_config.server.tls.unwrap_or(false),
+                cert_path: tls_cert
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| file_config.server.tls_cert.clone()),
+                key_path: tls_key
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| file_config.server.tls_key.clone()),
+                ca_path: tls_ca
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| file_config.server.tls_ca.clone()),
+            };
+
+            let acl_config = xfr::acl::AclConfig {
+                allow: if allow.is_empty() {
+                    file_config.server.allow.clone().unwrap_or_default()
+                } else {
+                    allow
+                },
+                deny: if deny.is_empty() {
+                    file_config.server.deny.clone().unwrap_or_default()
+                } else {
+                    deny
+                },
+                file: acl_file
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| file_config.server.acl_file.clone()),
+            };
+
+            let rate_limit_config = xfr::rate_limit::RateLimitConfig {
+                max_per_ip: rate_limit.or(file_config.server.rate_limit),
+                window_secs: rate_limit_window.as_secs(),
+            };
+
+            let audit_config = xfr::audit::AuditConfig {
+                path: audit_log
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| file_config.server.audit_log.clone()),
+                format: audit_format.parse().unwrap_or_default(),
+            };
+
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
@@ -380,6 +505,11 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "prometheus")]
                 prometheus_port: prom_port,
                 push_gateway_url,
+                auth: auth_config,
+                tls: tls_config,
+                acl: acl_config,
+                rate_limit: rate_limit_config,
+                audit: audit_config,
             };
             let server = Server::new(config);
             server.run().await?;
@@ -475,6 +605,13 @@ async fn main() -> Result<()> {
                 .or(file_config.client.timestamp_format)
                 .unwrap_or_default();
 
+            // Build PSK (CLI > file > config)
+            let client_psk = if let Some(ref psk_path) = cli.psk_file {
+                Some(xfr::auth::read_psk_file(psk_path)?)
+            } else {
+                cli.psk.clone().or_else(|| file_config.client.psk.clone())
+            };
+
             let config = ClientConfig {
                 host: host.clone(),
                 port: cli.port,
@@ -485,6 +622,8 @@ async fn main() -> Result<()> {
                 bitrate: cli.bitrate,
                 tcp_nodelay,
                 window_size,
+                psk: client_psk,
+                tls: xfr::tls::TlsClientConfig::default(),
             };
 
             // Determine output format
@@ -698,35 +837,34 @@ async fn run_tui_loop(
         terminal.draw(|f| draw(f, &app))?;
 
         // Handle events with timeout
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            // Cancel the test on server before exiting
-                            let _ = client.cancel();
-                            return Ok(app.result);
-                        }
-                        KeyCode::Char('p') => {
-                            app.toggle_pause();
-                        }
-                        KeyCode::Char('?') | KeyCode::F(1) => {
-                            app.toggle_help();
-                        }
-                        KeyCode::Esc => {
-                            if app.show_help {
-                                app.show_help = false;
-                            }
-                        }
-                        KeyCode::Char('j') => {
-                            if let Some(ref result) = app.result {
-                                // Will print JSON after TUI closes
-                                println!("{}", output_json(result));
-                            }
-                        }
-                        _ => {}
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') => {
+                    // Cancel the test on server before exiting
+                    let _ = client.cancel();
+                    return Ok(app.result);
+                }
+                KeyCode::Char('p') => {
+                    app.toggle_pause();
+                }
+                KeyCode::Char('?') | KeyCode::F(1) => {
+                    app.toggle_help();
+                }
+                KeyCode::Esc => {
+                    if app.show_help {
+                        app.show_help = false;
                     }
                 }
+                KeyCode::Char('j') => {
+                    if let Some(ref result) = app.result {
+                        // Will print JSON after TUI closes
+                        println!("{}", output_json(result));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -745,16 +883,15 @@ async fn run_tui_loop(
 
                     // Wait for quit
                     loop {
-                        if event::poll(Duration::from_millis(100))? {
-                            if let Event::Key(key) = event::read()? {
-                                if key.kind == KeyEventKind::Press {
-                                    match key.code {
-                                        KeyCode::Char('q') | KeyCode::Esc => {
-                                            return Ok(app.result);
-                                        }
-                                        _ => {}
-                                    }
+                        if event::poll(Duration::from_millis(100))?
+                            && let Event::Key(key) = event::read()?
+                            && key.kind == KeyEventKind::Press
+                        {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    return Ok(app.result);
                                 }
+                                _ => {}
                             }
                         }
                     }
@@ -765,13 +902,12 @@ async fn run_tui_loop(
 
                     // Wait for quit
                     loop {
-                        if event::poll(Duration::from_millis(100))? {
-                            if let Event::Key(key) = event::read()? {
-                                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q')
-                                {
-                                    return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
-                                }
-                            }
+                        if event::poll(Duration::from_millis(100))?
+                            && let Event::Key(key) = event::read()?
+                            && key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('q')
+                        {
+                            return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
                         }
                     }
                 }

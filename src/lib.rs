@@ -2,16 +2,21 @@
 //!
 //! A fast, beautiful iperf replacement built in Rust.
 
+pub mod acl;
+pub mod audit;
+pub mod auth;
 pub mod client;
 pub mod config;
 pub mod diff;
 pub mod discover;
 pub mod output;
 pub mod protocol;
+pub mod rate_limit;
 pub mod serve;
 pub mod stats;
 pub mod tcp;
 pub mod tcp_info;
+pub mod tls;
 pub mod tui;
 pub mod udp;
 

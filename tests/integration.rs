@@ -7,6 +7,7 @@ use tokio::time::timeout;
 use xfr::client::{Client, ClientConfig};
 use xfr::protocol::{Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
+use xfr::tls::TlsClientConfig;
 
 // Use different ports for each test to avoid conflicts
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
@@ -22,6 +23,7 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
         max_duration: None,
         #[cfg(feature = "prometheus")]
         prometheus_port: None,
+        ..Default::default()
     };
 
     tokio::spawn(async move {
@@ -48,6 +50,8 @@ async fn test_tcp_single_stream() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -80,6 +84,8 @@ async fn test_tcp_multi_stream() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -105,6 +111,8 @@ async fn test_connection_refused() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -130,6 +138,8 @@ async fn test_tcp_download() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -160,6 +170,8 @@ async fn test_tcp_bidir() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -190,6 +202,8 @@ async fn test_udp_upload() {
         bitrate: Some(100_000_000), // 100 Mbps
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -220,6 +234,8 @@ async fn test_udp_download() {
         bitrate: Some(100_000_000), // 100 Mbps
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client = Client::new(config);
@@ -248,6 +264,8 @@ async fn test_multi_client_concurrent() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let config2 = ClientConfig {
@@ -260,6 +278,8 @@ async fn test_multi_client_concurrent() {
         bitrate: None,
         tcp_nodelay: false,
         window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
     };
 
     let client1 = Client::new(config1);

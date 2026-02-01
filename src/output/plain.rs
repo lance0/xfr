@@ -92,7 +92,7 @@ pub fn output_plain(result: &TestResult) -> String {
 
 pub fn output_interval_plain(
     timestamp: &str,
-    elapsed_secs: f64,
+    _elapsed_secs: f64,
     throughput_mbps: f64,
     bytes: u64,
     retransmits: Option<u64>,

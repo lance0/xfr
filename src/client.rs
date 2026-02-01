@@ -12,12 +12,14 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
+use crate::auth;
 use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
     versions_compatible,
 };
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
+use crate::tls::TlsClientConfig;
 use crate::udp;
 
 #[derive(Clone)]
@@ -31,6 +33,10 @@ pub struct ClientConfig {
     pub bitrate: Option<u64>,
     pub tcp_nodelay: bool,
     pub window_size: Option<usize>,
+    /// Pre-shared key for authentication
+    pub psk: Option<String>,
+    /// TLS configuration
+    pub tls: TlsClientConfig,
 }
 
 impl Default for ClientConfig {
@@ -45,6 +51,8 @@ impl Default for ClientConfig {
             bitrate: None,
             tcp_nodelay: false,
             window_size: None,
+            psk: None,
+            tls: TlsClientConfig::default(),
         }
     }
 }
@@ -111,6 +119,7 @@ impl Client {
             ControlMessage::Hello {
                 version,
                 capabilities,
+                auth,
                 ..
             } => {
                 if !versions_compatible(&version, PROTOCOL_VERSION) {
@@ -121,6 +130,38 @@ impl Client {
                     ));
                 }
                 debug!("Server capabilities: {:?}", capabilities);
+
+                // Handle authentication if server requires it
+                if let Some(challenge) = auth {
+                    debug!("Server requires {} authentication", challenge.method);
+
+                    let psk = self.config.psk.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Server requires authentication but no PSK configured")
+                    })?;
+
+                    let response = auth::compute_response(&challenge.nonce, psk);
+                    let auth_msg = ControlMessage::auth_response(response);
+                    writer
+                        .write_all(format!("{}\n", auth_msg.serialize()?).as_bytes())
+                        .await?;
+
+                    // Read auth result
+                    line.clear();
+                    reader.read_line(&mut line).await?;
+                    let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+                    match auth_result {
+                        ControlMessage::AuthSuccess => {
+                            info!("Authentication successful");
+                        }
+                        ControlMessage::Error { message } => {
+                            return Err(anyhow::anyhow!("Authentication failed: {}", message));
+                        }
+                        _ => {
+                            return Err(anyhow::anyhow!("Unexpected auth response"));
+                        }
+                    }
+                }
             }
             ControlMessage::Error { message } => {
                 return Err(anyhow::anyhow!("Server error: {}", message));

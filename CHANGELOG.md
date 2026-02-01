@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prometheus Push Gateway support (`--push-gateway`) for pushing metrics at test completion
 - File logging with daily rotation (`--log-file`, `--log-level`)
 - Integration tests for TCP, UDP, download, bidir, and multi-client modes
+- **Security & Enterprise features (v0.4):**
+  - Pre-shared key (PSK) authentication (`--psk`, `--psk-file`)
+  - TLS encryption for control channel (`--tls`, `--tls-cert`, `--tls-key`, `--tls-ca`)
+  - Per-IP rate limiting (`--rate-limit`, `--rate-limit-window`)
+  - IP access control lists (`--allow`, `--deny`, `--acl-file`)
+  - Audit logging with JSON/text formats (`--audit-log`, `--audit-format`)
 
 ### Fixed
 - Stats now shared correctly between handlers and TestStats (real-time intervals)

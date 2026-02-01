@@ -83,6 +83,10 @@ xfr serve -p 9000            # Custom port
 xfr serve --one-off          # Exit after one test
 xfr serve --max-duration 60s # Limit test duration
 xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
+xfr serve --psk mysecret     # Require PSK authentication
+xfr serve --tls --tls-cert cert.pem --tls-key key.pem  # Enable TLS
+xfr serve --rate-limit 2     # Max 2 concurrent tests per IP
+xfr serve --allow 192.168.0.0/16 --deny 0.0.0.0/0  # IP ACL
 ```
 
 ### Client
@@ -165,6 +169,11 @@ port = 5201
 push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
+psk = "my-secret-key"
+rate_limit = 5
+allow = ["192.168.0.0/16", "10.0.0.0/8"]
+audit_log = "/var/log/xfr-audit.log"
+audit_format = "json"
 ```
 
 Environment variables override config file:
@@ -216,6 +225,16 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
 | `--push-gateway` | | none | Prometheus Push Gateway URL (server only) |
+| `--psk` | | none | Pre-shared key for authentication (server) |
+| `--psk-file` | | none | Read PSK from file (server) |
+| `--tls` | | false | Enable TLS encryption (server) |
+| `--tls-cert` | | none | TLS certificate file (server) |
+| `--tls-key` | | none | TLS private key file (server) |
+| `--rate-limit` | | none | Max concurrent tests per IP (server) |
+| `--allow` | | none | Allow IP/subnet, repeatable (server) |
+| `--deny` | | none | Deny IP/subnet, repeatable (server) |
+| `--audit-log` | | none | Audit log file path (server) |
+| `--audit-format` | | json | Audit format: json or text (server) |
 
 ## Platform Support
 

@@ -14,6 +14,19 @@ pub fn versions_compatible(version_a: &str, version_b: &str) -> bool {
     major_a == major_b
 }
 
+/// Authentication challenge sent by server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthChallenge {
+    pub method: String,
+    pub nonce: String,
+}
+
+/// Authentication response from client
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub response: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
@@ -25,7 +38,13 @@ pub enum ControlMessage {
         server: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth: Option<AuthChallenge>,
     },
+    AuthResponse {
+        response: String,
+    },
+    AuthSuccess,
     TestStart {
         id: String,
         protocol: Protocol,
@@ -249,6 +268,7 @@ impl ControlMessage {
             client: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
             server: None,
             capabilities: None,
+            auth: None,
         }
     }
 
@@ -262,7 +282,33 @@ impl ControlMessage {
                 "udp".to_string(),
                 "multistream".to_string(),
             ]),
+            auth: None,
         }
+    }
+
+    pub fn server_hello_with_auth(nonce: String) -> Self {
+        ControlMessage::Hello {
+            version: PROTOCOL_VERSION.to_string(),
+            client: None,
+            server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
+            capabilities: Some(vec![
+                "tcp".to_string(),
+                "udp".to_string(),
+                "multistream".to_string(),
+            ]),
+            auth: Some(AuthChallenge {
+                method: "psk".to_string(),
+                nonce,
+            }),
+        }
+    }
+
+    pub fn auth_response(response: String) -> Self {
+        ControlMessage::AuthResponse { response }
+    }
+
+    pub fn auth_success() -> Self {
+        ControlMessage::AuthSuccess
     }
 
     pub fn error(message: impl Into<String>) -> Self {

@@ -50,6 +50,21 @@ pub struct ClientDefaults {
 
     /// Log level (error, warn, info, debug, trace)
     pub log_level: Option<String>,
+
+    /// Pre-shared key for authentication
+    pub psk: Option<String>,
+
+    /// Enable TLS
+    pub tls: Option<bool>,
+
+    /// TLS client certificate path
+    pub tls_cert: Option<String>,
+
+    /// TLS client key path
+    pub tls_key: Option<String>,
+
+    /// Skip TLS certificate verification
+    pub tls_insecure: Option<bool>,
 }
 
 /// Default settings for server mode
@@ -72,6 +87,42 @@ pub struct ServerDefaults {
 
     /// Log level (error, warn, info, debug, trace)
     pub log_level: Option<String>,
+
+    /// Pre-shared key for authentication
+    pub psk: Option<String>,
+
+    /// Enable TLS
+    pub tls: Option<bool>,
+
+    /// TLS certificate path
+    pub tls_cert: Option<String>,
+
+    /// TLS key path
+    pub tls_key: Option<String>,
+
+    /// TLS CA for client certificate verification
+    pub tls_ca: Option<String>,
+
+    /// Max concurrent tests per IP
+    pub rate_limit: Option<u32>,
+
+    /// Rate limit window in seconds
+    pub rate_limit_window: Option<u64>,
+
+    /// IP allow list (CIDR notation)
+    pub allow: Option<Vec<String>>,
+
+    /// IP deny list (CIDR notation)
+    pub deny: Option<Vec<String>>,
+
+    /// ACL file path
+    pub acl_file: Option<String>,
+
+    /// Audit log file path
+    pub audit_log: Option<String>,
+
+    /// Audit log format (json, text)
+    pub audit_format: Option<String>,
 }
 
 /// Server preset for quick configuration
