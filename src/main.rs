@@ -35,6 +35,7 @@ struct OutputOptions {
 }
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
+use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
 use xfr::tui::{App, draw};
 
 /// Initialize logging with optional file output
@@ -542,7 +543,7 @@ async fn main() -> Result<()> {
             } else if ipv6_only {
                 xfr::net::AddressFamily::V6Only
             } else if let Some(ref af) = file_config.server.address_family {
-                xfr::net::AddressFamily::from_str(af).unwrap_or_default()
+                af.parse().unwrap_or_default()
             } else {
                 xfr::net::AddressFamily::default()
             };
@@ -560,14 +561,15 @@ async fn main() -> Result<()> {
                 rate_limit: rate_limit_config,
                 audit: audit_config,
                 address_family,
+                tui_tx: None,
             };
-            let server = Server::new(config);
+
             if server_tui {
-                // TODO: Run server with TUI dashboard
-                // This requires refactoring the server to use channels for updates
-                eprintln!("Server TUI is not yet implemented. Running without TUI.");
+                run_server_tui(config).await?;
+            } else {
+                let server = Server::new(config);
+                server.run().await?;
             }
-            server.run().await?;
         }
 
         Some(Commands::Diff {
@@ -673,7 +675,7 @@ async fn main() -> Result<()> {
             } else if cli.ipv6_only {
                 xfr::net::AddressFamily::V6Only
             } else if let Some(ref af) = file_config.client.address_family {
-                xfr::net::AddressFamily::from_str(af).unwrap_or_default()
+                af.parse().unwrap_or_default()
             } else {
                 xfr::net::AddressFamily::default()
             };
@@ -1004,4 +1006,87 @@ async fn run_tui_loop(
             }
         }
     }
+}
+
+async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
+    // Create channel for server events
+    let (tx, mut rx) = mpsc::channel::<ServerEvent>(100);
+    config.tui_tx = Some(tx);
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    stdout.execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let server = Server::new(config);
+    let server_handle = tokio::spawn(async move { server.run().await });
+
+    let mut app = ServerApp::new();
+
+    loop {
+        // Draw UI
+        terminal.draw(|f| server_draw(f, &app))?;
+
+        // Handle keyboard events with timeout
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') => {
+                    break;
+                }
+                KeyCode::Char('?') | KeyCode::F(1) => {
+                    app.toggle_help();
+                }
+                KeyCode::Esc => {
+                    if app.show_help {
+                        app.show_help = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Process server events
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ServerEvent::TestStarted(info) => {
+                    app.add_test(info);
+                }
+                ServerEvent::TestUpdated {
+                    id,
+                    bytes,
+                    throughput_mbps,
+                } => {
+                    app.update_test(&id, bytes, throughput_mbps);
+                }
+                ServerEvent::TestCompleted { id, bytes } => {
+                    app.remove_test(&id, bytes);
+                }
+                ServerEvent::ConnectionBlocked => {
+                    app.record_blocked();
+                }
+                ServerEvent::AuthFailure => {
+                    app.record_auth_failure();
+                }
+            }
+        }
+
+        // Update bandwidth history
+        app.update_bandwidth();
+
+        // Check if server task ended
+        if server_handle.is_finished() {
+            break;
+        }
+    }
+
+    // Restore terminal
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+
+    Ok(())
 }

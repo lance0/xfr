@@ -26,6 +26,7 @@ xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 ## Features
 
 - **Live TUI** with real-time throughput graphs and per-stream stats
+- **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP and UDP** with configurable bitrate and parallel streams
 - **Bidirectional testing** - measure upload and download simultaneously
@@ -40,7 +41,7 @@ xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 
 | Feature | iperf3 | xfr |
 |---------|--------|-----|
-| Live TUI | No | Yes |
+| Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
 | Output formats | Text/JSON | Text/JSON/CSV/Prometheus |
 | Compare runs | No | `xfr diff` |
@@ -83,6 +84,7 @@ cargo install xfr --all-features
 ```bash
 xfr serve                    # Listen on port 5201
 xfr serve -p 9000            # Custom port
+xfr serve --tui              # Live dashboard showing active tests
 xfr serve --one-off          # Exit after one test
 xfr serve --max-duration 60s # Limit test duration
 xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
@@ -145,7 +147,7 @@ xfr discover                 # Find xfr servers on LAN
 xfr discover --timeout 10s   # Extended search
 ```
 
-## Keybindings (TUI)
+## Keybindings (Client TUI)
 
 | Key | Action |
 |-----|--------|
@@ -154,6 +156,14 @@ xfr discover --timeout 10s   # Extended search
 | `t` | Cycle color theme |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |
+
+## Keybindings (Server TUI)
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit server |
+| `?` / `F1` | Help |
+| `Esc` | Close help |
 
 ## Themes
 
@@ -258,6 +268,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
 | `--audit-log` | | none | Audit log file path (server) |
 | `--audit-format` | | json | Audit format: json or text (server) |
+| `--tui` | | false | Enable live dashboard (server) |
 
 ## Platform Support
 

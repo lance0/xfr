@@ -22,16 +22,20 @@ pub enum AddressFamily {
     DualStack,
 }
 
-impl AddressFamily {
-    /// Parse from string (for config/CLI)
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for AddressFamily {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "4" | "v4" | "ipv4" | "v4only" | "ipv4-only" => Some(Self::V4Only),
-            "6" | "v6" | "ipv6" | "v6only" | "ipv6-only" => Some(Self::V6Only),
-            "dual" | "dualstack" | "dual-stack" | "both" => Some(Self::DualStack),
-            _ => None,
+            "4" | "v4" | "ipv4" | "v4only" | "ipv4-only" => Ok(Self::V4Only),
+            "6" | "v6" | "ipv6" | "v6only" | "ipv6-only" => Ok(Self::V6Only),
+            "dual" | "dualstack" | "dual-stack" | "both" => Ok(Self::DualStack),
+            _ => Err(()),
         }
     }
+}
+
+impl AddressFamily {
 
     /// Get the bind address for this family
     pub fn bind_addr(&self, port: u16) -> SocketAddr {
@@ -281,19 +285,13 @@ mod tests {
 
     #[test]
     fn test_address_family_from_str() {
-        assert_eq!(AddressFamily::from_str("4"), Some(AddressFamily::V4Only));
-        assert_eq!(AddressFamily::from_str("ipv4"), Some(AddressFamily::V4Only));
-        assert_eq!(AddressFamily::from_str("6"), Some(AddressFamily::V6Only));
-        assert_eq!(AddressFamily::from_str("ipv6"), Some(AddressFamily::V6Only));
-        assert_eq!(
-            AddressFamily::from_str("dual"),
-            Some(AddressFamily::DualStack)
-        );
-        assert_eq!(
-            AddressFamily::from_str("both"),
-            Some(AddressFamily::DualStack)
-        );
-        assert_eq!(AddressFamily::from_str("invalid"), None);
+        assert_eq!("4".parse::<AddressFamily>(), Ok(AddressFamily::V4Only));
+        assert_eq!("ipv4".parse::<AddressFamily>(), Ok(AddressFamily::V4Only));
+        assert_eq!("6".parse::<AddressFamily>(), Ok(AddressFamily::V6Only));
+        assert_eq!("ipv6".parse::<AddressFamily>(), Ok(AddressFamily::V6Only));
+        assert_eq!("dual".parse::<AddressFamily>(), Ok(AddressFamily::DualStack));
+        assert_eq!("both".parse::<AddressFamily>(), Ok(AddressFamily::DualStack));
+        assert_eq!("invalid".parse::<AddressFamily>(), Err(()));
     }
 
     #[test]

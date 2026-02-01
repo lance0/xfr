@@ -41,15 +41,16 @@ pub enum BackendType {
     Uring,
 }
 
-impl BackendType {
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for BackendType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
-            "tokio" | "epoll" | "kqueue" => Some(Self::Tokio),
+            "auto" => Ok(Self::Auto),
+            "tokio" | "epoll" | "kqueue" => Ok(Self::Tokio),
             #[cfg(all(target_os = "linux", feature = "io-uring"))]
-            "uring" | "io_uring" | "io-uring" => Some(Self::Uring),
-            _ => None,
+            "uring" | "io_uring" | "io-uring" => Ok(Self::Uring),
+            _ => Err(()),
         }
     }
 }
@@ -152,10 +153,10 @@ mod tests {
 
     #[test]
     fn test_backend_type_from_str() {
-        assert_eq!(BackendType::from_str("auto"), Some(BackendType::Auto));
-        assert_eq!(BackendType::from_str("tokio"), Some(BackendType::Tokio));
-        assert_eq!(BackendType::from_str("epoll"), Some(BackendType::Tokio));
-        assert_eq!(BackendType::from_str("invalid"), None);
+        assert_eq!("auto".parse::<BackendType>(), Ok(BackendType::Auto));
+        assert_eq!("tokio".parse::<BackendType>(), Ok(BackendType::Tokio));
+        assert_eq!("epoll".parse::<BackendType>(), Ok(BackendType::Tokio));
+        assert_eq!("invalid".parse::<BackendType>(), Err(()));
     }
 
     #[test]

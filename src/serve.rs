@@ -24,7 +24,9 @@ use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::tls::{MaybeTlsServerStream, TlsServerConfig, accept_tls};
+use crate::tui::server::{ActiveTestInfo, ServerEvent};
 use crate::udp;
+use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 
 /// Maximum control message line length to prevent memory DoS
@@ -55,6 +57,8 @@ pub struct ServerConfig {
     pub audit: AuditConfig,
     /// Address family (IPv4, IPv6, dual-stack)
     pub address_family: AddressFamily,
+    /// Channel to send events to TUI
+    pub tui_tx: Option<mpsc::Sender<ServerEvent>>,
 }
 
 impl Default for ServerConfig {
@@ -72,6 +76,7 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             audit: AuditConfig::default(),
             address_family: AddressFamily::default(),
+            tui_tx: None,
         }
     }
 }
@@ -84,6 +89,7 @@ struct SecurityContext {
     audit: Option<Arc<AuditLogger>>,
     tls_acceptor: Option<TlsAcceptor>,
     address_family: AddressFamily,
+    tui_tx: Option<mpsc::Sender<ServerEvent>>,
 }
 
 struct ActiveTest {
@@ -144,6 +150,7 @@ impl Server {
             audit,
             tls_acceptor,
             address_family: self.config.address_family,
+            tui_tx: self.config.tui_tx.clone(),
         });
 
         // Start rate limiter cleanup task if enabled
@@ -181,6 +188,9 @@ impl Server {
                         rule: security.acl.matched_rule(peer_ip),
                     });
                 }
+                if let Some(tx) = &security.tui_tx {
+                    let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                }
                 drop(stream);
                 continue;
             }
@@ -196,6 +206,9 @@ impl Server {
                         current: e.current,
                         max: e.max,
                     });
+                }
+                if let Some(tx) = &security.tui_tx {
+                    let _ = tx.try_send(ServerEvent::ConnectionBlocked);
                 }
                 drop(stream);
                 continue;
@@ -320,6 +333,9 @@ async fn handle_client_with_auth(
                             method: "psk".to_string(),
                             reason: "Invalid response".to_string(),
                         });
+                    }
+                    if let Some(tx) = &security.tui_tx {
+                        let _ = tx.try_send(ServerEvent::AuthFailure);
                     }
                     let error = ControlMessage::error("Authentication failed");
                     writer
@@ -566,6 +582,8 @@ async fn handle_test_request(
                 bitrate,
                 active_tests.clone(),
                 security.address_family,
+                peer_addr,
+                security.tui_tx.clone(),
             )
             .await;
 
@@ -616,6 +634,8 @@ async fn run_test(
     bitrate: Option<u64>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     address_family: AddressFamily,
+    peer_addr: SocketAddr,
+    tui_tx: Option<mpsc::Sender<ServerEvent>>,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -672,6 +692,21 @@ async fn run_test(
         );
     }
 
+    // Notify TUI that test started
+    if let Some(tx) = &tui_tx {
+        let _ = tx.try_send(ServerEvent::TestStarted(ActiveTestInfo {
+            id: id.to_string(),
+            client_ip: peer_addr.ip(),
+            protocol: protocol.to_string(),
+            direction: direction.to_string(),
+            streams,
+            started: std::time::Instant::now(),
+            duration_secs: duration.as_secs() as u32,
+            bytes: 0,
+            throughput_mbps: 0.0,
+        }));
+    }
+
     // Notify metrics that test started
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_start();
@@ -723,8 +758,17 @@ async fn run_test(
                     id: id.to_string(),
                     elapsed_ms: stats.elapsed_ms(),
                     streams: stream_intervals,
-                    aggregate,
+                    aggregate: aggregate.clone(),
                 };
+
+                // Notify TUI of progress
+                if let Some(tx) = &tui_tx {
+                    let _ = tx.try_send(ServerEvent::TestUpdated {
+                        id: id.to_string(),
+                        bytes: aggregate.bytes,
+                        throughput_mbps: aggregate.throughput_mbps,
+                    });
+                }
 
                 if writer.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
                     warn!("Failed to send interval, client may have disconnected");
@@ -794,6 +838,14 @@ async fn run_test(
     // Notify metrics that test completed
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_complete(&stats);
+
+    // Notify TUI that test completed
+    if let Some(tx) = &tui_tx {
+        let _ = tx.try_send(ServerEvent::TestCompleted {
+            id: id.to_string(),
+            bytes: bytes_total,
+        });
+    }
 
     // Cleanup
     active_tests.lock().await.remove(id);

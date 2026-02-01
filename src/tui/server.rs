@@ -6,6 +6,25 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+/// Events sent from server to TUI
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    /// A new test has started
+    TestStarted(ActiveTestInfo),
+    /// Test progress update
+    TestUpdated {
+        id: String,
+        bytes: u64,
+        throughput_mbps: f64,
+    },
+    /// Test completed
+    TestCompleted { id: String, bytes: u64 },
+    /// Connection blocked by ACL or rate limit
+    ConnectionBlocked,
+    /// Authentication failure
+    AuthFailure,
+}
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
