@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -435,9 +435,10 @@ impl Client {
             let direction = self.config.direction;
             let duration = self.config.duration;
             let stream_bitrate = bitrate / self.config.streams as u64;
+            let address_family = self.config.address_family;
 
             tokio::spawn(async move {
-                let socket = match UdpSocket::bind("0.0.0.0:0").await {
+                let socket = match net::create_udp_socket(0, address_family).await {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
                         error!("Failed to bind UDP socket: {}", e);

@@ -80,7 +80,7 @@
 
 ---
 
-## v0.5 - Advanced Protocols
+## v0.5 - Advanced Protocols & TUI Enhancements (In Progress)
 
 **Why this matters:** QUIC is the future of internet transport. HTTP/3 adoption is accelerating (Cloudflare, Akamai, Fastly enable by default). Testing QUIC is increasingly important.
 
@@ -91,18 +91,23 @@
 - [ ] **Stream multiplexing tests** - measure QUIC's head-of-line blocking advantage
 
 ### IPv6
-- [ ] **Full IPv6 support** - dual-stack, IPv6-only modes
+- [x] **Full IPv6 support** (`-4`, `-6` flags) - dual-stack, IPv6-only modes
 - [ ] **IPv6 flow labels** - for traffic engineering tests
 
 ### MPTCP (Multi-Path TCP)
 - [ ] **MPTCP support** - iperf3 3.16 added this, test multi-path aggregation
+
+### TUI Enhancements
+- [x] **Theme system** - 11 built-in themes, `t` to cycle
+- [x] **Preferences persistence** (`~/.config/xfr/prefs.toml`)
+- [ ] **Server TUI dashboard** - module exists, not yet wired
 
 ---
 
 ## Future Ideas
 
 ### High-Speed Optimization (10G+)
-- [ ] **io_uring on Linux** - reduce syscall overhead
+- [~] **io_uring on Linux** - backend infrastructure complete, syscalls pending
 - [ ] **CPU affinity options** - pin to specific cores/NUMA nodes
 - [ ] **Zerocopy send/receive** - MSG_ZEROCOPY, MSG_TRUNC
 - [ ] **Multi-queue NIC support** - leverage hardware parallelism
@@ -160,6 +165,18 @@
 | rperf | Rust | Yes | No | No | Active |
 | nperf | Rust | ? | No | Yes | Active |
 | **xfr** | Rust | Yes | Yes | Planned | Active |
+
+---
+
+## Known Limitations
+
+These features are partially implemented and documented for transparency:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| TLS data transfer | Handshake only | Control channel TLS works, data path uses plain sockets |
+| io_uring backend | Infrastructure only | Falls back to tokio for all operations |
+| Server `--tui` flag | Stub | Prints warning and runs headless |
 
 ---
 
