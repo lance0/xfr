@@ -38,6 +38,7 @@
 - [x] Proper bidir mode with split sockets
 - [x] Integration tests for all modes
 - [x] mDNS service registration on server start
+- [x] Full IPv6 support (`-4`, `-6` flags) - dual-stack, IPv6-only modes
 
 ---
 
@@ -85,16 +86,6 @@
 
 ### QUIC Support
 - [ ] **QUIC transport via `quinn` crate** - battle-tested implementation
-- [ ] **0-RTT connection establishment** - test resumed connections
-- [ ] **Connection migration testing** - simulate IP changes (mobile networks)
-- [ ] **Stream multiplexing tests** - measure QUIC's head-of-line blocking advantage
-
-### IPv6
-- [x] **Full IPv6 support** (`-4`, `-6` flags) - dual-stack, IPv6-only modes
-- [ ] **IPv6 flow labels** - for traffic engineering tests
-
-### MPTCP (Multi-Path TCP)
-- [ ] **MPTCP support** - iperf3 3.16 added this, test multi-path aggregation
 
 ### TUI Enhancements
 - [x] **Theme system** - 11 built-in themes, `t` to cycle
@@ -107,24 +98,11 @@
 
 ### High-Speed Optimization (10G+)
 - [ ] **io_uring on Linux** - for kernel bypass at 10G+
+- [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
+- [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **CPU affinity options** - pin to specific cores/NUMA nodes
 - [ ] **Zerocopy send/receive** - MSG_ZEROCOPY, MSG_TRUNC
 - [ ] **Multi-queue NIC support** - leverage hardware parallelism
-
-### Storage & Analysis
-- [ ] **Historical data storage** - SQLite for trend analysis
-- [ ] **Scheduled tests** - cron-like recurring bandwidth checks
-- [ ] **Baseline management** - store and compare against baselines
-
-### Integrations
-- [ ] **Web UI** - browser-based dashboard for long-running servers
-- [ ] **Cloud discovery** - AWS/GCP/Azure endpoint discovery
-- [ ] **Grafana plugin** - native Grafana data source
-- [ ] **OpenTelemetry export** - traces and metrics
-
-### Library Mode
-- [ ] **libxfr** - C-compatible FFI for embedding in other tools
-- [ ] **Python bindings** - for scripting and automation
 
 ---
 
@@ -141,6 +119,40 @@
 - [ ] SCTP transport mode
 
 *Rationale: Limited real-world usage compared to TCP/UDP/QUIC.*
+
+### Advanced QUIC Features
+- [ ] 0-RTT connection establishment
+- [ ] Connection migration testing
+- [ ] Stream multiplexing tests
+
+*Rationale: Get basic QUIC working first. These are nice-to-haves.*
+
+### IPv6 Flow Labels
+- [ ] Traffic engineering tests with flow labels
+
+*Rationale: Niche use case, rarely needed.*
+
+### MPTCP
+- [ ] Multi-Path TCP support
+
+*Rationale: Very few deployments have MPTCP enabled.*
+
+### Integrations & Bindings
+- [ ] Web UI for long-running servers
+- [ ] Cloud discovery (AWS/GCP/Azure)
+- [ ] Grafana plugin (native data source)
+- [ ] OpenTelemetry export
+- [ ] libxfr C FFI
+- [ ] Python bindings
+
+*Rationale: Scope creep. Prometheus export and CLI cover most use cases.*
+
+### Storage & Analysis
+- [ ] Historical data storage (SQLite)
+- [ ] Scheduled tests
+- [ ] Baseline management
+
+*Rationale: Use external tools (cron, databases). `xfr diff` covers basic comparison.*
 
 ---
 
