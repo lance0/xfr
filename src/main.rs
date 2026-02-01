@@ -165,6 +165,10 @@ struct Cli {
     #[arg(long)]
     no_tui: bool,
 
+    /// Color theme (default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized)
+    #[arg(long, default_value = "default")]
+    theme: String,
+
     /// Report interval in seconds
     #[arg(short = 'i', long, default_value = "1.0")]
     interval: f64,
@@ -662,8 +666,18 @@ async fn main() -> Result<()> {
                 // Plain/JSON/CSV mode
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {
-                // TUI mode
-                run_client_tui(config, cli.output, timestamp_format).await?;
+                // TUI mode - CLI theme takes precedence over config
+                let theme_name = if cli.theme != "default" {
+                    cli.theme.clone()
+                } else {
+                    file_config
+                        .client
+                        .theme
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string())
+                };
+                let theme = xfr::tui::Theme::by_name(&theme_name);
+                run_client_tui(config, cli.output, timestamp_format, theme).await?;
             }
         }
     }
@@ -793,6 +807,7 @@ async fn run_client_tui(
     config: ClientConfig,
     output: Option<PathBuf>,
     timestamp_format: TimestampFormat,
+    theme: xfr::tui::Theme,
 ) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -801,7 +816,7 @@ async fn run_client_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format).await;
+    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format, theme).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -832,6 +847,7 @@ async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     config: ClientConfig,
     timestamp_format: TimestampFormat,
+    theme: xfr::tui::Theme,
 ) -> Result<Option<xfr::protocol::TestResult>> {
     let mut app = App::new(
         config.host.clone(),
@@ -842,6 +858,7 @@ async fn run_tui_loop(
         config.duration,
         config.bitrate,
         timestamp_format,
+        theme,
     );
 
     let client = Arc::new(Client::new(config));

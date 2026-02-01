@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use crate::client::TestProgress;
 use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
 
+use super::theme::Theme;
+
 const SPARKLINE_HISTORY: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,7 @@ pub struct App {
     pub start_time: Option<Instant>,
     pub show_help: bool,
     pub timestamp_format: TimestampFormat,
+    pub theme: Theme,
 }
 
 impl App {
@@ -69,6 +72,7 @@ impl App {
         duration: Duration,
         bitrate: Option<u64>,
         timestamp_format: TimestampFormat,
+        theme: Theme,
     ) -> Self {
         Self {
             state: AppState::Connecting,
@@ -108,6 +112,7 @@ impl App {
             start_time: None,
             show_help: false,
             timestamp_format,
+            theme,
         }
     }
 
@@ -225,6 +230,7 @@ impl Default for App {
             Duration::from_secs(10),
             None,
             TimestampFormat::default(),
+            Theme::default(),
         )
     }
 }

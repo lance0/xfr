@@ -65,6 +65,9 @@ pub struct ClientDefaults {
 
     /// Skip TLS certificate verification
     pub tls_insecure: Option<bool>,
+
+    /// TUI color theme
+    pub theme: Option<String>,
 }
 
 /// Default settings for server mode
