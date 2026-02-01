@@ -53,14 +53,36 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let info = format!(
-        "Protocol: {}    Streams: {}    Direction: {}    Elapsed: {}s / {}s",
-        app.protocol,
-        app.streams_count,
-        app.direction,
-        app.elapsed.as_secs(),
-        app.duration.as_secs()
-    );
+    let bitrate_str = app.bitrate.map(|b| {
+        if b >= 1_000_000_000 {
+            format!("{}G", b / 1_000_000_000)
+        } else if b >= 1_000_000 {
+            format!("{}M", b / 1_000_000)
+        } else {
+            format!("{}K", b / 1_000)
+        }
+    });
+
+    let info = if let Some(br) = bitrate_str {
+        format!(
+            "Protocol: {} @ {}bps    Streams: {}    Direction: {}    Elapsed: {}s / {}s",
+            app.protocol,
+            br,
+            app.streams_count,
+            app.direction,
+            app.elapsed.as_secs(),
+            app.duration.as_secs()
+        )
+    } else {
+        format!(
+            "Protocol: {}    Streams: {}    Direction: {}    Elapsed: {}s / {}s",
+            app.protocol,
+            app.streams_count,
+            app.direction,
+            app.elapsed.as_secs(),
+            app.duration.as_secs()
+        )
+    };
 
     let info_widget = Paragraph::new(info).style(Style::default().fg(Color::Gray));
     frame.render_widget(info_widget, inner);
@@ -178,14 +200,25 @@ fn draw_test_content(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(bar, stream_area);
     }
 
-    // Stats
-    let stats = format!(
-        "Transfer: {}    Retransmits: {}    RTT: {:.2}ms    Cwnd: {}KB",
-        bytes_to_human(app.total_bytes),
-        app.total_retransmits,
-        app.rtt_us as f64 / 1000.0,
-        app.cwnd / 1024
-    );
+    // Stats - show different info for TCP vs UDP
+    let stats = if app.protocol == crate::protocol::Protocol::Udp {
+        format!(
+            "Transfer: {}    Jitter: {:.2}ms    Loss: {:.1}% ({}/{} pkts)",
+            bytes_to_human(app.total_bytes),
+            app.udp_jitter_ms,
+            app.udp_lost_percent,
+            app.udp_packets_lost,
+            app.udp_packets_sent,
+        )
+    } else {
+        format!(
+            "Transfer: {}    Retransmits: {}    RTT: {:.2}ms    Cwnd: {}KB",
+            bytes_to_human(app.total_bytes),
+            app.total_retransmits,
+            app.rtt_us as f64 / 1000.0,
+            app.cwnd / 1024
+        )
+    };
     let stats_widget = Paragraph::new(stats).style(Style::default().fg(Color::Gray));
     frame.render_widget(stats_widget, chunks[5]);
 }

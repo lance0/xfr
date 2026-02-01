@@ -44,6 +44,12 @@ pub struct App {
     pub rtt_us: u32,
     pub cwnd: u32,
 
+    // UDP stats
+    pub udp_jitter_ms: f64,
+    pub udp_lost_percent: f64,
+    pub udp_packets_sent: u64,
+    pub udp_packets_lost: u64,
+
     pub result: Option<TestResult>,
     pub error: Option<String>,
 
@@ -91,6 +97,11 @@ impl App {
             rtt_us: 0,
             cwnd: 0,
 
+            udp_jitter_ms: 0.0,
+            udp_lost_percent: 0.0,
+            udp_packets_sent: 0,
+            udp_packets_lost: 0,
+
             result: None,
             error: None,
 
@@ -118,6 +129,10 @@ impl App {
 
         // Update stream data
         // Intervals are sent every second, so throughput = bytes * 8 / 1_000_000
+        let mut total_jitter = 0.0;
+        let mut total_lost = 0u64;
+        let mut jitter_count = 0;
+
         for interval in &progress.streams {
             if let Some(stream) = self.streams.get_mut(interval.id as usize) {
                 stream.bytes = interval.bytes;
@@ -125,10 +140,25 @@ impl App {
                 stream.throughput_mbps = (interval.bytes as f64 * 8.0) / 1_000_000.0;
                 stream.retransmits = interval.retransmits.unwrap_or(0);
             }
+
+            // Accumulate UDP stats from intervals
+            if let Some(jitter) = interval.jitter_ms {
+                total_jitter += jitter;
+                jitter_count += 1;
+            }
+            if let Some(lost) = interval.lost {
+                total_lost += lost;
+            }
         }
 
         // Sum retransmits
         self.total_retransmits = self.streams.iter().map(|s| s.retransmits).sum();
+
+        // Update UDP stats (average jitter across streams)
+        if jitter_count > 0 {
+            self.udp_jitter_ms = total_jitter / jitter_count as f64;
+        }
+        self.udp_packets_lost = total_lost;
     }
 
     pub fn on_result(&mut self, result: TestResult) {
@@ -137,6 +167,12 @@ impl App {
             self.total_retransmits = tcp_info.retransmits;
             self.rtt_us = tcp_info.rtt_us;
             self.cwnd = tcp_info.cwnd;
+        }
+        if let Some(udp_stats) = &result.udp_stats {
+            self.udp_jitter_ms = udp_stats.jitter_ms;
+            self.udp_lost_percent = udp_stats.lost_percent;
+            self.udp_packets_sent = udp_stats.packets_sent;
+            self.udp_packets_lost = udp_stats.lost;
         }
         self.result = Some(result);
     }
