@@ -240,13 +240,14 @@ pub fn get_stream_tcp_info(stream: &TcpStream) -> Option<crate::protocol::TcpInf
 }
 
 /// Send data on a split socket write half (for bidir mode)
+/// Returns the write half for reuniting to get TCP_INFO
 pub async fn send_data_half(
     mut write_half: OwnedWriteHalf,
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
     cancel: watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<OwnedWriteHalf> {
     let buffer = vec![0u8; config.buffer_size];
     let deadline = tokio::time::Instant::now() + duration;
 
@@ -271,23 +272,24 @@ pub async fn send_data_half(
         }
     }
 
-    write_half.shutdown().await?;
+    let _ = write_half.shutdown().await;
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,
         stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
     );
 
-    Ok(())
+    Ok(write_half)
 }
 
 /// Receive data on a split socket read half (for bidir mode)
+/// Returns the read half for reuniting to get TCP_INFO
 pub async fn receive_data_half(
     mut read_half: OwnedReadHalf,
     stats: Arc<StreamStats>,
     cancel: watch::Receiver<bool>,
     config: TcpConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
 
     loop {
@@ -322,7 +324,7 @@ pub async fn receive_data_half(
             .load(std::sync::atomic::Ordering::Relaxed)
     );
 
-    Ok(())
+    Ok(read_half)
 }
 
 #[cfg(test)]

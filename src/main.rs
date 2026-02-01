@@ -39,7 +39,11 @@ use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
 use xfr::tui::{App, draw};
 
 /// Initialize logging with optional file output
-fn init_logging(log_file: Option<&str>, log_level: Option<&str>) -> anyhow::Result<()> {
+/// Returns the WorkerGuard if file logging is enabled - must be held until program exit
+fn init_logging(
+    log_file: Option<&str>,
+    log_level: Option<&str>,
+) -> anyhow::Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -74,10 +78,7 @@ fn init_logging(log_file: Option<&str>, log_level: Option<&str>) -> anyhow::Resu
                 .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
         );
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-
-        // Keep guard alive for the duration of the program
-        std::mem::forget(_guard);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
         let file_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
@@ -89,14 +90,16 @@ fn init_logging(log_file: Option<&str>, log_level: Option<&str>) -> anyhow::Resu
             .with(console_layer)
             .with(file_layer)
             .init();
+
+        Ok(Some(guard))
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(console_layer)
             .init();
-    }
 
-    Ok(())
+        Ok(None)
+    }
 }
 
 #[derive(Parser)]
@@ -420,7 +423,8 @@ async fn main() -> Result<()> {
             (file, level)
         }
     };
-    init_logging(
+    // Hold the logging guard until program exit to ensure all logs are flushed
+    let _log_guard = init_logging(
         effective_log_file.map(|s| s.as_str()),
         effective_log_level.map(|s| s.as_str()),
     )?;

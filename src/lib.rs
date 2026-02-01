@@ -4,7 +4,6 @@
 
 pub mod acl;
 pub mod auth;
-pub mod backend;
 pub mod client;
 pub mod config;
 pub mod diff;

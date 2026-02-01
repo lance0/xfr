@@ -242,10 +242,10 @@ impl TestStats {
         self.tcp_info.lock().push(info);
     }
 
-    /// Get a single representative TCP info (first stream's info, or aggregated)
+    /// Get final TCP info (last snapshot represents post-transfer state)
     pub fn get_tcp_info(&self) -> Option<TcpInfoSnapshot> {
         let infos = self.tcp_info.lock();
-        infos.first().cloned()
+        infos.last().cloned()
     }
 }
 

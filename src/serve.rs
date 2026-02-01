@@ -1286,6 +1286,7 @@ async fn spawn_tcp_handlers(
 
                     let send_stats = stream_stats.clone();
                     let recv_stats = stream_stats.clone();
+                    let final_stats = stream_stats.clone();
                     let send_cancel = cancel.clone();
                     let recv_cancel = cancel;
 
@@ -1297,23 +1298,29 @@ async fn spawn_tcp_handlers(
                     let recv_config = config;
 
                     let send_handle = tokio::spawn(async move {
-                        let _ = tcp::send_data_half(
+                        tcp::send_data_half(
                             write_half,
                             send_stats,
                             duration,
                             send_config,
                             send_cancel,
                         )
-                        .await;
+                        .await
                     });
 
                     let recv_handle = tokio::spawn(async move {
-                        let _ =
-                            tcp::receive_data_half(read_half, recv_stats, recv_cancel, recv_config)
-                                .await;
+                        tcp::receive_data_half(read_half, recv_stats, recv_cancel, recv_config)
+                            .await
                     });
 
-                    let _ = tokio::join!(send_handle, recv_handle);
+                    // Wait for both to complete and reunite halves to get TCP_INFO
+                    let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
+                    if let (Ok(Ok(write_half)), Ok(Ok(read_half))) = (send_result, recv_result)
+                        && let Ok(stream) = read_half.reunite(write_half)
+                        && let Some(info) = tcp::get_stream_tcp_info(&stream)
+                    {
+                        final_stats.add_retransmits(info.retransmits);
+                    }
                 }
             }
         });
