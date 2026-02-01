@@ -16,7 +16,7 @@ futures = "0.3"
 
 # TUI
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -26,17 +26,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Metrics
-prometheus = { version = "0.13", optional = true }
+prometheus = { version = "0.14", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 
 # Discovery
-mdns-sd = { version = "0.11", optional = true }
+mdns-sd = { version = "0.17", optional = true }
 
 # Config
-toml = "0.8"
-dirs = "5"
+toml = "0.9"
+dirs = "6"
 
 # Misc
 anyhow = "1"
@@ -59,7 +59,7 @@ discovery = ["dep:mdns-sd"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.7", features = ["async_tokio"] }
 
 [[bench]]
 name = "throughput"
