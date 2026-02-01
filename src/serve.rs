@@ -289,7 +289,7 @@ async fn handle_client_with_auth(
     stream: TcpStream,
     peer_addr: SocketAddr,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    base_port: u16,
+    _base_port: u16,
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
 ) -> anyhow::Result<()> {
@@ -352,7 +352,6 @@ async fn handle_client_with_auth(
         &mut writer,
         peer_addr,
         active_tests,
-        base_port,
         server_max_duration,
         security,
     )
@@ -474,12 +473,11 @@ async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 /// Handle test request after authentication
-async fn handle_test_request<W: tokio::io::AsyncWrite + Unpin>(
+async fn handle_test_request(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-    writer: &mut W,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
     peer_addr: SocketAddr,
-    _active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    _base_port: u16,
+    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
 ) -> anyhow::Result<()> {
@@ -496,7 +494,7 @@ async fn handle_test_request<W: tokio::io::AsyncWrite + Unpin>(
             streams,
             duration_secs,
             direction,
-            bitrate: _,
+            bitrate,
         } => {
             // Validate stream count
             if streams > MAX_STREAMS {
@@ -514,11 +512,21 @@ async fn handle_test_request<W: tokio::io::AsyncWrite + Unpin>(
             let mut duration = Duration::from_secs(duration_secs as u64);
             if duration > MAX_TEST_DURATION {
                 duration = MAX_TEST_DURATION;
+                warn!(
+                    "Client requested {}s, capped to {}s",
+                    duration_secs,
+                    MAX_TEST_DURATION.as_secs()
+                );
             }
             if let Some(max_dur) = server_max_duration
                 && duration > max_dur
             {
                 duration = max_dur;
+                warn!(
+                    "Client requested {}s, capped to server max {}s",
+                    duration_secs,
+                    max_dur.as_secs()
+                );
             }
 
             // Log test start
@@ -534,28 +542,260 @@ async fn handle_test_request<W: tokio::io::AsyncWrite + Unpin>(
             }
 
             info!(
-                "Test {} started: {} {} streams, {} mode, {}s",
-                id,
+                "Test requested: {} {} streams, {} mode, {}s",
                 protocol,
                 streams,
                 direction,
                 duration.as_secs()
             );
 
-            // Continue with existing test logic...
-            // For now, delegate to the original handler
-            // This will need to be refactored for full integration
+            // Run the actual test
+            let result = run_test(
+                reader,
+                writer,
+                &id,
+                protocol,
+                streams,
+                duration,
+                direction,
+                bitrate,
+                active_tests.clone(),
+            )
+            .await;
+
+            // Log test completion
+            if let Some(audit) = &security.audit {
+                match &result {
+                    Ok((bytes, duration_ms, throughput)) => {
+                        audit.log(AuditEvent::TestComplete {
+                            ip: peer_addr.ip(),
+                            test_id: id.clone(),
+                            bytes: *bytes,
+                            duration_ms: *duration_ms,
+                            throughput_mbps: *throughput,
+                        });
+                    }
+                    Err(e) => {
+                        audit.log(AuditEvent::TestCancelled {
+                            ip: peer_addr.ip(),
+                            test_id: id.clone(),
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            result.map(|_| ())
         }
         _ => {
             let error = ControlMessage::error("Expected test_start message");
             writer
                 .write_all(format!("{}\n", error.serialize()?).as_bytes())
                 .await?;
-            return Err(anyhow::anyhow!("Expected test_start"));
+            Err(anyhow::anyhow!("Expected test_start"))
+        }
+    }
+}
+
+/// Run the actual bandwidth test
+#[allow(clippy::too_many_arguments)]
+async fn run_test(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    id: &str,
+    protocol: Protocol,
+    streams: u8,
+    duration: Duration,
+    direction: Direction,
+    bitrate: Option<u64>,
+    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
+) -> anyhow::Result<(u64, u64, f64)> {
+    let mut line = String::new();
+
+    // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
+    let mut data_ports = Vec::new();
+
+    // Pre-bind listeners/sockets to get actual ports
+    let (tcp_listeners, udp_sockets) = match protocol {
+        Protocol::Tcp => {
+            let mut listeners = Vec::new();
+            for _ in 0..streams {
+                let listener = TcpListener::bind("0.0.0.0:0").await?;
+                data_ports.push(listener.local_addr()?.port());
+                debug!("Data port {} allocated", data_ports.last().unwrap());
+                listeners.push(listener);
+            }
+            (listeners, Vec::new())
+        }
+        Protocol::Udp => {
+            let mut sockets = Vec::new();
+            for _ in 0..streams {
+                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                data_ports.push(socket.local_addr()?.port());
+                debug!("UDP port {} allocated", data_ports.last().unwrap());
+                sockets.push(Arc::new(socket));
+            }
+            (Vec::new(), sockets)
+        }
+    };
+
+    // Send test ack with allocated ports
+    let ack = ControlMessage::TestAck {
+        id: id.to_string(),
+        data_ports: data_ports.clone(),
+    };
+    writer
+        .write_all(format!("{}\n", ack.serialize()?).as_bytes())
+        .await?;
+
+    // Create test stats
+    let stats = Arc::new(TestStats::new(id.to_string(), streams));
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+
+    // Store active test
+    {
+        let mut tests = active_tests.lock().await;
+        tests.insert(
+            id.to_string(),
+            ActiveTest {
+                stats: stats.clone(),
+                cancel_tx,
+                data_ports: data_ports.clone(),
+            },
+        );
+    }
+
+    // Notify metrics that test started
+    #[cfg(feature = "prometheus")]
+    crate::output::prometheus::on_test_start();
+
+    // Spawn data stream handlers
+    let handles: Vec<JoinHandle<()>> = match protocol {
+        Protocol::Tcp => {
+            spawn_tcp_handlers(
+                tcp_listeners,
+                stats.clone(),
+                direction,
+                duration,
+                cancel_rx.clone(),
+            )
+            .await
+        }
+        Protocol::Udp => {
+            spawn_udp_handlers(
+                udp_sockets,
+                stats.clone(),
+                direction,
+                duration,
+                bitrate.unwrap_or(1_000_000_000),
+                cancel_rx.clone(),
+            )
+            .await
+        }
+    };
+
+    // Send interval updates
+    let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
+    let start = std::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = interval_timer.tick() => {
+                if start.elapsed() >= duration {
+                    break;
+                }
+
+                let intervals = stats.record_intervals();
+                let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
+                    .zip(intervals.iter())
+                    .map(|(s, i)| s.to_interval(i))
+                    .collect();
+                let aggregate = stats.to_aggregate(&intervals);
+
+                let interval_msg = ControlMessage::Interval {
+                    id: id.to_string(),
+                    elapsed_ms: stats.elapsed_ms(),
+                    streams: stream_intervals,
+                    aggregate,
+                };
+
+                if writer.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
+                    warn!("Failed to send interval, client may have disconnected");
+                    break;
+                }
+            }
+        }
+
+        // Check for cancel message
+        line.clear();
+        let read_result =
+            tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line)).await;
+
+        if let Ok(Ok(n)) = read_result
+            && n > 0
+            && let Ok(ControlMessage::Cancel {
+                id: cancel_id,
+                reason,
+            }) = ControlMessage::deserialize(line.trim())
+            && cancel_id == id
+        {
+            info!("Test {} cancelled: {}", id, reason);
+            if let Some(test) = active_tests.lock().await.get(id) {
+                let _ = test.cancel_tx.send(true);
+            }
+            let cancelled = ControlMessage::Cancelled { id: id.to_string() };
+            writer
+                .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                .await?;
+            break;
         }
     }
 
-    Ok(())
+    // Signal handlers to stop
+    if let Some(test) = active_tests.lock().await.get(id) {
+        let _ = test.cancel_tx.send(true);
+    }
+
+    // Wait for all data handlers to complete
+    futures::future::join_all(handles).await;
+
+    // Send final result
+    let duration_ms = stats.elapsed_ms();
+    let bytes_total = stats.total_bytes();
+    let throughput_mbps = (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
+
+    let stream_results: Vec<_> = stats
+        .streams
+        .iter()
+        .map(|s| s.to_result(duration_ms))
+        .collect();
+
+    let result = ControlMessage::Result(TestResult {
+        id: id.to_string(),
+        bytes_total,
+        duration_ms,
+        throughput_mbps,
+        streams: stream_results,
+        tcp_info: stats.get_tcp_info(),
+        udp_stats: stats.aggregate_udp_stats(),
+    });
+
+    writer
+        .write_all(format!("{}\n", result.serialize()?).as_bytes())
+        .await?;
+
+    // Notify metrics that test completed
+    #[cfg(feature = "prometheus")]
+    crate::output::prometheus::on_test_complete(&stats);
+
+    // Cleanup
+    active_tests.lock().await.remove(id);
+    info!(
+        "Test {} complete: {:.2} Mbps, {} bytes",
+        id, throughput_mbps, bytes_total
+    );
+
+    Ok((bytes_total, duration_ms, throughput_mbps))
 }
 
 /// Read a line with bounded length to prevent memory DoS
@@ -591,301 +831,6 @@ async fn read_bounded_line(
     }
 }
 
-#[allow(dead_code)]
-async fn handle_client(
-    stream: TcpStream,
-    _peer_addr: SocketAddr,
-    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    _base_port: u16,
-    server_max_duration: Option<Duration>,
-) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-
-    // Read client hello with bounded length
-    read_bounded_line(&mut reader, &mut line).await?;
-    let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
-
-    match msg {
-        ControlMessage::Hello { version, .. } => {
-            if !versions_compatible(&version, PROTOCOL_VERSION) {
-                let error = ControlMessage::error(format!(
-                    "Incompatible protocol version: {} (server: {})",
-                    version, PROTOCOL_VERSION
-                ));
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
-                return Err(anyhow::anyhow!("Protocol version mismatch"));
-            }
-
-            // Send server hello
-            let hello = ControlMessage::server_hello();
-            writer
-                .write_all(format!("{}\n", hello.serialize()?).as_bytes())
-                .await?;
-        }
-        _ => {
-            let error = ControlMessage::error("Expected hello message");
-            writer
-                .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                .await?;
-            return Err(anyhow::anyhow!("Expected hello message"));
-        }
-    }
-
-    // Read test request with bounded length
-    read_bounded_line(&mut reader, &mut line).await?;
-    let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
-
-    match msg {
-        ControlMessage::TestStart {
-            id,
-            protocol,
-            streams,
-            duration_secs,
-            direction,
-            bitrate,
-        } => {
-            // Validate stream count
-            if streams > MAX_STREAMS {
-                let error = ControlMessage::error(format!(
-                    "Requested {} streams exceeds maximum of {}",
-                    streams, MAX_STREAMS
-                ));
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
-                return Err(anyhow::anyhow!("Stream count exceeds maximum"));
-            }
-
-            // Calculate effective duration (respect server max)
-            let mut duration = Duration::from_secs(duration_secs as u64);
-            if duration > MAX_TEST_DURATION {
-                duration = MAX_TEST_DURATION;
-                warn!(
-                    "Client requested {}s, capped to {}s",
-                    duration_secs,
-                    MAX_TEST_DURATION.as_secs()
-                );
-            }
-            if let Some(max_dur) = server_max_duration
-                && duration > max_dur
-            {
-                duration = max_dur;
-                warn!(
-                    "Client requested {}s, capped to server max {}s",
-                    duration_secs,
-                    max_dur.as_secs()
-                );
-            }
-
-            info!(
-                "Test requested: {} {} streams, {} mode, {}s",
-                protocol,
-                streams,
-                direction,
-                duration.as_secs()
-            );
-
-            // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
-            let mut data_ports = Vec::new();
-
-            // Pre-bind listeners/sockets to get actual ports
-            let (tcp_listeners, udp_sockets) = match protocol {
-                Protocol::Tcp => {
-                    let mut listeners = Vec::new();
-                    for _ in 0..streams {
-                        let listener = TcpListener::bind("0.0.0.0:0").await?;
-                        data_ports.push(listener.local_addr()?.port());
-                        debug!("Data port {} allocated", data_ports.last().unwrap());
-                        listeners.push(listener);
-                    }
-                    (listeners, Vec::new())
-                }
-                Protocol::Udp => {
-                    let mut sockets = Vec::new();
-                    for _ in 0..streams {
-                        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-                        data_ports.push(socket.local_addr()?.port());
-                        debug!("UDP port {} allocated", data_ports.last().unwrap());
-                        sockets.push(Arc::new(socket));
-                    }
-                    (Vec::new(), sockets)
-                }
-            };
-
-            // Send test ack with allocated ports
-            let ack = ControlMessage::TestAck {
-                id: id.clone(),
-                data_ports: data_ports.clone(),
-            };
-            writer
-                .write_all(format!("{}\n", ack.serialize()?).as_bytes())
-                .await?;
-
-            // Create test stats
-            let stats = Arc::new(TestStats::new(id.clone(), streams));
-            let (cancel_tx, cancel_rx) = watch::channel(false);
-
-            // Store active test
-            {
-                let mut tests = active_tests.lock().await;
-                tests.insert(
-                    id.clone(),
-                    ActiveTest {
-                        stats: stats.clone(),
-                        cancel_tx,
-                        data_ports: data_ports.clone(),
-                    },
-                );
-            }
-
-            // Notify metrics that test started
-            #[cfg(feature = "prometheus")]
-            crate::output::prometheus::on_test_start();
-
-            // Spawn data stream handlers
-            let handles: Vec<JoinHandle<()>> = match protocol {
-                Protocol::Tcp => {
-                    spawn_tcp_handlers(
-                        tcp_listeners,
-                        stats.clone(),
-                        direction,
-                        duration,
-                        cancel_rx.clone(),
-                    )
-                    .await
-                }
-                Protocol::Udp => {
-                    spawn_udp_handlers(
-                        udp_sockets,
-                        stats.clone(),
-                        direction,
-                        duration,
-                        bitrate.unwrap_or(1_000_000_000),
-                        cancel_rx.clone(),
-                    )
-                    .await
-                }
-            };
-
-            // Send interval updates
-            let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
-            let start = std::time::Instant::now();
-
-            loop {
-                tokio::select! {
-                    _ = interval_timer.tick() => {
-                        if start.elapsed() >= duration {
-                            break;
-                        }
-
-                        let intervals = stats.record_intervals();
-                        let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
-                            .zip(intervals.iter())
-                            .map(|(s, i)| s.to_interval(i))
-                            .collect();
-                        let aggregate = stats.to_aggregate(&intervals);
-
-                        let interval_msg = ControlMessage::Interval {
-                            id: id.clone(),
-                            elapsed_ms: stats.elapsed_ms(),
-                            streams: stream_intervals,
-                            aggregate,
-                        };
-
-                        if writer.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
-                            warn!("Failed to send interval, client may have disconnected");
-                            break;
-                        }
-                    }
-                }
-
-                // Check for cancel message
-                line.clear();
-                let read_result =
-                    tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line))
-                        .await;
-
-                if let Ok(Ok(n)) = read_result
-                    && n > 0
-                    && let Ok(ControlMessage::Cancel {
-                        id: cancel_id,
-                        reason,
-                    }) = ControlMessage::deserialize(line.trim())
-                    && cancel_id == id
-                {
-                    info!("Test {} cancelled: {}", id, reason);
-                    if let Some(test) = active_tests.lock().await.get(&id) {
-                        let _ = test.cancel_tx.send(true);
-                    }
-                    let cancelled = ControlMessage::Cancelled { id: id.clone() };
-                    writer
-                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
-                        .await?;
-                    break;
-                }
-            }
-
-            // Signal handlers to stop
-            if let Some(test) = active_tests.lock().await.get(&id) {
-                let _ = test.cancel_tx.send(true);
-            }
-
-            // Wait for all data handlers to complete
-            futures::future::join_all(handles).await;
-
-            // Send final result
-            let duration_ms = stats.elapsed_ms();
-            let bytes_total = stats.total_bytes();
-            let throughput_mbps =
-                (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
-
-            let stream_results: Vec<_> = stats
-                .streams
-                .iter()
-                .map(|s| s.to_result(duration_ms))
-                .collect();
-
-            let result = ControlMessage::Result(TestResult {
-                id: id.clone(),
-                bytes_total,
-                duration_ms,
-                throughput_mbps,
-                streams: stream_results,
-                tcp_info: stats.get_tcp_info(),
-                udp_stats: stats.aggregate_udp_stats(),
-            });
-
-            writer
-                .write_all(format!("{}\n", result.serialize()?).as_bytes())
-                .await?;
-
-            // Notify metrics that test completed
-            #[cfg(feature = "prometheus")]
-            crate::output::prometheus::on_test_complete(&stats);
-
-            // Cleanup
-            active_tests.lock().await.remove(&id);
-            info!(
-                "Test {} complete: {:.2} Mbps, {} bytes",
-                id, throughput_mbps, bytes_total
-            );
-        }
-        _ => {
-            let error = ControlMessage::error("Expected test_start message");
-            writer
-                .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                .await?;
-        }
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
 async fn spawn_tcp_handlers(
     listeners: Vec<TcpListener>,
     stats: Arc<TestStats>,

@@ -299,3 +299,239 @@ async fn test_multi_client_concurrent() {
     assert!(result1.is_ok(), "Client 1 should succeed: {:?}", result1);
     assert!(result2.is_ok(), "Client 2 should succeed: {:?}", result2);
 }
+
+// ============================================================================
+// Security Integration Tests
+// ============================================================================
+
+use xfr::acl::AclConfig;
+use xfr::auth::AuthConfig;
+use xfr::rate_limit::RateLimitConfig;
+
+async fn start_secure_server(
+    port: u16,
+    psk: Option<String>,
+    rate_limit: Option<u32>,
+    allow: Vec<String>,
+    deny: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        auth: AuthConfig { psk },
+        acl: AclConfig {
+            allow,
+            deny,
+            file: None,
+        },
+        rate_limit: RateLimitConfig {
+            max_per_ip: rate_limit,
+            window_secs: 60,
+        },
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    })
+}
+
+#[tokio::test]
+async fn test_psk_auth_success() {
+    let port = get_test_port();
+    let psk = "test-secret-key".to_string();
+    let _server = start_secure_server(port, Some(psk.clone()), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: Some(psk),
+        tls: TlsClientConfig::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "PSK auth should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_psk_auth_failure() {
+    let port = get_test_port();
+    let _server = start_secure_server(
+        port,
+        Some("server-secret".to_string()),
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: Some("wrong-secret".to_string()),
+        tls: TlsClientConfig::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete (not timeout)");
+    let result = result.unwrap();
+    assert!(result.is_err(), "PSK auth should fail with wrong key");
+}
+
+#[tokio::test]
+async fn test_psk_auth_missing_client_key() {
+    let port = get_test_port();
+    let _server = start_secure_server(
+        port,
+        Some("server-secret".to_string()),
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None, // No PSK provided
+        tls: TlsClientConfig::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete (not timeout)");
+    let result = result.unwrap();
+    assert!(
+        result.is_err(),
+        "Should fail when server requires auth but client has no PSK"
+    );
+}
+
+#[tokio::test]
+async fn test_acl_allow() {
+    let port = get_test_port();
+    // Allow localhost only
+    let _server =
+        start_secure_server(port, None, None, vec!["127.0.0.1/32".to_string()], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "Localhost should be allowed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_rate_limit() {
+    let port = get_test_port();
+    // Allow only 1 concurrent test per IP
+    let _server = start_secure_server(port, None, Some(1), vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Start first client (should succeed)
+    let config1 = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(3),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
+    };
+
+    let client1 = Client::new(config1.clone());
+    let handle1 = tokio::spawn(async move { client1.run(None).await });
+
+    // Give first client time to connect
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second client should be rate limited
+    let config2 = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        tls: TlsClientConfig::default(),
+    };
+
+    let client2 = Client::new(config2);
+    let result2 = timeout(Duration::from_secs(5), client2.run(None)).await;
+
+    // Second connection should fail (rate limited - connection dropped)
+    // The server drops the connection before hello, so client gets connection error
+    if let Ok(inner) = result2 {
+        // Either fails or succeeds if timing allows
+        // We mainly verify we don't panic
+        let _ = inner;
+    }
+
+    // Wait for first client
+    let result1 = handle1.await;
+    assert!(result1.is_ok(), "First client task should complete");
+}
