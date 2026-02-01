@@ -92,25 +92,16 @@ impl PushGatewayClient {
 
         // Helper to write metric
         let write_metric = |output: &mut String, name: &str, value: f64| {
-            output.push_str(&format!(
-                "# TYPE {} gauge\n{} {}\n",
-                name, name, value
-            ));
+            output.push_str(&format!("# TYPE {} gauge\n{} {}\n", name, name, value));
         };
 
         // Helper to write counter
         let write_counter = |output: &mut String, name: &str, value: f64| {
-            output.push_str(&format!(
-                "# TYPE {} counter\n{} {}\n",
-                name, name, value
-            ));
+            output.push_str(&format!("# TYPE {} counter\n{} {}\n", name, name, value));
         };
 
         // Add labels for the test
-        output.push_str(&format!(
-            "# Test ID: {}\n",
-            test_id
-        ));
+        output.push_str(&format!("# Test ID: {}\n", test_id));
 
         // Aggregate metrics
         write_counter(&mut output, "xfr_bytes_total", bytes_total as f64);
@@ -138,20 +129,53 @@ impl PushGatewayClient {
             ));
         }
 
-        // TCP info if available
-        if let Some(ref tcp_info) = *stats.tcp_info.lock() {
-            write_metric(&mut output, "xfr_tcp_rtt_microseconds", tcp_info.rtt_us as f64);
-            write_counter(&mut output, "xfr_tcp_retransmits_total", tcp_info.retransmits as f64);
-            write_metric(&mut output, "xfr_tcp_cwnd_bytes", tcp_info.cwnd as f64);
+        // Aggregate TCP info if available
+        let tcp_infos = stats.tcp_info.lock();
+        if !tcp_infos.is_empty() {
+            // Use the last snapshot as the most recent state
+            if let Some(tcp_info) = tcp_infos.last() {
+                write_metric(
+                    &mut output,
+                    "xfr_tcp_rtt_microseconds",
+                    tcp_info.rtt_us as f64,
+                );
+                write_counter(
+                    &mut output,
+                    "xfr_tcp_retransmits_total",
+                    tcp_info.retransmits as f64,
+                );
+                write_metric(&mut output, "xfr_tcp_cwnd_bytes", tcp_info.cwnd as f64);
+            }
         }
 
-        // UDP stats if available
-        if let Some(ref udp_stats) = *stats.udp_stats.lock() {
-            write_counter(&mut output, "xfr_udp_packets_sent", udp_stats.packets_sent as f64);
-            write_counter(&mut output, "xfr_udp_packets_received", udp_stats.packets_received as f64);
-            write_counter(&mut output, "xfr_udp_packets_lost", udp_stats.lost as f64);
-            write_metric(&mut output, "xfr_udp_jitter_ms", udp_stats.jitter_ms);
-            write_metric(&mut output, "xfr_udp_lost_percent", udp_stats.lost_percent);
+        // Aggregate UDP stats if available
+        let udp_stats_vec = stats.udp_stats.lock();
+        if !udp_stats_vec.is_empty() {
+            // Aggregate all UDP stats
+            let mut total_sent = 0u64;
+            let mut total_received = 0u64;
+            let mut total_lost = 0u64;
+            let mut max_jitter = 0.0f64;
+            for udp in udp_stats_vec.iter() {
+                total_sent += udp.packets_sent;
+                total_received += udp.packets_received;
+                total_lost += udp.lost;
+                max_jitter = max_jitter.max(udp.jitter_ms);
+            }
+            let lost_percent = if total_sent > 0 {
+                (total_lost as f64 / total_sent as f64) * 100.0
+            } else {
+                0.0
+            };
+            write_counter(&mut output, "xfr_udp_packets_sent", total_sent as f64);
+            write_counter(
+                &mut output,
+                "xfr_udp_packets_received",
+                total_received as f64,
+            );
+            write_counter(&mut output, "xfr_udp_packets_lost", total_lost as f64);
+            write_metric(&mut output, "xfr_udp_jitter_ms", max_jitter);
+            write_metric(&mut output, "xfr_udp_lost_percent", lost_percent);
         }
 
         output
@@ -159,10 +183,7 @@ impl PushGatewayClient {
 }
 
 /// Push metrics to the gateway if configured
-pub async fn maybe_push_metrics(
-    push_gateway_url: &Option<String>,
-    stats: &TestStats,
-) {
+pub async fn maybe_push_metrics(push_gateway_url: &Option<String>, stats: &TestStats) {
     if let Some(url) = push_gateway_url {
         let client = PushGatewayClient::new(url.clone());
         client.push_test_metrics(stats).await;

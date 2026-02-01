@@ -80,6 +80,7 @@ struct SecurityContext {
     rate_limiter: Option<Arc<RateLimiter>>,
     address_family: AddressFamily,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
+    push_gateway_url: Option<String>,
 }
 
 struct ActiveTest {
@@ -144,6 +145,7 @@ impl Server {
             rate_limiter: rate_limiter.clone(),
             address_family: self.config.address_family,
             tui_tx: self.config.tui_tx.clone(),
+            push_gateway_url: self.config.push_gateway_url.clone(),
         });
 
         // Start rate limiter cleanup task if enabled
@@ -475,6 +477,7 @@ async fn handle_quic_client(
                 active_tests,
                 peer_addr,
                 security.tui_tx.clone(),
+                &security.push_gateway_url,
             )
             .await?;
         }
@@ -683,6 +686,7 @@ async fn handle_test_request(
                 security.address_family,
                 peer_addr,
                 security.tui_tx.clone(),
+                &security.push_gateway_url,
             )
             .await;
 
@@ -711,6 +715,7 @@ async fn run_quic_test(
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
+    push_gateway_url: &Option<String>,
 ) -> anyhow::Result<()> {
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
@@ -922,6 +927,9 @@ async fn run_quic_test(
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_complete(&stats);
 
+    // Push metrics to gateway if configured
+    crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+
     if let Some(tx) = &tui_tx {
         let _ = tx.try_send(ServerEvent::TestCompleted {
             id: id.to_string(),
@@ -953,6 +961,7 @@ async fn run_test(
     address_family: AddressFamily,
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
+    push_gateway_url: &Option<String>,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -1167,6 +1176,9 @@ async fn run_test(
     // Notify metrics that test completed
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_complete(&stats);
+
+    // Push metrics to gateway if configured
+    crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
 
     // Notify TUI that test completed
     if let Some(tx) = &tui_tx {

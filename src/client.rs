@@ -529,7 +529,7 @@ impl Client {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         // Create QUIC endpoint and connect
-        let endpoint = quic::create_client_endpoint()?;
+        let endpoint = quic::create_client_endpoint(self.config.address_family)?;
         let addr = net::resolve_host(
             &self.config.host,
             self.config.port,

@@ -18,6 +18,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
+use crate::net::AddressFamily;
 use crate::stats::StreamStats;
 
 /// Generate a self-signed certificate for QUIC
@@ -60,7 +61,7 @@ pub fn create_server_endpoint(
 }
 
 /// Create a QUIC client endpoint
-pub fn create_client_endpoint() -> anyhow::Result<Endpoint> {
+pub fn create_client_endpoint(address_family: AddressFamily) -> anyhow::Result<Endpoint> {
     // Client accepts any certificate (xfr uses its own auth mechanism)
     let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -77,7 +78,13 @@ pub fn create_client_endpoint() -> anyhow::Result<Endpoint> {
     let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
     client_config.transport_config(Arc::new(transport));
 
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    // Bind to appropriate address based on address family
+    let bind_addr: SocketAddr = match address_family {
+        AddressFamily::V6Only => "[::]:0".parse()?,
+        _ => "0.0.0.0:0".parse()?, // IPv4 or dual-stack default to IPv4 bind
+    };
+
+    let mut endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)

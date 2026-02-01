@@ -1,6 +1,7 @@
 pub mod csv;
 pub mod json;
 pub mod plain;
+pub mod push_gateway;
 
 #[cfg(feature = "prometheus")]
 pub mod prometheus;
