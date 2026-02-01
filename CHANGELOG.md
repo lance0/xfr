@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Stats now shared correctly between handlers and TestStats (real-time intervals)
+- Bidirectional mode properly splits sockets for concurrent send/receive
+- UDP receive uses recv_from for unconnected sockets
+- Server signals cancel when test duration elapses
+- Client control loop has 30s timeout to prevent hangs
+- Dynamic port allocation prevents multi-client port collisions
+- Hostname parsing provides proper error messages
+- Interval history bounded to 60 entries to prevent memory growth
+- Client cancel() method now functional
+- Protocol version checking uses proper comparison function
+
+### Added
+- mDNS service registration on server start for discovery
+- Integration tests for UDP, download, bidir, and multi-client modes
+- send_data_half/receive_data_half for split socket operations
+
+### Changed
+- Replaced emoji indicators with ASCII [OK]/[WARN]/[FAIL] for terminal compatibility
+
 ## [0.2.0] - 2026-01-31
 
 ### Added
