@@ -11,6 +11,50 @@ use super::theme::Theme;
 use super::widgets::{ProgressBar, Sparkline, StreamBar};
 use crate::stats::{bytes_to_human, mbps_to_human};
 
+/// Get color for retransmit count: green (0), yellow (1-100), red (>100)
+fn retransmit_color(retransmits: u64, theme: &Theme) -> Color {
+    if retransmits == 0 {
+        theme.success
+    } else if retransmits <= 100 {
+        theme.warning
+    } else {
+        theme.error
+    }
+}
+
+/// Get color for packet loss percentage: green (<0.1%), yellow (0.1-1%), red (>1%)
+fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
+    if loss_percent < 0.1 {
+        theme.success
+    } else if loss_percent <= 1.0 {
+        theme.warning
+    } else {
+        theme.error
+    }
+}
+
+/// Get color for jitter: green (<1ms), yellow (1-10ms), red (>10ms)
+fn jitter_color(jitter_ms: f64, theme: &Theme) -> Color {
+    if jitter_ms < 1.0 {
+        theme.success
+    } else if jitter_ms <= 10.0 {
+        theme.warning
+    } else {
+        theme.error
+    }
+}
+
+/// Get color for RTT: green (<10ms), yellow (10-100ms), red (>100ms)
+fn rtt_color(rtt_ms: f64, theme: &Theme) -> Color {
+    if rtt_ms < 10.0 {
+        theme.success
+    } else if rtt_ms <= 100.0 {
+        theme.warning
+    } else {
+        theme.error
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let size = frame.area();
     let theme = &app.theme;
@@ -107,8 +151,11 @@ fn draw_main(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .style(Style::default().fg(theme.error));
             frame.render_widget(msg, inner);
         }
-        AppState::Running | AppState::Paused | AppState::Completed => {
+        AppState::Running | AppState::Paused => {
             draw_test_content(frame, app, theme, inner);
+        }
+        AppState::Completed => {
+            draw_summary(frame, app, theme, inner);
         }
     }
 }
@@ -200,27 +247,162 @@ fn draw_test_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         frame.render_widget(bar, stream_area);
     }
 
-    // Stats - show different info for TCP vs UDP
-    let stats = if app.protocol == crate::protocol::Protocol::Udp {
-        format!(
-            "Transfer: {}    Jitter: {:.2}ms    Loss: {:.1}% ({}/{} pkts)",
-            bytes_to_human(app.total_bytes),
-            app.udp_jitter_ms,
-            app.udp_lost_percent,
-            app.udp_packets_lost,
-            app.udp_packets_sent,
-        )
+    // Stats - show different info for TCP vs UDP with color-coded metrics
+    let stats_line = if app.protocol == crate::protocol::Protocol::Udp {
+        let jitter_col = jitter_color(app.udp_jitter_ms, theme);
+        let loss_col = loss_color(app.udp_lost_percent, theme);
+        Line::from(vec![
+            Span::styled("Transfer: ", Style::default().fg(theme.text_dim)),
+            Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            Span::styled("    Jitter: ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("{:.2}ms", app.udp_jitter_ms), Style::default().fg(jitter_col)),
+            Span::styled("    Loss: ", Style::default().fg(theme.text_dim)),
+            Span::styled(
+                format!("{:.1}% ({}/{})", app.udp_lost_percent, app.udp_packets_lost, app.udp_packets_sent),
+                Style::default().fg(loss_col),
+            ),
+        ])
     } else {
-        format!(
-            "Transfer: {}    Retransmits: {}    RTT: {:.2}ms    Cwnd: {}KB",
-            bytes_to_human(app.total_bytes),
-            app.total_retransmits,
-            app.rtt_us as f64 / 1000.0,
-            app.cwnd / 1024
-        )
+        let rtt_ms = app.rtt_us as f64 / 1000.0;
+        let retransmit_col = retransmit_color(app.total_retransmits, theme);
+        let rtt_col = rtt_color(rtt_ms, theme);
+        Line::from(vec![
+            Span::styled("Transfer: ", Style::default().fg(theme.text_dim)),
+            Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            Span::styled("    Retransmits: ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("{}", app.total_retransmits), Style::default().fg(retransmit_col)),
+            Span::styled("    RTT: ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("{:.2}ms", rtt_ms), Style::default().fg(rtt_col)),
+            Span::styled("    Cwnd: ", Style::default().fg(theme.text_dim)),
+            Span::styled(format!("{}KB", app.cwnd / 1024), Style::default().fg(theme.text)),
+        ])
     };
-    let stats_widget = Paragraph::new(stats).style(Style::default().fg(theme.text_dim));
+    let stats_widget = Paragraph::new(stats_line);
     frame.render_widget(stats_widget, chunks[5]);
+}
+
+fn draw_summary(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // Throughput sparkline + value
+            Constraint::Length(1), // Spacer
+            Constraint::Min(8),    // Summary box
+            Constraint::Length(1), // Spacer
+        ])
+        .margin(1)
+        .split(area);
+
+    // Throughput label and sparkline
+    let throughput_label = Paragraph::new("Throughput")
+        .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
+    frame.render_widget(throughput_label, chunks[0]);
+
+    if !app.throughput_history.is_empty() {
+        let sparkline_area = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y + 1,
+            width: chunks[0].width.saturating_sub(20),
+            height: 2,
+        };
+        let data: Vec<f64> = app.throughput_history.iter().cloned().collect();
+        let sparkline = Sparkline::new(&data)
+            .max(app.max_throughput().max(100.0))
+            .style(Style::default().fg(theme.graph_primary));
+        frame.render_widget(sparkline, sparkline_area);
+
+        // Average throughput display
+        let avg_throughput = if !app.throughput_history.is_empty() {
+            app.throughput_history.iter().sum::<f64>() / app.throughput_history.len() as f64
+        } else {
+            0.0
+        };
+        let value_area = Rect {
+            x: sparkline_area.x + sparkline_area.width + 1,
+            y: sparkline_area.y,
+            width: 18,
+            height: 2,
+        };
+        let value = Paragraph::new(format!("{}\naverage", mbps_to_human(avg_throughput)))
+            .style(Style::default().fg(theme.graph_primary).add_modifier(Modifier::BOLD));
+        frame.render_widget(value, value_area);
+    }
+
+    // Summary box
+    let summary_area = chunks[2];
+    let summary_block = Block::default()
+        .title(" Summary ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.border));
+    let summary_inner = summary_block.inner(summary_area);
+    frame.render_widget(summary_block, summary_area);
+
+    // Calculate average throughput for display
+    let avg_throughput = if !app.throughput_history.is_empty() {
+        app.throughput_history.iter().sum::<f64>() / app.throughput_history.len() as f64
+    } else {
+        app.current_throughput_mbps
+    };
+
+    // Build summary lines based on protocol
+    let summary_lines = if app.protocol == crate::protocol::Protocol::Udp {
+        let jitter_col = jitter_color(app.udp_jitter_ms, theme);
+        let loss_col = loss_color(app.udp_lost_percent, theme);
+        vec![
+            Line::from(vec![
+                Span::styled("  Transfer:     ", Style::default().fg(theme.text_dim)),
+                Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Throughput:   ", Style::default().fg(theme.text_dim)),
+                Span::styled(mbps_to_human(avg_throughput), Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Duration:     ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{:.2}s", app.duration.as_secs_f64()), Style::default().fg(theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Jitter:       ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{:.2}ms", app.udp_jitter_ms), Style::default().fg(jitter_col)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Packet Loss:  ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    format!("{:.2}% ({}/{})", app.udp_lost_percent, app.udp_packets_lost, app.udp_packets_sent),
+                    Style::default().fg(loss_col),
+                ),
+            ]),
+        ]
+    } else {
+        let rtt_ms = app.rtt_us as f64 / 1000.0;
+        let retransmit_col = retransmit_color(app.total_retransmits, theme);
+        let rtt_col = rtt_color(rtt_ms, theme);
+        vec![
+            Line::from(vec![
+                Span::styled("  Transfer:     ", Style::default().fg(theme.text_dim)),
+                Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Throughput:   ", Style::default().fg(theme.text_dim)),
+                Span::styled(mbps_to_human(avg_throughput), Style::default().fg(theme.success).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Duration:     ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{:.2}s", app.duration.as_secs_f64()), Style::default().fg(theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("  Retransmits:  ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{}", app.total_retransmits), Style::default().fg(retransmit_col)),
+            ]),
+            Line::from(vec![
+                Span::styled("  RTT:          ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{:.2}ms", rtt_ms), Style::default().fg(rtt_col)),
+            ]),
+        ]
+    };
+
+    let summary_widget = Paragraph::new(summary_lines);
+    frame.render_widget(summary_widget, summary_inner);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
