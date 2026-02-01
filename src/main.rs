@@ -43,6 +43,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Generate shell completions
+    #[arg(long, value_name = "SHELL", value_parser = ["bash", "zsh", "fish", "powershell", "elvish"])]
+    completions: Option<String>,
+
     /// Target host for client mode
     #[arg(value_name = "HOST")]
     host: Option<String>,
@@ -197,15 +201,40 @@ fn parse_size(s: &str) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+fn generate_completions(shell: &str) {
+    use clap::CommandFactory;
+    use clap_complete::{Shell, generate};
+
+    let mut cmd = Cli::command();
+    let shell = match shell {
+        "bash" => Shell::Bash,
+        "zsh" => Shell::Zsh,
+        "fish" => Shell::Fish,
+        "powershell" => Shell::PowerShell,
+        "elvish" => Shell::Elvish,
+        _ => {
+            eprintln!("Unknown shell: {}", shell);
+            std::process::exit(1);
+        }
+    };
+    generate(shell, &mut cmd, "xfr", &mut std::io::stdout());
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Handle shell completions early (before logging init)
+    if let Some(ref shell) = cli.completions {
+        generate_completions(shell);
+        return Ok(());
+    }
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("xfr=info".parse()?))
         .with_target(false)
         .init();
-
-    let cli = Cli::parse();
 
     // Load config file (falls back to defaults if not found)
     let file_config = Config::load().unwrap_or_default();

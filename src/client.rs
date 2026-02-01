@@ -284,11 +284,11 @@ impl Client {
             let direction = self.config.direction;
             let duration = self.config.duration;
 
-            let config = TcpConfig {
-                nodelay: self.config.tcp_nodelay,
-                window_size: self.config.window_size,
-                ..Default::default()
-            };
+            let config = TcpConfig::with_auto_detect(
+                self.config.tcp_nodelay,
+                self.config.window_size,
+                self.config.bitrate,
+            );
 
             tokio::spawn(async move {
                 match TcpStream::connect(addr).await {

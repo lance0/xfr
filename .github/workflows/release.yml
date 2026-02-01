@@ -13,7 +13,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,11 +51,11 @@ jobs:
             cross: false
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-large
             cross: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -96,22 +96,22 @@ jobs:
           cd -
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: xfr-${{ matrix.target }}
           path: xfr-${{ matrix.target }}.tar.gz
 
   release:
     name: Create Release
-    needs: [audit, build]
+    needs: [audit, build, completions]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -132,18 +132,46 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/SHA256SUMS
+            artifacts/completions/completions.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  completions:
+    name: Generate Shell Completions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Generate completions
+        run: |
+          mkdir -p completions
+          ./target/release/xfr --completions bash > completions/xfr.bash
+          ./target/release/xfr --completions zsh > completions/_xfr
+          ./target/release/xfr --completions fish > completions/xfr.fish
+          ./target/release/xfr --completions powershell > completions/_xfr.ps1
+          tar czvf completions.tar.gz completions/
+
+      - name: Upload completions
+        uses: actions/upload-artifact@v6
+        with:
+          name: completions
+          path: completions.tar.gz
+
   publish:
     name: Publish to crates.io
     needs: [release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

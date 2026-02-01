@@ -153,6 +153,11 @@ impl Default for PacketTracker {
     }
 }
 
+/// Burst size threshold: batch packets when PPS exceeds this
+const HIGH_PPS_THRESHOLD: f64 = 100_000.0;
+/// Number of packets to send per burst in high-PPS mode
+const BURST_SIZE: u64 = 100;
+
 /// Send UDP data at a paced rate
 pub async fn send_udp_paced(
     socket: Arc<UdpSocket>,
@@ -163,16 +168,26 @@ pub async fn send_udp_paced(
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
     let bits_per_packet = (packet_size * 8) as u64;
-    let packets_per_sec = target_bitrate / bits_per_packet;
-    let pacing_interval = if packets_per_sec > 0 {
-        Duration::from_secs_f64(1.0 / packets_per_sec as f64)
+
+    // Use floating-point for precision in interval calculation
+    let packets_per_sec_f64 = target_bitrate as f64 / bits_per_packet as f64;
+
+    // For high PPS, batch multiple packets per interval to reduce timer overhead
+    let (pacing_interval, packets_per_tick) = if packets_per_sec_f64 > HIGH_PPS_THRESHOLD {
+        // High PPS: batch BURST_SIZE packets per interval
+        let interval = Duration::from_secs_f64(BURST_SIZE as f64 / packets_per_sec_f64);
+        (interval, BURST_SIZE)
+    } else if packets_per_sec_f64 > 0.0 {
+        // Normal PPS: one packet per interval
+        let interval = Duration::from_secs_f64(1.0 / packets_per_sec_f64);
+        (interval, 1)
     } else {
-        Duration::from_millis(1)
+        (Duration::from_millis(1), 1)
     };
 
     debug!(
-        "UDP pacing: {} packets/sec, interval {:?}",
-        packets_per_sec, pacing_interval
+        "UDP pacing: {:.0} packets/sec, interval {:?}, {} packets/tick",
+        packets_per_sec_f64, pacing_interval, packets_per_tick
     );
 
     let mut sequence: u64 = 0;
@@ -194,22 +209,29 @@ pub async fn send_udp_paced(
             break;
         }
 
-        // Build packet with relative timestamp
-        let now_us = start.elapsed().as_micros() as u64;
-        let header = UdpPacketHeader {
-            sequence,
-            timestamp_us: now_us,
-        };
-        header.encode(&mut packet);
-
-        match socket.send(&packet).await {
-            Ok(n) => {
-                stats.add_bytes_sent(n as u64);
-                sequence += 1;
+        // Send packets_per_tick packets in this burst
+        for _ in 0..packets_per_tick {
+            if Instant::now() >= deadline {
+                break;
             }
-            Err(e) => {
-                warn!("UDP send error: {}", e);
-                // Continue sending - UDP is best-effort
+
+            // Build packet with relative timestamp
+            let now_us = start.elapsed().as_micros() as u64;
+            let header = UdpPacketHeader {
+                sequence,
+                timestamp_us: now_us,
+            };
+            header.encode(&mut packet);
+
+            match socket.send(&packet).await {
+                Ok(n) => {
+                    stats.add_bytes_sent(n as u64);
+                    sequence += 1;
+                }
+                Err(e) => {
+                    warn!("UDP send error: {}", e);
+                    // Continue sending - UDP is best-effort
+                }
             }
         }
     }

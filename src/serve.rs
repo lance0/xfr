@@ -417,8 +417,8 @@ async fn handle_client(
                 duration_ms,
                 throughput_mbps,
                 streams: stream_results,
-                tcp_info: stats.tcp_info.lock().clone(),
-                udp_stats: stats.udp_stats.lock().clone(),
+                tcp_info: stats.get_tcp_info(),
+                udp_stats: stats.aggregate_udp_stats(),
             });
 
             writer
@@ -478,11 +478,12 @@ async fn spawn_tcp_handlers(
                 }
             };
 
-            let config = TcpConfig::default();
+            // Use high-speed config for server - we want maximum throughput
+            let config = TcpConfig::high_speed();
 
             // Capture TCP_INFO before transfer starts
             if let Some(info) = tcp::get_stream_tcp_info(&stream) {
-                test_stats.update_tcp_info(info);
+                test_stats.add_tcp_info(info);
             }
 
             match direction {
@@ -560,7 +561,7 @@ async fn spawn_udp_handlers(
                     if let Ok((udp_stats, _bytes)) =
                         udp::receive_udp(socket, stream_stats, cancel).await
                     {
-                        test_stats.update_udp_stats(udp_stats);
+                        test_stats.add_udp_stats(udp_stats);
                     }
                 }
                 Direction::Download => {
@@ -593,7 +594,7 @@ async fn spawn_udp_handlers(
                         if let Ok((udp_stats, _bytes)) =
                             udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
                         {
-                            test_stats_copy.update_udp_stats(udp_stats);
+                            test_stats_copy.add_udp_stats(udp_stats);
                         }
                     });
 

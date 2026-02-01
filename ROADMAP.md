@@ -46,18 +46,19 @@
 **Why this matters:** Users migrating from iperf3 expect familiar output options. JSON streaming enables real-time monitoring integrations.
 
 ### Output Enhancements
-- [ ] **CSV output format** (`--csv`) - frequently requested iperf2 feature never added to iperf3
-- [ ] **JSON streaming output** (`--json-stream`) - iperf3 3.18 added this, one JSON object per line
-- [ ] **Quiet mode** (`-q`) - suppress interval output, show only summary
+- [x] **CSV output format** (`--csv`) - frequently requested iperf2 feature never added to iperf3
+- [x] **JSON streaming output** (`--json-stream`) - iperf3 3.18 added this, one JSON object per line
+- [x] **Quiet mode** (`-q`) - suppress interval output, show only summary
 
 ### Usability
-- [ ] **Server max duration** (`--server-max-duration`) - limit test length server-side
-- [ ] **Omit interval** (`--omit N`) - discard first N seconds (TCP ramp-up)
-- [ ] **Report interval** (`-i`) - configurable reporting interval (default 1s)
+- [x] **Server max duration** (`--max-duration`) - limit test length server-side
+- [x] **Omit interval** (`--omit N`) - discard first N seconds (TCP ramp-up)
+- [x] **Report interval** (`-i`) - configurable reporting interval (default 1s)
+- [x] **Shell completions** (`--completions SHELL`) - bash, zsh, fish, powershell, elvish
 - [ ] **Timestamp format options** - ISO 8601, Unix epoch, relative
 
 ### Platform
-- [ ] **Environment variable overrides** - `XFR_PORT`, `XFR_DURATION`, etc.
+- [x] **Environment variable overrides** - `XFR_PORT`, `XFR_DURATION`, etc.
 - [ ] **Push gateway support** - push Prometheus metrics to gateway
 
 ---

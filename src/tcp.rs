@@ -33,12 +33,45 @@ impl Default for TcpConfig {
     }
 }
 
+/// Threshold for auto-selecting high-speed configuration (1 MB)
+const HIGH_SPEED_WINDOW_THRESHOLD: usize = 1_000_000;
+
 impl TcpConfig {
     pub fn high_speed() -> Self {
         Self {
             buffer_size: HIGH_SPEED_BUFFER,
             nodelay: true,
             window_size: Some(HIGH_SPEED_BUFFER),
+        }
+    }
+
+    /// Create a config with auto-detection for high-speed mode.
+    /// Selects high_speed() when window_size > 1MB or when there's no bitrate limit.
+    pub fn with_auto_detect(
+        nodelay: bool,
+        window_size: Option<usize>,
+        bitrate_limit: Option<u64>,
+    ) -> Self {
+        // Auto-select high-speed mode when:
+        // 1. Window size is explicitly set to > 1MB, or
+        // 2. No bitrate limit is set (unlimited speed)
+        let use_high_speed = window_size
+            .map(|w| w > HIGH_SPEED_WINDOW_THRESHOLD)
+            .unwrap_or(false)
+            || bitrate_limit.is_none();
+
+        if use_high_speed && window_size.is_none() {
+            // Use full high-speed config with large buffers
+            let mut config = Self::high_speed();
+            config.nodelay = nodelay;
+            config
+        } else {
+            // Use user-specified or default settings
+            Self {
+                buffer_size: window_size.unwrap_or(DEFAULT_BUFFER_SIZE),
+                nodelay,
+                window_size,
+            }
         }
     }
 }

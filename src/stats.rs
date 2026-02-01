@@ -140,8 +140,10 @@ pub struct TestStats {
     pub test_id: String,
     pub streams: Vec<Arc<StreamStats>>,
     pub start_time: Instant,
-    pub tcp_info: Mutex<Option<TcpInfoSnapshot>>,
-    pub udp_stats: Mutex<Option<UdpStats>>,
+    /// Per-stream TCP info snapshots (indexed by stream_id)
+    pub tcp_info: Mutex<Vec<TcpInfoSnapshot>>,
+    /// Per-stream UDP stats (indexed by stream_id)
+    pub udp_stats: Mutex<Vec<UdpStats>>,
 }
 
 impl TestStats {
@@ -153,13 +155,48 @@ impl TestStats {
             test_id,
             streams,
             start_time: Instant::now(),
-            tcp_info: Mutex::new(None),
-            udp_stats: Mutex::new(None),
+            tcp_info: Mutex::new(Vec::new()),
+            udp_stats: Mutex::new(Vec::new()),
         }
     }
 
-    pub fn update_udp_stats(&self, stats: UdpStats) {
-        *self.udp_stats.lock() = Some(stats);
+    pub fn add_udp_stats(&self, stats: UdpStats) {
+        self.udp_stats.lock().push(stats);
+    }
+
+    /// Aggregate all UDP stats across streams
+    pub fn aggregate_udp_stats(&self) -> Option<UdpStats> {
+        let stats = self.udp_stats.lock();
+        if stats.is_empty() {
+            return None;
+        }
+
+        let mut total = UdpStats {
+            packets_sent: 0,
+            packets_received: 0,
+            lost: 0,
+            lost_percent: 0.0,
+            jitter_ms: 0.0,
+            out_of_order: 0,
+        };
+
+        for s in stats.iter() {
+            total.packets_sent += s.packets_sent;
+            total.packets_received += s.packets_received;
+            total.lost += s.lost;
+            total.out_of_order += s.out_of_order;
+            total.jitter_ms += s.jitter_ms;
+        }
+
+        // Average jitter across streams
+        total.jitter_ms /= stats.len() as f64;
+
+        // Recalculate loss percent from totals
+        if total.packets_sent > 0 {
+            total.lost_percent = (total.lost as f64 / total.packets_sent as f64) * 100.0;
+        }
+
+        Some(total)
     }
 
     pub fn elapsed_ms(&self) -> u64 {
@@ -188,8 +225,14 @@ impl TestStats {
         self.streams.iter().map(|s| s.total_bytes()).sum()
     }
 
-    pub fn update_tcp_info(&self, info: TcpInfoSnapshot) {
-        *self.tcp_info.lock() = Some(info);
+    pub fn add_tcp_info(&self, info: TcpInfoSnapshot) {
+        self.tcp_info.lock().push(info);
+    }
+
+    /// Get a single representative TCP info (first stream's info, or aggregated)
+    pub fn get_tcp_info(&self) -> Option<TcpInfoSnapshot> {
+        let infos = self.tcp_info.lock();
+        infos.first().cloned()
     }
 }
 
