@@ -211,18 +211,13 @@ impl TimestampFormat {
                 format!("{:.3}", elapsed.as_secs_f64())
             }
             TimestampFormat::Iso8601 => {
-                let elapsed = now.duration_since(test_start);
                 let now_system = std::time::SystemTime::now();
-                // Adjust back by elapsed to get test start time, then add elapsed
-                let timestamp = now_system - elapsed;
-                let datetime = chrono::DateTime::<chrono::Utc>::from(timestamp);
+                let datetime = chrono::DateTime::<chrono::Utc>::from(now_system);
                 datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
             }
             TimestampFormat::Unix => {
-                let elapsed = now.duration_since(test_start);
                 let now_system = std::time::SystemTime::now();
-                let timestamp = now_system - elapsed;
-                let duration_since_epoch = timestamp
+                let duration_since_epoch = now_system
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
                 format!("{:.3}", duration_since_epoch.as_secs_f64())

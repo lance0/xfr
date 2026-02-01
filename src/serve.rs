@@ -319,7 +319,7 @@ async fn handle_quic_client(
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
 ) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
 
     let connection = incoming.await?;
     debug!("QUIC connection established with {}", peer_addr);
@@ -329,8 +329,8 @@ async fn handle_quic_client(
     let mut ctrl_reader = BufReader::new(ctrl_recv);
     let mut line = String::new();
 
-    // Read client hello
-    ctrl_reader.read_line(&mut line).await?;
+    // Read client hello (bounded to prevent DoS)
+    read_bounded_line(&mut ctrl_reader, &mut line).await?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     let auth_nonce = match msg {
@@ -373,8 +373,7 @@ async fn handle_quic_client(
 
     // Handle authentication if required
     if let Some(nonce) = auth_nonce {
-        line.clear();
-        ctrl_reader.read_line(&mut line).await?;
+        read_bounded_line(&mut ctrl_reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -407,8 +406,7 @@ async fn handle_quic_client(
     }
 
     // Read test start
-    line.clear();
-    ctrl_reader.read_line(&mut line).await?;
+    read_bounded_line(&mut ctrl_reader, &mut line).await?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -714,8 +712,6 @@ async fn run_quic_test(
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
 ) -> anyhow::Result<()> {
-    use tokio::io::AsyncBufReadExt;
-
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -857,10 +853,12 @@ async fn run_quic_test(
             }
         }
 
-        // Check for cancel message (non-blocking)
-        line.clear();
-        let read_result =
-            tokio::time::timeout(Duration::from_millis(10), ctrl_reader.read_line(&mut line)).await;
+        // Check for cancel message (non-blocking, bounded read)
+        let read_result = tokio::time::timeout(
+            Duration::from_millis(10),
+            read_bounded_line(&mut ctrl_reader, &mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result
             && n > 0
@@ -1106,10 +1104,12 @@ async fn run_test(
             }
         }
 
-        // Check for cancel message
-        line.clear();
-        let read_result =
-            tokio::time::timeout(Duration::from_millis(10), reader.read_line(&mut line)).await;
+        // Check for cancel message (bounded read)
+        let read_result = tokio::time::timeout(
+            Duration::from_millis(10),
+            read_bounded_line(reader, &mut line),
+        )
+        .await;
 
         if let Ok(Ok(n)) = read_result
             && n > 0
@@ -1187,8 +1187,8 @@ async fn run_test(
 }
 
 /// Read a line with bounded length to prevent memory DoS
-async fn read_bounded_line(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
     buf: &mut String,
 ) -> anyhow::Result<usize> {
     buf.clear();
