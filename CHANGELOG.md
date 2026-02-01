@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Timestamp format options (`--timestamp-format`) - relative, iso8601, or unix epoch
+- Prometheus Push Gateway support (`--push-gateway`) for pushing metrics at test completion
+- File logging with daily rotation (`--log-file`, `--log-level`)
+- Integration tests for TCP, UDP, download, bidir, and multi-client modes
+
 ### Fixed
 - Stats now shared correctly between handlers and TestStats (real-time intervals)
 - Bidirectional mode properly splits sockets for concurrent send/receive

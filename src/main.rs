@@ -31,10 +31,72 @@ struct OutputOptions {
     quiet: bool,
     omit_secs: u64,
     interval_secs: f64,
+    timestamp_format: TimestampFormat,
 }
-use xfr::protocol::{DEFAULT_PORT, Direction, Protocol};
+use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
 use xfr::tui::{App, draw};
+
+/// Initialize logging with optional file output
+fn init_logging(log_file: Option<&str>, log_level: Option<&str>) -> anyhow::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let level = log_level.unwrap_or("info");
+    let env_filter = EnvFilter::from_default_env().add_directive(format!("xfr={}", level).parse()?);
+
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .without_time();
+
+    if let Some(file_path) = log_file {
+        // Expand tilde to home directory
+        let expanded_path = if file_path.starts_with("~/") {
+            dirs::home_dir()
+                .map(|home| home.join(&file_path[2..]))
+                .unwrap_or_else(|| PathBuf::from(file_path))
+        } else {
+            PathBuf::from(file_path)
+        };
+
+        // Ensure parent directory exists
+        if let Some(parent) = expanded_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Create non-blocking file appender with daily rotation
+        let file_appender = tracing_appender::rolling::daily(
+            expanded_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            expanded_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
+        );
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        // Keep guard alive for the duration of the program
+        std::mem::forget(_guard);
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_writer(non_blocking)
+            .with_ansi(false);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(console_layer)
+            .with(file_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(console_layer)
+            .init();
+    }
+
+    Ok(())
+}
 
 #[derive(Parser)]
 #[command(name = "xfr")]
@@ -118,6 +180,18 @@ struct Cli {
     /// TCP window size (e.g., 512K, 1M)
     #[arg(long, value_parser = parse_size)]
     window: Option<usize>,
+
+    /// Timestamp format for interval output (relative, iso8601, unix)
+    #[arg(long, value_parser = parse_timestamp_format, env = "XFR_TIMESTAMP_FORMAT")]
+    timestamp_format: Option<TimestampFormat>,
+
+    /// Log file path (e.g., "~/.config/xfr/xfr.log")
+    #[arg(long, env = "XFR_LOG_FILE")]
+    log_file: Option<String>,
+
+    /// Log level (error, warn, info, debug, trace)
+    #[arg(long, env = "XFR_LOG_LEVEL")]
+    log_level: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -140,6 +214,18 @@ enum Commands {
         #[cfg(feature = "prometheus")]
         #[arg(long)]
         prometheus: Option<u16>,
+
+        /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
+        #[arg(long, env = "XFR_PUSH_GATEWAY")]
+        push_gateway: Option<String>,
+
+        /// Log file path (e.g., "~/.config/xfr/xfr.log")
+        #[arg(long, env = "XFR_LOG_FILE")]
+        log_file: Option<String>,
+
+        /// Log level (error, warn, info, debug, trace)
+        #[arg(long, env = "XFR_LOG_LEVEL")]
+        log_level: Option<String>,
     },
 
     /// Compare two test results
@@ -201,6 +287,10 @@ fn parse_size(s: &str) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+fn parse_timestamp_format(s: &str) -> Result<TimestampFormat, String> {
+    s.parse::<TimestampFormat>()
+}
+
 fn generate_completions(shell: &str) {
     use clap::CommandFactory;
     use clap_complete::{Shell, generate};
@@ -230,14 +320,19 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("xfr=info".parse()?))
-        .with_target(false)
-        .init();
-
     // Load config file (falls back to defaults if not found)
     let file_config = Config::load().unwrap_or_default();
+
+    // Initialize logging (with file support)
+    let log_file = cli
+        .log_file
+        .as_ref()
+        .or(file_config.client.log_file.as_ref());
+    let log_level = cli
+        .log_level
+        .as_ref()
+        .or(file_config.client.log_level.as_ref());
+    init_logging(log_file.map(|s| s.as_str()), log_level.map(|s| s.as_str()))?;
 
     match cli.command {
         Some(Commands::Serve {
@@ -246,7 +341,24 @@ async fn main() -> Result<()> {
             max_duration,
             #[cfg(feature = "prometheus")]
             prometheus,
+            push_gateway,
+            log_file: serve_log_file,
+            log_level: serve_log_level,
         }) => {
+            // Re-initialize logging for server mode with server-specific settings if provided
+            let server_log_file = serve_log_file
+                .as_ref()
+                .or(file_config.server.log_file.as_ref())
+                .or(log_file);
+            let server_log_level = serve_log_level
+                .as_ref()
+                .or(file_config.server.log_level.as_ref())
+                .or(log_level);
+            init_logging(
+                server_log_file.map(|s| s.as_str()),
+                server_log_level.map(|s| s.as_str()),
+            )?;
+
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
                 port
@@ -259,12 +371,15 @@ async fn main() -> Result<()> {
             #[cfg(feature = "prometheus")]
             let prom_port = prometheus.or(file_config.server.prometheus_port);
 
+            let push_gateway_url = push_gateway.or_else(|| file_config.server.push_gateway.clone());
+
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
                 max_duration,
                 #[cfg(feature = "prometheus")]
                 prometheus_port: prom_port,
+                push_gateway_url,
             };
             let server = Server::new(config);
             server.run().await?;
@@ -354,6 +469,12 @@ async fn main() -> Result<()> {
             let json_output = cli.json || file_config.client.json_output.unwrap_or(false);
             let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
 
+            // Determine timestamp format (CLI > config > default)
+            let timestamp_format = cli
+                .timestamp_format
+                .or(file_config.client.timestamp_format)
+                .unwrap_or_default();
+
             let config = ClientConfig {
                 host: host.clone(),
                 port: cli.port,
@@ -374,6 +495,7 @@ async fn main() -> Result<()> {
                 quiet: cli.quiet,
                 omit_secs: cli.omit,
                 interval_secs: cli.interval,
+                timestamp_format,
             };
 
             if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet {
@@ -381,7 +503,7 @@ async fn main() -> Result<()> {
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {
                 // TUI mode
-                run_client_tui(config, cli.output).await?;
+                run_client_tui(config, cli.output, timestamp_format).await?;
             }
         }
     }
@@ -400,7 +522,10 @@ async fn run_client_plain(
 
     // Print CSV header if needed
     if opts.csv && !opts.quiet {
-        print!("{}", xfr::output::csv::csv_interval_header());
+        print!(
+            "{}",
+            xfr::output::csv::csv_interval_header(&opts.timestamp_format)
+        );
         let _ = io::stdout().flush();
     }
 
@@ -409,6 +534,8 @@ async fn run_client_plain(
     let json_stream = opts.json_stream;
     let csv = opts.csv;
     let interval_secs = opts.interval_secs;
+    let timestamp_format = opts.timestamp_format;
+    let test_start = std::time::Instant::now();
 
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
@@ -438,10 +565,14 @@ async fn run_client_plain(
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
             let lost = progress.streams.first().and_then(|s| s.lost);
 
+            let now = std::time::Instant::now();
+            let timestamp = timestamp_format.format(test_start, now);
+
             let interval_output = if json_stream {
                 format!(
                     "{}\n",
                     xfr::output::json::output_interval_json(
+                        &timestamp,
                         elapsed_secs,
                         progress.throughput_mbps,
                         progress.total_bytes,
@@ -452,6 +583,7 @@ async fn run_client_plain(
                 )
             } else if csv {
                 xfr::output::csv::output_interval_csv(
+                    &timestamp,
                     elapsed_secs,
                     progress.throughput_mbps,
                     progress.total_bytes,
@@ -461,6 +593,7 @@ async fn run_client_plain(
                 )
             } else {
                 xfr::output::plain::output_interval_plain(
+                    &timestamp,
                     elapsed_secs,
                     progress.throughput_mbps,
                     progress.total_bytes,
@@ -496,7 +629,11 @@ async fn run_client_plain(
     Ok(())
 }
 
-async fn run_client_tui(config: ClientConfig, output: Option<PathBuf>) -> Result<()> {
+async fn run_client_tui(
+    config: ClientConfig,
+    output: Option<PathBuf>,
+    timestamp_format: TimestampFormat,
+) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -504,7 +641,7 @@ async fn run_client_tui(config: ClientConfig, output: Option<PathBuf>) -> Result
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui_loop(&mut terminal, config.clone()).await;
+    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -534,6 +671,7 @@ async fn run_client_tui(config: ClientConfig, output: Option<PathBuf>) -> Result
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     config: ClientConfig,
+    timestamp_format: TimestampFormat,
 ) -> Result<Option<xfr::protocol::TestResult>> {
     let mut app = App::new(
         config.host.clone(),
@@ -543,6 +681,7 @@ async fn run_tui_loop(
         config.streams,
         config.duration,
         config.bitrate,
+        timestamp_format,
     );
 
     let client = Arc::new(Client::new(config));

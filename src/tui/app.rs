@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::client::TestProgress;
-use crate::protocol::{Direction, Protocol, TestResult};
+use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
 
 const SPARKLINE_HISTORY: usize = 60;
 
@@ -49,6 +49,7 @@ pub struct App {
 
     pub start_time: Option<Instant>,
     pub show_help: bool,
+    pub timestamp_format: TimestampFormat,
 }
 
 impl App {
@@ -60,6 +61,7 @@ impl App {
         streams: u8,
         duration: Duration,
         bitrate: Option<u64>,
+        timestamp_format: TimestampFormat,
     ) -> Self {
         Self {
             state: AppState::Connecting,
@@ -93,6 +95,7 @@ impl App {
 
             start_time: None,
             show_help: false,
+            timestamp_format,
         }
     }
 
@@ -184,6 +187,7 @@ impl Default for App {
             1,
             Duration::from_secs(10),
             None,
+            TimestampFormat::default(),
         )
     }
 }

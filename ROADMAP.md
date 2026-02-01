@@ -55,11 +55,12 @@
 - [x] **Omit interval** (`--omit N`) - discard first N seconds (TCP ramp-up)
 - [x] **Report interval** (`-i`) - configurable reporting interval (default 1s)
 - [x] **Shell completions** (`--completions SHELL`) - bash, zsh, fish, powershell, elvish
-- [ ] **Timestamp format options** - ISO 8601, Unix epoch, relative
+- [x] **Timestamp format options** (`--timestamp-format`) - ISO 8601, Unix epoch, relative
 
 ### Platform
 - [x] **Environment variable overrides** - `XFR_PORT`, `XFR_DURATION`, etc.
-- [ ] **Push gateway support** - push Prometheus metrics to gateway
+- [x] **Push gateway support** (`--push-gateway`) - push Prometheus metrics to gateway
+- [x] **File logging** (`--log-file`, `--log-level`) - with daily rotation via tracing-appender
 
 ---
 

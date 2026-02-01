@@ -164,6 +164,84 @@ pub struct UdpStats {
     pub out_of_order: u64,
 }
 
+/// Timestamp format options for interval output
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampFormat {
+    /// Seconds since test start (default): [5.2s]
+    #[default]
+    Relative,
+    /// ISO 8601 format: 2026-01-31T21:45:30Z
+    Iso8601,
+    /// Unix epoch with milliseconds: 1738356330.123
+    Unix,
+}
+
+impl TimestampFormat {
+    /// Format a timestamp based on the format type
+    ///
+    /// # Arguments
+    /// * `test_start` - When the test started (for relative calculation)
+    /// * `now` - Current time to format
+    pub fn format(&self, test_start: std::time::Instant, now: std::time::Instant) -> String {
+        match self {
+            TimestampFormat::Relative => {
+                let elapsed = now.duration_since(test_start);
+                format!("{:.3}", elapsed.as_secs_f64())
+            }
+            TimestampFormat::Iso8601 => {
+                let elapsed = now.duration_since(test_start);
+                let now_system = std::time::SystemTime::now();
+                // Adjust back by elapsed to get test start time, then add elapsed
+                let timestamp = now_system - elapsed;
+                let datetime = chrono::DateTime::<chrono::Utc>::from(timestamp);
+                datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+            }
+            TimestampFormat::Unix => {
+                let elapsed = now.duration_since(test_start);
+                let now_system = std::time::SystemTime::now();
+                let timestamp = now_system - elapsed;
+                let duration_since_epoch = timestamp
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                format!("{:.3}", duration_since_epoch.as_secs_f64())
+            }
+        }
+    }
+
+    /// Format for CLI help text
+    pub fn variants() -> &'static [&'static str] {
+        &["relative", "iso8601", "unix"]
+    }
+}
+
+impl std::str::FromStr for TimestampFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "relative" => Ok(TimestampFormat::Relative),
+            "iso8601" | "iso" => Ok(TimestampFormat::Iso8601),
+            "unix" | "epoch" => Ok(TimestampFormat::Unix),
+            _ => Err(format!(
+                "Invalid timestamp format: {}. Valid options: {}",
+                s,
+                Self::variants().join(", ")
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for TimestampFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimestampFormat::Relative => write!(f, "relative"),
+            TimestampFormat::Iso8601 => write!(f, "iso8601"),
+            TimestampFormat::Unix => write!(f, "unix"),
+        }
+    }
+}
+
 impl ControlMessage {
     pub fn client_hello() -> Self {
         ControlMessage::Hello {

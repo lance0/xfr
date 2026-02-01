@@ -1,6 +1,6 @@
 //! CSV output format
 
-use crate::protocol::TestResult;
+use crate::protocol::{TestResult, TimestampFormat};
 
 /// Output test result as CSV
 pub fn output_csv(result: &TestResult) -> String {
@@ -35,6 +35,7 @@ pub fn output_csv(result: &TestResult) -> String {
 
 /// Output interval as CSV line
 pub fn output_interval_csv(
+    timestamp: &str,
     elapsed_secs: f64,
     throughput_mbps: f64,
     bytes: u64,
@@ -43,7 +44,8 @@ pub fn output_interval_csv(
     lost: Option<u64>,
 ) -> String {
     format!(
-        "{:.2},{},{:.2},{},{},{}\n",
+        "{},{:.2},{},{:.2},{},{},{}\n",
+        timestamp,
         elapsed_secs,
         bytes,
         throughput_mbps,
@@ -54,6 +56,13 @@ pub fn output_interval_csv(
 }
 
 /// CSV header for interval output
-pub fn csv_interval_header() -> &'static str {
-    "elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost\n"
+pub fn csv_interval_header(timestamp_format: &TimestampFormat) -> String {
+    match timestamp_format {
+        TimestampFormat::Relative => {
+            "timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost\n".to_string()
+        }
+        _ => {
+            "timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost\n".to_string()
+        }
+    }
 }

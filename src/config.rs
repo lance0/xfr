@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::protocol::TimestampFormat;
+
 /// Root configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -38,6 +40,16 @@ pub struct ClientDefaults {
 
     /// Disable TUI by default
     pub no_tui: Option<bool>,
+
+    /// Timestamp format for interval output (relative, iso8601, unix)
+    #[serde(default)]
+    pub timestamp_format: Option<TimestampFormat>,
+
+    /// Log file path (e.g., "~/.config/xfr/xfr.log", null to disable)
+    pub log_file: Option<String>,
+
+    /// Log level (error, warn, info, debug, trace)
+    pub log_level: Option<String>,
 }
 
 /// Default settings for server mode
@@ -51,6 +63,15 @@ pub struct ServerDefaults {
 
     /// Prometheus metrics port
     pub prometheus_port: Option<u16>,
+
+    /// Prometheus push gateway URL (e.g., "http://pushgateway:9091")
+    pub push_gateway: Option<String>,
+
+    /// Log file path (e.g., "~/.config/xfr/xfr.log", null to disable)
+    pub log_file: Option<String>,
+
+    /// Log level (error, warn, info, debug, trace)
+    pub log_level: Option<String>,
 }
 
 /// Server preset for quick configuration

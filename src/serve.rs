@@ -34,6 +34,8 @@ pub struct ServerConfig {
     pub max_duration: Option<Duration>,
     #[cfg(feature = "prometheus")]
     pub prometheus_port: Option<u16>,
+    /// Prometheus push gateway URL for pushing metrics at test completion
+    pub push_gateway_url: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -44,6 +46,7 @@ impl Default for ServerConfig {
             max_duration: None,
             #[cfg(feature = "prometheus")]
             prometheus_port: None,
+            push_gateway_url: None,
         }
     }
 }

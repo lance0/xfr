@@ -91,14 +91,15 @@ pub fn output_plain(result: &TestResult) -> String {
 }
 
 pub fn output_interval_plain(
+    timestamp: &str,
     elapsed_secs: f64,
     throughput_mbps: f64,
     bytes: u64,
     retransmits: Option<u64>,
 ) -> String {
     let mut output = format!(
-        "[{:5.1}s]  {}  {}",
-        elapsed_secs,
+        "[{}]  {}  {}",
+        timestamp,
         mbps_to_human(throughput_mbps),
         bytes_to_human(bytes)
     );

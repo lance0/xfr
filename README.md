@@ -82,6 +82,7 @@ xfr serve                    # Listen on port 5201
 xfr serve -p 9000            # Custom port
 xfr serve --one-off          # Exit after one test
 xfr serve --max-duration 60s # Limit test duration
+xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
 ```
 
 ### Client
@@ -111,6 +112,7 @@ xfr host --csv               # CSV output
 xfr host -q                  # Quiet mode (summary only)
 xfr host -o results.json     # Save to file
 xfr host --no-tui            # Plain text, no TUI
+xfr host --timestamp-format iso8601  # ISO 8601 timestamps
 ```
 
 ### Interval Control
@@ -154,9 +156,15 @@ parallel_streams = 1
 tcp_nodelay = false
 json_output = false
 no_tui = false
+timestamp_format = "relative"  # or "iso8601", "unix"
+log_file = "~/.config/xfr/xfr.log"
+log_level = "info"
 
 [server]
 port = 5201
+push_gateway = "http://pushgateway:9091"
+log_file = "~/.config/xfr/xfr-server.log"
+log_level = "info"
 ```
 
 Environment variables override config file:
@@ -204,6 +212,10 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--no-tui` | | false | Disable TUI |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
 | `--window` | | OS default | TCP window size |
+| `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
+| `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
+| `--log-level` | | info | Log level (error, warn, info, debug, trace) |
+| `--push-gateway` | | none | Prometheus Push Gateway URL (server only) |
 
 ## Platform Support
 

@@ -20,6 +20,7 @@ pub fn save_json(result: &TestResult, path: &Path) -> anyhow::Result<()> {
 /// JSON streaming interval output (one JSON object per line)
 #[derive(Serialize)]
 pub struct StreamInterval {
+    pub timestamp: String,
     pub elapsed_secs: f64,
     pub bytes: u64,
     pub throughput_mbps: f64,
@@ -33,6 +34,7 @@ pub struct StreamInterval {
 
 /// Output interval as JSON line (for --json-stream)
 pub fn output_interval_json(
+    timestamp: &str,
     elapsed_secs: f64,
     throughput_mbps: f64,
     bytes: u64,
@@ -41,6 +43,7 @@ pub fn output_interval_json(
     lost: Option<u64>,
 ) -> String {
     let interval = StreamInterval {
+        timestamp: timestamp.to_string(),
         elapsed_secs,
         bytes,
         throughput_mbps,

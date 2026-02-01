@@ -43,11 +43,16 @@ dirs = "5"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 parking_lot = "0.12"
 humantime = "2"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 once_cell = "1"
+chrono = "0.4"
+
+# Push gateway
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]
