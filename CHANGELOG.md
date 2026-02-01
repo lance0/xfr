@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Auto-saves last used theme
   - Remembers user preferences across sessions
 - Server TUI module scaffolded (dashboard showing active tests, bandwidth, security stats)
+- **Full IPv6 support:**
+  - `-4`/`--ipv4` and `-6`/`--ipv6` flags for address family selection
+  - Dual-stack mode (default): server accepts both IPv4 and IPv6 clients
+  - Proper `IPV6_V6ONLY` socket option handling via socket2
+  - ACL normalizes IPv4-mapped IPv6 addresses for consistent rule matching
+- **io_uring backend infrastructure** (`--features io-uring`):
+  - DataBackend trait abstraction for I/O operations
+  - TokioBackend (default) using epoll/kqueue
+  - UringBackend stub for Linux 5.10+ (falls back to tokio currently)
+  - Auto-detection of best available backend
 
 ### Fixed
 - Stats now shared correctly between handlers and TestStats (real-time intervals)

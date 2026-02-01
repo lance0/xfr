@@ -69,6 +69,9 @@ sudo cp target/release/xfr /usr/local/bin/
 # Prometheus metrics support
 cargo install xfr --features prometheus
 
+# io_uring backend (Linux only, requires kernel 5.10+)
+cargo install xfr --features io-uring
+
 # All features
 cargo install xfr --all-features
 ```
@@ -97,6 +100,8 @@ xfr 192.168.1.1 -t 30s       # 30 second test
 xfr 192.168.1.1 -P 4         # 4 parallel streams
 xfr 192.168.1.1 -R           # Reverse (download test)
 xfr 192.168.1.1 --bidir      # Bidirectional
+xfr 192.168.1.1 -6           # Force IPv6 only
+xfr ::1 -6                   # IPv6 localhost
 ```
 
 ### UDP Mode
