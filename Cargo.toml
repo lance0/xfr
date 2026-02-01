@@ -72,7 +72,7 @@ dashmap = "6"
 ipnetwork = "0.21"
 
 # Socket control (IPv6 dual-stack, flow labels)
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]
@@ -85,7 +85,7 @@ discovery = ["dep:mdns-sd"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = { version = "0.6", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 tempfile = "3"
 
 [[bench]]
