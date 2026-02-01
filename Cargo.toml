@@ -39,6 +39,9 @@ mdns-sd = { version = "0.11", optional = true }
 toml = "0.8"
 dirs = "5"
 
+# Async traits
+async-trait = "0.1"
+
 # Misc
 anyhow = "1"
 tracing = "0.1"
@@ -72,6 +75,9 @@ ipnetwork = "0.20"
 # Socket control (IPv6 dual-stack, flow labels)
 socket2 = { version = "0.5", features = ["all"] }
 
+# io_uring (Linux only, optional)
+tokio-uring = { version = "0.5", optional = true }
+
 # Platform-specific
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -80,6 +86,7 @@ libc = "0.2"
 default = ["discovery"]
 prometheus = ["dep:prometheus", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 discovery = ["dep:mdns-sd"]
+io-uring = ["dep:tokio-uring"]
 
 [dev-dependencies]
 tokio-test = "0.4"
