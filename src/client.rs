@@ -18,9 +18,9 @@ use crate::protocol::{
     ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
     versions_compatible,
 };
+use crate::quic;
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
-use crate::tls::TlsClientConfig;
 use crate::udp;
 
 #[derive(Clone)]
@@ -36,8 +36,6 @@ pub struct ClientConfig {
     pub window_size: Option<usize>,
     /// Pre-shared key for authentication
     pub psk: Option<String>,
-    /// TLS configuration
-    pub tls: TlsClientConfig,
     /// Address family preference
     pub address_family: AddressFamily,
 }
@@ -55,7 +53,6 @@ impl Default for ClientConfig {
             tcp_nodelay: false,
             window_size: None,
             psk: None,
-            tls: TlsClientConfig::default(),
             address_family: AddressFamily::default(),
         }
     }
@@ -90,6 +87,11 @@ impl Client {
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
+
+        // Use QUIC transport if selected
+        if self.config.protocol == Protocol::Quic {
+            return self.run_quic(progress_tx).await;
+        }
 
         let (stream, peer_addr) = net::connect_tcp(
             &self.config.host,
@@ -227,6 +229,12 @@ impl Client {
             Protocol::Udp => {
                 self.spawn_udp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
                     .await?;
+            }
+            Protocol::Quic => {
+                // QUIC uses its own connection model - should not reach here
+                return Err(anyhow::anyhow!(
+                    "QUIC protocol uses run_quic(), not run_test()"
+                ));
             }
         }
 
@@ -511,6 +519,291 @@ impl Client {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
+    }
+
+    /// Run a test using QUIC transport
+    async fn run_quic(
+        &self,
+        progress_tx: Option<mpsc::Sender<TestProgress>>,
+    ) -> anyhow::Result<TestResult> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        // Create QUIC endpoint and connect
+        let endpoint = quic::create_client_endpoint()?;
+        let addr = net::resolve_host(
+            &self.config.host,
+            self.config.port,
+            self.config.address_family,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No address found for {}", self.config.host))?;
+
+        info!("Connecting via QUIC to {}...", addr);
+        let connection = quic::connect(&endpoint, addr).await?;
+
+        // Open control stream (bidirectional)
+        let (mut ctrl_send, ctrl_recv) = connection.open_bi().await?;
+        let mut ctrl_reader = BufReader::new(ctrl_recv);
+        let mut line = String::new();
+
+        // Send client hello
+        let hello = ControlMessage::client_hello();
+        ctrl_send
+            .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+            .await?;
+
+        // Read server hello
+        ctrl_reader.read_line(&mut line).await?;
+        let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+        match msg {
+            ControlMessage::Hello {
+                version,
+                capabilities,
+                auth,
+                ..
+            } => {
+                if !versions_compatible(&version, PROTOCOL_VERSION) {
+                    return Err(anyhow::anyhow!(
+                        "Incompatible protocol version: {} (client: {})",
+                        version,
+                        PROTOCOL_VERSION
+                    ));
+                }
+                debug!("Server capabilities: {:?}", capabilities);
+
+                // Handle authentication if server requires it
+                if let Some(challenge) = auth {
+                    debug!("Server requires {} authentication", challenge.method);
+
+                    let psk = self.config.psk.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Server requires authentication but no PSK configured")
+                    })?;
+
+                    let response = auth::compute_response(&challenge.nonce, psk);
+                    let auth_msg = ControlMessage::auth_response(response);
+                    ctrl_send
+                        .write_all(format!("{}\n", auth_msg.serialize()?).as_bytes())
+                        .await?;
+
+                    // Read auth result
+                    line.clear();
+                    ctrl_reader.read_line(&mut line).await?;
+                    let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+                    match auth_result {
+                        ControlMessage::AuthSuccess => {
+                            info!("Authentication successful");
+                        }
+                        ControlMessage::Error { message } => {
+                            return Err(anyhow::anyhow!("Authentication failed: {}", message));
+                        }
+                        _ => {
+                            return Err(anyhow::anyhow!("Unexpected auth response"));
+                        }
+                    }
+                }
+            }
+            ControlMessage::Error { message } => {
+                return Err(anyhow::anyhow!("Server error: {}", message));
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Unexpected response from server"));
+            }
+        }
+
+        // Send test start
+        let test_id = Uuid::new_v4().to_string();
+        let test_start = ControlMessage::TestStart {
+            id: test_id.clone(),
+            protocol: Protocol::Quic,
+            streams: self.config.streams,
+            duration_secs: self.config.duration.as_secs() as u32,
+            direction: self.config.direction,
+            bitrate: self.config.bitrate,
+        };
+        ctrl_send
+            .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
+            .await?;
+
+        // Read test ack
+        line.clear();
+        ctrl_reader.read_line(&mut line).await?;
+        let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+        match msg {
+            ControlMessage::TestAck { .. } => {
+                debug!("Server acknowledged QUIC test");
+            }
+            ControlMessage::Error { message } => {
+                return Err(anyhow::anyhow!("Server error: {}", message));
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Expected test_ack"));
+            }
+        }
+
+        // Create stats and cancel channels
+        let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
+
+        *self.cancel_tx.lock() = Some(cancel_tx.clone());
+        *self.cancel_request_tx.lock() = Some(cancel_request_tx);
+
+        // Spawn data streams based on direction
+        for i in 0..self.config.streams {
+            let stream_stats = stats.streams[i as usize].clone();
+            let cancel = cancel_rx.clone();
+            let duration = self.config.duration;
+            let direction = self.config.direction;
+            let conn = connection.clone();
+
+            tokio::spawn(async move {
+                match direction {
+                    Direction::Upload => {
+                        // Open unidirectional stream for sending
+                        match conn.open_uni().await {
+                            Ok(send) => {
+                                if let Err(e) =
+                                    quic::send_quic_data(send, stream_stats, duration, cancel).await
+                                {
+                                    error!("QUIC send error: {}", e);
+                                }
+                            }
+                            Err(e) => error!("Failed to open send stream: {}", e),
+                        }
+                    }
+                    Direction::Download => {
+                        // Accept unidirectional stream from server
+                        match conn.accept_uni().await {
+                            Ok(recv) => {
+                                if let Err(e) =
+                                    quic::receive_quic_data(recv, stream_stats, cancel).await
+                                {
+                                    error!("QUIC receive error: {}", e);
+                                }
+                            }
+                            Err(e) => error!("Failed to accept receive stream: {}", e),
+                        }
+                    }
+                    Direction::Bidir => {
+                        // Open bidirectional stream for both directions
+                        match conn.open_bi().await {
+                            Ok((send, recv)) => {
+                                let send_stats = stream_stats.clone();
+                                let recv_stats = stream_stats;
+                                let send_cancel = cancel.clone();
+                                let recv_cancel = cancel;
+
+                                let send_handle = tokio::spawn(async move {
+                                    if let Err(e) = quic::send_quic_data(
+                                        send,
+                                        send_stats,
+                                        duration,
+                                        send_cancel,
+                                    )
+                                    .await
+                                    {
+                                        error!("QUIC bidir send error: {}", e);
+                                    }
+                                });
+
+                                let recv_handle = tokio::spawn(async move {
+                                    if let Err(e) =
+                                        quic::receive_quic_data(recv, recv_stats, recv_cancel).await
+                                    {
+                                        error!("QUIC bidir receive error: {}", e);
+                                    }
+                                });
+
+                                let _ = tokio::join!(send_handle, recv_handle);
+                            }
+                            Err(e) => error!("Failed to open bidir stream: {}", e),
+                        }
+                    }
+                }
+            });
+        }
+
+        // Read interval updates and final result
+        let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
+
+        loop {
+            line.clear();
+
+            tokio::select! {
+                read_result = tokio::time::timeout_at(deadline, ctrl_reader.read_line(&mut line)) => {
+                    match read_result {
+                        Ok(Ok(0)) => break,
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            let _ = cancel_tx.send(true);
+                            return Err(e.into());
+                        }
+                        Err(_) => {
+                            let _ = cancel_tx.send(true);
+                            return Err(anyhow::anyhow!("Timeout waiting for server response"));
+                        }
+                    }
+                }
+                _ = cancel_request_rx.changed() => {
+                    if *cancel_request_rx.borrow() {
+                        let cancel_msg = ControlMessage::Cancel {
+                            id: test_id.clone(),
+                            reason: "User requested cancellation".to_string(),
+                        };
+                        let _ = ctrl_send.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
+                        let _ = cancel_tx.send(true);
+                    }
+                }
+            }
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+            match msg {
+                ControlMessage::Interval {
+                    elapsed_ms,
+                    streams,
+                    aggregate,
+                    ..
+                } => {
+                    if let Some(ref tx) = progress_tx {
+                        let _ = tx
+                            .send(TestProgress {
+                                elapsed_ms,
+                                total_bytes: aggregate.bytes,
+                                throughput_mbps: aggregate.throughput_mbps,
+                                streams,
+                            })
+                            .await;
+                    }
+                }
+                ControlMessage::Result(result) => {
+                    let _ = cancel_tx.send(true);
+                    endpoint.close(0u32.into(), b"done");
+                    return Ok(result);
+                }
+                ControlMessage::Error { message } => {
+                    let _ = cancel_tx.send(true);
+                    return Err(anyhow::anyhow!("Server error: {}", message));
+                }
+                ControlMessage::Cancelled { .. } => {
+                    let _ = cancel_tx.send(true);
+                    return Err(anyhow::anyhow!("Test was cancelled"));
+                }
+                _ => {
+                    debug!("Unexpected message: {:?}", msg);
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Connection closed without result"))
     }
 
     /// Cancel a running test.

@@ -54,18 +54,6 @@ pub struct ClientDefaults {
     /// Pre-shared key for authentication
     pub psk: Option<String>,
 
-    /// Enable TLS
-    pub tls: Option<bool>,
-
-    /// TLS client certificate path
-    pub tls_cert: Option<String>,
-
-    /// TLS client key path
-    pub tls_key: Option<String>,
-
-    /// Skip TLS certificate verification
-    pub tls_insecure: Option<bool>,
-
     /// TUI color theme
     pub theme: Option<String>,
 
@@ -96,18 +84,6 @@ pub struct ServerDefaults {
 
     /// Pre-shared key for authentication
     pub psk: Option<String>,
-
-    /// Enable TLS
-    pub tls: Option<bool>,
-
-    /// TLS certificate path
-    pub tls_cert: Option<String>,
-
-    /// TLS key path
-    pub tls_key: Option<String>,
-
-    /// TLS CA for client certificate verification
-    pub tls_ca: Option<String>,
 
     /// Max concurrent tests per IP
     pub rate_limit: Option<u32>,

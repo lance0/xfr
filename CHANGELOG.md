@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **QUIC transport** (`--quic`) via quinn crate - built-in TLS 1.3 encryption, stream multiplexing
+- QUIC supports upload, download, bidirectional, and multi-stream modes
+- QUIC works with PSK authentication
+
+### Removed
+- TLS over TCP (`--tls`, `--tls-cert`, `--tls-key`, `--tls-ca`) - replaced by QUIC which provides built-in encryption
+
 ### Fixed
 - Use VecDeque for interval history to avoid O(n) removal on every interval
 - Report per-interval retransmit deltas instead of cumulative totals
@@ -25,7 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration tests for TCP, UDP, download, bidir, and multi-client modes
 - **Security & Enterprise features:**
   - Pre-shared key (PSK) authentication (`--psk`, `--psk-file`)
-  - TLS encryption for control channel (`--tls`, `--tls-cert`, `--tls-key`, `--tls-ca`)
   - Per-IP rate limiting (`--rate-limit`, `--rate-limit-window`)
   - IP access control lists (`--allow`, `--deny`, `--acl-file`)
 - **TUI Improvements:**

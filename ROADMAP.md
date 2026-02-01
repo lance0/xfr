@@ -71,12 +71,13 @@
 
 ### Authentication
 - [x] **Pre-shared key authentication** (`--psk`, `--psk-file`) - HMAC-SHA256 challenge-response
-- [x] **TLS for control channel** (`--tls`, `--tls-cert`, `--tls-key`) - rustls-based encryption
 - [x] **Rate limiting** (`--rate-limit`) - per-IP concurrent test limits
 
 ### Enterprise Features
 - [x] **Server access control lists** (`--allow`, `--deny`, `--acl-file`) - IP/subnet allowlists
 - [ ] **Bandwidth quotas per client** - limit resource usage
+
+*Note: TLS was removed in favor of QUIC, which provides built-in encryption.*
 
 ---
 
@@ -85,9 +86,12 @@
 **Why this matters:** QUIC is the future of internet transport. HTTP/3 adoption is accelerating (Cloudflare, Akamai, Fastly enable by default). Testing QUIC is increasingly important.
 
 ### QUIC Support
-- [ ] **QUIC transport via `quinn` crate** - battle-tested implementation
+- [x] **QUIC transport** (`quinn` crate) - full client/server implementation
+- [x] **QUIC data transfer** - stream-based send/receive with multiplexing
+- [x] **QUIC server endpoint** - accepts QUIC alongside TCP on same port
+- [x] **QUIC integration tests** - upload, download, multi-stream, PSK auth
 
-*Note: QUIC provides encrypted data path, solving the current TLS limitation where only the control channel is encrypted.*
+*Note: QUIC provides built-in TLS 1.3 encryption. The legacy TLS-over-TCP code was removed in favor of QUIC.*
 
 ### TUI Enhancements
 - [x] **Theme system** - 11 built-in themes, `t` to cycle
@@ -186,17 +190,13 @@
 | iperf2 | C | Yes | No | No | Active |
 | rperf | Rust | Yes | No | No | Active |
 | nperf | Rust | ? | No | Yes | Active |
-| **xfr** | Rust | Yes | Yes | Planned | Active |
+| **xfr** | Rust | Yes | Yes | Yes | Active |
 
 ---
 
 ## Known Limitations
 
-These features are partially implemented and documented for transparency:
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| TLS data transfer | Control channel only | Data path uses plain sockets; QUIC will solve this |
+All major features are fully implemented. See "Low Priority" section for features not planned.
 
 ---
 

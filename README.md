@@ -28,7 +28,7 @@ xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 - **Live TUI** with real-time throughput graphs and per-stream stats
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
-- **TCP and UDP** with configurable bitrate and parallel streams
+- **TCP, UDP, and QUIC** with configurable bitrate and parallel streams
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
 - **Result comparison** - `xfr diff` to detect performance regressions
@@ -86,7 +86,6 @@ xfr serve --one-off          # Exit after one test
 xfr serve --max-duration 60s # Limit test duration
 xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
 xfr serve --psk mysecret     # Require PSK authentication
-xfr serve --tls --tls-cert cert.pem --tls-key key.pem  # Enable TLS
 xfr serve --rate-limit 2     # Max 2 concurrent tests per IP
 xfr serve --allow 192.168.0.0/16 --deny 0.0.0.0/0  # IP ACL
 ```
@@ -110,6 +109,16 @@ xfr 192.168.1.1 -u           # UDP mode
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 xfr 192.168.1.1 -u -b 100M   # UDP at 100 Mbps
 ```
+
+### QUIC Mode
+
+```bash
+xfr 192.168.1.1 --quic       # QUIC transport (encrypted)
+xfr 192.168.1.1 --quic -P 4  # QUIC with 4 parallel streams
+xfr 192.168.1.1 --quic -R    # QUIC download test
+```
+
+QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single connection.
 
 ### Output Formats
 
@@ -255,9 +264,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--push-gateway` | | none | Prometheus Push Gateway URL (server only) |
 | `--psk` | | none | Pre-shared key for authentication (server) |
 | `--psk-file` | | none | Read PSK from file (server) |
-| `--tls` | | false | Enable TLS encryption (server) |
-| `--tls-cert` | | none | TLS certificate file (server) |
-| `--tls-key` | | none | TLS private key file (server) |
+| `--quic` | | false | Use QUIC transport (built-in TLS 1.3 encryption) |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |

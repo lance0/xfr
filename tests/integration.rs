@@ -7,7 +7,6 @@ use tokio::time::timeout;
 use xfr::client::{Client, ClientConfig};
 use xfr::protocol::{Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
-use xfr::tls::TlsClientConfig;
 
 // Use different ports for each test to avoid conflicts
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
@@ -51,7 +50,6 @@ async fn test_tcp_single_stream() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -86,7 +84,6 @@ async fn test_tcp_multi_stream() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -114,7 +111,6 @@ async fn test_connection_refused() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -142,7 +138,6 @@ async fn test_tcp_download() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -175,7 +170,6 @@ async fn test_tcp_bidir() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -208,7 +202,6 @@ async fn test_udp_upload() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -241,7 +234,6 @@ async fn test_udp_download() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -272,7 +264,6 @@ async fn test_multi_client_concurrent() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -287,7 +278,6 @@ async fn test_multi_client_concurrent() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -368,7 +358,6 @@ async fn test_psk_auth_success() {
         tcp_nodelay: false,
         window_size: None,
         psk: Some(psk),
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -405,7 +394,6 @@ async fn test_psk_auth_failure() {
         tcp_nodelay: false,
         window_size: None,
         psk: Some("wrong-secret".to_string()),
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -442,7 +430,6 @@ async fn test_psk_auth_missing_client_key() {
         tcp_nodelay: false,
         window_size: None,
         psk: None, // No PSK provided
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -477,7 +464,6 @@ async fn test_acl_allow() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -509,7 +495,6 @@ async fn test_rate_limit() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -531,7 +516,6 @@ async fn test_rate_limit() {
         tcp_nodelay: false,
         window_size: None,
         psk: None,
-        tls: TlsClientConfig::default(),
         address_family: xfr::net::AddressFamily::default(),
     };
 
@@ -549,4 +533,140 @@ async fn test_rate_limit() {
     // Wait for first client
     let result1 = handle1.await;
     assert!(result1.is_ok(), "First client task should complete");
+}
+
+// ============================================================================
+// QUIC Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_quic_upload() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    // Give server time to start (including QUIC endpoint)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "QUIC upload should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+    assert!(result.bytes_total > 0, "Should have transferred bytes");
+}
+
+#[tokio::test]
+async fn test_quic_download() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC download should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "QUIC download should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_quic_multi_stream() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC multi-stream should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC multi-stream should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert_eq!(result.streams.len(), 4, "Should have 4 streams");
+}
+
+#[tokio::test]
+async fn test_quic_with_psk() {
+    let port = get_test_port();
+    let psk = "quic-test-secret".to_string();
+    let _server = start_secure_server(port, Some(psk.clone()), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: Some(psk),
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC with PSK should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "QUIC with PSK should succeed: {:?}", result);
 }

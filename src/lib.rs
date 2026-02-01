@@ -13,12 +13,12 @@ pub mod net;
 pub mod output;
 pub mod prefs;
 pub mod protocol;
+pub mod quic;
 pub mod rate_limit;
 pub mod serve;
 pub mod stats;
 pub mod tcp;
 pub mod tcp_info;
-pub mod tls;
 pub mod tui;
 pub mod udp;
 

@@ -126,6 +126,10 @@ struct Cli {
     #[arg(short = 'u', long)]
     udp: bool,
 
+    /// QUIC mode (encrypted, multiplexed streams)
+    #[arg(long)]
+    quic: bool,
+
     /// Target bitrate (e.g., 1G, 100M)
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
     bitrate: Option<u64>,
@@ -260,22 +264,6 @@ enum Commands {
         /// Read PSK from file
         #[arg(long)]
         psk_file: Option<PathBuf>,
-
-        /// Enable TLS
-        #[arg(long)]
-        tls: bool,
-
-        /// TLS certificate file (PEM)
-        #[arg(long)]
-        tls_cert: Option<PathBuf>,
-
-        /// TLS private key file (PEM)
-        #[arg(long)]
-        tls_key: Option<PathBuf>,
-
-        /// TLS CA file for client certificate verification
-        #[arg(long)]
-        tls_ca: Option<PathBuf>,
 
         /// Max concurrent tests per IP (rate limiting)
         #[arg(long)]
@@ -450,10 +438,6 @@ async fn main() -> Result<()> {
             log_level: _serve_log_level,
             psk,
             psk_file,
-            tls,
-            tls_cert,
-            tls_key,
-            tls_ca,
             rate_limit,
             rate_limit_window,
             allow,
@@ -485,19 +469,6 @@ async fn main() -> Result<()> {
 
             // Build security configs
             let auth_config = xfr::auth::AuthConfig { psk: effective_psk };
-
-            let tls_config = xfr::tls::TlsServerConfig {
-                enabled: tls || file_config.server.tls.unwrap_or(false),
-                cert_path: tls_cert
-                    .map(|p| p.to_string_lossy().to_string())
-                    .or_else(|| file_config.server.tls_cert.clone()),
-                key_path: tls_key
-                    .map(|p| p.to_string_lossy().to_string())
-                    .or_else(|| file_config.server.tls_key.clone()),
-                ca_path: tls_ca
-                    .map(|p| p.to_string_lossy().to_string())
-                    .or_else(|| file_config.server.tls_ca.clone()),
-            };
 
             let acl_config = xfr::acl::AclConfig {
                 allow: if allow.is_empty() {
@@ -539,7 +510,6 @@ async fn main() -> Result<()> {
                 prometheus_port: prom_port,
                 push_gateway_url,
                 auth: auth_config,
-                tls: tls_config,
                 acl: acl_config,
                 rate_limit: rate_limit_config,
                 address_family,
@@ -602,7 +572,9 @@ async fn main() -> Result<()> {
                 Direction::Upload
             };
 
-            let protocol = if cli.udp {
+            let protocol = if cli.quic {
+                Protocol::Quic
+            } else if cli.udp {
                 Protocol::Udp
             } else {
                 Protocol::Tcp
@@ -673,7 +645,6 @@ async fn main() -> Result<()> {
                 tcp_nodelay,
                 window_size,
                 psk: client_psk,
-                tls: xfr::tls::TlsClientConfig::default(),
                 address_family: client_address_family,
             };
 

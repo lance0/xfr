@@ -57,11 +57,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # Push gateway
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
-# TLS
-rustls = "0.23"
-tokio-rustls = "0.26"
-rustls-pemfile = "2"
-webpki-roots = "1.0"
+# QUIC
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.14"
 
 # Auth
 hmac = "0.12"

@@ -76,7 +76,9 @@ impl StreamStats {
         let interval_bytes = total_bytes.saturating_sub(last_bytes);
 
         let total_retransmits = self.retransmits.load(Ordering::Relaxed);
-        let last_retransmits = self.last_retransmits.swap(total_retransmits, Ordering::Relaxed);
+        let last_retransmits = self
+            .last_retransmits
+            .swap(total_retransmits, Ordering::Relaxed);
         let interval_retransmits = total_retransmits.saturating_sub(last_retransmits);
 
         let elapsed = now.duration_since(self.start_time);

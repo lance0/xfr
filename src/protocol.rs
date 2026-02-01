@@ -83,6 +83,7 @@ pub enum Protocol {
     #[default]
     Tcp,
     Udp,
+    Quic,
 }
 
 impl std::fmt::Display for Protocol {
@@ -90,6 +91,7 @@ impl std::fmt::Display for Protocol {
         match self {
             Protocol::Tcp => write!(f, "TCP"),
             Protocol::Udp => write!(f, "UDP"),
+            Protocol::Quic => write!(f, "QUIC"),
         }
     }
 }
