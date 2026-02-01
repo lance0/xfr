@@ -124,12 +124,6 @@ pub struct ServerDefaults {
     /// ACL file path
     pub acl_file: Option<String>,
 
-    /// Audit log file path
-    pub audit_log: Option<String>,
-
-    /// Audit log format (json, text)
-    pub audit_format: Option<String>,
-
     /// Address family preference (ipv4, ipv6, dual)
     pub address_family: Option<String>,
 }

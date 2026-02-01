@@ -66,7 +66,7 @@
 
 ## v0.4 - Security & Enterprise (Completed)
 
-**Why this matters:** Enterprise environments require authentication and audit trails. Security is a blocker for many deployments.
+**Why this matters:** Enterprise environments require authentication. Security is a blocker for many deployments.
 
 ### Authentication
 - [x] **Pre-shared key authentication** (`--psk`, `--psk-file`) - HMAC-SHA256 challenge-response
@@ -76,7 +76,6 @@
 ### Enterprise Features
 - [x] **Server access control lists** (`--allow`, `--deny`, `--acl-file`) - IP/subnet allowlists
 - [ ] **Bandwidth quotas per client** - limit resource usage
-- [x] **Audit logging** (`--audit-log`, `--audit-format`) - JSON/text structured logs
 
 ---
 
@@ -100,14 +99,14 @@
 ### TUI Enhancements
 - [x] **Theme system** - 11 built-in themes, `t` to cycle
 - [x] **Preferences persistence** (`~/.config/xfr/prefs.toml`)
-- [ ] **Server TUI dashboard** - module exists, not yet wired
+- [x] **Server TUI dashboard** (`xfr serve --tui`) - live view of active tests
 
 ---
 
 ## Future Ideas
 
 ### High-Speed Optimization (10G+)
-- [~] **io_uring on Linux** - backend infrastructure complete, syscalls pending
+- [ ] **io_uring on Linux** - for kernel bypass at 10G+
 - [ ] **CPU affinity options** - pin to specific cores/NUMA nodes
 - [ ] **Zerocopy send/receive** - MSG_ZEROCOPY, MSG_TRUNC
 - [ ] **Multi-queue NIC support** - leverage hardware parallelism
@@ -175,8 +174,6 @@ These features are partially implemented and documented for transparency:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | TLS data transfer | Handshake only | Control channel TLS works, data path uses plain sockets |
-| io_uring backend | Infrastructure only | Falls back to tokio for all operations |
-| Server `--tui` flag | Stub | Prints warning and runs headless |
 
 ---
 

@@ -24,7 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - TLS encryption for control channel (`--tls`, `--tls-cert`, `--tls-key`, `--tls-ca`)
   - Per-IP rate limiting (`--rate-limit`, `--rate-limit-window`)
   - IP access control lists (`--allow`, `--deny`, `--acl-file`)
-  - Audit logging with JSON/text formats (`--audit-log`, `--audit-format`)
 - **TUI Improvements:**
   - 11 color themes: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized
   - Theme selection via `--theme` flag or config file
@@ -39,11 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dual-stack mode (default): server accepts both IPv4 and IPv6 clients
   - Proper `IPV6_V6ONLY` socket option handling via socket2
   - ACL normalizes IPv4-mapped IPv6 addresses for consistent rule matching
-- **io_uring backend infrastructure** (`--features io-uring`):
-  - DataBackend trait abstraction for I/O operations
-  - TokioBackend (default) using epoll/kqueue
-  - UringBackend stub for Linux 5.10+ (falls back to tokio currently)
-  - Auto-detection of best available backend
 - CSV output format (`--csv`)
 - JSON streaming output (`--json-stream`) for real-time per-interval JSON
 - Quiet mode (`-q/--quiet`) to suppress interval output

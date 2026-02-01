@@ -3,7 +3,6 @@
 //! A fast, beautiful iperf replacement built in Rust.
 
 pub mod acl;
-pub mod audit;
 pub mod auth;
 pub mod backend;
 pub mod client;

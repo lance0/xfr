@@ -13,7 +13,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::acl::{Acl, AclConfig};
-use crate::audit::{AuditConfig, AuditEvent, AuditLogger};
 use crate::auth::{self, AuthConfig};
 use crate::net::{self, AddressFamily};
 use crate::protocol::{
@@ -53,8 +52,6 @@ pub struct ServerConfig {
     pub acl: AclConfig,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
-    /// Audit logging configuration
-    pub audit: AuditConfig,
     /// Address family (IPv4, IPv6, dual-stack)
     pub address_family: AddressFamily,
     /// Channel to send events to TUI
@@ -74,7 +71,6 @@ impl Default for ServerConfig {
             tls: TlsServerConfig::default(),
             acl: AclConfig::default(),
             rate_limit: RateLimitConfig::default(),
-            audit: AuditConfig::default(),
             address_family: AddressFamily::default(),
             tui_tx: None,
         }
@@ -86,7 +82,6 @@ struct SecurityContext {
     psk: Option<String>,
     acl: Acl,
     rate_limiter: Option<Arc<RateLimiter>>,
-    audit: Option<Arc<AuditLogger>>,
     tls_acceptor: Option<TlsAcceptor>,
     address_family: AddressFamily,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
@@ -121,7 +116,6 @@ impl Server {
         // Initialize security context
         let acl = self.config.acl.build()?;
         let rate_limiter = self.config.rate_limit.build();
-        let audit = self.config.audit.build()?;
         let tls_acceptor = self.config.tls.create_acceptor()?;
 
         if self.config.auth.psk.is_some() {
@@ -139,15 +133,11 @@ impl Server {
                 self.config.rate_limit.max_per_ip.unwrap_or(0)
             );
         }
-        if audit.is_some() {
-            info!("Audit logging enabled");
-        }
 
         let security = Arc::new(SecurityContext {
             psk: self.config.auth.psk.clone(),
             acl,
             rate_limiter: rate_limiter.clone(),
-            audit,
             tls_acceptor,
             address_family: self.config.address_family,
             tui_tx: self.config.tui_tx.clone(),
@@ -182,12 +172,6 @@ impl Server {
             // Check ACL
             if !security.acl.is_allowed(peer_ip) {
                 warn!("Connection rejected by ACL: {}", peer_addr);
-                if let Some(audit) = &security.audit {
-                    audit.log(AuditEvent::AclDenied {
-                        ip: peer_ip,
-                        rule: security.acl.matched_rule(peer_ip),
-                    });
-                }
                 if let Some(tx) = &security.tui_tx {
                     let _ = tx.try_send(ServerEvent::ConnectionBlocked);
                 }
@@ -200,13 +184,6 @@ impl Server {
                 && let Err(e) = limiter.check(peer_ip)
             {
                 warn!("Rate limit exceeded for {}: {}", peer_addr, e);
-                if let Some(audit) = &security.audit {
-                    audit.log(AuditEvent::RateLimitHit {
-                        ip: peer_ip,
-                        current: e.current,
-                        max: e.max,
-                    });
-                }
                 if let Some(tx) = &security.tui_tx {
                     let _ = tx.try_send(ServerEvent::ConnectionBlocked);
                 }
@@ -222,14 +199,6 @@ impl Server {
             let security = security.clone();
 
             let handle = tokio::spawn(async move {
-                // Log connection
-                if let Some(audit) = &security.audit {
-                    audit.log(AuditEvent::ClientConnect {
-                        ip: peer_ip,
-                        tls: security.tls_acceptor.is_some(),
-                    });
-                }
-
                 let result = handle_client_secure(
                     stream,
                     peer_addr,
@@ -327,13 +296,6 @@ async fn handle_client_with_auth(
             ControlMessage::AuthResponse { response } => {
                 let psk = security.psk.as_ref().unwrap();
                 if !auth::verify_response(&nonce, psk, &response) {
-                    if let Some(audit) = &security.audit {
-                        audit.log(AuditEvent::AuthFailure {
-                            ip: peer_addr.ip(),
-                            method: "psk".to_string(),
-                            reason: "Invalid response".to_string(),
-                        });
-                    }
                     if let Some(tx) = &security.tui_tx {
                         let _ = tx.try_send(ServerEvent::AuthFailure);
                     }
@@ -342,13 +304,6 @@ async fn handle_client_with_auth(
                         .write_all(format!("{}\n", error.serialize()?).as_bytes())
                         .await?;
                     return Err(anyhow::anyhow!("Authentication failed"));
-                }
-
-                if let Some(audit) = &security.audit {
-                    audit.log(AuditEvent::AuthSuccess {
-                        ip: peer_addr.ip(),
-                        method: "psk".to_string(),
-                    });
                 }
 
                 // Send auth success
@@ -550,18 +505,6 @@ async fn handle_test_request(
                 );
             }
 
-            // Log test start
-            if let Some(audit) = &security.audit {
-                audit.log(AuditEvent::TestStart {
-                    ip: peer_addr.ip(),
-                    test_id: id.clone(),
-                    protocol: protocol.to_string(),
-                    streams,
-                    direction: direction.to_string(),
-                    duration_secs: duration.as_secs() as u32,
-                });
-            }
-
             info!(
                 "Test requested: {} {} streams, {} mode, {}s",
                 protocol,
@@ -586,28 +529,6 @@ async fn handle_test_request(
                 security.tui_tx.clone(),
             )
             .await;
-
-            // Log test completion
-            if let Some(audit) = &security.audit {
-                match &result {
-                    Ok((bytes, duration_ms, throughput)) => {
-                        audit.log(AuditEvent::TestComplete {
-                            ip: peer_addr.ip(),
-                            test_id: id.clone(),
-                            bytes: *bytes,
-                            duration_ms: *duration_ms,
-                            throughput_mbps: *throughput,
-                        });
-                    }
-                    Err(e) => {
-                        audit.log(AuditEvent::TestCancelled {
-                            ip: peer_addr.ip(),
-                            test_id: id.clone(),
-                            reason: e.to_string(),
-                        });
-                    }
-                }
-            }
 
             result.map(|_| ())
         }

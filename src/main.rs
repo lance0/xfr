@@ -297,14 +297,6 @@ enum Commands {
         #[arg(long)]
         acl_file: Option<PathBuf>,
 
-        /// Audit log file
-        #[arg(long)]
-        audit_log: Option<PathBuf>,
-
-        /// Audit log format (json, text)
-        #[arg(long, default_value = "json")]
-        audit_format: String,
-
         /// Force IPv4 only
         #[arg(short = '4', long = "ipv4")]
         ipv4_only: bool,
@@ -467,8 +459,6 @@ async fn main() -> Result<()> {
             allow,
             deny,
             acl_file,
-            audit_log,
-            audit_format,
             ipv4_only,
             ipv6_only,
         }) => {
@@ -530,13 +520,6 @@ async fn main() -> Result<()> {
                 window_secs: rate_limit_window.as_secs(),
             };
 
-            let audit_config = xfr::audit::AuditConfig {
-                path: audit_log
-                    .map(|p| p.to_string_lossy().to_string())
-                    .or_else(|| file_config.server.audit_log.clone()),
-                format: audit_format.parse().unwrap_or_default(),
-            };
-
             // Determine address family
             let address_family = if ipv4_only {
                 xfr::net::AddressFamily::V4Only
@@ -559,7 +542,6 @@ async fn main() -> Result<()> {
                 tls: tls_config,
                 acl: acl_config,
                 rate_limit: rate_limit_config,
-                audit: audit_config,
                 address_family,
                 tui_tx: None,
             };

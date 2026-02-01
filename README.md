@@ -70,9 +70,6 @@ sudo cp target/release/xfr /usr/local/bin/
 # Prometheus metrics support
 cargo install xfr --features prometheus
 
-# io_uring backend (Linux only, requires kernel 5.10+)
-cargo install xfr --features io-uring
-
 # All features
 cargo install xfr --all-features
 ```
@@ -204,8 +201,6 @@ log_level = "info"
 psk = "my-secret-key"
 rate_limit = 5
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
-audit_log = "/var/log/xfr-audit.log"
-audit_format = "json"
 ```
 
 Environment variables override config file:
@@ -266,8 +261,6 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
-| `--audit-log` | | none | Audit log file path (server) |
-| `--audit-format` | | json | Audit format: json or text (server) |
 | `--tui` | | false | Enable live dashboard (server) |
 
 ## Platform Support
