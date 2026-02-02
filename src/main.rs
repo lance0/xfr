@@ -873,12 +873,17 @@ async fn run_client_tui(
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     match result {
-        Ok((test_result, final_prefs)) => {
-            if let Some(test_result) = test_result {
-                println!("{}", output_plain(&test_result));
+        Ok((test_result, final_prefs, print_json)) => {
+            if let Some(ref test_result) = test_result {
+                // Print JSON if requested via 'j' key
+                if print_json {
+                    println!("{}", output_json(test_result));
+                } else {
+                    println!("{}", output_plain(test_result));
+                }
 
                 if let Some(path) = output {
-                    xfr::output::json::save_json(&test_result, &path)?;
+                    xfr::output::json::save_json(test_result, &path)?;
                     println!("Results saved to {}", path.display());
                 }
             } else {
@@ -898,7 +903,8 @@ async fn run_tui_loop(
     config: ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
-) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs)> {
+) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
+    let mut print_json_on_exit = false;
     let mut app = App::with_theme_name(
         config.host.clone(),
         config.port,
@@ -934,7 +940,7 @@ async fn run_tui_loop(
                     // Cancel the test on server before exiting
                     let _ = client.cancel();
                     prefs.theme = Some(app.theme_name().to_string());
-                    return Ok((app.result, prefs));
+                    return Ok((app.result, prefs, print_json_on_exit));
                 }
                 KeyCode::Char('p') => {
                     app.toggle_pause();
@@ -951,9 +957,10 @@ async fn run_tui_loop(
                     }
                 }
                 KeyCode::Char('j') => {
-                    if let Some(ref result) = app.result {
-                        // Will print JSON after TUI closes
-                        println!("{}", output_json(result));
+                    if app.result.is_some() {
+                        // Set flag to print JSON after TUI closes
+                        print_json_on_exit = true;
+                        app.log("JSON output queued for display on exit.");
                     }
                 }
                 _ => {}
@@ -982,10 +989,15 @@ async fn run_tui_loop(
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => {
                                     prefs.theme = Some(app.theme_name().to_string());
-                                    return Ok((app.result, prefs));
+                                    return Ok((app.result, prefs, print_json_on_exit));
                                 }
                                 KeyCode::Char('t') => {
                                     app.cycle_theme();
+                                    terminal.draw(|f| draw(f, &app))?;
+                                }
+                                KeyCode::Char('j') => {
+                                    print_json_on_exit = true;
+                                    app.log("JSON output queued for display on exit.");
                                     terminal.draw(|f| draw(f, &app))?;
                                 }
                                 _ => {}

@@ -4,10 +4,11 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::app::{App, AppState};
 use super::theme::Theme;
+use super::widgets::Sparkline;
 use crate::stats::{bytes_to_human, mbps_to_human};
 
 /// Get color for packet loss percentage: green (<0.1%), yellow (0.1-1%), red (>1%)
@@ -104,10 +105,10 @@ fn draw_configuration(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let role = if app.direction == crate::protocol::Direction::Upload {
-        "Client (Upload)"
-    } else {
-        "Client (Download)"
+    let role = match app.direction {
+        crate::protocol::Direction::Upload => "Client (Upload)",
+        crate::protocol::Direction::Download => "Client (Download)",
+        crate::protocol::Direction::Bidir => "Client (Bidirectional)",
     };
 
     let lines = vec![
@@ -151,69 +152,99 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Throughput gauge
-            Constraint::Length(1), // Spacer
+            Constraint::Length(3), // Throughput sparkline + current value
             Constraint::Length(1), // Transfer progress
             Constraint::Length(1), // Spacer
             Constraint::Length(2), // Stats row
         ])
         .split(inner);
 
-    // Throughput gauge (big bar)
-    let throughput_ratio = if app.max_throughput() > 0.0 {
-        (app.current_throughput_mbps / app.max_throughput()).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(theme.graph_primary))
-        .ratio(throughput_ratio)
-        .label("");
-    frame.render_widget(gauge, chunks[0]);
+    // Throughput sparkline with current value
+    let sparkline_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(14), // Current throughput value
+            Constraint::Min(10),    // Sparkline graph
+        ])
+        .split(chunks[0]);
+
+    // Current throughput value (big number)
+    let throughput_str = mbps_to_human(app.current_throughput_mbps);
+    let throughput_display = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            throughput_str,
+            Style::default()
+                .fg(theme.graph_primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    frame.render_widget(throughput_display, sparkline_chunks[0]);
+
+    // Sparkline showing throughput history
+    if !app.throughput_history.is_empty() {
+        let data: Vec<f64> = app.throughput_history.iter().cloned().collect();
+        let sparkline = Sparkline::new(&data)
+            .max(app.max_throughput().max(100.0))
+            .style(Style::default().fg(theme.graph_primary));
+        let sparkline_area = Rect {
+            x: sparkline_chunks[1].x,
+            y: sparkline_chunks[1].y,
+            width: sparkline_chunks[1].width,
+            height: 3,
+        };
+        frame.render_widget(sparkline, sparkline_area);
+    }
 
     // Transfer progress line
     let progress = app.progress_percent() / 100.0;
     let transferred = bytes_to_human(app.total_bytes);
-    let target_bytes = if app.bitrate.is_some() {
-        // Estimate based on bitrate
-        bytes_to_human((app.bitrate.unwrap_or(0) / 8) * app.duration.as_secs())
-    } else {
-        // Just show elapsed/total time
-        format!("{}s", app.duration.as_secs())
-    };
+    let elapsed_secs = app.elapsed.as_secs();
+    let duration_secs = app.duration.as_secs();
 
     // Build arrow-style progress bar: [====>------] 45%
-    let bar_width = (area.width as usize).saturating_sub(40);
+    // Use inner width for calculation, with minimum of 10 chars for bar
+    let prefix_len = 12; // "  Transfer: "
+    let suffix_len = 25; // " X.XX GB / Xs [" + "] XX%"
+    let available_width = (inner.width as usize).saturating_sub(prefix_len + suffix_len);
+    let bar_width = available_width.clamp(10, 40);
+
     let filled = (progress * bar_width as f64) as usize;
-    let empty = bar_width.saturating_sub(filled).saturating_sub(1);
-    let arrow = if filled > 0 && empty > 0 { ">" } else { "" };
+    let empty = bar_width.saturating_sub(filled);
+    let arrow = if filled > 0 && filled < bar_width {
+        ">"
+    } else {
+        ""
+    };
+    let fill_chars = if arrow.is_empty() {
+        filled
+    } else {
+        filled.saturating_sub(1)
+    };
 
     let progress_bar = format!(
         "[{}{}{}]",
-        "=".repeat(filled.saturating_sub(1).max(0)),
+        "=".repeat(fill_chars),
         arrow,
         "-".repeat(empty)
     );
 
     let transfer_line = Line::from(vec![
         Span::styled("  Transfer: ", Style::default().fg(theme.text_dim)),
-        Span::styled(
-            format!("{} / {} ", transferred, target_bytes),
-            Style::default().fg(theme.text),
-        ),
+        Span::styled(format!("{} ", transferred), Style::default().fg(theme.text)),
         Span::styled(progress_bar, Style::default().fg(theme.graph_secondary)),
         Span::styled(
-            format!(" {:.0}%", app.progress_percent()),
+            format!(" {}s/{}s", elapsed_secs, duration_secs),
             Style::default().fg(theme.text),
         ),
     ]);
-    frame.render_widget(Paragraph::new(transfer_line), chunks[2]);
+    frame.render_widget(Paragraph::new(transfer_line), chunks[1]);
 
     // Stats row: Current/Average Speed | Jitter/Packet Loss
     let stats_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[4]);
+        .split(chunks[3]);
 
     let current_speed = mbps_to_human(app.current_throughput_mbps);
     let avg_speed = mbps_to_human(app.average_throughput_mbps);

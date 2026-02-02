@@ -368,6 +368,11 @@ impl Client {
                                 }
                             }
                             Direction::Bidir => {
+                                // Configure socket BEFORE splitting (nodelay, window, buffers)
+                                if let Err(e) = tcp::configure_stream(&stream, &config) {
+                                    error!("Failed to configure TCP socket: {}", e);
+                                }
+
                                 // Split socket for concurrent send/receive
                                 let (read_half, write_half) = stream.into_split();
 

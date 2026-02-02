@@ -1281,6 +1281,11 @@ async fn spawn_tcp_handlers(
                         .await;
                 }
                 Direction::Bidir => {
+                    // Configure socket BEFORE splitting (nodelay, window, buffers)
+                    if let Err(e) = tcp::configure_stream(&stream, &config) {
+                        tracing::error!("Failed to configure TCP socket: {}", e);
+                    }
+
                     // Split socket for concurrent send/receive
                     let (read_half, write_half) = stream.into_split();
 
@@ -1340,6 +1345,14 @@ async fn spawn_udp_handlers(
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
+    // Divide bitrate evenly across streams (matching client behavior)
+    let num_streams = sockets.len().max(1) as u64;
+    let per_stream_bitrate = if bitrate == 0 {
+        0 // Unlimited mode
+    } else {
+        bitrate / num_streams
+    };
+
     for (i, socket) in sockets.into_iter().enumerate() {
         let stream_stats = stats.streams[i].clone();
         let test_stats = stats.clone();
@@ -1356,9 +1369,15 @@ async fn spawn_udp_handlers(
                     }
                 }
                 Direction::Download => {
-                    // Server sends UDP
-                    let _ =
-                        udp::send_udp_paced(socket, bitrate, duration, stream_stats, cancel).await;
+                    // Server sends UDP at per-stream rate
+                    let _ = udp::send_udp_paced(
+                        socket,
+                        per_stream_bitrate,
+                        duration,
+                        stream_stats,
+                        cancel,
+                    )
+                    .await;
                 }
                 Direction::Bidir => {
                     // UDP can send/receive concurrently on same socket
@@ -1373,7 +1392,7 @@ async fn spawn_udp_handlers(
                     let send_handle = tokio::spawn(async move {
                         let _ = udp::send_udp_paced(
                             send_socket,
-                            bitrate,
+                            per_stream_bitrate,
                             duration,
                             send_stats,
                             send_cancel,

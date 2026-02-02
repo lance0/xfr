@@ -158,7 +158,7 @@ const HIGH_PPS_THRESHOLD: f64 = 100_000.0;
 /// Number of packets to send per burst in high-PPS mode
 const BURST_SIZE: u64 = 100;
 
-/// Send UDP data at a paced rate
+/// Send UDP data at a paced rate (or unlimited if target_bitrate is 0)
 pub async fn send_udp_paced(
     socket: Arc<UdpSocket>,
     target_bitrate: u64,
@@ -167,6 +167,12 @@ pub async fn send_udp_paced(
     cancel: watch::Receiver<bool>,
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
+
+    // Unlimited mode: no pacing, send as fast as possible
+    if target_bitrate == 0 {
+        return send_udp_unlimited(socket, duration, stats, cancel).await;
+    }
+
     let bits_per_packet = (packet_size * 8) as u64;
 
     // Use floating-point for precision in interval calculation
@@ -177,12 +183,10 @@ pub async fn send_udp_paced(
         // High PPS: batch BURST_SIZE packets per interval
         let interval = Duration::from_secs_f64(BURST_SIZE as f64 / packets_per_sec_f64);
         (interval, BURST_SIZE)
-    } else if packets_per_sec_f64 > 0.0 {
+    } else {
         // Normal PPS: one packet per interval
         let interval = Duration::from_secs_f64(1.0 / packets_per_sec_f64);
         (interval, 1)
-    } else {
-        (Duration::from_millis(1), 1)
     };
 
     debug!(
@@ -234,6 +238,66 @@ pub async fn send_udp_paced(
                 }
             }
         }
+    }
+
+    Ok(UdpSendStats {
+        packets_sent: sequence,
+        bytes_sent: sequence * packet_size as u64,
+    })
+}
+
+/// Send UDP data as fast as possible (unlimited mode)
+async fn send_udp_unlimited(
+    socket: Arc<UdpSocket>,
+    duration: Duration,
+    stats: Arc<StreamStats>,
+    cancel: watch::Receiver<bool>,
+) -> anyhow::Result<UdpSendStats> {
+    let packet_size = UDP_PAYLOAD_SIZE;
+    let mut sequence: u64 = 0;
+    let start = Instant::now();
+    let deadline = start + duration;
+    let mut packet = vec![0u8; packet_size];
+
+    debug!("UDP unlimited mode: sending as fast as possible");
+
+    // Send in tight loop with periodic yield and cancel check
+    loop {
+        if *cancel.borrow() {
+            debug!("UDP send cancelled");
+            break;
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+
+        // Send a burst of packets before yielding
+        for _ in 0..BURST_SIZE {
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            let now_us = start.elapsed().as_micros() as u64;
+            let header = UdpPacketHeader {
+                sequence,
+                timestamp_us: now_us,
+            };
+            header.encode(&mut packet);
+
+            match socket.send(&packet).await {
+                Ok(n) => {
+                    stats.add_bytes_sent(n as u64);
+                    sequence += 1;
+                }
+                Err(e) => {
+                    warn!("UDP send error: {}", e);
+                }
+            }
+        }
+
+        // Yield to allow other tasks (cancel checks, etc.)
+        tokio::task::yield_now().await;
     }
 
     Ok(UdpSendStats {
