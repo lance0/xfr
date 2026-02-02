@@ -234,26 +234,59 @@ pub fn on_test_complete(stats: &TestStats) {
     let duration_secs = stats.elapsed_ms() as f64 / 1000.0;
     m.test_duration_seconds.observe(duration_secs);
 
+    // Update gauges one final time
     update_metrics(stats);
+
+    // Update counters (only at completion to avoid overcounting)
+    update_counters(stats);
 }
 
-/// Update metrics with current test stats. Can be called during a test for live updates.
+/// Update metrics with current test stats for live monitoring.
+/// Only updates gauges (instantaneous values), not counters (cumulative values).
+/// Counters are only updated at test completion via on_test_complete().
 #[cfg(feature = "prometheus")]
 pub fn update_metrics(stats: &TestStats) {
     let m = &*METRICS;
     let test_id = &stats.test_id;
 
-    // Aggregate stats
+    // Update throughput gauge (instantaneous value)
     let total_bytes = stats.total_bytes();
-    m.bytes_total.inc_by(total_bytes as f64);
-
     let duration_ms = stats.elapsed_ms();
     if duration_ms > 0 {
         let throughput = (total_bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
         m.throughput_mbps.set(throughput);
     }
 
-    // Per-stream stats
+    // Per-stream gauges (instantaneous values)
+    for stream in &stats.streams {
+        let stream_id = stream.stream_id.to_string();
+        let labels = &[test_id.as_str(), stream_id.as_str()];
+
+        let stream_throughput = stream.throughput_mbps();
+        m.stream_throughput_mbps
+            .with_label_values(labels)
+            .set(stream_throughput);
+    }
+
+    // TCP RTT gauge (instantaneous value)
+    if let Some(ref tcp_info) = stats.get_tcp_info() {
+        m.tcp_rtt_microseconds
+            .with_label_values(&[test_id])
+            .set(tcp_info.rtt_us as f64);
+    }
+}
+
+/// Update counters with final test stats. Called only once per test at completion.
+#[cfg(feature = "prometheus")]
+fn update_counters(stats: &TestStats) {
+    let m = &*METRICS;
+    let test_id = &stats.test_id;
+
+    // Aggregate byte counter
+    let total_bytes = stats.total_bytes();
+    m.bytes_total.inc_by(total_bytes as f64);
+
+    // Per-stream counters
     for stream in &stats.streams {
         let stream_id = stream.stream_id.to_string();
         let labels = &[test_id.as_str(), stream_id.as_str()];
@@ -263,23 +296,14 @@ pub fn update_metrics(stats: &TestStats) {
             .with_label_values(labels)
             .inc_by(bytes as f64);
 
-        let stream_throughput = stream.throughput_mbps();
-        m.stream_throughput_mbps
-            .with_label_values(labels)
-            .set(stream_throughput);
-
         let retransmits = stream.retransmits();
         m.stream_retransmits
             .with_label_values(labels)
             .inc_by(retransmits as f64);
     }
 
-    // TCP info (use aggregated/first stream info)
+    // TCP retransmits counter
     if let Some(ref tcp_info) = stats.get_tcp_info() {
-        m.tcp_rtt_microseconds
-            .with_label_values(&[test_id])
-            .set(tcp_info.rtt_us as f64);
-
         m.tcp_retransmits_total
             .with_label_values(&[test_id])
             .inc_by(tcp_info.retransmits as f64);

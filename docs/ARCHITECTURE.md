@@ -81,14 +81,15 @@ src/
 
 ### Control Protocol
 
-The control channel uses length-prefixed JSON messages:
+The control channel uses newline-delimited JSON messages (one JSON object per line):
 
 ```
-┌──────────┬─────────────────────────────────────────┐
-│ 4 bytes  │ JSON payload                            │
-│ (length) │                                         │
-└──────────┴─────────────────────────────────────────┘
+{"Hello":{"version":"0.3.0","capabilities":[]}}\n
+{"TestStart":{"protocol":"tcp","streams":4,...}}\n
 ```
+
+Each message is serialized as compact JSON followed by a newline character.
+The receiver reads line-by-line and deserializes each line as a `ControlMessage`.
 
 Message types (see `protocol.rs`):
 - `Hello` - Version and capability exchange
@@ -219,18 +220,17 @@ pub struct TestResult {
 ```rust
 pub struct StreamStats {
     pub stream_id: u8,
-    pub bytes_transferred: AtomicU64,
-    pub interval_bytes: AtomicU64,
+    pub bytes_sent: AtomicU64,
+    pub bytes_received: AtomicU64,
     pub start_time: Instant,
-    pub last_interval: AtomicU64,
-
-    // TCP-specific
-    pub retransmits: AtomicU32,
-
-    // UDP-specific
-    pub packets_sent: AtomicU64,
-    pub packets_received: AtomicU64,
-    pub jitter_ms: AtomicF64,
+    pub intervals: Mutex<VecDeque<IntervalStats>>,
+    pub retransmits: AtomicU64,
+    pub last_bytes: AtomicU64,
+    pub last_retransmits: AtomicU64,
+    // UDP stats (updated live by receiver)
+    pub udp_jitter_us: AtomicU64,
+    pub udp_lost: AtomicU64,
+    pub last_udp_lost: AtomicU64,
 }
 ```
 

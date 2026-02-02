@@ -53,6 +53,8 @@ pub struct ServerConfig {
     pub address_family: AddressFamily,
     /// Channel to send events to TUI
     pub tui_tx: Option<mpsc::Sender<ServerEvent>>,
+    /// Enable QUIC protocol support (binds additional UDP port)
+    pub enable_quic: bool,
 }
 
 impl Default for ServerConfig {
@@ -69,6 +71,7 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             address_family: AddressFamily::default(),
             tui_tx: None,
+            enable_quic: true,
         }
     }
 }
@@ -109,8 +112,8 @@ impl Server {
         let listener =
             net::create_tcp_listener(self.config.port, self.config.address_family).await?;
 
-        // Create QUIC endpoint on the same port (UDP)
-        let quic_endpoint = {
+        // Create QUIC endpoint on the same port (UDP) - only if enabled
+        let quic_endpoint = if self.config.enable_quic {
             let (cert, key) = quic::generate_self_signed_cert()?;
             let bind_addr: SocketAddr = match self.config.address_family {
                 AddressFamily::V4Only => format!("0.0.0.0:{}", self.config.port).parse()?,
@@ -118,9 +121,12 @@ impl Server {
                     format!("[::]:{}", self.config.port).parse()?
                 }
             };
-            quic::create_server_endpoint(bind_addr, cert, key)?
+            let endpoint = quic::create_server_endpoint(bind_addr, cert, key)?;
+            info!("QUIC endpoint ready on port {}", self.config.port);
+            Some(endpoint)
+        } else {
+            None
         };
-        info!("QUIC endpoint ready on port {}", self.config.port);
 
         // Initialize security context
         let acl = self.config.acl.build()?;
@@ -153,63 +159,65 @@ impl Server {
             limiter.start_cleanup_task();
         }
 
-        // Spawn QUIC acceptor task
-        let quic_security = security.clone();
-        let quic_active_tests = self.active_tests.clone();
-        let quic_max_duration = self.config.max_duration;
-        let quic_rate_limiter = rate_limiter.clone();
-        tokio::spawn(async move {
-            while let Some(incoming) = quic_endpoint.accept().await {
-                let peer_addr = incoming.remote_address();
-                let peer_ip = peer_addr.ip();
+        // Spawn QUIC acceptor task (only if QUIC is enabled)
+        if let Some(quic_endpoint) = quic_endpoint {
+            let quic_security = security.clone();
+            let quic_active_tests = self.active_tests.clone();
+            let quic_max_duration = self.config.max_duration;
+            let quic_rate_limiter = rate_limiter.clone();
+            tokio::spawn(async move {
+                while let Some(incoming) = quic_endpoint.accept().await {
+                    let peer_addr = incoming.remote_address();
+                    let peer_ip = peer_addr.ip();
 
-                // Check ACL
-                if !quic_security.acl.is_allowed(peer_ip) {
-                    warn!("QUIC connection rejected by ACL: {}", peer_addr);
-                    if let Some(tx) = &quic_security.tui_tx {
-                        let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                    // Check ACL
+                    if !quic_security.acl.is_allowed(peer_ip) {
+                        warn!("QUIC connection rejected by ACL: {}", peer_addr);
+                        if let Some(tx) = &quic_security.tui_tx {
+                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                        }
+                        continue;
                     }
-                    continue;
+
+                    // Check rate limit
+                    if let Some(ref limiter) = quic_rate_limiter
+                        && let Err(e) = limiter.check(peer_ip)
+                    {
+                        warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
+                        if let Some(tx) = &quic_security.tui_tx {
+                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                        }
+                        continue;
+                    }
+
+                    info!("QUIC client connected: {}", peer_addr);
+
+                    let security = quic_security.clone();
+                    let active_tests = quic_active_tests.clone();
+                    let rate_limiter = quic_rate_limiter.clone();
+
+                    tokio::spawn(async move {
+                        let result = handle_quic_client(
+                            incoming,
+                            peer_addr,
+                            active_tests,
+                            quic_max_duration,
+                            &security,
+                        )
+                        .await;
+
+                        // Release rate limit slot
+                        if let Some(limiter) = &rate_limiter {
+                            limiter.release(peer_ip);
+                        }
+
+                        if let Err(e) = result {
+                            error!("QUIC client error {}: {}", peer_addr, e);
+                        }
+                    });
                 }
-
-                // Check rate limit
-                if let Some(ref limiter) = quic_rate_limiter
-                    && let Err(e) = limiter.check(peer_ip)
-                {
-                    warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
-                    if let Some(tx) = &quic_security.tui_tx {
-                        let _ = tx.try_send(ServerEvent::ConnectionBlocked);
-                    }
-                    continue;
-                }
-
-                info!("QUIC client connected: {}", peer_addr);
-
-                let security = quic_security.clone();
-                let active_tests = quic_active_tests.clone();
-                let rate_limiter = quic_rate_limiter.clone();
-
-                tokio::spawn(async move {
-                    let result = handle_quic_client(
-                        incoming,
-                        peer_addr,
-                        active_tests,
-                        quic_max_duration,
-                        &security,
-                    )
-                    .await;
-
-                    // Release rate limit slot
-                    if let Some(limiter) = &rate_limiter {
-                        limiter.release(peer_ip);
-                    }
-
-                    if let Err(e) = result {
-                        error!("QUIC client error {}: {}", peer_addr, e);
-                    }
-                });
-            }
-        });
+            });
+        }
 
         // Register mDNS service for discovery
         #[cfg(feature = "discovery")]

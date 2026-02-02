@@ -567,6 +567,7 @@ async fn main() -> Result<()> {
                 rate_limit: rate_limit_config,
                 address_family,
                 tui_tx: None,
+                enable_quic: true, // Enable QUIC by default
             };
 
             if server_tui {

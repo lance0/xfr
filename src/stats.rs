@@ -18,6 +18,10 @@ pub struct StreamStats {
     pub retransmits: AtomicU64,
     pub last_bytes: AtomicU64,
     pub last_retransmits: AtomicU64,
+    // UDP stats (updated live by receiver)
+    pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
+    pub udp_lost: AtomicU64,      // Total lost packets
+    pub last_udp_lost: AtomicU64, // For interval calculation
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +45,9 @@ impl StreamStats {
             retransmits: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
             last_retransmits: AtomicU64::new(0),
+            udp_jitter_us: AtomicU64::new(0),
+            udp_lost: AtomicU64::new(0),
+            last_udp_lost: AtomicU64::new(0),
         }
     }
 
@@ -54,6 +61,21 @@ impl StreamStats {
 
     pub fn add_retransmits(&self, count: u64) {
         self.retransmits.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Update live UDP jitter (in microseconds)
+    pub fn set_udp_jitter_us(&self, jitter_us: u64) {
+        self.udp_jitter_us.store(jitter_us, Ordering::Relaxed);
+    }
+
+    /// Add lost packets to cumulative count
+    pub fn add_udp_lost(&self, count: u64) {
+        self.udp_lost.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Get current jitter in milliseconds
+    pub fn udp_jitter_ms(&self) -> f64 {
+        self.udp_jitter_us.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -100,13 +122,19 @@ impl StreamStats {
             0.0
         };
 
+        // UDP stats for this interval
+        let jitter_ms = self.udp_jitter_ms();
+        let total_lost = self.udp_lost.load(Ordering::Relaxed);
+        let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
+        let interval_lost = total_lost.saturating_sub(last_lost);
+
         let stats = IntervalStats {
             timestamp: now,
             bytes: interval_bytes,
             throughput_mbps,
             retransmits: interval_retransmits,
-            jitter_ms: 0.0,
-            lost: 0,
+            jitter_ms,
+            lost: interval_lost,
         };
 
         let mut intervals = self.intervals.lock();
@@ -124,8 +152,16 @@ impl StreamStats {
             id: self.stream_id,
             bytes: interval_stats.bytes,
             retransmits: Some(interval_stats.retransmits),
-            jitter_ms: None,
-            lost: None,
+            jitter_ms: if interval_stats.jitter_ms > 0.0 {
+                Some(interval_stats.jitter_ms)
+            } else {
+                None
+            },
+            lost: if interval_stats.lost > 0 {
+                Some(interval_stats.lost)
+            } else {
+                None
+            },
             error: None,
         }
     }
@@ -224,13 +260,30 @@ impl TestStats {
         let total_bytes: u64 = intervals.iter().map(|i| i.bytes).sum();
         let total_throughput: f64 = intervals.iter().map(|i| i.throughput_mbps).sum();
         let total_retransmits: u64 = intervals.iter().map(|i| i.retransmits).sum();
+        let total_lost: u64 = intervals.iter().map(|i| i.lost).sum();
+
+        // Average jitter across streams that have jitter data
+        let jitter_values: Vec<f64> = intervals
+            .iter()
+            .filter(|i| i.jitter_ms > 0.0)
+            .map(|i| i.jitter_ms)
+            .collect();
+        let avg_jitter = if jitter_values.is_empty() {
+            None
+        } else {
+            Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
+        };
 
         AggregateInterval {
             bytes: total_bytes,
             throughput_mbps: total_throughput,
             retransmits: Some(total_retransmits),
-            jitter_ms: None,
-            lost: None,
+            jitter_ms: avg_jitter,
+            lost: if total_lost > 0 {
+                Some(total_lost)
+            } else {
+                None
+            },
         }
     }
 

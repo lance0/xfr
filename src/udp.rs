@@ -336,8 +336,18 @@ pub async fn receive_udp(
                         packets_received += 1;
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
+                            let old_lost = packet_tracker.lost.load(Ordering::Relaxed);
                             packet_tracker.record(header.sequence);
-                            jitter_calc.update(header.timestamp_us, recv_time);
+                            let new_lost = packet_tracker.lost.load(Ordering::Relaxed);
+
+                            // Update live stats for interval reporting
+                            let jitter_us = jitter_calc.update(header.timestamp_us, recv_time);
+                            stats.set_udp_jitter_us(jitter_us as u64);
+
+                            // Add any newly detected lost packets
+                            if new_lost > old_lost {
+                                stats.add_udp_lost(new_lost - old_lost);
+                            }
                         }
                     }
                     Err(e) => {

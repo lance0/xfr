@@ -222,12 +222,7 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         filled.saturating_sub(1)
     };
 
-    let progress_bar = format!(
-        "[{}{}{}]",
-        "=".repeat(fill_chars),
-        arrow,
-        "-".repeat(empty)
-    );
+    let progress_bar = format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty));
 
     let transfer_line = Line::from(vec![
         Span::styled("  Transfer: ", Style::default().fg(theme.text_dim)),
