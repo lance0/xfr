@@ -119,8 +119,8 @@ xfr host --json --no-tui
 
 ### Use nperf when:
 
-- You specifically need its QUIC implementation
 - Working in environments where nperf is already deployed
+- You need nperf-specific features
 
 ## Performance Notes
 

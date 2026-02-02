@@ -60,8 +60,12 @@ fn init_logging(
                 std::fs::create_dir_all(parent)?;
             }
             let file_appender = tracing_appender::rolling::daily(
-                expanded_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
-                expanded_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
+                expanded_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+                expanded_path
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
             );
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             let file_layer = tracing_subscriber::fmt::layer()
@@ -81,8 +85,12 @@ fn init_logging(
                 std::fs::create_dir_all(parent)?;
             }
             let file_appender = tracing_appender::rolling::daily(
-                expanded_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
-                expanded_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
+                expanded_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+                expanded_path
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
             );
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             let file_layer = tracing_subscriber::fmt::layer()

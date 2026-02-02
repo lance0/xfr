@@ -94,13 +94,30 @@ fn build_title(app: &App, theme: &Theme) -> Line<'static> {
     };
 
     Line::from(vec![
-        Span::styled(" xfr ", Style::default().fg(theme.header).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " xfr ",
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("── ", Style::default().fg(theme.border)),
-        Span::styled(format!("{}:{} ", app.host, app.port), Style::default().fg(theme.text)),
+        Span::styled(
+            format!("{}:{} ", app.host, app.port),
+            Style::default().fg(theme.text),
+        ),
         Span::styled("── ", Style::default().fg(theme.border)),
-        Span::styled(format!("{}", app.protocol), Style::default().fg(theme.accent)),
-        Span::styled(format!("×{} ", app.streams_count), Style::default().fg(theme.text_dim)),
-        Span::styled(format!("{} ", app.direction), Style::default().fg(theme.text_dim)),
+        Span::styled(
+            format!("{}", app.protocol),
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled(
+            format!("×{} ", app.streams_count),
+            Style::default().fg(theme.text_dim),
+        ),
+        Span::styled(
+            format!("{} ", app.direction),
+            Style::default().fg(theme.text_dim),
+        ),
         Span::styled("── ", Style::default().fg(theme.border)),
         Span::styled(
             format!("{}s/{}s ", app.elapsed.as_secs(), app.duration.as_secs()),
@@ -122,8 +139,7 @@ fn draw_main(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     match app.state {
         AppState::Connecting => {
-            let msg = Paragraph::new("Connecting...")
-                .style(Style::default().fg(theme.text_dim));
+            let msg = Paragraph::new("Connecting...").style(Style::default().fg(theme.text_dim));
             frame.render_widget(msg, inner);
         }
         AppState::Error => {
@@ -245,9 +261,15 @@ fn draw_stats_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         let loss_col = loss_color(app.udp_lost_percent, theme);
         Line::from(vec![
             Span::styled("Transfer ", Style::default().fg(theme.text_dim)),
-            Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            Span::styled(
+                bytes_to_human(app.total_bytes),
+                Style::default().fg(theme.text),
+            ),
             Span::styled("  Jitter ", Style::default().fg(theme.text_dim)),
-            Span::styled(format!("{:.2}ms", app.udp_jitter_ms), Style::default().fg(jitter_col)),
+            Span::styled(
+                format!("{:.2}ms", app.udp_jitter_ms),
+                Style::default().fg(jitter_col),
+            ),
             Span::styled("  Loss ", Style::default().fg(theme.text_dim)),
             Span::styled(
                 format!("{:.1}%", app.udp_lost_percent),
@@ -260,13 +282,22 @@ fn draw_stats_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         let rtt_col = rtt_color(rtt_ms, theme);
         Line::from(vec![
             Span::styled("Transfer ", Style::default().fg(theme.text_dim)),
-            Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+            Span::styled(
+                bytes_to_human(app.total_bytes),
+                Style::default().fg(theme.text),
+            ),
             Span::styled("  Retrans ", Style::default().fg(theme.text_dim)),
-            Span::styled(format!("{}", app.total_retransmits), Style::default().fg(retransmit_col)),
+            Span::styled(
+                format!("{}", app.total_retransmits),
+                Style::default().fg(retransmit_col),
+            ),
             Span::styled("  RTT ", Style::default().fg(theme.text_dim)),
             Span::styled(format!("{:.2}ms", rtt_ms), Style::default().fg(rtt_col)),
             Span::styled("  Cwnd ", Style::default().fg(theme.text_dim)),
-            Span::styled(format!("{}KB", app.cwnd / 1024), Style::default().fg(theme.text)),
+            Span::styled(
+                format!("{}KB", app.cwnd / 1024),
+                Style::default().fg(theme.text),
+            ),
         ])
     };
     frame.render_widget(Paragraph::new(stats_line), area);
@@ -293,12 +324,12 @@ fn draw_completion_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
     let mut lines = vec![
         Line::from(""),
         // Big throughput number centered
-        Line::from(vec![
-            Span::styled(
-                format!("       {}       ", mbps_to_human(avg_throughput)),
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("       {}       ", mbps_to_human(avg_throughput)),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
     ];
 
@@ -308,19 +339,31 @@ fn draw_completion_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
         lines.extend(vec![
             Line::from(vec![
                 Span::styled("  Transfer     ", Style::default().fg(theme.text_dim)),
-                Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+                Span::styled(
+                    bytes_to_human(app.total_bytes),
+                    Style::default().fg(theme.text),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  Duration     ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{:.2}s", app.duration.as_secs_f64()), Style::default().fg(theme.text)),
+                Span::styled(
+                    format!("{:.2}s", app.duration.as_secs_f64()),
+                    Style::default().fg(theme.text),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  Jitter       ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{:.2}ms", app.udp_jitter_ms), Style::default().fg(jitter_col)),
+                Span::styled(
+                    format!("{:.2}ms", app.udp_jitter_ms),
+                    Style::default().fg(jitter_col),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  Loss         ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{:.2}%", app.udp_lost_percent), Style::default().fg(loss_col)),
+                Span::styled(
+                    format!("{:.2}%", app.udp_lost_percent),
+                    Style::default().fg(loss_col),
+                ),
             ]),
         ]);
     } else {
@@ -330,15 +373,24 @@ fn draw_completion_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
         lines.extend(vec![
             Line::from(vec![
                 Span::styled("  Transfer     ", Style::default().fg(theme.text_dim)),
-                Span::styled(bytes_to_human(app.total_bytes), Style::default().fg(theme.text)),
+                Span::styled(
+                    bytes_to_human(app.total_bytes),
+                    Style::default().fg(theme.text),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  Duration     ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{:.2}s", app.duration.as_secs_f64()), Style::default().fg(theme.text)),
+                Span::styled(
+                    format!("{:.2}s", app.duration.as_secs_f64()),
+                    Style::default().fg(theme.text),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  Retransmits  ", Style::default().fg(theme.text_dim)),
-                Span::styled(format!("{}", app.total_retransmits), Style::default().fg(retransmit_col)),
+                Span::styled(
+                    format!("{}", app.total_retransmits),
+                    Style::default().fg(retransmit_col),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  RTT          ", Style::default().fg(theme.text_dim)),
@@ -378,8 +430,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         _ => "q quit | p pause | t theme | j json | ? help",
     };
 
-    let status = Paragraph::new(status_text)
-        .style(Style::default().fg(theme.text_dim));
+    let status = Paragraph::new(status_text).style(Style::default().fg(theme.text_dim));
     frame.render_widget(status, area);
 }
 
@@ -423,13 +474,12 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         ]),
     ];
 
-    let help = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .title(" Keybindings ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
-        );
+    let help = Paragraph::new(help_text).block(
+        Block::default()
+            .title(" Keybindings ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
 
     frame.render_widget(Clear, help_area);
     frame.render_widget(help, help_area);
