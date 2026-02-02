@@ -5,8 +5,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 
+use crate::stats::mbps_to_human;
+
+// Use 8-level block characters for sparklines
 const SPARKLINE_CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// A sparkline widget that can render multiple rows for taller graphs
 pub struct Sparkline<'a> {
     data: &'a [f64],
     max: Option<f64>,
@@ -45,26 +49,37 @@ impl Widget for Sparkline<'_> {
 
         let data_len = self.data.len();
         let width = area.width as usize;
+        let height = area.height as usize;
 
         // Take the last `width` values
         let start = data_len.saturating_sub(width);
         let visible_data = &self.data[start..];
 
+        // For multi-row sparklines, we divide the value range across rows
+        // Bottom row shows lowest portion, top row shows highest
         for (i, &value) in visible_data.iter().enumerate() {
             let normalized = (value / max).clamp(0.0, 1.0);
-            let char_index = ((normalized * 7.0) as usize).min(7);
-            let ch = SPARKLINE_CHARS[char_index];
+
+            // Calculate how many "eighth-blocks" this value represents across all rows
+            let total_eighths = (normalized * (height * 8) as f64) as usize;
 
             let x = area.x + i as u16;
-            let y = area.y;
 
-            if x < area.x + area.width {
-                buf[(x, y)].set_char(ch).set_style(self.style);
+            // Render from bottom to top
+            for row in 0..height {
+                let y = area.y + (height - 1 - row) as u16;
+                let eighths_for_row = total_eighths.saturating_sub(row * 8).min(8);
+
+                if eighths_for_row > 0 {
+                    let ch = SPARKLINE_CHARS[eighths_for_row - 1];
+                    buf[(x, y)].set_char(ch).set_style(self.style);
+                }
             }
         }
     }
 }
 
+/// A simple progress bar using block characters
 pub struct ProgressBar {
     pub progress: f64, // 0.0 to 1.0
     pub style: Style,
@@ -80,6 +95,7 @@ impl ProgressBar {
         }
     }
 
+    #[allow(dead_code)]
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
         self
@@ -100,7 +116,7 @@ impl Widget for ProgressBar {
         let filled_width = (self.progress * area.width as f64) as u16;
 
         for x in 0..area.width {
-            let ch = if x < filled_width { '█' } else { '░' };
+            let ch = if x < filled_width { '━' } else { '─' };
             let style = if x < filled_width {
                 self.filled_style
             } else {
@@ -111,6 +127,7 @@ impl Widget for ProgressBar {
     }
 }
 
+/// A bar showing per-stream throughput with retransmit count
 pub struct StreamBar {
     pub stream_id: u8,
     pub throughput_mbps: f64,
@@ -149,30 +166,32 @@ impl Widget for StreamBar {
             return;
         }
 
-        // Format: [0] ████████████░░░░  236 Mbps  rtx: 2
+        // Format: [0] ████████████────  35.2 Gbps  rtx: 0
         let label = format!("[{}] ", self.stream_id);
-        let stats = format!(
-            " {:.0} Mbps  rtx: {}",
-            self.throughput_mbps, self.retransmits
-        );
+        let throughput_str = mbps_to_human(self.throughput_mbps);
+        let stats = if self.retransmits > 0 {
+            format!(" {}  rtx: {}", throughput_str, self.retransmits)
+        } else {
+            format!(" {}", throughput_str)
+        };
 
         let label_width = label.len() as u16;
         let stats_width = stats.len() as u16;
         let bar_width = area.width.saturating_sub(label_width + stats_width);
 
         // Render label
-        buf.set_string(area.x, area.y, &label, Style::default().fg(self.bar_color));
+        buf.set_string(area.x, area.y, &label, Style::default().fg(Color::DarkGray));
 
-        // Render bar
+        // Render bar using line characters for cleaner look
         let progress = if self.max_throughput > 0.0 {
-            self.throughput_mbps / self.max_throughput
+            (self.throughput_mbps / self.max_throughput).clamp(0.0, 1.0)
         } else {
             0.0
         };
         let filled = (progress * bar_width as f64) as u16;
 
         for x in 0..bar_width {
-            let ch = if x < filled { '█' } else { '░' };
+            let ch = if x < filled { '━' } else { '─' };
             let style = if x < filled {
                 Style::default().fg(self.bar_color)
             } else {

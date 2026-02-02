@@ -163,7 +163,7 @@ fn draw_running_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Big throughput number + sparkline
+            Constraint::Length(5), // Big throughput number + taller sparkline
             Constraint::Length(1), // Progress bar
             Constraint::Length(1), // Spacer
             Constraint::Min(2),    // Streams
@@ -191,13 +191,14 @@ fn draw_throughput_section(frame: &mut Frame, app: &App, theme: &Theme, area: Re
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(20), // Throughput value
+            Constraint::Length(16), // Throughput value
             Constraint::Min(10),    // Sparkline
         ])
         .split(area);
 
-    // Big throughput number
+    // Big throughput number with peak value
     let throughput_str = mbps_to_human(app.current_throughput_mbps);
+    let peak_str = mbps_to_human(app.max_throughput());
     let throughput = Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -206,16 +207,20 @@ fn draw_throughput_section(frame: &mut Frame, app: &App, theme: &Theme, area: Re
                 .fg(theme.graph_primary)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            format!("peak {}", peak_str),
+            Style::default().fg(theme.text_dim),
+        )),
     ]);
     frame.render_widget(throughput, chunks[0]);
 
-    // Sparkline
+    // Taller sparkline (4 rows)
     if !app.throughput_history.is_empty() {
         let sparkline_area = Rect {
             x: chunks[1].x,
             y: chunks[1].y + 1,
             width: chunks[1].width,
-            height: 2,
+            height: 4,
         };
         let data: Vec<f64> = app.throughput_history.iter().cloned().collect();
         let sparkline = Sparkline::new(&data)
