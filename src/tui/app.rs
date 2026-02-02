@@ -9,6 +9,7 @@ use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
 use super::theme::Theme;
 
 const SPARKLINE_HISTORY: usize = 60;
+const LOG_HISTORY: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
@@ -24,6 +25,12 @@ pub struct StreamData {
     pub bytes: u64,
     pub throughput_mbps: f64,
     pub retransmits: u64,
+}
+
+#[derive(Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub message: String,
 }
 
 pub struct App {
@@ -60,6 +67,12 @@ pub struct App {
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
     pub theme_index: usize,
+
+    // History log
+    pub history: VecDeque<LogEntry>,
+    pub average_throughput_mbps: f64,
+    throughput_sum: f64,
+    throughput_count: u64,
 }
 
 impl App {
@@ -115,6 +128,35 @@ impl App {
             timestamp_format,
             theme,
             theme_index: 0,
+
+            history: VecDeque::with_capacity(LOG_HISTORY),
+            average_throughput_mbps: 0.0,
+            throughput_sum: 0.0,
+            throughput_count: 0,
+        }
+    }
+
+    /// Add a log entry with current timestamp
+    pub fn log(&mut self, message: impl Into<String>) {
+        let timestamp = if let Some(start) = self.start_time {
+            let elapsed = start.elapsed();
+            format!(
+                "{:02}:{:02}:{:02}",
+                elapsed.as_secs() / 3600,
+                (elapsed.as_secs() % 3600) / 60,
+                elapsed.as_secs() % 60
+            )
+        } else {
+            "00:00:00".to_string()
+        };
+
+        self.history.push_front(LogEntry {
+            timestamp,
+            message: message.into(),
+        });
+
+        if self.history.len() > LOG_HISTORY {
+            self.history.pop_back();
         }
     }
 
@@ -168,6 +210,7 @@ impl App {
     pub fn on_connected(&mut self) {
         self.state = AppState::Running;
         self.start_time = Some(Instant::now());
+        self.log("Connected to server.");
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
@@ -213,6 +256,13 @@ impl App {
             self.udp_jitter_ms = total_jitter / jitter_count as f64;
         }
         self.udp_packets_lost = total_lost;
+
+        // Track average throughput
+        if progress.throughput_mbps > 0.0 {
+            self.throughput_sum += progress.throughput_mbps;
+            self.throughput_count += 1;
+            self.average_throughput_mbps = self.throughput_sum / self.throughput_count as f64;
+        }
     }
 
     pub fn on_result(&mut self, result: TestResult) {
@@ -230,10 +280,15 @@ impl App {
             self.udp_packets_lost = udp_stats.lost;
         }
         self.result = Some(result);
+        self.log(format!(
+            "Test completed. Avg: {:.0} Mbps.",
+            self.average_throughput_mbps
+        ));
     }
 
     pub fn on_error(&mut self, error: String) {
         self.state = AppState::Error;
+        self.log(format!("Error: {}", &error));
         self.error = Some(error);
     }
 
