@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::app::{App, AppState};
+use super::settings::SettingsCategory;
 use super::theme::Theme;
 use super::widgets::Sparkline;
 use crate::stats::{bytes_to_human, mbps_to_human};
@@ -53,6 +54,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if app.show_help {
         draw_help_overlay(frame, theme, size);
+    }
+
+    if app.settings.visible {
+        draw_settings_modal(frame, app, theme, size);
     }
 }
 
@@ -366,8 +371,8 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("] Quit | [", Style::default().fg(theme.text_dim)),
         Span::styled("p", Style::default().fg(theme.accent)),
         Span::styled("] Pause | [", Style::default().fg(theme.text_dim)),
-        Span::styled("t", Style::default().fg(theme.accent)),
-        Span::styled("] Theme | [", Style::default().fg(theme.text_dim)),
+        Span::styled("s", Style::default().fg(theme.accent)),
+        Span::styled("] Settings | [", Style::default().fg(theme.text_dim)),
         Span::styled("?", Style::default().fg(theme.accent)),
         Span::styled("] Help | Status: ", Style::default().fg(theme.text_dim)),
         Span::styled(status_text, Style::default().fg(status_color)),
@@ -378,7 +383,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
     let help_width = 36;
-    let help_height = 12;
+    let help_height = 13;
     let help_area = Rect {
         x: (area.width.saturating_sub(help_width)) / 2,
         y: (area.height.saturating_sub(help_height)) / 2,
@@ -395,6 +400,10 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(vec![
             Span::styled("  p", Style::default().fg(theme.accent)),
             Span::styled("  pause/resume", Style::default().fg(theme.text_dim)),
+        ]),
+        Line::from(vec![
+            Span::styled("  s", Style::default().fg(theme.accent)),
+            Span::styled("  settings", Style::default().fg(theme.text_dim)),
         ]),
         Line::from(vec![
             Span::styled("  t", Style::default().fg(theme.accent)),
@@ -425,4 +434,245 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
 
     frame.render_widget(Clear, help_area);
     frame.render_widget(help, help_area);
+}
+
+fn draw_settings_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let settings = &app.settings;
+
+    // Modal dimensions
+    let modal_width = 50u16;
+    let modal_height = 18u16;
+    let modal_area = Rect {
+        x: area.width.saturating_sub(modal_width) / 2,
+        y: area.height.saturating_sub(modal_height) / 2,
+        width: modal_width.min(area.width),
+        height: modal_height.min(area.height),
+    };
+
+    // Clear background and draw modal border
+    let block = Block::default()
+        .title(Span::styled(
+            " Settings ",
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(Clear, modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Layout: tabs, content, buttons, help
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Tabs
+            Constraint::Min(8),    // Content
+            Constraint::Length(2), // Buttons
+            Constraint::Length(1), // Help line
+        ])
+        .split(inner);
+
+    // Draw category tabs
+    draw_settings_tabs(frame, settings, theme, chunks[0]);
+
+    // Draw content based on category
+    match settings.category {
+        SettingsCategory::Display => draw_display_settings(frame, app, settings, theme, chunks[1]),
+        SettingsCategory::Test => draw_test_settings(frame, settings, theme, chunks[1]),
+    }
+
+    // Draw buttons
+    draw_settings_buttons(frame, settings, theme, chunks[2]);
+
+    // Draw help line
+    let help_line = Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(theme.accent)),
+        Span::styled("/", Style::default().fg(theme.text_dim)),
+        Span::styled("jk", Style::default().fg(theme.accent)),
+        Span::styled(" Navigate  ", Style::default().fg(theme.text_dim)),
+        Span::styled("←→", Style::default().fg(theme.accent)),
+        Span::styled("/", Style::default().fg(theme.text_dim)),
+        Span::styled("hl", Style::default().fg(theme.accent)),
+        Span::styled(" Change  ", Style::default().fg(theme.text_dim)),
+        Span::styled("Tab", Style::default().fg(theme.accent)),
+        Span::styled(" Switch  ", Style::default().fg(theme.text_dim)),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::styled(" Close", Style::default().fg(theme.text_dim)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(help_line).alignment(Alignment::Center),
+        chunks[3],
+    );
+}
+
+fn draw_settings_tabs(
+    frame: &mut Frame,
+    settings: &super::settings::SettingsState,
+    theme: &Theme,
+    area: Rect,
+) {
+    let display_style = if settings.category == SettingsCategory::Display {
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let test_style = if settings.category == SettingsCategory::Test {
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let tabs = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("[", Style::default().fg(theme.border)),
+        Span::styled("Display", display_style),
+        Span::styled("]", Style::default().fg(theme.border)),
+        Span::raw("  "),
+        Span::styled("[", Style::default().fg(theme.border)),
+        Span::styled("Test", test_style),
+        Span::styled("]", Style::default().fg(theme.border)),
+    ]);
+
+    frame.render_widget(Paragraph::new(tabs), area);
+}
+
+fn draw_display_settings(
+    frame: &mut Frame,
+    _app: &App,
+    settings: &super::settings::SettingsState,
+    theme: &Theme,
+    area: Rect,
+) {
+    let theme_list = super::theme::Theme::list();
+    let theme_name = theme_list
+        .get(settings.theme_index)
+        .copied()
+        .unwrap_or("default");
+
+    let items: Vec<(&str, String)> = vec![
+        ("Theme:", theme_name.to_string()),
+        ("Timestamp:", settings.timestamp_format.as_str().to_string()),
+        ("Units:", settings.units.as_str().to_string()),
+    ];
+
+    draw_setting_items(
+        frame,
+        &items,
+        settings.selected_index,
+        settings.button_focused,
+        theme,
+        area,
+    );
+}
+
+fn draw_test_settings(
+    frame: &mut Frame,
+    settings: &super::settings::SettingsState,
+    theme: &Theme,
+    area: Rect,
+) {
+    let items: Vec<(&str, String)> = vec![
+        ("Streams:", format!("{}", settings.streams)),
+        ("Protocol:", format!("{}", settings.protocol)),
+        ("Duration:", format!("{}s", settings.duration_secs)),
+        ("Direction:", format!("{:?}", settings.direction)),
+    ];
+
+    draw_setting_items(
+        frame,
+        &items,
+        settings.selected_index,
+        settings.button_focused,
+        theme,
+        area,
+    );
+}
+
+fn draw_setting_items(
+    frame: &mut Frame,
+    items: &[(&str, String)],
+    selected_index: usize,
+    button_focused: bool,
+    theme: &Theme,
+    area: Rect,
+) {
+    let mut lines = Vec::new();
+    lines.push(Line::from("")); // Top padding
+
+    for (i, (label, value)) in items.iter().enumerate() {
+        let is_selected = !button_focused && i == selected_index;
+
+        let prefix = if is_selected { "▶ " } else { "  " };
+        let label_style = Style::default().fg(theme.text_dim);
+        let value_style = if is_selected {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+
+        // Add arrows for selected item
+        let value_display = if is_selected {
+            format!("◀ {} ▶", value)
+        } else {
+            value.clone()
+        };
+
+        lines.push(Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(format!("{:<14}", label), label_style),
+            Span::styled(value_display, value_style),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_settings_buttons(
+    frame: &mut Frame,
+    settings: &super::settings::SettingsState,
+    theme: &Theme,
+    area: Rect,
+) {
+    let show_apply = settings.test_params_dirty();
+
+    let apply_style = if settings.button_focused && settings.button_index == 0 {
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let close_style = if settings.button_focused && settings.button_index == 1 {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let mut buttons = vec![Span::raw("          ")]; // Left padding
+
+    if show_apply {
+        buttons.push(Span::styled("[Apply & Restart]", apply_style));
+        buttons.push(Span::raw("  "));
+    }
+
+    buttons.push(Span::styled("[Close]", close_style));
+
+    let button_line = Line::from(buttons);
+    frame.render_widget(
+        Paragraph::new(button_line).alignment(Alignment::Center),
+        area,
+    );
 }

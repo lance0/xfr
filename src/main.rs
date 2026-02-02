@@ -36,6 +36,7 @@ struct OutputOptions {
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
 use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
+use xfr::tui::settings::SettingsAction;
 use xfr::tui::{App, draw};
 
 /// Initialize logging with optional file output
@@ -936,6 +937,51 @@ async fn run_tui_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // Settings modal takes priority when visible
+            if app.settings.visible {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('s') => {
+                        app.settings.close();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.settings.move_up();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.settings.move_down();
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        app.settings.value_prev();
+                        // Apply theme change immediately
+                        app.set_theme_index(app.settings.theme_index);
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        app.settings.value_next();
+                        // Apply theme change immediately
+                        app.set_theme_index(app.settings.theme_index);
+                    }
+                    KeyCode::Tab => {
+                        app.settings.switch_tab();
+                    }
+                    KeyCode::Enter => {
+                        let action = app.settings.on_enter();
+                        match action {
+                            SettingsAction::Restart => {
+                                // Cancel current test and signal restart
+                                let _ = client.cancel();
+                                prefs.theme = Some(app.theme_name().to_string());
+                                // TODO: Return restart signal with new params
+                                // For now, just close - restart requires refactoring
+                                app.log("Settings changed. Restart not yet implemented.");
+                            }
+                            SettingsAction::Close => {}
+                            SettingsAction::None => {}
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Char('q') => {
                     // Cancel the test on server before exiting
@@ -948,6 +994,9 @@ async fn run_tui_loop(
                 }
                 KeyCode::Char('t') => {
                     app.cycle_theme();
+                }
+                KeyCode::Char('s') => {
+                    app.settings.toggle();
                 }
                 KeyCode::Char('?') | KeyCode::F(1) => {
                     app.toggle_help();
@@ -983,10 +1032,43 @@ async fn run_tui_loop(
 
                     // Wait for quit
                     loop {
+                        terminal.draw(|f| draw(f, &app))?;
+
                         if event::poll(Duration::from_millis(100))?
                             && let Event::Key(key) = event::read()?
                             && key.kind == KeyEventKind::Press
                         {
+                            // Settings modal handling
+                            if app.settings.visible {
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('s') => {
+                                        app.settings.close();
+                                    }
+                                    KeyCode::Up | KeyCode::Char('k') => {
+                                        app.settings.move_up();
+                                    }
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        app.settings.move_down();
+                                    }
+                                    KeyCode::Left | KeyCode::Char('h') => {
+                                        app.settings.value_prev();
+                                        app.set_theme_index(app.settings.theme_index);
+                                    }
+                                    KeyCode::Right | KeyCode::Char('l') => {
+                                        app.settings.value_next();
+                                        app.set_theme_index(app.settings.theme_index);
+                                    }
+                                    KeyCode::Tab => {
+                                        app.settings.switch_tab();
+                                    }
+                                    KeyCode::Enter => {
+                                        let _ = app.settings.on_enter();
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => {
                                     prefs.theme = Some(app.theme_name().to_string());
@@ -994,12 +1076,13 @@ async fn run_tui_loop(
                                 }
                                 KeyCode::Char('t') => {
                                     app.cycle_theme();
-                                    terminal.draw(|f| draw(f, &app))?;
+                                }
+                                KeyCode::Char('s') => {
+                                    app.settings.toggle();
                                 }
                                 KeyCode::Char('j') => {
                                     print_json_on_exit = true;
                                     app.log("JSON output queued for display on exit.");
-                                    terminal.draw(|f| draw(f, &app))?;
                                 }
                                 _ => {}
                             }

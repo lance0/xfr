@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::client::TestProgress;
 use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
 
+use super::settings::SettingsState;
 use super::theme::Theme;
 
 const SPARKLINE_HISTORY: usize = 60;
@@ -68,6 +69,9 @@ pub struct App {
     pub theme: Theme,
     pub theme_index: usize,
 
+    // Settings modal state
+    pub settings: SettingsState,
+
     // History log
     pub history: VecDeque<LogEntry>,
     pub average_throughput_mbps: f64,
@@ -128,6 +132,8 @@ impl App {
             timestamp_format,
             theme,
             theme_index: 0,
+
+            settings: SettingsState::new(0, streams, protocol, duration, direction),
 
             history: VecDeque::with_capacity(LOG_HISTORY),
             average_throughput_mbps: 0.0,
@@ -192,6 +198,7 @@ impl App {
             theme,
         );
         app.theme_index = theme_index;
+        app.settings.theme_index = theme_index;
         app
     }
 
@@ -200,6 +207,17 @@ impl App {
         let theme_list = Theme::list();
         self.theme_index = (self.theme_index + 1) % theme_list.len();
         self.theme = Theme::by_name(theme_list[self.theme_index]);
+        self.settings.theme_index = self.theme_index;
+    }
+
+    /// Set theme by index (from settings modal)
+    pub fn set_theme_index(&mut self, index: usize) {
+        let theme_list = Theme::list();
+        if index < theme_list.len() {
+            self.theme_index = index;
+            self.theme = Theme::by_name(theme_list[index]);
+            self.settings.theme_index = index;
+        }
     }
 
     /// Get current theme name

@@ -207,6 +207,7 @@ xfr discover --timeout 10s   # Extended search
 |-----|--------|
 | `q` | Quit (cancels test) |
 | `p` | Pause/Resume display |
+| `s` | Settings modal |
 | `t` | Cycle color theme |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |

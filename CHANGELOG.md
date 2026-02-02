@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Settings modal** (`s` key) - adjust display and test settings on the fly:
+  - Display tab: Theme, Timestamp format, Units (auto-persist)
+  - Test tab: Streams, Protocol, Duration, Direction (session-only)
+  - Vim-style navigation (j/k/h/l) and arrow keys supported
+  - Tab key switches between categories
 - **QUIC transport** (`--quic`) via quinn crate - built-in TLS 1.3 encryption, stream multiplexing
 - **TUI visual overhaul** - cleaner design inspired by ttl:
   - Styled title bar with status indicators (●, ⏸, ✓, ✗)
