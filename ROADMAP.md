@@ -117,6 +117,8 @@
 
 *Target: Saturate 10G home lab and 25G data center links.*
 
+*Current limitation: UDP pacing tops out around 2 Gbps due to per-packet syscall overhead. TCP achieves 35+ Gbps on localhost.*
+
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **CPU affinity options** (`--affinity`) - pin to specific cores
