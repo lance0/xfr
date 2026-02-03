@@ -121,7 +121,7 @@
 
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
-- [ ] **CPU affinity options** (`--affinity`) - pin to specific cores
+- [ ] **CPU affinity options** (`--affinity`) - pin streams to specific cores, reduces page faults and context switches (rperf has this)
 - [ ] **Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed
 
 ---
