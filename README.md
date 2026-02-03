@@ -298,7 +298,8 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration |
 | `--udp` | `-u` | false | UDP mode |
-| `--bitrate` | `-b` | unlimited | Target bitrate (e.g., 1G, 100M) |
+| `--quic` | `-Q` | false | QUIC mode (encrypted) |
+| `--bitrate` | `-b` | unlimited | Target bitrate for UDP (e.g., 1G, 100M) |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

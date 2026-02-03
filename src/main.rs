@@ -100,7 +100,8 @@ fn init_logging(
                 .with_ansi(false);
             let console_layer = tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .without_time();
+                .without_time()
+                .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(console_layer)
@@ -113,10 +114,11 @@ fn init_logging(
             Ok(None)
         }
         (None, false) => {
-            // Normal mode: console logging only
+            // Normal mode: console logging only (to stderr)
             let console_layer = tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .without_time();
+                .without_time()
+                .with_writer(std::io::stderr);
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(console_layer)
@@ -164,10 +166,10 @@ struct Cli {
     udp: bool,
 
     /// QUIC mode (encrypted, multiplexed streams)
-    #[arg(long)]
+    #[arg(short = 'Q', long)]
     quic: bool,
 
-    /// Target bitrate (e.g., 1G, 100M)
+    /// Target bitrate for UDP (e.g., 1G, 100M). TCP runs at full speed.
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
     bitrate: Option<u64>,
 

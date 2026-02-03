@@ -1410,46 +1410,64 @@ async fn spawn_udp_handlers(
                     }
                 }
                 Direction::Download => {
-                    // Server sends UDP at per-stream rate
-                    let _ = udp::send_udp_paced(
-                        socket,
-                        per_stream_bitrate,
-                        duration,
-                        stream_stats,
-                        cancel,
-                    )
-                    .await;
+                    // Wait for client's hello packet to learn their address
+                    match udp::wait_for_client(&socket, Duration::from_secs(10)).await {
+                        Ok(client_addr) => {
+                            // Server sends UDP at per-stream rate to client
+                            let _ = udp::send_udp_paced(
+                                socket,
+                                Some(client_addr),
+                                per_stream_bitrate,
+                                duration,
+                                stream_stats,
+                                cancel,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            warn!("UDP reverse: failed to get client address: {}", e);
+                        }
+                    }
                 }
                 Direction::Bidir => {
-                    // UDP can send/receive concurrently on same socket
-                    let send_socket = socket.clone();
-                    let recv_socket = socket;
-                    let send_stats = stream_stats.clone();
-                    let recv_stats = stream_stats;
-                    let send_cancel = cancel.clone();
-                    let recv_cancel = cancel;
-                    let test_stats_copy = test_stats.clone();
+                    // Wait for client's first packet to learn their address
+                    match udp::wait_for_client(&socket, Duration::from_secs(10)).await {
+                        Ok(client_addr) => {
+                            // UDP can send/receive concurrently on same socket
+                            let send_socket = socket.clone();
+                            let recv_socket = socket;
+                            let send_stats = stream_stats.clone();
+                            let recv_stats = stream_stats;
+                            let send_cancel = cancel.clone();
+                            let recv_cancel = cancel;
+                            let test_stats_copy = test_stats.clone();
 
-                    let send_handle = tokio::spawn(async move {
-                        let _ = udp::send_udp_paced(
-                            send_socket,
-                            per_stream_bitrate,
-                            duration,
-                            send_stats,
-                            send_cancel,
-                        )
-                        .await;
-                    });
+                            let send_handle = tokio::spawn(async move {
+                                let _ = udp::send_udp_paced(
+                                    send_socket,
+                                    Some(client_addr),
+                                    per_stream_bitrate,
+                                    duration,
+                                    send_stats,
+                                    send_cancel,
+                                )
+                                .await;
+                            });
 
-                    let recv_handle = tokio::spawn(async move {
-                        if let Ok((udp_stats, _bytes)) =
-                            udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
-                        {
-                            test_stats_copy.add_udp_stats(udp_stats);
+                            let recv_handle = tokio::spawn(async move {
+                                if let Ok((udp_stats, _bytes)) =
+                                    udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
+                                {
+                                    test_stats_copy.add_udp_stats(udp_stats);
+                                }
+                            });
+
+                            let _ = tokio::join!(send_handle, recv_handle);
                         }
-                    });
-
-                    let _ = tokio::join!(send_handle, recv_handle);
+                        Err(e) => {
+                            warn!("UDP bidir: failed to get client address: {}", e);
+                        }
+                    }
                 }
             }
         });

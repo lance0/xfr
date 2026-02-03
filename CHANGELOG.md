@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `-Q` short flag for `--quic` mode (uppercase to distinguish from `-q` quiet)
+
+### Changed
+- `-b/--bitrate` help text clarifies it only applies to UDP
+- Log messages now go to stderr instead of stdout (allows clean JSON/CSV piping)
+
+### Fixed
+- UDP reverse mode (`-u -R`) now works - server learns client address before sending
+- UDP bidirectional mode on server now waits for client before sending
+
 ## [0.4.0] - 2026-02-02
 
 ### Added

@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Maximum control message line length to prevent memory DoS
@@ -90,6 +90,11 @@ impl Client {
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
+
+        // Warn if bitrate limit is set for TCP (only UDP supports pacing)
+        if self.config.protocol == Protocol::Tcp && self.config.bitrate.is_some() {
+            warn!("Bitrate limit (-b) only works for UDP; TCP will run at full speed");
+        }
 
         // Use QUIC transport if selected
         if self.config.protocol == Protocol::Quic {
@@ -469,6 +474,7 @@ impl Client {
                     Direction::Upload => {
                         if let Err(e) = udp::send_udp_paced(
                             socket,
+                            None, // Connected socket, no target needed
                             stream_bitrate,
                             duration,
                             stream_stats,
@@ -480,6 +486,10 @@ impl Client {
                         }
                     }
                     Direction::Download => {
+                        // Send a "hello" packet so server learns our address
+                        if let Err(e) = socket.send(&[0u8; 1]).await {
+                            error!("Failed to send UDP hello: {}", e);
+                        }
                         if let Err(e) = udp::receive_udp(socket, stream_stats, cancel).await {
                             error!("UDP receive error: {}", e);
                         }
@@ -496,6 +506,7 @@ impl Client {
                         let send_handle = tokio::spawn(async move {
                             if let Err(e) = udp::send_udp_paced(
                                 send_socket,
+                                None, // Connected socket, no target needed
                                 stream_bitrate,
                                 duration,
                                 send_stats,

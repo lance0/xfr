@@ -3,6 +3,7 @@
 //! Implements paced UDP sending to avoid buffer saturation and provides
 //! jitter/loss calculation per RFC 3550.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -159,8 +160,12 @@ const HIGH_PPS_THRESHOLD: f64 = 100_000.0;
 const BURST_SIZE: u64 = 100;
 
 /// Send UDP data at a paced rate (or unlimited if target_bitrate is 0)
+///
+/// If `target` is Some, uses send_to() for unconnected sockets (server reverse mode).
+/// If `target` is None, uses send() for connected sockets (client mode).
 pub async fn send_udp_paced(
     socket: Arc<UdpSocket>,
+    target: Option<SocketAddr>,
     target_bitrate: u64,
     duration: Duration,
     stats: Arc<StreamStats>,
@@ -170,7 +175,7 @@ pub async fn send_udp_paced(
 
     // Unlimited mode: no pacing, send as fast as possible
     if target_bitrate == 0 {
-        return send_udp_unlimited(socket, duration, stats, cancel).await;
+        return send_udp_unlimited(socket, target, duration, stats, cancel).await;
     }
 
     let bits_per_packet = (packet_size * 8) as u64;
@@ -227,7 +232,12 @@ pub async fn send_udp_paced(
             };
             header.encode(&mut packet);
 
-            match socket.send(&packet).await {
+            let result = match target {
+                Some(addr) => socket.send_to(&packet, addr).await,
+                None => socket.send(&packet).await,
+            };
+
+            match result {
                 Ok(n) => {
                     stats.add_bytes_sent(n as u64);
                     sequence += 1;
@@ -249,6 +259,7 @@ pub async fn send_udp_paced(
 /// Send UDP data as fast as possible (unlimited mode)
 async fn send_udp_unlimited(
     socket: Arc<UdpSocket>,
+    target: Option<SocketAddr>,
     duration: Duration,
     stats: Arc<StreamStats>,
     cancel: watch::Receiver<bool>,
@@ -285,7 +296,12 @@ async fn send_udp_unlimited(
             };
             header.encode(&mut packet);
 
-            match socket.send(&packet).await {
+            let result = match target {
+                Some(addr) => socket.send_to(&packet, addr).await,
+                None => socket.send(&packet).await,
+            };
+
+            match result {
                 Ok(n) => {
                     stats.add_bytes_sent(n as u64);
                     sequence += 1;
@@ -381,6 +397,30 @@ pub async fn receive_udp(
         },
         packets_sent,
     ))
+}
+
+/// Wait for the first packet from a client and return their address.
+/// Used in server reverse mode to learn where to send data.
+pub async fn wait_for_client(
+    socket: &UdpSocket,
+    timeout: Duration,
+) -> anyhow::Result<SocketAddr> {
+    let mut buffer = [0u8; 64];
+
+    tokio::select! {
+        result = socket.recv_from(&mut buffer) => {
+            match result {
+                Ok((_, addr)) => {
+                    debug!("UDP client connected from {}", addr);
+                    Ok(addr)
+                }
+                Err(e) => Err(anyhow::anyhow!("Failed to receive from client: {}", e)),
+            }
+        }
+        _ = tokio::time::sleep(timeout) => {
+            Err(anyhow::anyhow!("Timeout waiting for UDP client"))
+        }
+    }
 }
 
 #[cfg(test)]
