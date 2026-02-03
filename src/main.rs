@@ -158,43 +158,43 @@ struct Cli {
     port: u16,
 
     /// Test duration
-    #[arg(short = 't', long, default_value = "10s", value_parser = parse_duration, env = "XFR_DURATION")]
+    #[arg(short = 't', long, default_value = "10s", value_parser = parse_test_duration, env = "XFR_DURATION")]
     time: Duration,
 
     /// UDP mode
-    #[arg(short = 'u', long)]
+    #[arg(short = 'u', long, conflicts_with = "quic")]
     udp: bool,
 
     /// QUIC mode (encrypted, multiplexed streams)
-    #[arg(short = 'Q', long)]
+    #[arg(short = 'Q', long, conflicts_with = "udp")]
     quic: bool,
 
     /// Target bitrate for UDP (e.g., 1G, 100M). TCP runs at full speed.
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
     bitrate: Option<u64>,
 
-    /// Number of parallel streams
-    #[arg(short = 'P', long, default_value_t = 1)]
+    /// Number of parallel streams (1-128)
+    #[arg(short = 'P', long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=128))]
     parallel: u8,
 
     /// Reverse direction (server sends to client)
-    #[arg(short = 'R', long)]
+    #[arg(short = 'R', long, conflicts_with = "bidir")]
     reverse: bool,
 
     /// Bidirectional test
-    #[arg(long)]
+    #[arg(long, conflicts_with = "reverse")]
     bidir: bool,
 
     /// JSON output
-    #[arg(long)]
+    #[arg(long, conflicts_with = "csv")]
     json: bool,
 
     /// JSON streaming output (one object per line)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "csv")]
     json_stream: bool,
 
     /// CSV output
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["json", "json_stream"])]
     csv: bool,
 
     /// Quiet mode - suppress interval output, show only summary
@@ -358,6 +358,14 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
+fn parse_test_duration(s: &str) -> Result<Duration, String> {
+    let duration = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+    if duration < Duration::from_secs(1) {
+        return Err("Minimum test duration is 1 second".to_string());
+    }
+    Ok(duration)
+}
+
 fn parse_bitrate(s: &str) -> Result<u64, String> {
     let s = s.to_uppercase();
     let (num, suffix) = if s.ends_with('G') {
@@ -370,9 +378,10 @@ fn parse_bitrate(s: &str) -> Result<u64, String> {
         (s.as_str(), 1u64)
     };
 
-    num.parse::<u64>()
-        .map(|n| n * suffix)
-        .map_err(|e| e.to_string())
+    num.parse::<u64>().map_err(|e| e.to_string()).and_then(|n| {
+        n.checked_mul(suffix)
+            .ok_or_else(|| format!("Bitrate overflow: {}", s))
+    })
 }
 
 fn parse_size(s: &str) -> Result<usize, String> {
@@ -388,8 +397,11 @@ fn parse_size(s: &str) -> Result<usize, String> {
     };
 
     num.parse::<usize>()
-        .map(|n| n * suffix)
         .map_err(|e| e.to_string())
+        .and_then(|n| {
+            n.checked_mul(suffix)
+                .ok_or_else(|| format!("Size overflow: {}", s))
+        })
 }
 
 fn parse_timestamp_format(s: &str) -> Result<TimestampFormat, String> {
@@ -1211,4 +1223,93 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_bitrate_basic() {
+        assert_eq!(parse_bitrate("100").unwrap(), 100);
+        assert_eq!(parse_bitrate("100K").unwrap(), 100_000);
+        assert_eq!(parse_bitrate("100M").unwrap(), 100_000_000);
+        assert_eq!(parse_bitrate("1G").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_bitrate_case_insensitive() {
+        assert_eq!(parse_bitrate("100k").unwrap(), 100_000);
+        assert_eq!(parse_bitrate("100m").unwrap(), 100_000_000);
+        assert_eq!(parse_bitrate("1g").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_bitrate_overflow() {
+        // This should overflow u64
+        assert!(parse_bitrate("999999999999999999999G").is_err());
+    }
+
+    #[test]
+    fn test_parse_size_basic() {
+        assert_eq!(parse_size("100").unwrap(), 100);
+        assert_eq!(parse_size("1K").unwrap(), 1024);
+        assert_eq!(parse_size("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1G").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_overflow() {
+        // This should overflow usize
+        assert!(parse_size("999999999999999999999G").is_err());
+    }
+
+    #[test]
+    fn test_parse_test_duration_minimum() {
+        // 1 second should work
+        assert!(parse_test_duration("1s").is_ok());
+        assert!(parse_test_duration("10s").is_ok());
+
+        // Sub-second should fail
+        assert!(parse_test_duration("500ms").is_err());
+        assert!(parse_test_duration("0s").is_err());
+    }
+
+    #[test]
+    fn test_cli_conflicts() {
+        use clap::Parser;
+
+        // --quic and --udp should conflict
+        let result = Cli::try_parse_from(["xfr", "host", "--quic", "--udp"]);
+        assert!(result.is_err());
+
+        // --bidir and --reverse should conflict
+        let result = Cli::try_parse_from(["xfr", "host", "--bidir", "--reverse"]);
+        assert!(result.is_err());
+
+        // --json and --csv should conflict
+        let result = Cli::try_parse_from(["xfr", "host", "--json", "--csv"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parallel_range() {
+        use clap::Parser;
+
+        // -P 0 should fail
+        let result = Cli::try_parse_from(["xfr", "host", "-P", "0"]);
+        assert!(result.is_err());
+
+        // -P 1 should work
+        let result = Cli::try_parse_from(["xfr", "host", "-P", "1"]);
+        assert!(result.is_ok());
+
+        // -P 128 should work
+        let result = Cli::try_parse_from(["xfr", "host", "-P", "128"]);
+        assert!(result.is_ok());
+
+        // -P 129 should fail
+        let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
+        assert!(result.is_err());
+    }
 }

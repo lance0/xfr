@@ -9,14 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `-Q` short flag for `--quic` mode (uppercase to distinguish from `-q` quiet)
+- Security documentation section in README
+- 30-second timeout for control-plane handshakes (prevents DoS from idle connections)
 
 ### Changed
 - `-b/--bitrate` help text clarifies it only applies to UDP
 - Log messages now go to stderr instead of stdout (allows clean JSON/CSV piping)
+- Minimum test duration enforced at 1 second
+- Protocol documentation corrected (newline-delimited JSON, not length-prefixed)
 
 ### Fixed
 - UDP reverse mode (`-u -R`) now works - server learns client address before sending
 - UDP bidirectional mode on server now waits for client before sending
+- Division by zero guard in throughput calculations for zero-duration tests
+- Overflow protection in bitrate/size parsing (checked_mul instead of unchecked)
+- Conflicting CLI flags now produce clear errors (`--quic --udp`, `--bidir --reverse`, `--json --csv`)
+- Parallel streams validated to 1-128 range (prevents `-P 0` crash)
 
 ## [0.4.0] - 2026-02-02
 

@@ -85,10 +85,14 @@ impl PushGatewayClient {
     fn format_metrics(&self, stats: &TestStats) -> String {
         let mut output = String::new();
         let test_id = &stats.test_id;
-        let duration_secs = stats.elapsed_ms() as f64 / 1000.0;
+        let elapsed_ms = stats.elapsed_ms();
+        let duration_secs = elapsed_ms as f64 / 1000.0;
         let bytes_total = stats.total_bytes();
-        let throughput_mbps =
-            (bytes_total as f64 * 8.0) / (stats.elapsed_ms() as f64 / 1000.0) / 1_000_000.0;
+        let throughput_mbps = if elapsed_ms > 0 {
+            (bytes_total as f64 * 8.0) / duration_secs / 1_000_000.0
+        } else {
+            0.0
+        };
 
         // Helper to write metric
         let write_metric = |output: &mut String, name: &str, value: f64| {

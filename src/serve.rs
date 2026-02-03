@@ -33,6 +33,8 @@ const MAX_LINE_LENGTH: usize = 8192;
 const MAX_STREAMS: u8 = 128;
 /// Maximum test duration a client can request (1 hour)
 const MAX_TEST_DURATION: Duration = Duration::from_secs(3600);
+/// Timeout for control-plane handshake reads (prevents DoS from idle connections)
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct ServerConfig {
     pub port: u16,
@@ -372,8 +374,13 @@ async fn handle_quic_client(
     let mut ctrl_reader = BufReader::new(ctrl_recv);
     let mut line = String::new();
 
-    // Read client hello (bounded to prevent DoS)
-    read_bounded_line(&mut ctrl_reader, &mut line).await?;
+    // Read client hello (bounded to prevent DoS, with timeout)
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        read_bounded_line(&mut ctrl_reader, &mut line),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for hello"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     let auth_nonce = match msg {
@@ -416,7 +423,12 @@ async fn handle_quic_client(
 
     // Handle authentication if required
     if let Some(nonce) = auth_nonce {
-        read_bounded_line(&mut ctrl_reader, &mut line).await?;
+        tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            read_bounded_line(&mut ctrl_reader, &mut line),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -448,8 +460,13 @@ async fn handle_quic_client(
         }
     }
 
-    // Read test start
-    read_bounded_line(&mut ctrl_reader, &mut line).await?;
+    // Read test start (with timeout)
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        read_bounded_line(&mut ctrl_reader, &mut line),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -469,15 +486,15 @@ async fn handle_quic_client(
                 return Err(anyhow::anyhow!("Protocol mismatch"));
             }
 
-            if streams > MAX_STREAMS {
+            if streams == 0 || streams > MAX_STREAMS {
                 let error = ControlMessage::error(format!(
-                    "Requested {} streams exceeds maximum of {}",
+                    "Invalid stream count {} (must be 1-{})",
                     streams, MAX_STREAMS
                 ));
                 ctrl_send
                     .write_all(format!("{}\n", error.serialize()?).as_bytes())
                     .await?;
-                return Err(anyhow::anyhow!("Stream count exceeds maximum"));
+                return Err(anyhow::anyhow!("Invalid stream count"));
             }
 
             let mut duration = Duration::from_secs(duration_secs as u64);
@@ -552,7 +569,9 @@ async fn handle_client_with_auth(
 
     // If auth was required, verify the response
     if let Some(nonce) = auth_nonce {
-        read_bounded_line(&mut reader, &mut line).await?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
+            .await
+            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -605,8 +624,10 @@ async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
 ) -> anyhow::Result<Option<String>> {
     let mut line = String::new();
 
-    // Read client hello
-    read_bounded_line(reader, &mut line).await?;
+    // Read client hello (with timeout)
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(reader, &mut line))
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for hello"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -659,8 +680,10 @@ async fn handle_test_request(
 ) -> anyhow::Result<()> {
     let mut line = String::new();
 
-    // Read test request
-    read_bounded_line(reader, &mut line).await?;
+    // Read test request (with timeout)
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(reader, &mut line))
+        .await
+        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -673,15 +696,15 @@ async fn handle_test_request(
             bitrate,
         } => {
             // Validate stream count
-            if streams > MAX_STREAMS {
+            if streams == 0 || streams > MAX_STREAMS {
                 let error = ControlMessage::error(format!(
-                    "Requested {} streams exceeds maximum of {}",
+                    "Invalid stream count {} (must be 1-{})",
                     streams, MAX_STREAMS
                 ));
                 writer
                     .write_all(format!("{}\n", error.serialize()?).as_bytes())
                     .await?;
-                return Err(anyhow::anyhow!("Stream count exceeds maximum"));
+                return Err(anyhow::anyhow!("Invalid stream count"));
             }
 
             // Calculate effective duration
@@ -937,7 +960,11 @@ async fn run_quic_test(
     // Send final result
     let duration_ms = stats.elapsed_ms();
     let bytes_total = stats.total_bytes();
-    let throughput_mbps = (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
+    let throughput_mbps = if duration_ms > 0 {
+        (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
+    } else {
+        0.0
+    };
 
     let stream_results: Vec<_> = stats
         .streams
@@ -1192,7 +1219,11 @@ async fn run_test(
     // Send final result
     let duration_ms = stats.elapsed_ms();
     let bytes_total = stats.total_bytes();
-    let throughput_mbps = (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
+    let throughput_mbps = if duration_ms > 0 {
+        (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
+    } else {
+        0.0
+    };
 
     let stream_results: Vec<_> = stats
         .streams

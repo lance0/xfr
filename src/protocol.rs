@@ -1,13 +1,14 @@
 //! Control protocol for xfr client-server communication
 //!
-//! The control channel uses length-prefixed JSON messages over TCP:
+//! The control channel uses newline-delimited JSON messages over TCP/QUIC:
 //!
 //! ```text
-//! ┌──────────┬─────────────────────────────────────────┐
-//! │ 4 bytes  │ JSON payload                            │
-//! │ (length) │                                         │
-//! └──────────┴─────────────────────────────────────────┘
+//! {"type":"Hello","version":"1.0",...}\n
+//! {"type":"ServerHello",...}\n
+//! {"type":"TestStart",...}\n
 //! ```
+//!
+//! Each message is a single JSON object followed by a newline character.
 //!
 //! # Protocol Versioning
 //!

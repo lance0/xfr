@@ -330,6 +330,36 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--tui` | | false | Enable live dashboard (server) |
 | `--one-off` | | false | Exit after one test (server) |
 
+## Security Considerations
+
+### Transport Encryption
+
+| Mode | Encryption | Certificate Verification |
+|------|------------|-------------------------|
+| TCP | None | N/A |
+| UDP | None | N/A |
+| QUIC | TLS 1.3 | Disabled by default |
+
+**QUIC mode** (`-Q/--quic`) provides TLS 1.3 encryption but does not verify server certificates. This is suitable for trusted networks. For untrusted networks, use a VPN or SSH tunnel.
+
+### Authentication
+
+PSK authentication (`--psk`) verifies client identity but does not encrypt TCP/UDP traffic. For encrypted + authenticated connections, use QUIC with PSK:
+
+```bash
+# Server
+xfr serve --psk "secretkey"
+
+# Client (encrypted + authenticated)
+xfr host -Q --psk "secretkey"
+```
+
+### Network Considerations
+
+- **UDP on untrusted networks**: UDP mode may be susceptible to reflection attacks from spoofed source addresses. Use TCP or QUIC on public networks.
+- **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
+- **ACLs**: Use `--allow`/`--deny` to restrict client access.
+
 ## Platform Support
 
 | Platform | Status |

@@ -401,10 +401,7 @@ pub async fn receive_udp(
 
 /// Wait for the first packet from a client and return their address.
 /// Used in server reverse mode to learn where to send data.
-pub async fn wait_for_client(
-    socket: &UdpSocket,
-    timeout: Duration,
-) -> anyhow::Result<SocketAddr> {
+pub async fn wait_for_client(socket: &UdpSocket, timeout: Duration) -> anyhow::Result<SocketAddr> {
     let mut buffer = [0u8; 64];
 
     tokio::select! {
