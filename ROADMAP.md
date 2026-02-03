@@ -128,8 +128,16 @@
 - [ ] Basic TCP/UDP testing (no TCP_INFO)
 - [ ] TUI compatibility with Windows Terminal
 - [ ] Pre-built binaries
+- [ ] Config path adjustment (`%APPDATA%\xfr`)
 
-*Rationale: WSL works well. Native Windows adds complexity for limited benefit.*
+*Rationale: Codebase already has fallbacks for Unix-specific features. Cross-compilation should work with minimal changes.*
+
+### TUI Code Refactoring
+- [ ] Split `ui.rs` into `render.rs` and `modals.rs`
+- [ ] Extract state/event logic from `app.rs` into `state.rs`
+- [ ] Keep `widgets.rs` as-is
+
+*Rationale: TUI code is growing. Not urgent, but would improve maintainability for future features.*
 
 ### SCTP Support
 - [ ] SCTP transport mode

@@ -49,6 +49,9 @@ use tracing::{debug, error, info};
 use crate::net::AddressFamily;
 use crate::stats::StreamStats;
 
+/// Default buffer size for QUIC send/receive operations (128 KB)
+const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
+
 /// Generate a self-signed certificate for QUIC
 ///
 /// xfr uses its own PSK authentication mechanism, so we don't need
@@ -168,7 +171,7 @@ pub async fn send_quic_data(
     duration: Duration,
     cancel: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let buffer = vec![0u8; 128 * 1024]; // 128KB buffer
+    let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
     let deadline = tokio::time::Instant::now() + duration;
 
     loop {
@@ -200,7 +203,7 @@ pub async fn receive_quic_data(
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let mut buffer = vec![0u8; 128 * 1024];
+    let mut buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
 
     loop {
         tokio::select! {
