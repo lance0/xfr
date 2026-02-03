@@ -201,7 +201,10 @@ impl Server {
                     let permit = match quic_semaphore.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            warn!("Max concurrent handlers reached, rejecting QUIC: {}", peer_addr);
+                            warn!(
+                                "Max concurrent handlers reached, rejecting QUIC: {}",
+                                peer_addr
+                            );
                             continue;
                         }
                     };

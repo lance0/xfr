@@ -86,9 +86,11 @@ impl RateLimiter {
     pub fn release(&self, ip: IpAddr) {
         if let Some(state) = self.limits.get(&ip) {
             // Use fetch_update to atomically decrement without underflow
-            let _ = state.count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                Some(count.saturating_sub(1))
-            });
+            let _ = state
+                .count
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    Some(count.saturating_sub(1))
+                });
         }
     }
 
