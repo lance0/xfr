@@ -213,11 +213,13 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let duration_secs = app.duration.as_secs();
 
     // Build arrow-style progress bar: [====>------] 45%
-    // Use inner width for calculation, with minimum of 10 chars for bar
+    // Adaptive width: use available space with minimum of 10 chars
     let prefix_len = 12; // "  Transfer: "
-    let suffix_len = 25; // " X.XX GB / Xs [" + "] XX%"
-    let available_width = (inner.width as usize).saturating_sub(prefix_len + suffix_len);
-    let bar_width = available_width.clamp(10, 40);
+    let suffix_len = 18; // " Xs/Xs" + "[]"
+    let transferred_len = transferred.len() + 1;
+    let available_width =
+        (inner.width as usize).saturating_sub(prefix_len + suffix_len + transferred_len);
+    let bar_width = available_width.max(10);
 
     let filled = (progress * bar_width as f64) as usize;
     let empty = bar_width.saturating_sub(filled);
