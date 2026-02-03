@@ -109,6 +109,11 @@
 
 ## Future Ideas
 
+### CLI & Scripting
+- [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
+- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno)
+- [ ] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+
 ### TUI Enhancements
 - [ ] **Test profiles** - save/load named test configurations
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
