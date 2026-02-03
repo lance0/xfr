@@ -103,6 +103,8 @@ xfr serve --prometheus 9090 --push-gateway http://pushgateway:9091
 curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
 ```
 
+Or [review the script](install.sh) first, then run it.
+
 ### From crates.io
 
 ```bash
