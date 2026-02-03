@@ -316,6 +316,7 @@ impl ControlMessage {
             capabilities: Some(vec![
                 "tcp".to_string(),
                 "udp".to_string(),
+                "quic".to_string(),
                 "multistream".to_string(),
             ]),
             auth: None,
@@ -330,6 +331,7 @@ impl ControlMessage {
             capabilities: Some(vec![
                 "tcp".to_string(),
                 "udp".to_string(),
+                "quic".to_string(),
                 "multistream".to_string(),
             ]),
             auth: Some(AuthChallenge {

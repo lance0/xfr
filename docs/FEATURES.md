@@ -262,7 +262,7 @@ Build with `--features prometheus` for metrics support.
 ### Metrics Endpoint
 
 ```bash
-xfr serve --prometheus-port 9090
+xfr serve --prometheus 9090
 ```
 
 Available at `http://localhost:9090/metrics`:

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `-Q` short flag for `--quic` mode (uppercase to distinguish from `-q` quiet)
 - Security documentation section in README
 - 30-second timeout for control-plane handshakes (prevents DoS from idle connections)
+- KNOWN_ISSUES.md documenting edge cases and limitations
+- "quic" capability in server Hello message
 
 ### Changed
 - `-b/--bitrate` help text clarifies it only applies to UDP
@@ -25,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Overflow protection in bitrate/size parsing (checked_mul instead of unchecked)
 - Conflicting CLI flags now produce clear errors (`--quic --udp`, `--bidir --reverse`, `--json --csv`)
 - Parallel streams validated to 1-128 range (prevents `-P 0` crash)
+- Documentation: corrected JSON field names in SCRIPTING.md (bytes_total, duration_ms)
+- Documentation: fixed Prometheus flag name in FEATURES.md (--prometheus not --prometheus-port)
+- QUIC bitrate warning now logged like TCP when -b flag is ignored
 
 ## [0.4.0] - 2026-02-02
 

@@ -185,6 +185,8 @@ xfr host --no-tui            # Plain text, no TUI
 xfr host --timestamp-format iso8601  # ISO 8601 timestamps
 ```
 
+**Note:** Log messages go to stderr, allowing clean JSON/CSV piping: `xfr host --json 2>/dev/null`
+
 ### Interval Control
 
 ```bash
@@ -323,8 +325,9 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
 | `--psk` | | none | Pre-shared key for authentication |
 | `--psk-file` | | none | Read PSK from file |
-| `--quic` | | false | Use QUIC transport (built-in TLS 1.3 encryption) |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
+| `--rate-limit-window` | | 60s | Rate limit time window (server) |
+| `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
 | `--tui` | | false | Enable live dashboard (server) |
@@ -400,6 +403,7 @@ Ensure the server is running and the port is not blocked by a firewall.
 - [Features Reference](docs/FEATURES.md) - Detailed feature documentation
 - [Architecture](docs/ARCHITECTURE.md) - For contributors
 - [Changelog](CHANGELOG.md) - Release history
+- [Known Issues](KNOWN_ISSUES.md) - Edge cases and limitations
 - [Roadmap](ROADMAP.md) - Planned features
 - [Contributing](CONTRIBUTING.md) - Development guidelines
 

@@ -91,9 +91,12 @@ impl Client {
     ) -> anyhow::Result<TestResult> {
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
 
-        // Warn if bitrate limit is set for TCP (only UDP supports pacing)
+        // Warn if bitrate limit is set for non-UDP protocols (only UDP supports pacing)
         if self.config.protocol == Protocol::Tcp && self.config.bitrate.is_some() {
             warn!("Bitrate limit (-b) only works for UDP; TCP will run at full speed");
+        }
+        if self.config.protocol == Protocol::Quic && self.config.bitrate.is_some() {
+            warn!("Bitrate limit (-b) not implemented for QUIC; running at full speed");
         }
 
         // Use QUIC transport if selected

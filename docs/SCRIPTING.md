@@ -33,13 +33,14 @@ xfr host --json --no-tui > result.json
 
 ```json
 {
-  "protocol": "tcp",
-  "direction": "upload",
-  "duration_secs": 10.0,
-  "bytes_transferred": 1234567890,
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "bytes_total": 1234567890,
+  "duration_ms": 10000,
   "throughput_mbps": 987.65,
-  "streams": 1,
-  "retransmits": 42
+  "streams": [
+    {"id": 0, "bytes": 1234567890, "throughput_mbps": 987.65, "retransmits": 42}
+  ],
+  "tcp_info": {"retransmits": 42, "rtt_us": 1200, "rtt_var_us": 100, "cwnd": 10}
 }
 ```
 
@@ -188,7 +189,7 @@ xfr $SERVER --json --no-tui -t 30s > current.json
 
 # Compare
 if [ -f "$BASELINE" ]; then
-    xfr diff "$BASELINE" current.json --threshold ${THRESHOLD}%
+    xfr diff "$BASELINE" current.json --threshold ${THRESHOLD}
     if [ $? -ne 0 ]; then
         echo "Performance regression detected!"
         exit 1
@@ -257,7 +258,7 @@ if (( $(echo "$THROUGHPUT < $MIN_THROUGHPUT" | bc -l) )); then
 fi
 
 # Check retransmit rate (>1% is concerning)
-BYTES=$(echo "$RESULT" | jq '.bytes_transferred')
+BYTES=$(echo "$RESULT" | jq '.bytes_total')
 RETRANSMIT_RATE=$(echo "scale=4; $RETRANSMITS * 1500 * 100 / $BYTES" | bc)
 if (( $(echo "$RETRANSMIT_RATE > 1" | bc -l) )); then
     echo "WARN: High retransmit rate: ${RETRANSMIT_RATE}%"
@@ -279,7 +280,7 @@ xfr serve --push-gateway http://pushgateway:9091
 # Or push from client-side script
 xfr host --json --no-tui | jq -r '
   "xfr_throughput_mbps \(.throughput_mbps)\n" +
-  "xfr_bytes_total \(.bytes_transferred)\n" +
+  "xfr_bytes_total \(.bytes_total)\n" +
   "xfr_retransmits_total \(.retransmits // 0)"
 ' | curl --data-binary @- http://pushgateway:9091/metrics/job/xfr/instance/$(hostname)
 ```

@@ -1,0 +1,99 @@
+# Known Issues
+
+This document tracks known limitations and edge cases that are documented but not yet addressed.
+
+## Low Priority / Edge Cases
+
+### Timestamp Overflow for Very Long Tests
+
+**Issue:** `elapsed.as_millis()` returns `u128` but is cast to `u64` in interval reporting.
+
+**Impact:** Only affects tests longer than ~584 million years. No practical impact.
+
+**Mitigation:** None needed.
+
+---
+
+### UDP MTU Hardcoded to 1472 Bytes
+
+**Issue:** UDP packet size is hardcoded assuming standard Ethernet MTU (1500 - 20 IP - 8 UDP = 1472).
+
+**Impact:** May not be optimal for jumbo frames or networks with different MTUs.
+
+**Workaround:** Works correctly for the vast majority of networks.
+
+---
+
+### Bitrate Division Truncation
+
+**Issue:** When calculating packets per second from bitrate, integer division may cause minor precision loss.
+
+**Impact:** Actual bitrate may be slightly lower than requested (< 0.1% difference).
+
+**Workaround:** None needed for typical use cases.
+
+---
+
+### QUIC Accept Loop Timeout
+
+**Issue:** If a QUIC connection is accepted but the client never opens a stream, the server waits indefinitely in `accept_uni()`.
+
+**Impact:** Low probability - requires malicious client holding connections.
+
+**Mitigation:** Handshake timeout covers most DoS scenarios. Connection eventually times out at QUIC layer.
+
+---
+
+### Settings Modal Doesn't Apply Changes
+
+**Issue:** The TUI settings modal shows options but doesn't apply changes mid-test.
+
+**Impact:** UI shows "restart required" - this is by design for current release.
+
+**Workaround:** Restart test with new settings via CLI flags.
+
+---
+
+### UDP Reverse Mode Error Handling
+
+**Issue:** In UDP reverse (download) mode, send errors on the server side are logged but not reported back to the client.
+
+**Impact:** Client may see lower throughput without explicit error indication.
+
+**Workaround:** Check server logs if UDP reverse shows unexpected results.
+
+---
+
+### Rate Limiter Slowloris Vulnerability
+
+**Issue:** A malicious client could hold open a test slot by connecting but sending data very slowly.
+
+**Impact:** Could exhaust rate limit slots, denying service to legitimate clients.
+
+**Mitigation:**
+- Handshake timeout (30s) limits connection phase
+- Test duration limits via `--max-duration`
+- Semaphore prevents unbounded connections
+- For public servers, consider firewall-level rate limiting
+
+---
+
+## By Design
+
+### TCP Bitrate Limiting Not Implemented
+
+TCP mode ignores the `-b/--bitrate` flag. This is intentional - TCP should run at maximum sustainable rate.
+
+A warning is logged when `-b` is used with TCP.
+
+### QUIC Bitrate Limiting Not Implemented
+
+QUIC mode ignores the `-b/--bitrate` flag. Pacing support may be added in a future release.
+
+A warning is logged when `-b` is used with QUIC.
+
+---
+
+## Reporting Issues
+
+Found a bug not listed here? Please report it at: https://github.com/lance0/xfr/issues
