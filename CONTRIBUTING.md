@@ -2,7 +2,7 @@
 
 ## Development Setup
 
-1. Install Rust (1.85+):
+1. Install Rust (1.88+):
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
