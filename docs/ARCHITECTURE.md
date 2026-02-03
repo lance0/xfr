@@ -35,7 +35,7 @@ src/
 │   ├── mod.rs
 │   ├── json.rs
 │   ├── csv.rs
-│   └── text.rs
+│   └── plain.rs
 │
 └── tui/             # Terminal UI
     ├── mod.rs

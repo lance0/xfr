@@ -50,7 +50,7 @@ xfr is a network bandwidth testing tool. When running the server:
 For encrypted + authenticated connections, use QUIC with PSK:
 ```bash
 xfr serve --psk "secretkey"
-xfr host -Q --psk "secretkey"
+xfr <host> -Q --psk "secretkey"
 ```
 
 When running the client:
