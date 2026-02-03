@@ -23,6 +23,8 @@ xfr 192.168.1.1 -P 4         # 4 parallel streams
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 ```
 
+See [Installation](#installation) below for setup instructions.
+
 ## TUI Preview
 
 <p align="center">
@@ -99,9 +101,14 @@ xfr serve --prometheus 9090 --push-gateway http://pushgateway:9091
 
 ### From crates.io (Recommended)
 
-Requires [Rust 1.88+](https://rustup.rs/):
+Requires [Rust 1.88+](https://www.rust-lang.org/tools/install):
 
 ```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Install xfr
 cargo install xfr
 ```
 
