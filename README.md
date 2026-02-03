@@ -367,8 +367,9 @@ xfr host -Q --psk "secretkey"
 
 | Platform | Status |
 |----------|--------|
-| Linux | Full support, TCP_INFO stats |
-| macOS | Full support, TCP_INFO stats |
+| Linux x86_64/ARM64 | Full support, pre-built binaries |
+| macOS Apple Silicon | Full support, pre-built binaries |
+| macOS Intel | Full support, build from crate: `cargo install xfr` |
 | Windows | Via WSL2 |
 
 ## Troubleshooting

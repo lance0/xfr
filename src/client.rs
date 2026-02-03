@@ -489,9 +489,16 @@ impl Client {
                         }
                     }
                     Direction::Download => {
-                        // Send a "hello" packet so server learns our address
-                        if let Err(e) = socket.send(&[0u8; 1]).await {
-                            error!("Failed to send UDP hello: {}", e);
+                        // Send hello packets so server learns our address
+                        // Retry a few times in case server UDP handler isn't ready yet
+                        for i in 0..5 {
+                            if let Err(e) = socket.send(&[0u8; 1]).await {
+                                error!("Failed to send UDP hello: {}", e);
+                                break;
+                            }
+                            if i < 4 {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
                         }
                         if let Err(e) = udp::receive_udp(socket, stream_stats, cancel).await {
                             error!("UDP receive error: {}", e);

@@ -52,11 +52,7 @@ jobs:
             os: macos-latest
             cross: false
             features: prometheus
-          # macOS x86_64 (Intel) - uses macos-15-intel runner
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-            cross: false
-            features: prometheus
+          # Note: Intel Mac (x86_64-apple-darwin) removed - users can build from crate
 
     steps:
       - uses: actions/checkout@v6
