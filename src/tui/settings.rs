@@ -238,7 +238,8 @@ impl SettingsState {
         } else {
             // Move to buttons
             self.button_focused = true;
-            self.button_index = 0;
+            // Select first visible button (Apply if dirty, else Close)
+            self.button_index = if self.test_params_dirty() { 0 } else { 1 };
         }
     }
 
@@ -252,7 +253,10 @@ impl SettingsState {
     /// Cycle selected value to next
     pub fn value_next(&mut self) {
         if self.button_focused {
-            self.button_index = (self.button_index + 1) % 2;
+            // Only cycle if both buttons are visible
+            if self.test_params_dirty() {
+                self.button_index = (self.button_index + 1) % 2;
+            }
             return;
         }
 
@@ -280,7 +284,10 @@ impl SettingsState {
     /// Cycle selected value to previous
     pub fn value_prev(&mut self) {
         if self.button_focused {
-            self.button_index = if self.button_index == 0 { 1 } else { 0 };
+            // Only cycle if both buttons are visible
+            if self.test_params_dirty() {
+                self.button_index = if self.button_index == 0 { 1 } else { 0 };
+            }
             return;
         }
 
@@ -320,7 +327,8 @@ impl SettingsState {
         if !self.button_focused {
             // Move to buttons when pressing enter on a setting
             self.button_focused = true;
-            self.button_index = 0;
+            // Select first visible button (Apply if dirty, else Close)
+            self.button_index = if self.test_params_dirty() { 0 } else { 1 };
             return SettingsAction::None;
         }
 
