@@ -52,6 +52,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_content(frame, app, theme, chunks[1]);
     draw_footer(frame, app, theme, chunks[2]);
 
+    // Show pause overlay (behind other modals)
+    if app.state == AppState::Paused && !app.show_help && !app.settings.visible {
+        draw_pause_overlay(frame, theme, size);
+    }
+
     if app.show_help {
         draw_help_overlay(frame, theme, size);
     }
@@ -434,6 +439,42 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
 
     frame.render_widget(Clear, help_area);
     frame.render_widget(help, help_area);
+}
+
+fn draw_pause_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let pause_width = 20u16;
+    let pause_height = 5u16;
+    let pause_area = Rect {
+        x: area.width.saturating_sub(pause_width) / 2,
+        y: area.height.saturating_sub(pause_height) / 2,
+        width: pause_width.min(area.width),
+        height: pause_height.min(area.height),
+    };
+
+    let pause_text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "PAUSED",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Press p to resume",
+            Style::default().fg(theme.text_dim),
+        )),
+    ];
+
+    let pause = Paragraph::new(pause_text)
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.warning)),
+        );
+
+    frame.render_widget(Clear, pause_area);
+    frame.render_widget(pause, pause_area);
 }
 
 fn draw_settings_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
