@@ -4,7 +4,7 @@
   <img src="xfr-logo.png" alt="xfr logo" width="200">
 </p>
 
-A fast, modern network bandwidth testing tool with TUI. Built in Rust as an iperf replacement.
+A modern iperf3 alternative with a live TUI, multi-client server, and QUIC support. Built in Rust.
 
 [![Crates.io](https://img.shields.io/crates/v/xfr.svg)](https://crates.io/crates/xfr)
 [![CI](https://github.com/lance0/xfr/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/xfr/actions/workflows/ci.yml)
@@ -49,7 +49,8 @@ xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 |---------|--------|-----|
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
-| Output formats | Text/JSON | Text/JSON/CSV/Prometheus |
+| Output formats | Text/JSON | Text/JSON/CSV |
+| Prometheus metrics | No | Yes (optional feature) |
 | Compare runs | No | `xfr diff` |
 | LAN discovery | No | `xfr discover` |
 | Config file | No | Yes |
@@ -69,22 +70,22 @@ xfr 10.8.0.1 -t 30s
 ### UDP Congestion Detection
 Test UDP at your expected rate to detect packet loss:
 ```bash
-xfr host -u -b 500M -t 60s    # Watch for loss percentage in TUI
+xfr <host> -u -b 500M -t 60s    # Watch for loss percentage in TUI
 ```
 
 ### Before/After Comparison
 Quantify the impact of network changes:
 ```bash
-xfr host --json -o before.json
+xfr <host> --json -o before.json
 # ... make changes ...
-xfr host --json -o after.json
+xfr <host> --json -o after.json
 xfr diff before.json after.json --threshold 5
 ```
 
 ### Multi-Stream for Bonded Connections
 Test aggregate bandwidth across bonded/LACP interfaces:
 ```bash
-xfr host -P 8 -t 30s          # 8 streams to utilize all links
+xfr <host> -P 8 -t 30s          # 8 streams to utilize all links
 ```
 
 ### Prometheus Monitoring
@@ -182,22 +183,22 @@ QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single
 ### Output Formats
 
 ```bash
-xfr host --json              # JSON summary
-xfr host --json-stream       # JSON per interval (for scripting)
-xfr host --csv               # CSV output
-xfr host -q                  # Quiet mode (summary only)
-xfr host -o results.json     # Save to file
-xfr host --no-tui            # Plain text, no TUI
-xfr host --timestamp-format iso8601  # ISO 8601 timestamps
+xfr <host> --json              # JSON summary
+xfr <host> --json-stream       # JSON per interval (for scripting)
+xfr <host> --csv               # CSV output
+xfr <host> -q                  # Quiet mode (summary only)
+xfr <host> -o results.json     # Save to file
+xfr <host> --no-tui            # Plain text, no TUI
+xfr <host> --timestamp-format iso8601  # ISO 8601 timestamps
 ```
 
-**Note:** Log messages go to stderr, allowing clean JSON/CSV piping: `xfr host --json 2>/dev/null`
+**Note:** Log messages go to stderr, allowing clean JSON/CSV piping: `xfr <host> --json 2>/dev/null`
 
 ### Interval Control
 
 ```bash
-xfr host -i 2                # Report every 2 seconds
-xfr host --omit 3            # Skip first 3s of intervals (TCP ramp-up)
+xfr <host> -i 2                # Report every 2 seconds
+xfr <host> --omit 3            # Skip first 3s of intervals (TCP ramp-up)
 ```
 
 ### Compare Results
@@ -239,10 +240,10 @@ xfr discover --timeout 10s   # Extended search
 xfr includes 11 built-in color themes. Select with `--theme` or press `t` during a test:
 
 ```bash
-xfr host --theme dracula     # Dark purple theme
-xfr host --theme matrix      # Green on black hacker style
-xfr host --theme catppuccin  # Soothing pastels
-xfr host --theme nord        # Arctic blue tones
+xfr <host> --theme dracula     # Dark purple theme
+xfr <host> --theme matrix      # Green on black hacker style
+xfr <host> --theme catppuccin  # Soothing pastels
+xfr <host> --theme nord        # Arctic blue tones
 ```
 
 Available themes: `default`, `kawaii`, `cyber`, `dracula`, `monochrome`, `matrix`, `nord`, `gruvbox`, `catppuccin`, `tokyo_night`, `solarized`
@@ -360,7 +361,7 @@ PSK authentication (`--psk`) verifies client identity but does not encrypt TCP/U
 xfr serve --psk "secretkey"
 
 # Client (encrypted + authenticated)
-xfr host -Q --psk "secretkey"
+xfr <host> -Q --psk "secretkey"
 ```
 
 ### Network Considerations
