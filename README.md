@@ -97,18 +97,36 @@ xfr serve --prometheus 9090 --push-gateway http://pushgateway:9091
 
 ## Installation
 
-### Quick Install (Linux/macOS)
+### From crates.io (Recommended)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
-```
-
-Or [review the script](install.sh) first, then run it.
-
-### From crates.io
+Requires [Rust 1.88+](https://rustup.rs/):
 
 ```bash
 cargo install xfr
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install lance0/tap/xfr
+```
+
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
+
+| Platform | Target |
+|----------|--------|
+| Linux x86_64 | `xfr-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | Use `cargo install xfr` |
+| Windows | Use WSL2 |
+
+```bash
+# Example: Linux x86_64
+curl -LO https://github.com/lance0/xfr/releases/latest/download/xfr-x86_64-unknown-linux-musl.tar.gz
+tar xzf xfr-*.tar.gz && sudo mv xfr /usr/local/bin/
 ```
 
 ### From Source
@@ -119,6 +137,14 @@ cd xfr && cargo build --release
 sudo cp target/release/xfr /usr/local/bin/
 ```
 
+### Quick Install Script
+
+> **Note**: Review scripts before piping to sh. See the [install script](install.sh) source.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
+```
+
 ### Optional Features
 
 | Feature | Default | Description |
@@ -127,11 +153,8 @@ sudo cp target/release/xfr /usr/local/bin/
 | `prometheus` | No | Prometheus metrics endpoint and Push Gateway support |
 
 ```bash
-# Prometheus metrics support
-cargo install xfr --features prometheus
-
-# All features
-cargo install xfr --all-features
+cargo install xfr --features prometheus    # Prometheus support
+cargo install xfr --all-features           # All features
 ```
 
 ## Usage
