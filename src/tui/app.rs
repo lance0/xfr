@@ -65,6 +65,7 @@ pub struct App {
 
     pub start_time: Option<Instant>,
     pub show_help: bool,
+    pub show_streams: bool,
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
     pub theme_index: usize,
@@ -134,6 +135,7 @@ impl App {
 
             start_time: None,
             show_help: false,
+            show_streams: false,
             timestamp_format,
             theme,
             theme_index: 0,
@@ -361,6 +363,13 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    pub fn toggle_streams(&mut self) {
+        // Only toggle if multiple streams exist
+        if self.streams_count > 1 {
+            self.show_streams = !self.show_streams;
+        }
     }
 
     pub fn progress_percent(&self) -> f64 {

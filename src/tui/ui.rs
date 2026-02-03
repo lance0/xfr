@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use super::app::{App, AppState};
 use super::settings::SettingsCategory;
 use super::theme::Theme;
-use super::widgets::Sparkline;
+use super::widgets::{Sparkline, StreamBar};
 use crate::stats::{bytes_to_human, mbps_to_human};
 
 /// Get color for packet loss percentage: green (<0.1%), yellow (0.1-1%), red (>1%)
@@ -86,19 +86,25 @@ fn draw_title(frame: &mut Frame, theme: &Theme, area: Rect) {
 }
 
 fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    // Layout: Configuration + Real-time Stats + History
+    // Layout: Configuration + Real-time Stats + History/Streams
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),  // Configuration
             Constraint::Length(10), // Real-time Stats
-            Constraint::Min(4),     // History
+            Constraint::Min(4),     // History or Streams
         ])
         .split(area);
 
     draw_configuration(frame, app, theme, chunks[0]);
     draw_realtime_stats(frame, app, theme, chunks[1]);
-    draw_history(frame, app, theme, chunks[2]);
+
+    // Show streams panel or history based on toggle
+    if app.show_streams && app.streams_count > 1 {
+        draw_streams(frame, app, theme, chunks[2]);
+    } else {
+        draw_history(frame, app, theme, chunks[2]);
+    }
 }
 
 fn draw_configuration(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -355,6 +361,52 @@ fn draw_history(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .title(Span::styled(
+            " Streams ",
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Find max throughput for scaling bars
+    let max_throughput = app
+        .streams
+        .iter()
+        .map(|s| s.throughput_mbps)
+        .fold(0.0f64, f64::max)
+        .max(100.0); // Minimum scale of 100 Mbps
+
+    // Draw each stream bar
+    for (i, stream) in app.streams.iter().enumerate() {
+        if i as u16 >= inner.height {
+            break;
+        }
+        let stream_area = Rect {
+            x: inner.x,
+            y: inner.y + i as u16,
+            width: inner.width,
+            height: 1,
+        };
+        let bar = StreamBar::new(
+            stream.id,
+            stream.throughput_mbps,
+            max_throughput,
+            stream.retransmits,
+        )
+        .bar_color(theme.graph_primary)
+        .text_color(theme.text);
+
+        frame.render_widget(bar, stream_area);
+    }
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let status_text = match app.state {
         AppState::Connecting => "Connecting...",
@@ -372,7 +424,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         AppState::Error => theme.error,
     };
 
-    let footer = Line::from(vec![
+    let mut spans = vec![
         Span::styled("[", Style::default().fg(theme.text_dim)),
         Span::styled("q", Style::default().fg(theme.accent)),
         Span::styled("] Quit | [", Style::default().fg(theme.text_dim)),
@@ -381,16 +433,33 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("s", Style::default().fg(theme.accent)),
         Span::styled("] Settings | [", Style::default().fg(theme.text_dim)),
         Span::styled("?", Style::default().fg(theme.accent)),
-        Span::styled("] Help | Status: ", Style::default().fg(theme.text_dim)),
-        Span::styled(status_text, Style::default().fg(status_color)),
-    ]);
+        Span::styled("] Help", Style::default().fg(theme.text_dim)),
+    ];
+
+    // Add streams toggle hint when multiple streams exist
+    if app.streams_count > 1 {
+        spans.push(Span::styled(" | [", Style::default().fg(theme.text_dim)));
+        spans.push(Span::styled("d", Style::default().fg(theme.accent)));
+        spans.push(Span::styled(
+            "] Streams",
+            Style::default().fg(theme.text_dim),
+        ));
+    }
+
+    spans.push(Span::styled(
+        " | Status: ",
+        Style::default().fg(theme.text_dim),
+    ));
+    spans.push(Span::styled(status_text, Style::default().fg(status_color)));
+
+    let footer = Line::from(spans);
 
     frame.render_widget(Paragraph::new(footer), area);
 }
 
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
     let help_width = 36;
-    let help_height = 13;
+    let help_height = 14;
     let help_area = Rect {
         x: (area.width.saturating_sub(help_width)) / 2,
         y: (area.height.saturating_sub(help_height)) / 2,
@@ -419,6 +488,10 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(vec![
             Span::styled("  j", Style::default().fg(theme.accent)),
             Span::styled("  print JSON", Style::default().fg(theme.text_dim)),
+        ]),
+        Line::from(vec![
+            Span::styled("  d", Style::default().fg(theme.accent)),
+            Span::styled("  toggle streams", Style::default().fg(theme.text_dim)),
         ]),
         Line::from(vec![
             Span::styled("  ?", Style::default().fg(theme.accent)),

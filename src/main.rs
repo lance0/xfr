@@ -1002,6 +1002,9 @@ async fn run_tui_loop(
                 KeyCode::Char('?') | KeyCode::F(1) => {
                     app.toggle_help();
                 }
+                KeyCode::Char('d') => {
+                    app.toggle_streams();
+                }
                 KeyCode::Esc => {
                     if app.show_help {
                         app.show_help = false;
@@ -1091,6 +1094,9 @@ async fn run_tui_loop(
                                 }
                                 KeyCode::Char('?') | KeyCode::F(1) => {
                                     app.toggle_help();
+                                }
+                                KeyCode::Char('d') => {
+                                    app.toggle_streams();
                                 }
                                 KeyCode::Char('j') => {
                                     print_json_on_exit = true;
