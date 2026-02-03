@@ -110,6 +110,7 @@
 ## Future Ideas
 
 ### CLI & Scripting
+- [ ] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno)
 - [ ] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
