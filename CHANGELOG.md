@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Add semaphore to limit concurrent handlers (defense against connection floods on public servers)
 
+### Changed
+- Use constant for QUIC buffer size (consistency with TCP module)
+
+### Dependencies
+- hyper-util 0.1.19 → 0.1.20
+- slab 0.4.11 → 0.4.12
+- unicode-width 0.2.0 → 0.2.2
+- zmij 1.0.18 → 1.0.19
+
+### Testing
+- Add integration tests: UDP bidir, UDP multi-stream, QUIC bidir, ACL deny, IPv6 localhost
+- Add protocol parsing benchmarks (serialize/deserialize for Hello, TestStart, Interval, Result)
+
 ## [0.3.0] - 2026-01-31
 
 ### Added
