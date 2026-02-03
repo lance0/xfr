@@ -72,7 +72,7 @@ Quantify the impact of network changes:
 xfr host --json -o before.json
 # ... make changes ...
 xfr host --json -o after.json
-xfr diff before.json after.json --threshold 5%
+xfr diff before.json after.json --threshold 5
 ```
 
 ### Multi-Stream for Bonded Connections
@@ -84,7 +84,7 @@ xfr host -P 8 -t 30s          # 8 streams to utilize all links
 ### Prometheus Monitoring
 Continuous performance monitoring:
 ```bash
-xfr serve --prometheus-port 9090 --push-gateway http://pushgateway:9091
+xfr serve --prometheus 9090 --push-gateway http://pushgateway:9091
 # Scrape metrics or view in Grafana
 ```
 
@@ -191,7 +191,7 @@ xfr host --omit 3            # Skip first 3s of intervals (TCP ramp-up)
 
 ```bash
 xfr diff baseline.json current.json
-xfr diff baseline.json current.json --threshold 5%
+xfr diff baseline.json current.json --threshold 5
 ```
 
 ### Discovery
@@ -274,7 +274,7 @@ export XFR_DURATION=30s
 Enable with `--features prometheus`:
 
 ```bash
-xfr serve --prometheus-port 9090
+xfr serve --prometheus 9090
 ```
 
 Metrics available at `http://localhost:9090/metrics`:
@@ -297,6 +297,8 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |
+| `--ipv4` | `-4` | false | Force IPv4 only |
+| `--ipv6` | `-6` | false | Force IPv6 only |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
@@ -311,14 +313,16 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
-| `--push-gateway` | | none | Prometheus Push Gateway URL (server only) |
-| `--psk` | | none | Pre-shared key for authentication (server) |
-| `--psk-file` | | none | Read PSK from file (server) |
+| `--push-gateway` | | none | Prometheus Push Gateway URL (server) |
+| `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
+| `--psk` | | none | Pre-shared key for authentication |
+| `--psk-file` | | none | Read PSK from file |
 | `--quic` | | false | Use QUIC transport (built-in TLS 1.3 encryption) |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
 | `--tui` | | false | Enable live dashboard (server) |
+| `--one-off` | | false | Exit after one test (server) |
 
 ## Platform Support
 

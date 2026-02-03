@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tab key switches between categories
 - **QUIC transport** (`--quic`) via quinn crate - built-in TLS 1.3 encryption, stream multiplexing
 - **TUI visual overhaul** - cleaner design inspired by ttl:
-  - Styled title bar with status indicators (●, ⏸, ✓, ✗)
+  - Styled title bar and footer with status display
   - Completion results shown as centered modal overlay
   - Color-coded metrics (retransmits, loss, jitter, RTT)
   - Simplified layout with single outer border
