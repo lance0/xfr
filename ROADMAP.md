@@ -250,7 +250,12 @@ If you need these features, combine xfr with purpose-built tools.
 
 ## Known Limitations
 
-All major features are fully implemented. See "Low Priority" section for features not planned.
+See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for documented edge cases and limitations.
+
+**Potential future improvements** (from known issues):
+- [ ] QUIC bitrate pacing support
+- [ ] Configurable UDP MTU/packet size
+- [ ] UDP reverse mode error reporting to client
 
 ---
 

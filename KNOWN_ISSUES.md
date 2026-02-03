@@ -94,6 +94,12 @@ A warning is logged when `-b` is used with QUIC.
 
 ---
 
+## Future Improvements
+
+Some issues listed here may be addressed in future releases. See the [ROADMAP.md](ROADMAP.md) "Known Limitations" section for items under consideration.
+
+---
+
 ## Reporting Issues
 
 Found a bug not listed here? Please report it at: https://github.com/lance0/xfr/issues
