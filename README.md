@@ -23,6 +23,12 @@ xfr 192.168.1.1 -P 4         # 4 parallel streams
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 ```
 
+## TUI Preview
+
+<p align="center">
+  <img src="xfr-ss.png" alt="xfr TUI interface" width="800">
+</p>
+
 ## Features
 
 - **Live TUI** with real-time throughput graphs and per-stream stats
