@@ -77,6 +77,11 @@ pub struct App {
     pub average_throughput_mbps: f64,
     throughput_sum: f64,
     throughput_count: u64,
+
+    // Event tracking for history
+    peak_throughput_mbps: f64,
+    prev_retransmits: u64,
+    prev_udp_lost: u64,
 }
 
 impl App {
@@ -139,6 +144,10 @@ impl App {
             average_throughput_mbps: 0.0,
             throughput_sum: 0.0,
             throughput_count: 0,
+
+            peak_throughput_mbps: 0.0,
+            prev_retransmits: 0,
+            prev_udp_lost: 0,
         }
     }
 
@@ -281,6 +290,38 @@ impl App {
             self.throughput_count += 1;
             self.average_throughput_mbps = self.throughput_sum / self.throughput_count as f64;
         }
+
+        // Log significant events
+        self.detect_events(progress.throughput_mbps);
+    }
+
+    /// Detect and log significant events for history
+    fn detect_events(&mut self, throughput_mbps: f64) {
+        // Peak throughput (only log if 10%+ above previous peak, after warmup)
+        if self.throughput_count > 2 && throughput_mbps > self.peak_throughput_mbps * 1.1 {
+            self.peak_throughput_mbps = throughput_mbps;
+            self.log(format!("Peak: {:.0} Mbps", throughput_mbps));
+        } else if throughput_mbps > self.peak_throughput_mbps {
+            self.peak_throughput_mbps = throughput_mbps;
+        }
+
+        // Retransmit spike (TCP)
+        if self.total_retransmits > self.prev_retransmits {
+            let delta = self.total_retransmits - self.prev_retransmits;
+            if delta >= 10 {
+                self.log(format!("Retransmits: +{}", delta));
+            }
+        }
+        self.prev_retransmits = self.total_retransmits;
+
+        // UDP packet loss
+        if self.udp_packets_lost > self.prev_udp_lost {
+            let delta = self.udp_packets_lost - self.prev_udp_lost;
+            if delta >= 5 {
+                self.log(format!("UDP loss: +{} packets", delta));
+            }
+        }
+        self.prev_udp_lost = self.udp_packets_lost;
     }
 
     pub fn on_result(&mut self, result: TestResult) {
