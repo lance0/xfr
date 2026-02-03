@@ -6,6 +6,9 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use xfr::protocol::{
+    AggregateInterval, ControlMessage, Direction, Protocol, StreamInterval, TestResult,
+};
 use xfr::stats::StreamStats;
 use xfr::udp::{JitterCalculator, UdpPacketHeader};
 
@@ -89,6 +92,122 @@ fn bench_tcp_send_loop_overhead(c: &mut Criterion) {
     });
 }
 
+// ============================================================================
+// Protocol Message Benchmarks
+// ============================================================================
+
+fn bench_protocol_serialize_hello(c: &mut Criterion) {
+    let msg = ControlMessage::client_hello();
+
+    c.bench_function("protocol_serialize_hello", |b| {
+        b.iter(|| black_box(msg.serialize()))
+    });
+}
+
+fn bench_protocol_deserialize_hello(c: &mut Criterion) {
+    let msg = ControlMessage::client_hello();
+    let json = msg.serialize().unwrap();
+
+    c.bench_function("protocol_deserialize_hello", |b| {
+        b.iter(|| black_box(ControlMessage::deserialize(black_box(&json))))
+    });
+}
+
+fn bench_protocol_serialize_test_start(c: &mut Criterion) {
+    let msg = ControlMessage::TestStart {
+        id: "test-12345".to_string(),
+        streams: 4,
+        duration_secs: 10,
+        protocol: Protocol::Tcp,
+        direction: Direction::Upload,
+        bitrate: Some(1_000_000_000),
+    };
+
+    c.bench_function("protocol_serialize_test_start", |b| {
+        b.iter(|| black_box(msg.serialize()))
+    });
+}
+
+fn bench_protocol_serialize_interval(c: &mut Criterion) {
+    let msg = ControlMessage::Interval {
+        id: "test-12345".to_string(),
+        elapsed_ms: 5000,
+        streams: vec![
+            StreamInterval {
+                id: 0,
+                bytes: 125_000_000,
+                retransmits: Some(5),
+                jitter_ms: None,
+                lost: None,
+                error: None,
+            },
+            StreamInterval {
+                id: 1,
+                bytes: 130_000_000,
+                retransmits: Some(3),
+                jitter_ms: None,
+                lost: None,
+                error: None,
+            },
+        ],
+        aggregate: AggregateInterval {
+            bytes: 255_000_000,
+            throughput_mbps: 2040.0,
+            retransmits: Some(8),
+            jitter_ms: None,
+            lost: None,
+        },
+    };
+
+    c.bench_function("protocol_serialize_interval", |b| {
+        b.iter(|| black_box(msg.serialize()))
+    });
+}
+
+fn bench_protocol_deserialize_interval(c: &mut Criterion) {
+    let msg = ControlMessage::Interval {
+        id: "test-12345".to_string(),
+        elapsed_ms: 5000,
+        streams: vec![StreamInterval {
+            id: 0,
+            bytes: 125_000_000,
+            retransmits: Some(5),
+            jitter_ms: None,
+            lost: None,
+            error: None,
+        }],
+        aggregate: AggregateInterval {
+            bytes: 125_000_000,
+            throughput_mbps: 1000.0,
+            retransmits: Some(5),
+            jitter_ms: None,
+            lost: None,
+        },
+    };
+    let json = msg.serialize().unwrap();
+
+    c.bench_function("protocol_deserialize_interval", |b| {
+        b.iter(|| black_box(ControlMessage::deserialize(black_box(&json))))
+    });
+}
+
+fn bench_protocol_serialize_result(c: &mut Criterion) {
+    let result = TestResult {
+        id: "test-12345".to_string(),
+        duration_ms: 10000,
+        bytes_total: 1_250_000_000,
+        throughput_mbps: 1000.0,
+        streams: vec![],
+        tcp_info: None,
+        udp_stats: None,
+    };
+    let msg = ControlMessage::Result(result);
+
+    c.bench_function("protocol_serialize_result", |b| {
+        b.iter(|| black_box(msg.serialize()))
+    });
+}
+
 criterion_group!(
     benches,
     bench_stats_add_bytes,
@@ -96,6 +215,13 @@ criterion_group!(
     bench_udp_header_decode,
     bench_interval_record,
     bench_jitter_calculation,
-    bench_tcp_send_loop_overhead
+    bench_tcp_send_loop_overhead,
+    // Protocol message benchmarks
+    bench_protocol_serialize_hello,
+    bench_protocol_deserialize_hello,
+    bench_protocol_serialize_test_start,
+    bench_protocol_serialize_interval,
+    bench_protocol_deserialize_interval,
+    bench_protocol_serialize_result,
 );
 criterion_main!(benches);

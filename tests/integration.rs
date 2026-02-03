@@ -246,6 +246,74 @@ async fn test_udp_download() {
 }
 
 #[tokio::test]
+async fn test_udp_bidir() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Bidir,
+        bitrate: Some(100_000_000), // 100 Mbps
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP bidir should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "UDP bidir should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_udp_multi_stream() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000), // 100 Mbps total
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP multi-stream should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "UDP multi-stream should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert_eq!(result.streams.len(), 4, "Should have 4 streams");
+}
+
+#[tokio::test]
 async fn test_multi_client_concurrent() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
@@ -642,6 +710,38 @@ async fn test_quic_multi_stream() {
 }
 
 #[tokio::test]
+async fn test_quic_bidir() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Bidir,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC bidir should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "QUIC bidir should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
 async fn test_quic_with_psk() {
     let port = get_test_port();
     let psk = "quic-test-secret".to_string();
@@ -669,4 +769,93 @@ async fn test_quic_with_psk() {
     assert!(result.is_ok(), "QUIC with PSK should complete");
     let result = result.unwrap();
     assert!(result.is_ok(), "QUIC with PSK should succeed: {:?}", result);
+}
+
+// ============================================================================
+// ACL Deny Test
+// ============================================================================
+
+#[tokio::test]
+async fn test_acl_deny() {
+    let port = get_test_port();
+    // Deny localhost - should block connection
+    let _server =
+        start_secure_server(port, None, None, vec![], vec!["127.0.0.0/8".to_string()]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(5), client.run(None)).await;
+
+    // Connection should be dropped by ACL
+    assert!(result.is_ok(), "Test should complete (not timeout)");
+    let result = result.unwrap();
+    assert!(result.is_err(), "Connection should be denied by ACL");
+}
+
+// ============================================================================
+// IPv6 Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_ipv6_localhost() {
+    let port = get_test_port();
+
+    // Start server with dual-stack (default)
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::DualStack,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Connect via IPv6 localhost
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "IPv6 localhost should succeed: {:?}",
+        result
+    );
 }
