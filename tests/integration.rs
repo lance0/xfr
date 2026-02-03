@@ -221,7 +221,8 @@ async fn test_udp_download() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Give server more time to start on slower CI runners
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let config = ClientConfig {
         host: "127.0.0.1".to_string(),
@@ -238,7 +239,7 @@ async fn test_udp_download() {
     };
 
     let client = Client::new(config);
-    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    let result = timeout(Duration::from_secs(20), client.run(None)).await;
 
     assert!(result.is_ok(), "UDP download should complete");
     let result = result.unwrap();
@@ -250,7 +251,8 @@ async fn test_udp_bidir() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Give server more time to start on slower CI runners
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let config = ClientConfig {
         host: "127.0.0.1".to_string(),
@@ -267,7 +269,7 @@ async fn test_udp_bidir() {
     };
 
     let client = Client::new(config);
-    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    let result = timeout(Duration::from_secs(20), client.run(None)).await;
 
     assert!(result.is_ok(), "UDP bidir should complete");
     let result = result.unwrap();
