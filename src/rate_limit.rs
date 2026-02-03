@@ -85,11 +85,10 @@ impl RateLimiter {
     /// Release a slot when a test completes
     pub fn release(&self, ip: IpAddr) {
         if let Some(state) = self.limits.get(&ip) {
-            let prev = state.count.fetch_sub(1, Ordering::SeqCst);
-            // Prevent underflow
-            if prev == 0 {
-                state.count.store(0, Ordering::SeqCst);
-            }
+            // Use fetch_update to atomically decrement without underflow
+            let _ = state.count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                Some(count.saturating_sub(1))
+            });
         }
     }
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -55,6 +55,8 @@ pub struct ServerConfig {
     pub tui_tx: Option<mpsc::Sender<ServerEvent>>,
     /// Enable QUIC protocol support (binds additional UDP port)
     pub enable_quic: bool,
+    /// Maximum concurrent client handlers (defense against connection floods)
+    pub max_concurrent: u32,
 }
 
 impl Default for ServerConfig {
@@ -72,6 +74,7 @@ impl Default for ServerConfig {
             address_family: AddressFamily::default(),
             tui_tx: None,
             enable_quic: true,
+            max_concurrent: 1000,
         }
     }
 }
@@ -159,12 +162,16 @@ impl Server {
             limiter.start_cleanup_task();
         }
 
+        // Semaphore to limit concurrent handlers (defense against connection floods)
+        let handler_semaphore = Arc::new(Semaphore::new(self.config.max_concurrent as usize));
+
         // Spawn QUIC acceptor task (only if QUIC is enabled)
         if let Some(quic_endpoint) = quic_endpoint {
             let quic_security = security.clone();
             let quic_active_tests = self.active_tests.clone();
             let quic_max_duration = self.config.max_duration;
             let quic_rate_limiter = rate_limiter.clone();
+            let quic_semaphore = handler_semaphore.clone();
             tokio::spawn(async move {
                 while let Some(incoming) = quic_endpoint.accept().await {
                     let peer_addr = incoming.remote_address();
@@ -190,6 +197,15 @@ impl Server {
                         continue;
                     }
 
+                    // Acquire semaphore permit to limit concurrent handlers
+                    let permit = match quic_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("Max concurrent handlers reached, rejecting QUIC: {}", peer_addr);
+                            continue;
+                        }
+                    };
+
                     info!("QUIC client connected: {}", peer_addr);
 
                     let security = quic_security.clone();
@@ -197,6 +213,8 @@ impl Server {
                     let rate_limiter = quic_rate_limiter.clone();
 
                     tokio::spawn(async move {
+                        let _permit = permit; // Held until task completes
+
                         let result = handle_quic_client(
                             incoming,
                             peer_addr,
@@ -262,6 +280,16 @@ impl Server {
                 continue;
             }
 
+            // Acquire semaphore permit to limit concurrent handlers
+            let permit = match handler_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    warn!("Max concurrent handlers reached, rejecting: {}", peer_addr);
+                    drop(stream);
+                    continue;
+                }
+            };
+
             info!("Client connected: {}", peer_addr);
 
             let active_tests = self.active_tests.clone();
@@ -270,6 +298,8 @@ impl Server {
             let security = security.clone();
 
             let handle = tokio::spawn(async move {
+                let _permit = permit; // Held until task completes
+
                 let result = handle_client_secure(
                     stream,
                     peer_addr,

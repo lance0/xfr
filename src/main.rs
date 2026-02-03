@@ -569,6 +569,7 @@ async fn main() -> Result<()> {
                 address_family,
                 tui_tx: None,
                 enable_quic: true, // Enable QUIC by default
+                ..Default::default()
             };
 
             if server_tui {
