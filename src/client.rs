@@ -489,20 +489,25 @@ impl Client {
                         }
                     }
                     Direction::Download => {
-                        // Send hello packets so server learns our address
-                        // Retry a few times in case server UDP handler isn't ready yet
-                        for i in 0..5 {
-                            if let Err(e) = socket.send(&[0u8; 1]).await {
-                                error!("Failed to send UDP hello: {}", e);
-                                break;
+                        // Send hello packets concurrently with receiving
+                        // This ensures server learns our address even if first packets are missed
+                        let hello_socket = socket.clone();
+                        let hello_cancel = cancel.clone();
+                        let hello_handle = tokio::spawn(async move {
+                            // Send hello packets every 100ms until cancelled or 5 seconds
+                            for _ in 0..50 {
+                                if *hello_cancel.borrow() {
+                                    break;
+                                }
+                                let _ = hello_socket.send(&[0u8; 1]).await;
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
-                            if i < 4 {
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                            }
-                        }
+                        });
+
                         if let Err(e) = udp::receive_udp(socket, stream_stats, cancel).await {
                             error!("UDP receive error: {}", e);
                         }
+                        hello_handle.abort();
                     }
                     Direction::Bidir => {
                         // UDP can send/receive concurrently on same socket
