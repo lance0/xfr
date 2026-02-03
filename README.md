@@ -110,7 +110,12 @@ cd xfr && cargo build --release
 sudo cp target/release/xfr /usr/local/bin/
 ```
 
-### With Optional Features
+### Optional Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `discovery` | Yes | mDNS LAN discovery (`xfr discover`) |
+| `prometheus` | No | Prometheus metrics endpoint and Push Gateway support |
 
 ```bash
 # Prometheus metrics support

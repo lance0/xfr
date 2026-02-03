@@ -81,7 +81,7 @@
 
 ---
 
-## v0.5 - Advanced Protocols & TUI Enhancements (In Progress)
+## v0.5 - Advanced Protocols & TUI Enhancements (Completed)
 
 **Why this matters:** QUIC is the future of internet transport. HTTP/3 adoption is accelerating (Cloudflare, Akamai, Fastly enable by default). Testing QUIC is increasingly important.
 
@@ -104,12 +104,14 @@
 - [x] **Per-stream expandable view** (`d` key) - toggle between History and Streams panels
 - [x] **Pause overlay** - visual feedback when test is paused
 - [x] **History event logging** - automatic logging of peaks, retransmit spikes, UDP loss
-- [ ] **Test profiles** - save/load named test configurations
-- [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
 ---
 
 ## Future Ideas
+
+### TUI Enhancements
+- [ ] **Test profiles** - save/load named test configurations
+- [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
 ### High-Speed Optimization (10-25G)
 

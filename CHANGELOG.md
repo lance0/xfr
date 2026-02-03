@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-02
+
 ### Added
 - **Per-stream detail view** (`d` key) - toggle between History and Streams panels for multi-stream tests
   - Shows per-stream throughput bars with retransmit counts
@@ -193,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
-[Unreleased]: https://github.com/lance0/xfr/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lance0/xfr/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lance0/xfr/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lance0/xfr/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lance0/xfr/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/lance0/xfr/compare/v0.1.1...v0.1.2
