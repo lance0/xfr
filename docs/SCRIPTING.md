@@ -7,11 +7,11 @@ xfr is designed for automation with non-interactive modes, structured output, an
 For scripts and CI pipelines, use these flags:
 
 ```bash
-xfr host --no-tui         # Disable TUI, plain text output
-xfr host --json           # JSON summary at end
-xfr host --json-stream    # JSON per interval (for real-time parsing)
-xfr host --csv            # CSV output
-xfr host -q               # Quiet mode (summary only)
+xfr <host> --no-tui         # Disable TUI, plain text output
+xfr <host> --json           # JSON summary at end
+xfr <host> --json-stream    # JSON per interval (for real-time parsing)
+xfr <host> --csv            # CSV output
+xfr <host> -q               # Quiet mode (summary only)
 ```
 
 ### Exit Codes
@@ -28,7 +28,7 @@ xfr host -q               # Quiet mode (summary only)
 ### Summary JSON (`--json`)
 
 ```bash
-xfr host --json --no-tui > result.json
+xfr <host> --json --no-tui > result.json
 ```
 
 ```json
@@ -49,7 +49,7 @@ xfr host --json --no-tui > result.json
 One JSON object per line, per interval:
 
 ```bash
-xfr host --json-stream --no-tui
+xfr <host> --json-stream --no-tui
 ```
 
 ```
@@ -62,19 +62,19 @@ xfr host --json-stream --no-tui
 
 ```bash
 # Get final throughput
-xfr host --json --no-tui | jq '.throughput_mbps'
+xfr <host> --json --no-tui | jq '.throughput_mbps'
 
 # Get average from streaming output
-xfr host --json-stream --no-tui | jq -s 'map(.throughput_mbps) | add / length'
+xfr <host> --json-stream --no-tui | jq -s 'map(.throughput_mbps) | add / length'
 
 # Check if throughput meets threshold
-xfr host --json --no-tui | jq -e '.throughput_mbps > 900' || echo "FAIL"
+xfr <host> --json --no-tui | jq -e '.throughput_mbps > 900' || echo "FAIL"
 ```
 
 ## CSV Output
 
 ```bash
-xfr host --csv --no-tui > results.csv
+xfr <host> --csv --no-tui > results.csv
 ```
 
 Output format:
@@ -278,7 +278,7 @@ Push results after each test (useful for CI):
 xfr serve --push-gateway http://pushgateway:9091
 
 # Or push from client-side script
-xfr host --json --no-tui | jq -r '
+xfr <host> --json --no-tui | jq -r '
   "xfr_throughput_mbps \(.throughput_mbps)\n" +
   "xfr_bytes_total \(.bytes_total)\n" +
   "xfr_retransmits_total \(.retransmits // 0)"

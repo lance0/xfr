@@ -78,22 +78,22 @@ xfr serve -p 9000
 # iperf3: 4 parallel TCP streams, 30 second test
 iperf3 -c host -P 4 -t 30
 # xfr equivalent
-xfr host -P 4 -t 30s
+xfr <host> -P 4 -t 30s
 
 # iperf3: UDP at 1 Gbps
 iperf3 -c host -u -b 1G
 # xfr equivalent
-xfr host -u -b 1G
+xfr <host> -u -b 1G
 
 # iperf3: Reverse mode (download test)
 iperf3 -c host -R
 # xfr equivalent
-xfr host -R
+xfr <host> -R
 
 # iperf3: JSON output
 iperf3 -c host -J
 # xfr equivalent (for scripting, disable TUI)
-xfr host --json --no-tui
+xfr <host> --json --no-tui
 ```
 
 ## When to Use Each Tool

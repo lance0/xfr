@@ -9,9 +9,9 @@ Comprehensive documentation of xfr features.
 Standard TCP bulk transfer with configurable options:
 
 ```bash
-xfr host                     # Basic TCP test
-xfr host --tcp-nodelay       # Disable Nagle's algorithm
-xfr host --window 4M         # Set TCP window size
+xfr <host>                     # Basic TCP test
+xfr <host> --tcp-nodelay       # Disable Nagle's algorithm
+xfr <host> --window 4M         # Set TCP window size
 ```
 
 TCP provides:
@@ -24,9 +24,9 @@ TCP provides:
 Unreliable datagram transfer for testing network capacity:
 
 ```bash
-xfr host -u                  # UDP mode
-xfr host -u -b 1G            # UDP at 1 Gbps
-xfr host -u -b 0             # UDP unlimited (flood test - use carefully)
+xfr <host> -u                  # UDP mode
+xfr <host> -u -b 1G            # UDP at 1 Gbps
+xfr <host> -u -b 0             # UDP unlimited (flood test - use carefully)
 ```
 
 UDP provides:
@@ -42,9 +42,9 @@ UDP provides:
 Encrypted transport over UDP using TLS 1.3:
 
 ```bash
-xfr host --quic              # QUIC transport
-xfr host --quic -P 4         # QUIC with 4 multiplexed streams
-xfr host --quic --psk secret # QUIC with PSK authentication
+xfr <host> --quic              # QUIC transport
+xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
+xfr <host> --quic --psk secret # QUIC with PSK authentication
 ```
 
 QUIC provides:
@@ -60,8 +60,8 @@ QUIC provides:
 Test with parallel streams to utilize multiple CPU cores or aggregated links:
 
 ```bash
-xfr host -P 4                # 4 parallel streams
-xfr host -P 8                # 8 parallel streams
+xfr <host> -P 4                # 4 parallel streams
+xfr <host> -P 8                # 8 parallel streams
 ```
 
 Each stream reports individual statistics. Aggregate throughput is also shown.
@@ -76,8 +76,8 @@ Use cases:
 Test upload and download simultaneously:
 
 ```bash
-xfr host --bidir             # Bidirectional
-xfr host --bidir -P 2        # Bidir with 2 streams each direction
+xfr <host> --bidir             # Bidirectional
+xfr <host> --bidir -P 2        # Bidir with 2 streams each direction
 ```
 
 Reports separate statistics for upload and download.
@@ -85,9 +85,9 @@ Reports separate statistics for upload and download.
 ## Direction Control
 
 ```bash
-xfr host                     # Upload (client → server)
-xfr host -R                  # Reverse/download (server → client)
-xfr host --bidir             # Both directions
+xfr <host>                     # Upload (client → server)
+xfr <host> -R                  # Reverse/download (server → client)
+xfr <host> --bidir             # Both directions
 ```
 
 ## Output Formats
@@ -97,9 +97,9 @@ xfr host --bidir             # Both directions
 Human-readable output with optional TUI:
 
 ```bash
-xfr host                     # TUI with live graphs
-xfr host --no-tui            # Plain text output
-xfr host -q                  # Quiet mode (summary only)
+xfr <host>                     # TUI with live graphs
+xfr <host> --no-tui            # Plain text output
+xfr <host> -q                  # Quiet mode (summary only)
 ```
 
 ### JSON
@@ -107,9 +107,9 @@ xfr host -q                  # Quiet mode (summary only)
 Machine-readable JSON output:
 
 ```bash
-xfr host --json              # JSON summary at end
-xfr host --json-stream       # JSON per interval (one object per line)
-xfr host -o result.json      # Save to file
+xfr <host> --json              # JSON summary at end
+xfr <host> --json-stream       # JSON per interval (one object per line)
+xfr <host> -o result.json      # Save to file
 ```
 
 ### CSV
@@ -117,8 +117,8 @@ xfr host -o result.json      # Save to file
 Spreadsheet-compatible output:
 
 ```bash
-xfr host --csv               # CSV output
-xfr host --csv -o data.csv   # Save to file
+xfr <host> --csv               # CSV output
+xfr <host> --csv -o data.csv   # Save to file
 ```
 
 ### Timestamps
@@ -126,9 +126,9 @@ xfr host --csv -o data.csv   # Save to file
 Control timestamp format in output:
 
 ```bash
-xfr host --timestamp-format relative   # "1.0s", "2.0s" (default)
-xfr host --timestamp-format iso8601    # "2024-01-15T10:30:00Z"
-xfr host --timestamp-format unix       # "1705316400"
+xfr <host> --timestamp-format relative   # "1.0s", "2.0s" (default)
+xfr <host> --timestamp-format iso8601    # "2024-01-15T10:30:00Z"
+xfr <host> --timestamp-format unix       # "1705316400"
 ```
 
 ## Configuration
@@ -242,7 +242,7 @@ xfr serve --psk mysecretkey
 xfr serve --psk-file /etc/xfr/psk.txt
 
 # Client
-xfr host --psk mysecretkey
+xfr <host> --psk mysecretkey
 ```
 
 Authentication uses HMAC-SHA256 challenge-response.
@@ -312,7 +312,7 @@ Enable file logging for debugging:
 
 ```bash
 xfr serve --log-file /var/log/xfr.log --log-level debug
-xfr host --log-file ./test.log --log-level trace
+xfr <host> --log-file ./test.log --log-level trace
 ```
 
 Log levels: `error`, `warn`, `info`, `debug`, `trace`
