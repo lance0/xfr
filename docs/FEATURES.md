@@ -362,4 +362,4 @@ See `xfr --help` for complete CLI documentation.
 | `--acl-file` | none | Load ACL from file |
 | `--psk-file` | none | Read PSK from file |
 | `--push-gateway` | none | Prometheus Push Gateway URL |
-| `--prometheus-port` | none | Metrics endpoint port |
+| `--prometheus` | none | Metrics endpoint port |

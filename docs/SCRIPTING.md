@@ -290,7 +290,7 @@ xfr host --json --no-tui | jq -r '
 For continuous monitoring (requires `--features prometheus`):
 
 ```bash
-xfr serve --prometheus-port 9090
+xfr serve --prometheus 9090
 ```
 
 Metrics available at `http://localhost:9090/metrics`:

@@ -28,7 +28,7 @@ port = 5201
 one_off = false
 
 # Prometheus metrics port (requires --features prometheus)
-# prometheus_port = 9090
+# prometheus = 9090
 
 # Server presets - use with: xfr serve --preset limited
 [[presets]]
