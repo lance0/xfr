@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Per-stream detail view** (`d` key) - toggle between History and Streams panels for multi-stream tests
+  - Shows per-stream throughput bars with retransmit counts
+  - Uses existing StreamBar widget for consistent visualization
+- **Pause overlay** - prominent "PAUSED" overlay when test is paused (not just footer text)
+- **History event logging** - automatically logs significant events:
+  - Peak throughput moments (10%+ above previous peak)
+  - Retransmit spikes (10+ in an interval)
+  - UDP packet loss events (5+ packets lost)
 - **Settings modal** (`s` key) - adjust display and test settings on the fly:
   - Display tab: Theme, Timestamp format, Units (auto-persist)
   - Test tab: Streams, Protocol, Duration, Direction (session-only)
@@ -38,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use VecDeque for interval history to avoid O(n) removal on every interval
 - Report per-interval retransmit deltas instead of cumulative totals
 - Suppress console logging in TUI mode to prevent log messages corrupting display
+- Help modal now opens after test completion (was blocked by key handler)
+- Settings modal button cycling when Apply is hidden (only Close visible)
+- Rate limiter atomic underflow race condition (use fetch_update instead of fetch_sub)
+- Progress bar width now adaptive to terminal size (removed arbitrary 40-char max)
+
+### Security
+- Add semaphore to limit concurrent handlers (defense against connection floods on public servers)
 
 ## [0.3.0] - 2026-01-31
 

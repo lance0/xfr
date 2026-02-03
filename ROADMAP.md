@@ -100,9 +100,11 @@
 - [x] **Completion summary panel** - clear final stats display with throughput graph
 - [x] **Color-coded metrics** - green/yellow/red for retransmits, loss, jitter, RTT
 - [x] **Enhanced sparkline** - 2-row graph with peak value display
-- [ ] **Settings modal** (`s` key) - adjust display and test settings on the fly
+- [x] **Settings modal** (`s` key) - adjust display and test settings on the fly
+- [x] **Per-stream expandable view** (`d` key) - toggle between History and Streams panels
+- [x] **Pause overlay** - visual feedback when test is paused
+- [x] **History event logging** - automatic logging of peaks, retransmit spikes, UDP loss
 - [ ] **Test profiles** - save/load named test configurations
-- [ ] **Per-stream expandable view** - collapse/expand for multi-stream tests
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
 ---

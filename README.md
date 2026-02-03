@@ -209,6 +209,7 @@ xfr discover --timeout 10s   # Extended search
 | `p` | Pause/Resume display |
 | `s` | Settings modal |
 | `t` | Cycle color theme |
+| `d` | Toggle per-stream view |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |
 
