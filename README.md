@@ -157,6 +157,22 @@ cargo install xfr --features prometheus    # Prometheus support
 cargo install xfr --all-features           # All features
 ```
 
+### Shell Completions
+
+```bash
+# Bash
+xfr --completions bash > ~/.local/share/bash-completion/completions/xfr
+
+# Zsh (add ~/.zfunc to fpath in .zshrc first)
+xfr --completions zsh > ~/.zfunc/_xfr
+
+# Fish
+xfr --completions fish > ~/.config/fish/completions/xfr.fish
+
+# PowerShell (add to $PROFILE)
+xfr --completions powershell >> $PROFILE
+```
+
 ## Usage
 
 ### Server
