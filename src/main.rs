@@ -1070,15 +1070,26 @@ async fn run_tui_loop(
                             }
 
                             match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
+                                KeyCode::Char('q') => {
                                     prefs.theme = Some(app.theme_name().to_string());
                                     return Ok((app.result, prefs, print_json_on_exit));
+                                }
+                                KeyCode::Esc => {
+                                    if app.show_help {
+                                        app.show_help = false;
+                                    } else {
+                                        prefs.theme = Some(app.theme_name().to_string());
+                                        return Ok((app.result, prefs, print_json_on_exit));
+                                    }
                                 }
                                 KeyCode::Char('t') => {
                                     app.cycle_theme();
                                 }
                                 KeyCode::Char('s') => {
                                     app.settings.toggle();
+                                }
+                                KeyCode::Char('?') | KeyCode::F(1) => {
+                                    app.toggle_help();
                                 }
                                 KeyCode::Char('j') => {
                                     print_json_on_exit = true;
