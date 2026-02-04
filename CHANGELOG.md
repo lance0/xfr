@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Settings modal text truncation** - increased modal width to prevent help text from being cut off
+- **UDP session cleanup on client abort** (issue #12) - server now detects inactive UDP sessions after 30 seconds and cleans them up properly
 
 ## [0.4.3] - 2026-02-04
 

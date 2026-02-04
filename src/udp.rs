@@ -17,6 +17,7 @@ use crate::stats::StreamStats;
 
 pub const UDP_PAYLOAD_SIZE: usize = 1400; // Leave room for IP + UDP headers
 const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
+const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
 
 /// UDP packet header
 /// [seq: u64][timestamp_us: u64][payload...]
@@ -336,10 +337,20 @@ pub async fn receive_udp(
     let mut jitter_calc = JitterCalculator::new();
     let mut packet_tracker = PacketTracker::new();
     let mut packets_received: u64 = 0;
+    let mut last_recv = Instant::now();
 
     loop {
         if *cancel.borrow() {
             debug!("UDP receive cancelled");
+            break;
+        }
+
+        // Check for client inactivity (handles abrupt disconnects)
+        if last_recv.elapsed() > UDP_INACTIVITY_TIMEOUT {
+            debug!(
+                "UDP receive timeout: no packets for {:?}",
+                UDP_INACTIVITY_TIMEOUT
+            );
             break;
         }
 
@@ -352,6 +363,7 @@ pub async fn receive_udp(
                 match result {
                     Ok((n, _addr)) => {
                         let recv_time = Instant::now();
+                        last_recv = recv_time;
                         stats.add_bytes_received(n as u64);
                         packets_received += 1;
 
@@ -376,7 +388,7 @@ pub async fn receive_udp(
                 }
             }
             _ = timeout_future => {
-                // Check cancel again
+                // Check cancel and inactivity timeout again
             }
         }
     }
