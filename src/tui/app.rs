@@ -83,6 +83,9 @@ pub struct App {
     peak_throughput_mbps: f64,
     prev_retransmits: u64,
     prev_udp_lost: u64,
+
+    // Update notification
+    pub update_available: Option<String>,
 }
 
 impl App {
@@ -150,6 +153,8 @@ impl App {
             peak_throughput_mbps: 0.0,
             prev_retransmits: 0,
             prev_udp_lost: 0,
+
+            update_available: None,
         }
     }
 
@@ -372,8 +377,13 @@ impl App {
         }
     }
 
+    /// Check if test has infinite duration
+    pub fn is_infinite(&self) -> bool {
+        self.duration == Duration::ZERO
+    }
+
     pub fn progress_percent(&self) -> f64 {
-        if self.duration.as_secs() == 0 {
+        if self.is_infinite() {
             0.0
         } else {
             (self.elapsed.as_secs_f64() / self.duration.as_secs_f64() * 100.0).min(100.0)
@@ -381,7 +391,11 @@ impl App {
     }
 
     pub fn time_remaining(&self) -> Duration {
-        self.duration.saturating_sub(self.elapsed)
+        if self.is_infinite() {
+            Duration::ZERO
+        } else {
+            self.duration.saturating_sub(self.elapsed)
+        }
     }
 
     pub fn max_throughput(&self) -> f64 {

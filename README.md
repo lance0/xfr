@@ -128,6 +128,7 @@ Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
 | Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | Use `cargo install xfr` |
+| Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
 | Windows | Use WSL2 |
 
 ```bash
@@ -150,6 +151,15 @@ sudo cp target/release/xfr /usr/local/bin/
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
+```
+
+### Termux (Android)
+
+Download the `aarch64-linux-android` binary from [releases](https://github.com/lance0/xfr/releases), or build from source:
+
+```bash
+pkg install rust
+cargo install xfr
 ```
 
 ### Optional Features
@@ -274,6 +284,7 @@ xfr discover --timeout 10s   # Extended search
 | `d` | Toggle per-stream view |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |
+| `u` | Dismiss update notification |
 
 ## Keybindings (Server TUI)
 
@@ -353,7 +364,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--port` | `-p` | 5201 | Server/client port |
-| `--time` | `-t` | 10s | Test duration |
+| `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
 | `--bitrate` | `-b` | unlimited | Target bitrate for UDP (e.g., 1G, 100M) |
@@ -362,6 +373,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--bidir` | | false | Bidirectional test |
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
+| `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
@@ -425,6 +437,7 @@ xfr <host> -Q --psk "secretkey"
 | Linux x86_64/ARM64 | Full support, pre-built binaries |
 | macOS Apple Silicon | Full support, pre-built binaries |
 | macOS Intel | Full support, build from crate: `cargo install xfr` |
+| Android (Termux) | Full support, pre-built binaries |
 | Windows | Via WSL2 |
 
 ## Troubleshooting

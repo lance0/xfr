@@ -498,20 +498,35 @@ async fn handle_quic_client(
             }
 
             let mut duration = Duration::from_secs(duration_secs as u64);
-            if duration > MAX_TEST_DURATION {
-                duration = MAX_TEST_DURATION;
-            }
-            if let Some(max_dur) = server_max_duration
-                && duration > max_dur
-            {
-                duration = max_dur;
+            // Handle infinite duration (0) - apply server max if set
+            if duration == Duration::ZERO {
+                if let Some(max_dur) = server_max_duration {
+                    duration = max_dur;
+                    warn!(
+                        "Infinite duration requested, capped to server max {}s",
+                        max_dur.as_secs()
+                    );
+                }
+                // else: allow infinite if no server max
+            } else {
+                if duration > MAX_TEST_DURATION {
+                    duration = MAX_TEST_DURATION;
+                }
+                if let Some(max_dur) = server_max_duration
+                    && duration > max_dur
+                {
+                    duration = max_dur;
+                }
             }
 
+            let duration_display = if duration == Duration::ZERO {
+                "∞".to_string()
+            } else {
+                format!("{}s", duration.as_secs())
+            };
             info!(
-                "QUIC test requested: {} streams, {} mode, {}s",
-                streams,
-                direction,
-                duration.as_secs()
+                "QUIC test requested: {} streams, {} mode, {}",
+                streams, direction, duration_display
             );
 
             // Send test ack (no data ports for QUIC - streams are multiplexed)
@@ -709,31 +724,45 @@ async fn handle_test_request(
 
             // Calculate effective duration
             let mut duration = Duration::from_secs(duration_secs as u64);
-            if duration > MAX_TEST_DURATION {
-                duration = MAX_TEST_DURATION;
-                warn!(
-                    "Client requested {}s, capped to {}s",
-                    duration_secs,
-                    MAX_TEST_DURATION.as_secs()
-                );
-            }
-            if let Some(max_dur) = server_max_duration
-                && duration > max_dur
-            {
-                duration = max_dur;
-                warn!(
-                    "Client requested {}s, capped to server max {}s",
-                    duration_secs,
-                    max_dur.as_secs()
-                );
+            // Handle infinite duration (0) - apply server max if set
+            if duration == Duration::ZERO {
+                if let Some(max_dur) = server_max_duration {
+                    duration = max_dur;
+                    warn!(
+                        "Infinite duration requested, capped to server max {}s",
+                        max_dur.as_secs()
+                    );
+                }
+                // else: allow infinite if no server max
+            } else {
+                if duration > MAX_TEST_DURATION {
+                    duration = MAX_TEST_DURATION;
+                    warn!(
+                        "Client requested {}s, capped to {}s",
+                        duration_secs,
+                        MAX_TEST_DURATION.as_secs()
+                    );
+                }
+                if let Some(max_dur) = server_max_duration
+                    && duration > max_dur
+                {
+                    duration = max_dur;
+                    warn!(
+                        "Client requested {}s, capped to server max {}s",
+                        duration_secs,
+                        max_dur.as_secs()
+                    );
+                }
             }
 
+            let duration_display = if duration == Duration::ZERO {
+                "∞".to_string()
+            } else {
+                format!("{}s", duration.as_secs())
+            };
             info!(
-                "Test requested: {} {} streams, {} mode, {}s",
-                protocol,
-                streams,
-                direction,
-                duration.as_secs()
+                "Test requested: {} {} streams, {} mode, {}",
+                protocol, streams, direction, duration_display
             );
 
             // Run the actual test
@@ -889,7 +918,8 @@ async fn run_quic_test(
     loop {
         tokio::select! {
             _ = interval_timer.tick() => {
-                if start.elapsed() >= duration {
+                // Duration::ZERO means infinite - only break if duration is set
+                if duration != Duration::ZERO && start.elapsed() >= duration {
                     break;
                 }
 
@@ -1147,7 +1177,8 @@ async fn run_test(
     loop {
         tokio::select! {
             _ = interval_timer.tick() => {
-                if start.elapsed() >= duration {
+                // Duration::ZERO means infinite - only break if duration is set
+                if duration != Duration::ZERO && start.elapsed() >= duration {
                     break;
                 }
 

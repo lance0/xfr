@@ -203,6 +203,7 @@ pub async fn send_udp_paced(
     let mut ticker = interval(pacing_interval);
     let start = Instant::now();
     let deadline = start + duration;
+    let is_infinite = duration == Duration::ZERO;
 
     let mut packet = vec![0u8; packet_size];
 
@@ -214,13 +215,14 @@ pub async fn send_udp_paced(
 
         ticker.tick().await;
 
-        if Instant::now() >= deadline {
+        // Duration::ZERO means infinite - only check deadline if finite
+        if !is_infinite && Instant::now() >= deadline {
             break;
         }
 
         // Send packets_per_tick packets in this burst
         for _ in 0..packets_per_tick {
-            if Instant::now() >= deadline {
+            if !is_infinite && Instant::now() >= deadline {
                 break;
             }
 
@@ -268,6 +270,7 @@ async fn send_udp_unlimited(
     let mut sequence: u64 = 0;
     let start = Instant::now();
     let deadline = start + duration;
+    let is_infinite = duration == Duration::ZERO;
     let mut packet = vec![0u8; packet_size];
 
     debug!("UDP unlimited mode: sending as fast as possible");
@@ -279,13 +282,14 @@ async fn send_udp_unlimited(
             break;
         }
 
-        if Instant::now() >= deadline {
+        // Duration::ZERO means infinite - only check deadline if finite
+        if !is_infinite && Instant::now() >= deadline {
             break;
         }
 
         // Send a burst of packets before yielding
         for _ in 0..BURST_SIZE {
-            if Instant::now() >= deadline {
+            if !is_infinite && Instant::now() >= deadline {
                 break;
             }
 

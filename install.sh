@@ -5,7 +5,13 @@
 set -e
 
 REPO="lance0/xfr"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+# Default install directory (Termux uses $PREFIX/bin)
+if [ -n "$TERMUX_VERSION" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-$PREFIX/bin}"
+else
+  INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+fi
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -13,12 +19,21 @@ ARCH=$(uname -m)
 
 case "$OS" in
   linux)
-    case "$ARCH" in
-      x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
-      aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-      arm64)   TARGET="aarch64-unknown-linux-gnu" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
+    # Detect Termux (Android)
+    if [ -n "$TERMUX_VERSION" ]; then
+      case "$ARCH" in
+        aarch64) TARGET="aarch64-linux-android" ;;
+        arm64)   TARGET="aarch64-linux-android" ;;
+        *) echo "Unsupported Termux architecture: $ARCH"; exit 1 ;;
+      esac
+    else
+      case "$ARCH" in
+        x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
+        aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+        arm64)   TARGET="aarch64-unknown-linux-gnu" ;;
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+      esac
+    fi
     ;;
   darwin)
     case "$ARCH" in

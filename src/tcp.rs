@@ -146,6 +146,7 @@ pub async fn send_data(
 
     let buffer = vec![0u8; config.buffer_size];
     let deadline = tokio::time::Instant::now() + duration;
+    let is_infinite = duration == Duration::ZERO;
 
     loop {
         if *cancel.borrow() {
@@ -153,7 +154,8 @@ pub async fn send_data(
             break;
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        // Duration::ZERO means infinite - only check deadline if finite
+        if !is_infinite && tokio::time::Instant::now() >= deadline {
             break;
         }
 
@@ -255,6 +257,7 @@ pub async fn send_data_half(
 ) -> anyhow::Result<OwnedWriteHalf> {
     let buffer = vec![0u8; config.buffer_size];
     let deadline = tokio::time::Instant::now() + duration;
+    let is_infinite = duration == Duration::ZERO;
 
     loop {
         if *cancel.borrow() {
@@ -262,7 +265,8 @@ pub async fn send_data_half(
             break;
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        // Duration::ZERO means infinite - only check deadline if finite
+        if !is_infinite && tokio::time::Instant::now() >= deadline {
             break;
         }
 

@@ -34,6 +34,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### QUIC Client DualStack Binding
+
+**Issue:** QUIC client endpoint in DualStack mode binds to IPv4 (`0.0.0.0:0`) by default, which may not work when connecting to an IPv6-only server.
+
+**Impact:** Edge case - only affects DualStack clients connecting to IPv6-only QUIC servers.
+
+**Workaround:** Use `-6` flag to force IPv6 mode when connecting to IPv6-only servers.
+
+---
+
 ### QUIC Accept Loop Timeout
 
 **Issue:** If a QUIC connection is accepted but the client never opens a stream, the server waits indefinitely in `accept_uni()`.

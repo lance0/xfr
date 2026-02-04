@@ -157,7 +157,7 @@ struct Cli {
     #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
     port: u16,
 
-    /// Test duration
+    /// Test duration (use 0 for infinite)
     #[arg(short = 't', long, default_value = "10s", value_parser = parse_test_duration, env = "XFR_DURATION")]
     time: Duration,
 
@@ -256,6 +256,10 @@ struct Cli {
     /// Force IPv6 only
     #[arg(short = '6', long = "ipv6")]
     ipv6_only: bool,
+
+    /// Local address to bind to (e.g., 192.168.1.100 or 192.168.1.100:0)
+    #[arg(long, value_name = "ADDR")]
+    bind: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -360,8 +364,12 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 
 fn parse_test_duration(s: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+    // Allow 0 for infinite duration, otherwise require at least 1 second
+    if duration == Duration::ZERO {
+        return Ok(Duration::ZERO);
+    }
     if duration < Duration::from_secs(1) {
-        return Err("Minimum test duration is 1 second".to_string());
+        return Err("Minimum test duration is 1 second (use 0 for infinite)".to_string());
     }
     Ok(duration)
 }
@@ -406,6 +414,66 @@ fn parse_size(s: &str) -> Result<usize, String> {
 
 fn parse_timestamp_format(s: &str) -> Result<TimestampFormat, String> {
     s.parse::<TimestampFormat>()
+}
+
+/// Parse a bind address string (can be "IP" or "IP:port")
+fn parse_bind_address(s: &str) -> anyhow::Result<std::net::SocketAddr> {
+    use std::net::SocketAddr;
+
+    // Try parsing as full socket address first (IP:port or [IPv6]:port)
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Try parsing as IP only (use port 0 for auto-assign)
+    if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, 0));
+    }
+
+    // Handle bracketed IPv6 without port: [::1] -> ::1
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len() - 1];
+        if let Ok(ip) = inner.parse::<std::net::IpAddr>() {
+            return Ok(SocketAddr::new(ip, 0));
+        }
+    }
+
+    anyhow::bail!(
+        "Invalid bind address: {}. Use IP or IP:port format (for IPv6: [::1] or [::1]:port).",
+        s
+    )
+}
+
+/// Validate bind address compatibility with protocol and stream count
+fn validate_bind_address(
+    bind_addr: Option<std::net::SocketAddr>,
+    protocol: xfr::protocol::Protocol,
+    streams: u8,
+) -> anyhow::Result<()> {
+    if let Some(addr) = bind_addr
+        && addr.port() != 0
+    {
+        // TCP: explicit port causes EADDRINUSE (control + data both try to bind same port)
+        if protocol == xfr::protocol::Protocol::Tcp {
+            anyhow::bail!(
+                "Cannot use explicit bind port {} with TCP (control and data connections conflict). \
+                 Use just the IP address (e.g., --bind {}) to let the OS assign ports.",
+                addr.port(),
+                addr.ip()
+            );
+        }
+        // UDP/QUIC with multiple streams: can't reuse same port for multiple sockets
+        if streams > 1 {
+            anyhow::bail!(
+                "Cannot use explicit bind port {} with multiple streams (-P {}). \
+                 Use just the IP address (e.g., --bind {}) to let the OS assign ports.",
+                addr.port(),
+                streams,
+                addr.ip()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn generate_completions(shell: &str) {
@@ -704,6 +772,16 @@ async fn main() -> Result<()> {
                 xfr::net::AddressFamily::default()
             };
 
+            // Parse bind address (can be "IP" or "IP:port")
+            let bind_addr = if let Some(ref bind_str) = cli.bind {
+                Some(parse_bind_address(bind_str)?)
+            } else {
+                None
+            };
+
+            // Validate bind address compatibility with protocol and stream count
+            validate_bind_address(bind_addr, protocol, streams)?;
+
             let config = ClientConfig {
                 host: host.clone(),
                 port: cli.port,
@@ -716,6 +794,7 @@ async fn main() -> Result<()> {
                 window_size,
                 psk: client_psk,
                 address_family: client_address_family,
+                bind_addr,
             };
 
             // Determine output format
@@ -921,6 +1000,13 @@ async fn run_tui_loop(
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
 ) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
+    // Spawn background update check
+    let (update_tx, update_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = xfr::update::check_for_update();
+        let _ = update_tx.send(result);
+    });
+
     let mut print_json_on_exit = false;
     let mut app = App::with_theme_name(
         config.host.clone(),
@@ -934,6 +1020,9 @@ async fn run_tui_loop(
         prefs.theme_name(),
     );
 
+    // Track if we've received the update check result
+    let mut update_check_done = false;
+
     let client = Arc::new(Client::new(config));
     let client_for_task = client.clone();
     let (progress_tx, mut progress_rx) = mpsc::channel::<TestProgress>(100);
@@ -944,6 +1033,27 @@ async fn run_tui_loop(
     app.on_connected();
 
     loop {
+        // Check for update result if not already received
+        if !update_check_done {
+            match update_rx.try_recv() {
+                Ok(Some(version)) => {
+                    app.update_available = Some(version);
+                    update_check_done = true;
+                }
+                Ok(None) => {
+                    // No update available
+                    update_check_done = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still checking, will try again next loop
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Channel closed, stop checking
+                    update_check_done = true;
+                }
+            }
+        }
+
         // Draw UI
         terminal.draw(|f| draw(f, &app))?;
 
@@ -1031,6 +1141,12 @@ async fn run_tui_loop(
                         app.log("JSON output queued for display on exit.");
                     }
                 }
+                KeyCode::Char('u') => {
+                    // Dismiss update notification
+                    if app.update_available.is_some() {
+                        app.update_available = None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1050,6 +1166,21 @@ async fn run_tui_loop(
 
                     // Wait for quit
                     loop {
+                        // Check for update result if not already received
+                        if !update_check_done {
+                            match update_rx.try_recv() {
+                                Ok(Some(version)) => {
+                                    app.update_available = Some(version);
+                                    update_check_done = true;
+                                }
+                                Ok(None) => update_check_done = true,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    update_check_done = true;
+                                }
+                            }
+                        }
+
                         terminal.draw(|f| draw(f, &app))?;
 
                         if event::poll(Duration::from_millis(100))?
@@ -1115,6 +1246,11 @@ async fn run_tui_loop(
                                 KeyCode::Char('j') => {
                                     print_json_on_exit = true;
                                     app.log("JSON output queued for display on exit.");
+                                }
+                                KeyCode::Char('u') => {
+                                    if app.update_available.is_some() {
+                                        app.update_available = None;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1270,9 +1406,12 @@ mod tests {
         assert!(parse_test_duration("1s").is_ok());
         assert!(parse_test_duration("10s").is_ok());
 
-        // Sub-second should fail
+        // 0 for infinite should work
+        assert!(parse_test_duration("0s").is_ok());
+        assert_eq!(parse_test_duration("0s").unwrap(), Duration::ZERO);
+
+        // Sub-second (but not zero) should fail
         assert!(parse_test_duration("500ms").is_err());
-        assert!(parse_test_duration("0s").is_err());
     }
 
     #[test]
@@ -1311,5 +1450,109 @@ mod tests {
         // -P 129 should fail
         let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_bind_address_tcp_explicit_port() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use xfr::protocol::Protocol;
+
+        // TCP + explicit port should fail (control + data conflict)
+        let addr = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            5000,
+        ));
+        let result = validate_bind_address(addr, Protocol::Tcp, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("TCP"));
+
+        // TCP + port 0 (OS-assigned) should work
+        let addr = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            0,
+        ));
+        let result = validate_bind_address(addr, Protocol::Tcp, 1);
+        assert!(result.is_ok());
+
+        // TCP + no bind should work
+        let result = validate_bind_address(None, Protocol::Tcp, 4);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_bind_address_udp_multi_stream() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use xfr::protocol::Protocol;
+
+        // UDP + explicit port + multiple streams should fail
+        let addr = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            5000,
+        ));
+        let result = validate_bind_address(addr, Protocol::Udp, 4);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("multiple streams"));
+
+        // UDP + explicit port + single stream should work
+        let result = validate_bind_address(addr, Protocol::Udp, 1);
+        assert!(result.is_ok());
+
+        // UDP + port 0 + multiple streams should work
+        let addr = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            0,
+        ));
+        let result = validate_bind_address(addr, Protocol::Udp, 4);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_bind_address_quic_multi_stream() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use xfr::protocol::Protocol;
+
+        // QUIC + explicit port + multiple streams - currently rejected (stricter than necessary)
+        let addr = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            5000,
+        ));
+        let result = validate_bind_address(addr, Protocol::Quic, 4);
+        assert!(result.is_err());
+
+        // QUIC + explicit port + single stream should work
+        let result = validate_bind_address(addr, Protocol::Quic, 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_bind_address() {
+        // IPv4 without port
+        let addr = parse_bind_address("192.168.1.1").unwrap();
+        assert_eq!(addr.ip().to_string(), "192.168.1.1");
+        assert_eq!(addr.port(), 0);
+
+        // IPv4 with port
+        let addr = parse_bind_address("192.168.1.1:5000").unwrap();
+        assert_eq!(addr.ip().to_string(), "192.168.1.1");
+        assert_eq!(addr.port(), 5000);
+
+        // IPv6 without brackets or port
+        let addr = parse_bind_address("::1").unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 0);
+
+        // IPv6 with brackets, no port
+        let addr = parse_bind_address("[::1]").unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 0);
+
+        // IPv6 with brackets and port
+        let addr = parse_bind_address("[::1]:5000").unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 5000);
+
+        // Invalid address should fail
+        assert!(parse_bind_address("invalid").is_err());
+        assert!(parse_bind_address("[invalid]").is_err());
     }
 }

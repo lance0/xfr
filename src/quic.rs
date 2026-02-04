@@ -91,8 +91,11 @@ pub fn create_server_endpoint(
     Ok(endpoint)
 }
 
-/// Create a QUIC client endpoint
-pub fn create_client_endpoint(address_family: AddressFamily) -> anyhow::Result<Endpoint> {
+/// Create a QUIC client endpoint with optional local bind address
+pub fn create_client_endpoint(
+    address_family: AddressFamily,
+    local_bind: Option<SocketAddr>,
+) -> anyhow::Result<Endpoint> {
     // Client accepts any certificate (xfr uses its own auth mechanism)
     let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -109,11 +112,13 @@ pub fn create_client_endpoint(address_family: AddressFamily) -> anyhow::Result<E
     let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
     client_config.transport_config(Arc::new(transport));
 
-    // Bind to appropriate address based on address family
-    let bind_addr: SocketAddr = match address_family {
-        AddressFamily::V6Only => "[::]:0".parse()?,
-        _ => "0.0.0.0:0".parse()?, // IPv4 or dual-stack default to IPv4 bind
-    };
+    // Use provided bind address, or default based on address family
+    let bind_addr: SocketAddr = local_bind.unwrap_or_else(|| {
+        match address_family {
+            AddressFamily::V6Only => "[::]:0".parse().unwrap(),
+            _ => "0.0.0.0:0".parse().unwrap(), // IPv4 or dual-stack default to IPv4 bind
+        }
+    });
 
     let mut endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_config);
@@ -173,6 +178,7 @@ pub async fn send_quic_data(
 ) -> anyhow::Result<()> {
     let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
     let deadline = tokio::time::Instant::now() + duration;
+    let is_infinite = duration == Duration::ZERO;
 
     loop {
         if *cancel.borrow() {
@@ -180,7 +186,8 @@ pub async fn send_quic_data(
             break;
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        // Duration::ZERO means infinite - only check deadline if finite
+        if !is_infinite && tokio::time::Instant::now() >= deadline {
             break;
         }
 

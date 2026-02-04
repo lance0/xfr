@@ -38,19 +38,39 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let size = frame.area();
     let theme = &app.theme;
 
-    // Main layout: title + content + footer
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Title
-            Constraint::Min(0),    // Main content
-            Constraint::Length(1), // Footer
-        ])
-        .split(size);
+    // Main layout: title + optional update banner + content + footer
+    let has_update = app.update_available.is_some();
+    let chunks = if has_update {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title
+                Constraint::Length(1), // Update banner
+                Constraint::Min(0),    // Main content
+                Constraint::Length(1), // Footer
+            ])
+            .split(size)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title
+                Constraint::Min(0),    // Main content
+                Constraint::Length(1), // Footer
+            ])
+            .split(size)
+    };
 
     draw_title(frame, theme, chunks[0]);
-    draw_content(frame, app, theme, chunks[1]);
-    draw_footer(frame, app, theme, chunks[2]);
+
+    if has_update {
+        draw_update_banner(frame, app, theme, chunks[1]);
+        draw_content(frame, app, theme, chunks[2]);
+        draw_footer(frame, app, theme, chunks[3]);
+    } else {
+        draw_content(frame, app, theme, chunks[1]);
+        draw_footer(frame, app, theme, chunks[2]);
+    }
 
     // Show pause overlay (behind other modals)
     if app.state == AppState::Paused && !app.show_help && !app.settings.visible {
@@ -83,6 +103,23 @@ fn draw_title(frame: &mut Frame, theme: &Theme, area: Rect) {
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(title, area);
+}
+
+fn draw_update_banner(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    if let Some(ref version) = app.update_available {
+        let install_method = crate::update::InstallMethod::detect();
+        let update_cmd = install_method.update_command();
+        let text = format!(
+            " Update available: v{} → v{} | {} | Press 'u' to dismiss ",
+            env!("CARGO_PKG_VERSION"),
+            version,
+            update_cmd
+        );
+        let banner = Paragraph::new(text)
+            .style(Style::default().fg(Color::Black).bg(theme.warning))
+            .alignment(Alignment::Center);
+        frame.render_widget(banner, area);
+    }
 }
 
 fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -216,7 +253,6 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let progress = app.progress_percent() / 100.0;
     let transferred = bytes_to_human(app.total_bytes);
     let elapsed_secs = app.elapsed.as_secs();
-    let duration_secs = app.duration.as_secs();
 
     // Build arrow-style progress bar: [====>------] 45%
     // Adaptive width: use available space with minimum of 10 chars
@@ -227,29 +263,38 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         (inner.width as usize).saturating_sub(prefix_len + suffix_len + transferred_len);
     let bar_width = available_width.max(10);
 
-    let filled = (progress * bar_width as f64) as usize;
-    let empty = bar_width.saturating_sub(filled);
-    let arrow = if filled > 0 && filled < bar_width {
-        ">"
+    let (progress_bar, time_display) = if app.is_infinite() {
+        // Infinite duration: show elapsed time with ∞
+        let filled = bar_width; // Full bar since no target
+        (
+            format!("[{}]", "=".repeat(filled)),
+            format!(" {}s/∞", elapsed_secs),
+        )
     } else {
-        ""
+        let duration_secs = app.duration.as_secs();
+        let filled = (progress * bar_width as f64) as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let arrow = if filled > 0 && filled < bar_width {
+            ">"
+        } else {
+            ""
+        };
+        let fill_chars = if arrow.is_empty() {
+            filled
+        } else {
+            filled.saturating_sub(1)
+        };
+        (
+            format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty)),
+            format!(" {}s/{}s", elapsed_secs, duration_secs),
+        )
     };
-    let fill_chars = if arrow.is_empty() {
-        filled
-    } else {
-        filled.saturating_sub(1)
-    };
-
-    let progress_bar = format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty));
 
     let transfer_line = Line::from(vec![
         Span::styled("  Transfer: ", Style::default().fg(theme.text_dim)),
         Span::styled(format!("{} ", transferred), Style::default().fg(theme.text)),
         Span::styled(progress_bar, Style::default().fg(theme.graph_secondary)),
-        Span::styled(
-            format!(" {}s/{}s", elapsed_secs, duration_secs),
-            Style::default().fg(theme.text),
-        ),
+        Span::styled(time_display, Style::default().fg(theme.text)),
     ]);
     frame.render_widget(Paragraph::new(transfer_line), chunks[1]);
 
@@ -433,7 +478,9 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("s", Style::default().fg(theme.accent)),
         Span::styled("] Settings | [", Style::default().fg(theme.text_dim)),
         Span::styled("?", Style::default().fg(theme.accent)),
-        Span::styled("] Help", Style::default().fg(theme.text_dim)),
+        Span::styled("] Help | [", Style::default().fg(theme.text_dim)),
+        Span::styled("t", Style::default().fg(theme.accent)),
+        Span::styled("] Theme", Style::default().fg(theme.text_dim)),
     ];
 
     // Add streams toggle hint when multiple streams exist
@@ -442,6 +489,16 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         spans.push(Span::styled("d", Style::default().fg(theme.accent)));
         spans.push(Span::styled(
             "] Streams",
+            Style::default().fg(theme.text_dim),
+        ));
+    }
+
+    // Add dismiss hint when update available
+    if app.update_available.is_some() {
+        spans.push(Span::styled(" | [", Style::default().fg(theme.text_dim)));
+        spans.push(Span::styled("u", Style::default().fg(theme.accent)));
+        spans.push(Span::styled(
+            "] Dismiss",
             Style::default().fg(theme.text_dim),
         ));
     }

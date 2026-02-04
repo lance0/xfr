@@ -1,6 +1,6 @@
 [package]
 name = "xfr"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Modern network bandwidth testing with TUI"
@@ -70,6 +70,9 @@ rand = "0.9"
 # Rate limiting / ACL
 dashmap = "6"
 ipnetwork = "0.21"
+
+# Update notifications
+update-informer = { version = "1", features = ["github"] }
 
 # Socket control (IPv6 dual-stack, flow labels)
 socket2 = { version = "0.6", features = ["all"] }

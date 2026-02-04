@@ -75,6 +75,7 @@
 
 ### Enterprise Features
 - [x] **Server access control lists** (`--allow`, `--deny`, `--acl-file`) - IP/subnet allowlists
+- [x] **In-app update notifications** - yellow banner when newer version available, `u` to dismiss
 - [ ] **Bandwidth quotas per client** - limit resource usage
 
 *Note: TLS was removed in favor of QUIC, which provides built-in encryption.*
@@ -110,10 +111,10 @@
 ## Future Ideas
 
 ### CLI & Scripting
-- [ ] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
+- [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno)
-- [ ] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+- [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
 
 ### TUI Enhancements
 - [ ] **Test profiles** - save/load named test configurations

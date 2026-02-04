@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-02-04
+
+### Added
+- **In-app update notifications** - checks GitHub releases in background, shows banner with update command
+  - Detects install method (Homebrew, Cargo, binary) and shows appropriate update command
+  - Press `u` to dismiss the banner
+  - Uses 1-hour cache to avoid GitHub API rate limits
+- **Android/Termux support** - pre-built `aarch64-linux-android` binary in releases
+- **Infinite duration mode** (`-t 0`) - run test indefinitely until manually stopped with `q` or Ctrl+C
+- **Local bind address** (`--bind`) - bind to specific local IP or IP:port for multi-homed hosts
+- **Theme hint in footer** - `[t] Theme` now shown in TUI status bar
+
+### Fixed
+- **UDP cross-platform compatibility** (issue #10) - UDP mode now works between Linux server and macOS client
+  - Client UDP socket now matches server's address family instead of using dual-stack
+  - macOS handles dual-stack sockets differently than Linux; this fix ensures compatibility
+- **`--bind` with explicit port** - disallows explicit port for TCP (control + data connections would conflict)
+- **Non-blocking connect** - added EWOULDBLOCK to Unix error handling for edge cases
+
 ## [0.4.2] - 2026-02-03
 
 ### Changed

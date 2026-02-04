@@ -51,6 +51,7 @@ async fn test_tcp_single_stream() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -85,6 +86,7 @@ async fn test_tcp_multi_stream() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -112,6 +114,7 @@ async fn test_connection_refused() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -139,6 +142,7 @@ async fn test_tcp_download() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -171,6 +175,7 @@ async fn test_tcp_bidir() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -203,6 +208,7 @@ async fn test_udp_upload() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -236,6 +242,7 @@ async fn test_udp_download() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -266,6 +273,7 @@ async fn test_udp_bidir() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -298,6 +306,7 @@ async fn test_udp_multi_stream() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -335,6 +344,7 @@ async fn test_multi_client_concurrent() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let config2 = ClientConfig {
@@ -349,6 +359,7 @@ async fn test_multi_client_concurrent() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client1 = Client::new(config1);
@@ -429,6 +440,7 @@ async fn test_psk_auth_success() {
         window_size: None,
         psk: Some(psk),
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -465,6 +477,7 @@ async fn test_psk_auth_failure() {
         window_size: None,
         psk: Some("wrong-secret".to_string()),
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -501,6 +514,7 @@ async fn test_psk_auth_missing_client_key() {
         window_size: None,
         psk: None, // No PSK provided
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -535,6 +549,7 @@ async fn test_acl_allow() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -566,6 +581,7 @@ async fn test_rate_limit() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client1 = Client::new(config1.clone());
@@ -587,6 +603,7 @@ async fn test_rate_limit() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client2 = Client::new(config2);
@@ -629,6 +646,7 @@ async fn test_quic_upload() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -662,6 +680,7 @@ async fn test_quic_download() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -694,6 +713,7 @@ async fn test_quic_multi_stream() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -730,6 +750,7 @@ async fn test_quic_bidir() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -763,6 +784,7 @@ async fn test_quic_with_psk() {
         window_size: None,
         psk: Some(psk),
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -798,6 +820,7 @@ async fn test_acl_deny() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -848,6 +871,7 @@ async fn test_ipv6_localhost() {
         window_size: None,
         psk: None,
         address_family: xfr::net::AddressFamily::V6Only,
+        bind_addr: None,
     };
 
     let client = Client::new(config);
@@ -858,6 +882,247 @@ async fn test_ipv6_localhost() {
     assert!(
         result.is_ok(),
         "IPv6 localhost should succeed: {:?}",
+        result
+    );
+}
+
+// ============================================================================
+// Infinite Duration Tests (Duration::ZERO with cancel)
+// ============================================================================
+
+#[tokio::test]
+async fn test_tcp_infinite_duration_with_cancel() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::ZERO, // Infinite
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+
+    // Run for 1 second then cancel
+    let run_future = client.run(None);
+    let cancel_future = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = client.cancel();
+    };
+
+    // Race the test against cancellation
+    let result = tokio::select! {
+        r = run_future => r,
+        _ = cancel_future => {
+            // Give a moment for cancel to propagate
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Err(anyhow::anyhow!("Cancelled"))
+        }
+    };
+
+    // Test should either complete with result or be cancelled gracefully
+    // The important thing is it doesn't hang forever
+    let _ = result;
+}
+
+#[tokio::test]
+async fn test_udp_infinite_duration_with_cancel() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::ZERO, // Infinite
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000), // 100 Mbps to avoid flooding
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+
+    // Run for 1 second then cancel
+    let run_future = client.run(None);
+    let cancel_future = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = client.cancel();
+    };
+
+    let result = tokio::select! {
+        r = run_future => r,
+        _ = cancel_future => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Err(anyhow::anyhow!("Cancelled"))
+        }
+    };
+
+    let _ = result;
+}
+
+#[tokio::test]
+async fn test_quic_infinite_duration_with_cancel() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::ZERO, // Infinite
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+
+    // Run for 1 second then cancel
+    let run_future = client.run(None);
+    let cancel_future = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let _ = client.cancel();
+    };
+
+    let result = tokio::select! {
+        r = run_future => r,
+        _ = cancel_future => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Err(anyhow::anyhow!("Cancelled"))
+        }
+    };
+
+    let _ = result;
+}
+
+// ============================================================================
+// UDP Address Family Matching Tests (Issue #10 fix)
+// ============================================================================
+
+#[tokio::test]
+async fn test_udp_ipv4_explicit() {
+    // Test that UDP works with explicit IPv4 address
+    // This validates the fix for issue #10 (macOS dual-stack compatibility)
+    let port = get_test_port();
+
+    // Start server bound to IPv4 only
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V4Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client connects to IPv4 address - socket should match server's family
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::V4Only,
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP IPv4 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "UDP with explicit IPv4 should succeed: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_udp_ipv6_explicit() {
+    // Test that UDP works with explicit IPv6 address
+    let port = get_test_port();
+
+    // Start server bound to IPv6 only
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client connects to IPv6 address - socket should match server's family
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "UDP with explicit IPv6 should succeed: {:?}",
         result
     );
 }

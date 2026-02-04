@@ -54,6 +54,7 @@ pub mod tcp;
 pub mod tcp_info;
 pub mod tui;
 pub mod udp;
+pub mod update;
 
 pub use client::{Client, ClientConfig};
 pub use protocol::{ControlMessage, Direction, Protocol, TestResult};

@@ -41,6 +41,8 @@ pub struct ClientConfig {
     pub psk: Option<String>,
     /// Address family preference
     pub address_family: AddressFamily,
+    /// Local address to bind to
+    pub bind_addr: Option<SocketAddr>,
 }
 
 impl Default for ClientConfig {
@@ -57,6 +59,7 @@ impl Default for ClientConfig {
             window_size: None,
             psk: None,
             address_family: AddressFamily::default(),
+            bind_addr: None,
         }
     }
 }
@@ -108,6 +111,7 @@ impl Client {
             &self.config.host,
             self.config.port,
             self.config.address_family,
+            self.config.bind_addr,
         )
         .await?;
 
@@ -248,7 +252,13 @@ impl Client {
         }
 
         // Read interval updates and final result with timeout
-        let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
+        // For infinite duration, use 1 year timeout (effectively no timeout)
+        let timeout_duration = if self.config.duration == Duration::ZERO {
+            Duration::from_secs(365 * 24 * 3600) // 1 year
+        } else {
+            self.config.duration + Duration::from_secs(30)
+        };
+        let deadline = tokio::time::Instant::now() + timeout_duration;
 
         loop {
             // Check for external cancel request while waiting for server messages
@@ -345,6 +355,7 @@ impl Client {
             let cancel = cancel.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
+            let bind_addr = self.config.bind_addr;
 
             let config = TcpConfig::with_auto_detect(
                 self.config.tcp_nodelay,
@@ -353,7 +364,7 @@ impl Client {
             );
 
             tokio::spawn(async move {
-                match TcpStream::connect(addr).await {
+                match net::connect_tcp_with_bind(addr, bind_addr).await {
                     Ok(stream) => {
                         debug!("Connected to data port {}", port);
 
@@ -455,14 +466,26 @@ impl Client {
             let direction = self.config.direction;
             let duration = self.config.duration;
             let stream_bitrate = bitrate / self.config.streams as u64;
-            let address_family = self.config.address_family;
+            let bind_addr = self.config.bind_addr;
 
             tokio::spawn(async move {
-                let socket = match net::create_udp_socket(0, address_family).await {
-                    Ok(s) => Arc::new(s),
-                    Err(e) => {
-                        error!("Failed to bind UDP socket: {}", e);
-                        return;
+                // Create UDP socket matching the server's address family for cross-platform compatibility.
+                // macOS dual-stack sockets behave differently than Linux, so we match the server's family.
+                let socket = if let Some(local) = bind_addr {
+                    match net::create_udp_socket_bound(local).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            error!("Failed to bind UDP socket to {}: {}", local, e);
+                            return;
+                        }
+                    }
+                } else {
+                    match net::create_udp_socket_for_remote(server_port).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            error!("Failed to create UDP socket: {}", e);
+                            return;
+                        }
                     }
                 };
 
@@ -559,7 +582,8 @@ impl Client {
         use tokio::io::BufReader;
 
         // Create QUIC endpoint and connect
-        let endpoint = quic::create_client_endpoint(self.config.address_family)?;
+        let endpoint =
+            quic::create_client_endpoint(self.config.address_family, self.config.bind_addr)?;
         let addr = net::resolve_host(
             &self.config.host,
             self.config.port,
@@ -756,7 +780,13 @@ impl Client {
         }
 
         // Read interval updates and final result
-        let deadline = tokio::time::Instant::now() + self.config.duration + Duration::from_secs(30);
+        // For infinite duration, use 1 year timeout (effectively no timeout)
+        let timeout_duration = if self.config.duration == Duration::ZERO {
+            Duration::from_secs(365 * 24 * 3600) // 1 year
+        } else {
+            self.config.duration + Duration::from_secs(30)
+        };
+        let deadline = tokio::time::Instant::now() + timeout_duration;
 
         loop {
             tokio::select! {

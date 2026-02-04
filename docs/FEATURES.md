@@ -90,6 +90,35 @@ xfr <host> -R                  # Reverse/download (server → client)
 xfr <host> --bidir             # Both directions
 ```
 
+## Infinite Duration
+
+Run tests indefinitely until manually stopped:
+
+```bash
+xfr <host> -t 0                # Run until Ctrl+C or 'q'
+xfr <host> -u -t 0 -b 100M     # Continuous UDP at 100 Mbps
+```
+
+The TUI shows elapsed time as `Xs/∞`. Press `q` to stop.
+
+Servers can cap infinite requests with `--max-duration`:
+
+```bash
+xfr serve --max-duration 300s  # Cap all tests at 5 minutes
+```
+
+## Local Bind Address
+
+Bind the client to a specific local IP (useful for multi-homed hosts):
+
+```bash
+xfr <host> --bind 192.168.1.100         # Bind to specific IPv4
+xfr <host> --bind 10.0.0.1:0            # IP with auto-assigned port
+xfr <host> --bind [::1]                 # IPv6 address
+```
+
+**Note:** TCP mode does not support explicit port binding (use IP only).
+
 ## Output Formats
 
 ### Plain Text (Default)
@@ -319,6 +348,17 @@ Log levels: `error`, `warn`, `info`, `debug`, `trace`
 
 Logs rotate daily when using a log file.
 
+## Update Notifications
+
+xfr checks GitHub for newer versions in the background. If an update is available, a yellow banner appears below the title bar showing:
+
+- Current version → new version
+- Appropriate update command (based on how you installed xfr)
+
+Press `u` to dismiss the banner.
+
+The check uses a 1-hour cache to avoid GitHub API rate limits.
+
 ## CLI Reference
 
 See `xfr --help` for complete CLI documentation.
@@ -326,7 +366,7 @@ See `xfr --help` for complete CLI documentation.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--port` | `-p` | 5201 | Server/client port |
-| `--time` | `-t` | 10s | Test duration |
+| `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
 | `--bitrate` | `-b` | unlimited | Target bitrate (e.g., 1G, 100M) |
 | `--parallel` | `-P` | 1 | Parallel streams |
@@ -348,6 +388,7 @@ See `xfr --help` for complete CLI documentation.
 | `--timestamp-format` | | relative | Timestamp format |
 | `--log-file` | | none | Log file path |
 | `--log-level` | | info | Log level |
+| `--bind` | | none | Local address to bind (IP or IP:port) |
 
 ### Server-Specific Flags
 

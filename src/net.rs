@@ -134,6 +134,30 @@ pub async fn create_udp_socket_bound(addr: SocketAddr) -> io::Result<UdpSocket> 
     UdpSocket::from_std(std_socket)
 }
 
+/// Create a UDP socket matching the address family of the remote address.
+/// This ensures cross-platform compatibility (macOS dual-stack differs from Linux).
+pub async fn create_udp_socket_for_remote(remote: SocketAddr) -> io::Result<UdpSocket> {
+    let domain = if remote.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+
+    // Bind to appropriate unspecified address
+    let bind_addr = if remote.is_ipv4() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+    };
+    socket.bind(&SockAddr::from(bind_addr))?;
+    socket.set_nonblocking(true)?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
+}
+
 /// Resolve a hostname to addresses, filtered by address family preference
 pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<Vec<SocketAddr>> {
     // Handle zone IDs for link-local IPv6 (e.g., fe80::1%eth0)
@@ -181,11 +205,12 @@ pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<
     Ok(filtered)
 }
 
-/// Connect to a host with address family preference
+/// Connect to a host with address family preference and optional bind address
 pub async fn connect_tcp(
     host: &str,
     port: u16,
     family: AddressFamily,
+    bind_addr: Option<SocketAddr>,
 ) -> io::Result<(TcpStream, SocketAddr)> {
     let addrs = resolve_host(host, port, family)?;
 
@@ -193,7 +218,12 @@ pub async fn connect_tcp(
 
     for addr in addrs {
         debug!("Trying to connect to {}", addr);
-        match TcpStream::connect(addr).await {
+        let result = if bind_addr.is_some() {
+            connect_tcp_with_bind(addr, bind_addr).await
+        } else {
+            TcpStream::connect(addr).await
+        };
+        match result {
             Ok(stream) => {
                 info!("Connected to {}", addr);
                 return Ok((stream, addr));
@@ -208,6 +238,55 @@ pub async fn connect_tcp(
     Err(last_err.unwrap_or_else(|| {
         io::Error::new(io::ErrorKind::NotConnected, "No addresses to connect to")
     }))
+}
+
+/// Connect TCP socket with optional local bind address
+pub async fn connect_tcp_with_bind(
+    remote: SocketAddr,
+    bind_addr: Option<SocketAddr>,
+) -> io::Result<TcpStream> {
+    if let Some(local) = bind_addr {
+        // Create socket, bind to local address, then connect
+        let domain = if remote.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&SockAddr::from(local))?;
+
+        // Connect (non-blocking) - handle platform-specific "in progress" errors
+        match socket.connect(&SockAddr::from(remote)) {
+            Ok(()) => {}
+            #[cfg(unix)]
+            Err(e)
+                if e.raw_os_error() == Some(libc::EINPROGRESS)
+                    || e.raw_os_error() == Some(libc::EALREADY)
+                    || e.raw_os_error() == Some(libc::EWOULDBLOCK) => {}
+            #[cfg(windows)]
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+
+        // Convert to tokio TcpStream
+        let std_stream: std::net::TcpStream = socket.into();
+        let stream = TcpStream::from_std(std_stream)?;
+
+        // Wait for connection to complete
+        stream.writable().await?;
+
+        // Check for connection errors
+        if let Some(e) = stream.take_error()? {
+            return Err(e);
+        }
+
+        debug!("Connected to {} from {}", remote, local);
+        Ok(stream)
+    } else {
+        // No bind address, use normal connect
+        Ok(TcpStream::connect(remote).await?)
+    }
 }
 
 /// Set IPv6 flow label on a socket (Linux only)
