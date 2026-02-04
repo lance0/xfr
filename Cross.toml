@@ -1,0 +1,7 @@
+# Cross-compilation configuration
+# See: https://github.com/cross-rs/cross/wiki/Configuration
+
+# Use edge images for Android to fix libunwind linking issue
+# See: https://github.com/cross-rs/cross/issues/1222
+[target.aarch64-linux-android]
+image = "ghcr.io/cross-rs/aarch64-linux-android:edge"
