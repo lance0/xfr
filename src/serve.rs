@@ -868,12 +868,10 @@ async fn run_quic_test(
                             None
                         }
                     };
-                    if let Some(recv) = accept_result {
-                        if let Err(e) =
-                            quic::receive_quic_data(recv, stream_stats, cancel).await
-                        {
-                            debug!("QUIC receive ended: {}", e);
-                        }
+                    if let Some(recv) = accept_result
+                        && let Err(e) = quic::receive_quic_data(recv, stream_stats, cancel).await
+                    {
+                        debug!("QUIC receive ended: {}", e);
                     }
                 }
                 Direction::Download => {
@@ -911,13 +909,11 @@ async fn run_quic_test(
 
                         let send_handle = tokio::spawn(async move {
                             let _ =
-                                quic::send_quic_data(send, send_stats, duration, send_cancel)
-                                    .await;
+                                quic::send_quic_data(send, send_stats, duration, send_cancel).await;
                         });
 
                         let recv_handle = tokio::spawn(async move {
-                            let _ =
-                                quic::receive_quic_data(recv, recv_stats, recv_cancel).await;
+                            let _ = quic::receive_quic_data(recv, recv_stats, recv_cancel).await;
                         });
 
                         let _ = tokio::join!(send_handle, recv_handle);
