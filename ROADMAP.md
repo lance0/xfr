@@ -113,15 +113,24 @@
 ### Pre-1.0 Requirements
 - [ ] **Structured error types** - replace `anyhow::Error` with `thiserror` enum for library users
 - [ ] **Lower default max_concurrent** - reduce from 1000 to 100 for safer defaults
+- [ ] **Config file versioning** - add version field and migration support for breaking changes
 
 ### Code Quality
 - [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers
 - [ ] **Refactor main.rs** - split CLI, config, and TUI setup into separate modules
 - [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
+- [ ] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
+- [ ] **Audit unwrap()/expect() calls** - reduce 61 calls in production code, especially auth.rs HMAC init
+- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures and humantime
 
 ### Testing
 - [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
 - [ ] **Fuzz testing** - fuzz control protocol JSON parsing for robustness
+- [ ] **Property-based testing** - packet sequence tracking, rate limiter invariants
+
+### Documentation
+- [ ] **API documentation** - add examples to public functions in net module
+- [ ] **Algorithm documentation** - inline comments for jitter calculation and other complex logic
 
 ---
 

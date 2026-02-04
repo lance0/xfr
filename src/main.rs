@@ -603,6 +603,11 @@ async fn main() -> Result<()> {
                 psk.or_else(|| file_config.server.psk.clone())
             };
 
+            // Validate PSK if provided
+            if let Some(ref psk_value) = effective_psk {
+                xfr::auth::validate_psk(psk_value)?;
+            }
+
             // Build security configs
             let auth_config = xfr::auth::AuthConfig { psk: effective_psk };
 
@@ -760,6 +765,11 @@ async fn main() -> Result<()> {
             } else {
                 cli.psk.clone().or_else(|| file_config.client.psk.clone())
             };
+
+            // Validate PSK if provided
+            if let Some(ref psk_value) = client_psk {
+                xfr::auth::validate_psk(psk_value)?;
+            }
 
             // Determine address family
             let client_address_family = if cli.ipv4_only {

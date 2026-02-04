@@ -20,7 +20,7 @@ use crate::protocol::{
     versions_compatible,
 };
 use crate::quic;
-use crate::rate_limit::{RateLimitConfig, RateLimiter};
+use crate::rate_limit::{RateLimitConfig, RateLimitGuard, RateLimiter};
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::tui::server::{ActiveTestInfo, ServerEvent};
@@ -273,17 +273,20 @@ impl Server {
                 continue;
             }
 
-            // Check rate limit
-            if let Some(limiter) = &security.rate_limiter
-                && let Err(e) = limiter.check(peer_ip)
-            {
-                warn!("Rate limit exceeded for {}: {}", peer_addr, e);
-                if let Some(tx) = &security.tui_tx {
-                    let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+            // Check rate limit and create guard for RAII cleanup
+            let rate_limit_guard = if let Some(limiter) = &security.rate_limiter {
+                if let Err(e) = limiter.check(peer_ip) {
+                    warn!("Rate limit exceeded for {}: {}", peer_addr, e);
+                    if let Some(tx) = &security.tui_tx {
+                        let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                    }
+                    drop(stream);
+                    continue;
                 }
-                drop(stream);
-                continue;
-            }
+                Some(RateLimitGuard::new(limiter.clone(), peer_ip))
+            } else {
+                None
+            };
 
             // Acquire semaphore permit to limit concurrent handlers
             let permit = match handler_semaphore.clone().try_acquire_owned() {
@@ -291,6 +294,7 @@ impl Server {
                 Err(_) => {
                     warn!("Max concurrent handlers reached, rejecting: {}", peer_addr);
                     drop(stream);
+                    // rate_limit_guard drops here, releasing the slot
                     continue;
                 }
             };
@@ -304,6 +308,7 @@ impl Server {
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // Held until task completes
+                let _rate_guard = rate_limit_guard; // Released on drop (even on panic)
 
                 let result = handle_client_secure(
                     stream,
@@ -314,11 +319,6 @@ impl Server {
                     &security,
                 )
                 .await;
-
-                // Release rate limit slot
-                if let Some(limiter) = &security.rate_limiter {
-                    limiter.release(peer_ip);
-                }
 
                 if let Err(e) = result {
                     error!("Client error {}: {}", peer_addr, e);
@@ -1319,7 +1319,8 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
             if total + to_read > MAX_LINE_LENGTH {
                 return Err(anyhow::anyhow!("Line exceeds maximum length"));
             }
-            buf.push_str(std::str::from_utf8(&bytes[..to_read])?);
+            // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
+            buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
             reader.consume(to_read);
             return Ok(total + to_read);
         }
@@ -1328,7 +1329,8 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         if total + len > MAX_LINE_LENGTH {
             return Err(anyhow::anyhow!("Line exceeds maximum length"));
         }
-        buf.push_str(std::str::from_utf8(bytes)?);
+        // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
+        buf.push_str(&String::from_utf8_lossy(bytes));
         reader.consume(len);
         total += len;
     }

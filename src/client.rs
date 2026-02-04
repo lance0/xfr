@@ -895,7 +895,8 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
             if total + to_read > MAX_LINE_LENGTH {
                 return Err(anyhow::anyhow!("Line exceeds maximum length"));
             }
-            buf.push_str(std::str::from_utf8(&bytes[..to_read])?);
+            // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
+            buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
             reader.consume(to_read);
             return Ok(total + to_read);
         }
@@ -904,7 +905,8 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         if total + len > MAX_LINE_LENGTH {
             return Err(anyhow::anyhow!("Line exceeds maximum length"));
         }
-        buf.push_str(std::str::from_utf8(bytes)?);
+        // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
+        buf.push_str(&String::from_utf8_lossy(bytes));
         reader.consume(len);
         total += len;
     }

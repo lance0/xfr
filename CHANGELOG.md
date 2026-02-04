@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Settings modal text truncation** - increased modal width to prevent help text from being cut off
 - **UDP session cleanup on client abort** (issue #12) - server now detects inactive UDP sessions after 30 seconds and cleans them up properly
+- **UTF-8 handling in protocol parser** - use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
+- **Rate limiter cleanup on panic** - use RAII guard to ensure slot release even if task panics
+- **PSK length validation** - reject PSKs over 1024 bytes and empty PSKs to prevent abuse
 
 ### Documentation
 - Added server memory footprint guide to README

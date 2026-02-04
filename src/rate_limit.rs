@@ -147,6 +147,26 @@ impl std::fmt::Display for RateLimitError {
 
 impl std::error::Error for RateLimitError {}
 
+/// RAII guard that releases rate limit slot on drop
+/// Ensures cleanup happens even if the task panics
+pub struct RateLimitGuard {
+    limiter: Arc<RateLimiter>,
+    ip: IpAddr,
+}
+
+impl RateLimitGuard {
+    /// Create a new guard that will release the rate limit slot on drop
+    pub fn new(limiter: Arc<RateLimiter>, ip: IpAddr) -> Self {
+        Self { limiter, ip }
+    }
+}
+
+impl Drop for RateLimitGuard {
+    fn drop(&mut self) {
+        self.limiter.release(self.ip);
+    }
+}
+
 /// Rate limiter configuration
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {

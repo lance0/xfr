@@ -9,6 +9,8 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 const NONCE_LENGTH: usize = 32;
+/// Maximum PSK length to prevent performance issues with very long keys
+pub const MAX_PSK_LENGTH: usize = 1024;
 
 /// Generate a random nonce for authentication challenge
 pub fn generate_nonce() -> String {
@@ -48,7 +50,24 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Read PSK from file, trimming whitespace
 pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)?;
-    Ok(content.trim().to_string())
+    let psk = content.trim().to_string();
+    validate_psk(&psk)?;
+    Ok(psk)
+}
+
+/// Validate PSK length
+pub fn validate_psk(psk: &str) -> anyhow::Result<()> {
+    if psk.len() > MAX_PSK_LENGTH {
+        anyhow::bail!(
+            "PSK exceeds maximum length of {} bytes (got {} bytes)",
+            MAX_PSK_LENGTH,
+            psk.len()
+        );
+    }
+    if psk.is_empty() {
+        anyhow::bail!("PSK cannot be empty");
+    }
+    Ok(())
 }
 
 /// Authentication configuration
@@ -114,5 +133,23 @@ mod tests {
         assert!(constant_time_eq(b"hello", b"hello"));
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
+    }
+
+    #[test]
+    fn test_validate_psk_valid() {
+        assert!(validate_psk("secret").is_ok());
+        assert!(validate_psk("a").is_ok());
+        assert!(validate_psk(&"x".repeat(MAX_PSK_LENGTH)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_psk_empty() {
+        assert!(validate_psk("").is_err());
+    }
+
+    #[test]
+    fn test_validate_psk_too_long() {
+        let long_psk = "x".repeat(MAX_PSK_LENGTH + 1);
+        assert!(validate_psk(&long_psk).is_err());
     }
 }
