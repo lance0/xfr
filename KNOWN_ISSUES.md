@@ -88,6 +88,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### Windows Support is Experimental
+
+**Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently.
+
+**Impact:** Basic TCP/UDP/QUIC testing works, but advanced metrics are missing.
+
+**Workaround:** Use WSL2 for full functionality on Windows. Native Windows binaries are not provided.
+
+---
+
 ## By Design
 
 ### TCP Bitrate Limiting Not Implemented
@@ -101,6 +111,20 @@ A warning is logged when `-b` is used with TCP.
 QUIC mode ignores the `-b/--bitrate` flag. Pacing support may be added in a future release.
 
 A warning is logged when `-b` is used with QUIC.
+
+### QUIC Server Certificate Not Verified
+
+QUIC transport uses self-signed certificates and does not verify the server's identity. This is intentional for ease of use in trusted environments.
+
+**Impact:** QUIC connections are encrypted but not authenticated without PSK, leaving them vulnerable to man-in-the-middle attacks on untrusted networks.
+
+**Mitigation:** Always use `--psk` for QUIC on untrusted networks. PSK provides mutual authentication via HMAC-SHA256 challenge-response.
+
+### Protocol Extensions Require Major Version Bump
+
+The control protocol uses strict JSON deserialization. Unrecognized message types or fields cause parse errors, meaning protocol extensions require a major version bump.
+
+**Rationale:** This favors simplicity over complex version negotiation. The version handshake ensures compatibility.
 
 ---
 

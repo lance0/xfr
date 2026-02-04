@@ -129,7 +129,7 @@ Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
 | macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | Use `cargo install xfr` |
 | Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
-| Windows | Use WSL2 |
+| Windows | Use WSL2 (native support is experimental) |
 
 ```bash
 # Example: Linux x86_64
@@ -418,7 +418,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | UDP | None | N/A |
 | QUIC | TLS 1.3 | Disabled by default |
 
-**QUIC mode** (`-Q/--quic`) provides TLS 1.3 encryption but does not verify server certificates. This is suitable for trusted networks. For untrusted networks, use a VPN or SSH tunnel.
+**QUIC mode** (`-Q/--quic`) provides TLS 1.3 encryption but does not verify server certificates, making it vulnerable to MITM attacks without additional authentication. **Always use `--psk` with QUIC on untrusted networks.** Alternatively, use a VPN or SSH tunnel.
 
 ### Authentication
 
@@ -438,6 +438,18 @@ xfr <host> -Q --psk "secretkey"
 - **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
 - **ACLs**: Use `--allow`/`--deny` to restrict client access.
 
+### Server Resource Usage
+
+Each stream allocates 128KB-4MB for buffers depending on speed mode. Memory usage scales with concurrent clients:
+
+| Streams per client | Memory per client | 10 clients |
+|-------------------|-------------------|------------|
+| 1 (`-P 1`) | 128KB - 4MB | 1.3MB - 40MB |
+| 8 (`-P 8`) | 1MB - 32MB | 10MB - 320MB |
+| 128 (`-P 128`) | 16MB - 512MB | 160MB - 5GB |
+
+Use `--max-concurrent` to limit simultaneous tests on memory-constrained systems.
+
 ## Platform Support
 
 | Platform | Status |
@@ -446,7 +458,8 @@ xfr <host> -Q --psk "secretkey"
 | macOS Apple Silicon | Full support, pre-built binaries |
 | macOS Intel | Full support, build from crate: `cargo install xfr` |
 | Android (Termux) | Full support, pre-built binaries |
-| Windows | Via WSL2 |
+| NetBSD | Full support, via pkgsrc: `pkgin install xfr` |
+| Windows | Experimental (WSL2 recommended). Native builds work but lack TCP_INFO metrics. |
 
 ## Troubleshooting
 

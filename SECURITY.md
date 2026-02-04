@@ -47,11 +47,15 @@ xfr is a network bandwidth testing tool. When running the server:
 | UDP  | None       | PSK optional   |
 | QUIC | TLS 1.3    | PSK optional   |
 
+**Important:** QUIC encrypts traffic but uses self-signed certificates without server verification. This means QUIC alone does not protect against man-in-the-middle attacks. **Always use PSK with QUIC on untrusted networks.**
+
 For encrypted + authenticated connections, use QUIC with PSK:
 ```bash
 xfr serve --psk "secretkey"
 xfr <host> -Q --psk "secretkey"
 ```
+
+Use a strong, high-entropy PSK (16+ random characters) to prevent offline brute-force attacks.
 
 When running the client:
 

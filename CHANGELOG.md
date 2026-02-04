@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Settings modal text truncation** - increased modal width to prevent help text from being cut off
 - **UDP session cleanup on client abort** (issue #12) - server now detects inactive UDP sessions after 30 seconds and cleans them up properly
 
+### Documentation
+- Added server memory footprint guide to README
+- Clarified Windows support is experimental (WSL2 recommended)
+- Emphasized PSK requirement for QUIC on untrusted networks
+- Fixed buffer size documentation (256KB → 128KB)
+- Updated KNOWN_ISSUES with QUIC cert verification, protocol versioning, Windows limitations
+- Added pre-1.0 roadmap items (structured errors, code refactoring, fuzz testing)
+
 ## [0.4.3] - 2026-02-04
 
 ### Added

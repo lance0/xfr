@@ -108,6 +108,23 @@
 
 ---
 
+## v0.5 - Code Quality & Robustness
+
+### Pre-1.0 Requirements
+- [ ] **Structured error types** - replace `anyhow::Error` with `thiserror` enum for library users
+- [ ] **Lower default max_concurrent** - reduce from 1000 to 100 for safer defaults
+
+### Code Quality
+- [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers
+- [ ] **Refactor main.rs** - split CLI, config, and TUI setup into separate modules
+- [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
+
+### Testing
+- [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
+- [ ] **Fuzz testing** - fuzz control protocol JSON parsing for robustness
+
+---
+
 ## Future Ideas
 
 ### CLI & Scripting

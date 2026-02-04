@@ -104,7 +104,7 @@ Message types (see `protocol.rs`):
 
 ### Data Transfer
 
-**TCP**: Simple bulk send/receive with large buffers (256KB).
+**TCP**: Simple bulk send/receive with large buffers (128KB default, 4MB for high-speed mode).
 
 **UDP**: Paced sending with sequence numbers for loss detection:
 ```
@@ -255,14 +255,16 @@ See `tcp_info.rs` for implementations.
 Large buffers are used for high throughput:
 
 ```rust
-// TCP
-socket.set_send_buffer_size(262144)?;   // 256KB
-socket.set_recv_buffer_size(262144)?;
+// TCP (default, auto-bumps to 4MB for unlimited bitrate)
+socket.set_send_buffer_size(131072)?;   // 128KB
+socket.set_recv_buffer_size(131072)?;
 
 // UDP (larger for burst tolerance)
 socket.set_send_buffer_size(4194304)?;  // 4MB
 socket.set_recv_buffer_size(4194304)?;
 ```
+
+**Memory footprint:** Each stream allocates 128KB-4MB for buffers. A test with `-P 8` uses ~1-32MB; 10 concurrent clients with 8 streams each could use 80-320MB.
 
 ## Error Handling
 
