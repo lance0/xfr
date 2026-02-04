@@ -59,6 +59,9 @@ mod linux {
         let mut info: TcpInfo = Default::default();
         let mut len = mem::size_of::<TcpInfo>() as libc::socklen_t;
 
+        // SAFETY: fd is a valid file descriptor from socket.as_raw_fd(),
+        // info is zeroed TcpInfo struct with correct size, len is initialized
+        // to the struct size. getsockopt will write at most len bytes.
         let ret = unsafe {
             libc::getsockopt(
                 fd,
@@ -136,6 +139,9 @@ mod macos {
         let mut info: TcpConnectionInfo = Default::default();
         let mut len = mem::size_of::<TcpConnectionInfo>() as libc::socklen_t;
 
+        // SAFETY: fd is a valid file descriptor from socket.as_raw_fd(),
+        // info is zeroed TcpConnectionInfo struct with correct size, len is
+        // initialized to the struct size. getsockopt will write at most len bytes.
         let ret = unsafe {
             libc::getsockopt(
                 fd,

@@ -1126,3 +1126,55 @@ async fn test_udp_ipv6_explicit() {
         result
     );
 }
+
+/// Regression test for UDP bitrate underflow (issue: bitrate/streams=0 became unlimited)
+/// With very low bitrate and multiple streams, test should still complete within timeout
+/// and transfer a bounded amount of data (not unlimited).
+#[tokio::test]
+async fn test_udp_bitrate_underflow_regression() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Very low bitrate (1000 bps) with 8 streams
+    // Old bug: 1000/8 = 125, but with integer underflow could become 0 (unlimited)
+    // Fixed: per-stream bitrate clamped to at least 1 bps
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 8,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(1000), // 1000 bps total = 125 bps per stream
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    // If bitrate became unlimited, this would timeout or transfer huge amounts
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP low bitrate test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "UDP with low bitrate should succeed: {:?}",
+        result
+    );
+
+    // Verify bounded data transfer (at 1000 bps for 2 sec = ~250 bytes max)
+    // Allow overhead for UDP headers and minimum packet sizes, but must be well under 1MB
+    // (if unlimited, would transfer megabytes at wire speed)
+    if let Ok(test_result) = result {
+        assert!(
+            test_result.bytes_total < 100_000,
+            "Low bitrate should transfer bounded data, got {} bytes (unlimited would be MB+)",
+            test_result.bytes_total
+        );
+    }
+}

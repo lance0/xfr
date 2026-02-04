@@ -84,6 +84,9 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
     let fd = stream.as_raw_fd();
     let size = buffer_size as libc::c_int;
 
+    // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
+    // size is a valid c_int pointer, and size_of::<c_int>() is correct.
+    // setsockopt may fail but we check and log the return value.
     unsafe {
         let ret = libc::setsockopt(
             fd,

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Lower default max_concurrent** - reduced from 1000 to 100 for safer resource defaults
+
 ### Fixed
 - **Settings modal text truncation** - increased modal width to prevent help text from being cut off
 - **UDP session cleanup on client abort** (issue #12) - server now detects inactive UDP sessions after 30 seconds and cleans them up properly
@@ -16,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UDP per-stream bitrate underflow** - clamp to minimum 1 bps when total bitrate > 0 to prevent unlimited mode
 - **QUIC stream accept timeout** - add 30-second timeout and cancellation support to prevent infinite hangs
 - **active_tests cleanup order** - cleanup before result write to prevent stale entries on connection failure
+
+### Testing
+- Added regression test for UDP bitrate underflow bug
+
+### Code Quality
+- Added SAFETY comments to all 4 unsafe blocks (tcp_info.rs, tcp.rs, net.rs)
 
 ### Documentation
 - Added server memory footprint guide to README

@@ -312,6 +312,9 @@ pub fn set_flow_label(socket: &Socket, flow_label: u32) -> io::Result<()> {
     // Set IPV6_FLOWINFO to include flow label in sent packets
     let fd = socket.as_raw_fd();
     let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid file descriptor from socket.as_raw_fd(),
+    // enable is a valid c_int pointer, and size_of::<c_int>() is correct.
+    // setsockopt may fail but we check the return value.
     unsafe {
         let ret = libc::setsockopt(
             fd,

@@ -76,7 +76,7 @@ impl Default for ServerConfig {
             address_family: AddressFamily::default(),
             tui_tx: None,
             enable_quic: true,
-            max_concurrent: 1000,
+            max_concurrent: 100,
         }
     }
 }
