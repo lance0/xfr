@@ -162,6 +162,14 @@ pkg install rust
 cargo install xfr
 ```
 
+### NetBSD
+
+Available via [pkgsrc](https://pkgsrc.se/net/xfr):
+
+```bash
+pkgin install xfr
+```
+
 ### Optional Features
 
 | Feature | Default | Description |

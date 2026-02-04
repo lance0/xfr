@@ -613,7 +613,7 @@ fn draw_settings_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let settings = &app.settings;
 
     // Modal dimensions
-    let modal_width = 50u16;
+    let modal_width = 58u16;
     let modal_height = 18u16;
     let modal_area = Rect {
         x: area.width.saturating_sub(modal_width) / 2,
@@ -841,7 +841,7 @@ fn draw_settings_buttons(
         buttons.push(Span::raw("  "));
     }
 
-    buttons.push(Span::styled("[Close]", close_style));
+    buttons.push(Span::styled("[Esc]", close_style));
 
     let button_line = Line::from(buttons);
     frame.render_widget(
