@@ -855,16 +855,25 @@ async fn run_quic_test(
         let handle = tokio::spawn(async move {
             match direction {
                 Direction::Upload => {
-                    // Server receives - accept uni stream from client
-                    match conn.accept_uni().await {
-                        Ok(recv) => {
-                            if let Err(e) =
-                                quic::receive_quic_data(recv, stream_stats, cancel).await
-                            {
-                                debug!("QUIC receive ended: {}", e);
-                            }
+                    // Server receives - accept uni stream from client with timeout
+                    let mut cancel_rx = cancel.clone();
+                    let accept_result = tokio::select! {
+                        result = conn.accept_uni() => result.ok(),
+                        _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+                            debug!("Timeout waiting for client to open uni stream");
+                            None
                         }
-                        Err(e) => debug!("Failed to accept uni stream: {}", e),
+                        _ = cancel_rx.changed() => {
+                            debug!("Cancelled while waiting for uni stream");
+                            None
+                        }
+                    };
+                    if let Some(recv) = accept_result {
+                        if let Err(e) =
+                            quic::receive_quic_data(recv, stream_stats, cancel).await
+                        {
+                            debug!("QUIC receive ended: {}", e);
+                        }
                     }
                 }
                 Direction::Download => {
@@ -881,28 +890,37 @@ async fn run_quic_test(
                     }
                 }
                 Direction::Bidir => {
-                    // Accept bidir stream from client
-                    match conn.accept_bi().await {
-                        Ok((send, recv)) => {
-                            let send_stats = stream_stats.clone();
-                            let recv_stats = stream_stats;
-                            let send_cancel = cancel.clone();
-                            let recv_cancel = cancel;
-
-                            let send_handle = tokio::spawn(async move {
-                                let _ =
-                                    quic::send_quic_data(send, send_stats, duration, send_cancel)
-                                        .await;
-                            });
-
-                            let recv_handle = tokio::spawn(async move {
-                                let _ =
-                                    quic::receive_quic_data(recv, recv_stats, recv_cancel).await;
-                            });
-
-                            let _ = tokio::join!(send_handle, recv_handle);
+                    // Accept bidir stream from client with timeout
+                    let mut cancel_rx = cancel.clone();
+                    let accept_result = tokio::select! {
+                        result = conn.accept_bi() => result.ok(),
+                        _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+                            debug!("Timeout waiting for client to open bi stream");
+                            None
                         }
-                        Err(e) => debug!("Failed to accept bidir stream: {}", e),
+                        _ = cancel_rx.changed() => {
+                            debug!("Cancelled while waiting for bi stream");
+                            None
+                        }
+                    };
+                    if let Some((send, recv)) = accept_result {
+                        let send_stats = stream_stats.clone();
+                        let recv_stats = stream_stats;
+                        let send_cancel = cancel.clone();
+                        let recv_cancel = cancel;
+
+                        let send_handle = tokio::spawn(async move {
+                            let _ =
+                                quic::send_quic_data(send, send_stats, duration, send_cancel)
+                                    .await;
+                        });
+
+                        let recv_handle = tokio::spawn(async move {
+                            let _ =
+                                quic::receive_quic_data(recv, recv_stats, recv_cancel).await;
+                        });
+
+                        let _ = tokio::join!(send_handle, recv_handle);
                     }
                 }
             }
@@ -1272,9 +1290,9 @@ async fn run_test(
         udp_stats: stats.aggregate_udp_stats(),
     });
 
-    writer
-        .write_all(format!("{}\n", result.serialize()?).as_bytes())
-        .await?;
+    // Cleanup active test entry BEFORE sending result
+    // This ensures cleanup happens even if the write fails
+    active_tests.lock().await.remove(id);
 
     // Notify metrics that test completed
     #[cfg(feature = "prometheus")]
@@ -1291,8 +1309,11 @@ async fn run_test(
         });
     }
 
-    // Cleanup
-    active_tests.lock().await.remove(id);
+    // Send result (after cleanup so stale entries don't persist on failure)
+    writer
+        .write_all(format!("{}\n", result.serialize()?).as_bytes())
+        .await?;
+
     info!(
         "Test {} complete: {:.2} Mbps, {} bytes",
         id, throughput_mbps, bytes_total
@@ -1451,11 +1472,13 @@ async fn spawn_udp_handlers(
     let mut handles = Vec::new();
 
     // Divide bitrate evenly across streams (matching client behavior)
+    // Clamp to at least 1 bps to prevent integer division underflow
+    // Only bitrate=0 means unlimited (explicit -b 0)
     let num_streams = sockets.len().max(1) as u64;
     let per_stream_bitrate = if bitrate == 0 {
-        0 // Unlimited mode
+        0 // Unlimited mode (explicit -b 0)
     } else {
-        bitrate / num_streams
+        (bitrate / num_streams).max(1)
     };
 
     for (i, socket) in sockets.into_iter().enumerate() {

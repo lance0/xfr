@@ -375,7 +375,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
-| `--bitrate` | `-b` | unlimited | Target bitrate for UDP (e.g., 1G, 100M) |
+| `--bitrate` | `-b` | 1G | Target bitrate for UDP (e.g., 1G, 100M). Use `-b 0` for unlimited |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |
@@ -434,6 +434,7 @@ xfr <host> -Q --psk "secretkey"
 
 ### Network Considerations
 
+- **Data ports are unauthenticated**: Once a test starts, data ports are open to any host that knows the port number. Use `--psk` authentication on untrusted networks.
 - **UDP on untrusted networks**: UDP mode may be susceptible to reflection attacks from spoofed source addresses. Use TCP or QUIC on public networks.
 - **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
 - **ACLs**: Use `--allow`/`--deny` to restrict client access.

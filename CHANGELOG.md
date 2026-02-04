@@ -13,14 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UTF-8 handling in protocol parser** - use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
 - **Rate limiter cleanup on panic** - use RAII guard to ensure slot release even if task panics
 - **PSK length validation** - reject PSKs over 1024 bytes and empty PSKs to prevent abuse
+- **UDP per-stream bitrate underflow** - clamp to minimum 1 bps when total bitrate > 0 to prevent unlimited mode
+- **QUIC stream accept timeout** - add 30-second timeout and cancellation support to prevent infinite hangs
+- **active_tests cleanup order** - cleanup before result write to prevent stale entries on connection failure
 
 ### Documentation
 - Added server memory footprint guide to README
 - Clarified Windows support is experimental (WSL2 recommended)
 - Emphasized PSK requirement for QUIC on untrusted networks
 - Fixed buffer size documentation (256KB → 128KB)
+- Fixed UDP bitrate default documentation (1 Gbps, not unlimited; use `-b 0` for unlimited)
+- Documented that data ports are unauthenticated by design
 - Updated KNOWN_ISSUES with QUIC cert verification, protocol versioning, Windows limitations
+- Added KNOWN_ISSUES entries for UDP data plane spoofing risk and IPv6 zone ID limitation
 - Added pre-1.0 roadmap items (structured errors, code refactoring, fuzz testing)
+- Expanded roadmap with security enhancements, testing, and optimization items
 
 ## [0.4.3] - 2026-02-04
 

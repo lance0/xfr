@@ -459,13 +459,21 @@ impl Client {
     ) -> anyhow::Result<()> {
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
 
+        // Calculate per-stream bitrate, clamping to at least 1 bps to prevent
+        // integer division underflow (e.g., 100 bps / 8 streams = 12 bps, not 0)
+        // Only bitrate=0 means unlimited (explicit -b 0)
+        let stream_bitrate = if bitrate == 0 {
+            0 // Unlimited mode (explicit -b 0)
+        } else {
+            (bitrate / self.config.streams as u64).max(1)
+        };
+
         for (i, &port) in data_ports.iter().enumerate() {
             let server_port = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
-            let stream_bitrate = bitrate / self.config.streams as u64;
             let bind_addr = self.config.bind_addr;
 
             tokio::spawn(async move {

@@ -126,6 +126,22 @@ The control protocol uses strict JSON deserialization. Unrecognized message type
 
 **Rationale:** This favors simplicity over complex version negotiation. The version handshake ensures compatibility.
 
+### UDP Data Plane Unauthenticated
+
+In UDP reverse/bidir mode, the server uses the source address of the first received packet to determine where to send data. Without PSK authentication, a spoofed packet could redirect traffic to a third party.
+
+**Impact:** Potential reflection/amplification attack if server is exposed to untrusted networks.
+
+**Mitigation:** Use `--psk` authentication on untrusted networks. The control-plane PSK challenge validates client identity before data transfer begins.
+
+### IPv6 Zone IDs Not Supported
+
+IPv6 link-local addresses with zone IDs (e.g., `fe80::1%eth0`) are not supported in socket addresses.
+
+**Impact:** Cannot bind to or connect to link-local addresses that require zone specification.
+
+**Workaround:** Use global or unique-local IPv6 addresses instead.
+
 ---
 
 ## Future Improvements

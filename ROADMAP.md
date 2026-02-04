@@ -115,18 +115,27 @@
 - [ ] **Lower default max_concurrent** - reduce from 1000 to 100 for safer defaults
 - [ ] **Config file versioning** - add version field and migration support for breaking changes
 
+### Security Enhancements
+- [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use
+- [ ] **Data-plane authentication** - per-test tokens/cookies to prevent port hijacking on untrusted networks
+
 ### Code Quality
 - [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers
 - [ ] **Refactor main.rs** - split CLI, config, and TUI setup into separate modules
 - [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
 - [ ] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
 - [ ] **Audit unwrap()/expect() calls** - reduce 61 calls in production code, especially auth.rs HMAC init
-- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures and humantime
+- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime, async-trait
+- [ ] **Join client data tasks** - ensure Client::run waits for all data tasks before returning (library safety)
+- [ ] **Extract shared handshake logic** - reduce duplication between TCP and QUIC control-plane paths
 
 ### Testing
 - [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
 - [ ] **Fuzz testing** - fuzz control protocol JSON parsing for robustness
 - [ ] **Property-based testing** - packet sequence tracking, rate limiter invariants
+- [ ] **Rate limiting and ACL tests** - allow/deny precedence, IPv4-mapped IPv6
+- [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
+- [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 
 ### Documentation
 - [ ] **API documentation** - add examples to public functions in net module
@@ -156,6 +165,7 @@
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **CPU affinity options** (`--affinity`) - pin streams to specific cores, reduces page faults and context switches (rperf has this)
 - [ ] **Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed
+- [ ] **Batch atomic counter updates** - reduce per-packet atomic operations at high PPS (flush once per interval)
 
 ---
 
