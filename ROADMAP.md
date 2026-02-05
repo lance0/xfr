@@ -160,6 +160,7 @@
 - [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
 
 ### TUI Enhancements
+- [ ] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); essential for `-t 0` where results are never finalized
 - [ ] **Test profiles** - save/load named test configurations
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
