@@ -120,6 +120,9 @@
 - [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use
 - [ ] **Data-plane authentication** - per-test tokens/cookies to prevent port hijacking on untrusted networks
 - [ ] **Rate limiting on data connections** - apply per-IP limits to data connections (currently control-only)
+- [x] **Slow-loris protection** - accept loop spawns per-connection tasks with 5s initial read timeout
+- [x] **DataHello flood protection** - validate test_id exists before processing data connections
+- [x] **Client capabilities negotiation** - client advertises capabilities; server falls back to multi-port TCP for legacy clients
 
 ### Code Quality
 - [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers

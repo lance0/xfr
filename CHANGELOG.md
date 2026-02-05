@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Single-port TCP mode** (issue #16) - TCP tests now use only port 5201 for all connections, making them firewall-friendly. Data connections identify themselves via `DataHello` message instead of using ephemeral ports.
 - **Protocol version bump to 1.1** - Signals DataHello support; adds `single_port_tcp` capability for backward compatibility detection
+- **Client capabilities in Hello** - Client now advertises supported capabilities (tcp, udp, quic, multistream, single_port_tcp); server falls back to multi-port TCP for legacy clients without `single_port_tcp`
+- **Numeric version comparison** - `versions_compatible()` now parses major version as integer instead of string comparison
 
 ### Fixed
 - **QUIC IPv6 support** (issue #17) - QUIC clients can now connect to IPv6 addresses without requiring `-6` flag; endpoint now binds to matching address family
@@ -20,12 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Client OOB panic on port mismatch** - Added bounds check when server returns fewer ports than requested streams
 - **DoS guard on oversized lines** - `read_first_line_unbuffered()` now returns error instead of truncating
 - **DataHello serialization panic** - Replaced `unwrap()` with proper error handling in spawned task
+- **One-off mode deadlock** - `--one-off` no longer blocks the accept loop waiting for test completion; uses shutdown channel to signal exit after test finishes
+- **QUIC one-off mode** - QUIC accept loop now responds to shutdown signal for proper `--one-off` exit
+- **cancel.changed() busy-loop** - Handle sender-dropped error in stream collection select! to prevent CPU spin
+- **IPv4-mapped IPv6 comparison** - DataHello IP validation now normalizes `::ffff:x.x.x.x` addresses for correct matching on dual-stack systems
 
 ### Security
 - **DataHello IP validation** - Server validates DataHello connections come from same IP as control connection to prevent connection hijacking
+- **Slow-loris protection** - Accept loop now spawns per-connection tasks with 5-second initial read timeout; slow clients can no longer block the listener
+- **DataHello flood protection** - Server validates test_id exists in active_tests before processing DataHello connections; unknown test_ids are dropped immediately
 
 ### Testing
 - Added regression test for QUIC IPv6 connectivity
+- Added `test_tcp_one_off_multi_stream` - verifies 4-stream TCP in `--one-off` mode with stream count assertion
+- Added `test_quic_one_off` - verifies 2-stream QUIC in `--one-off` mode with stream count assertion
+
+### Code Quality
+- Log panics from `join_all` in QUIC, UDP, and TCP stream handlers instead of silently discarding JoinErrors
 
 ## [0.4.4] - 2026-02-04
 
