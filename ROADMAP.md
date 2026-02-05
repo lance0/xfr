@@ -123,6 +123,8 @@
 - [x] **Slow-loris protection** - accept loop spawns per-connection tasks with 5s initial read timeout
 - [x] **DataHello flood protection** - validate test_id exists before processing data connections
 - [x] **Client capabilities negotiation** - client advertises capabilities; server falls back to multi-port TCP for legacy clients
+- [x] **Pre-handshake connection gate** - limits concurrent unclassified connections to prevent connection-flood DoS
+- [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
 ### Code Quality
 - [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers

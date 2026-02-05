@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DataHello IP validation** - Server validates DataHello connections come from same IP as control connection to prevent connection hijacking
 - **Slow-loris protection** - Accept loop now spawns per-connection tasks with 5-second initial read timeout; slow clients can no longer block the listener
 - **DataHello flood protection** - Server validates test_id exists in active_tests before processing DataHello connections; unknown test_ids are dropped immediately
+- **Pre-handshake connection gate** - Limits concurrent unclassified connections (4x max_concurrent) to prevent connection-flood DoS before Hello/DataHello routing
+- **Multi-port TCP fallback IP validation** - Per-stream listeners validate connecting peer IP against control connection, preventing unauthorized data stream injection
+- **One-off mode hardened** - Failed handshakes and auth failures no longer trigger server shutdown in `--one-off` mode; only successful test completion exits
 
 ### Testing
 - Added regression test for QUIC IPv6 connectivity
@@ -39,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Code Quality
 - Log panics from `join_all` in QUIC, UDP, and TCP stream handlers instead of silently discarding JoinErrors
+- Multi-port fallback listener tasks cleaned up via cancel signal (no leaked tasks on partial connections)
 
 ## [0.4.4] - 2026-02-04
 
