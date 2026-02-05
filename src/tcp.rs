@@ -139,13 +139,14 @@ pub fn configure_stream(stream: &TcpStream, config: &TcpConfig) -> std::io::Resu
 }
 
 /// Send data as fast as possible for the given duration
+/// Returns the final TCP_INFO snapshot (for RTT, retransmits, cwnd)
 pub async fn send_data(
     mut stream: TcpStream,
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
     cancel: watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
 
     let buffer = vec![0u8; config.buffer_size];
@@ -174,8 +175,9 @@ pub async fn send_data(
         }
     }
 
-    // Capture final TCP_INFO for retransmit count
-    if let Some(info) = get_stream_tcp_info(&stream) {
+    // Capture final TCP_INFO for retransmit count and RTT
+    let tcp_info = get_stream_tcp_info(&stream);
+    if let Some(ref info) = tcp_info {
         stats.add_retransmits(info.retransmits);
     }
 
@@ -186,16 +188,17 @@ pub async fn send_data(
         stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
     );
 
-    Ok(())
+    Ok(tcp_info)
 }
 
 /// Receive data and count bytes
+/// Returns the final TCP_INFO snapshot (for RTT, cwnd - note: retransmits only meaningful for sender)
 pub async fn receive_data(
     mut stream: TcpStream,
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
     config: TcpConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
 
     let mut buffer = vec![0u8; config.buffer_size];
@@ -229,8 +232,9 @@ pub async fn receive_data(
         }
     }
 
-    // Capture final TCP_INFO for retransmit count
-    if let Some(info) = get_stream_tcp_info(&stream) {
+    // Capture final TCP_INFO
+    let tcp_info = get_stream_tcp_info(&stream);
+    if let Some(ref info) = tcp_info {
         stats.add_retransmits(info.retransmits);
     }
 
@@ -242,7 +246,7 @@ pub async fn receive_data(
             .load(std::sync::atomic::Ordering::Relaxed)
     );
 
-    Ok(())
+    Ok(tcp_info)
 }
 
 /// Get TCP stats from the socket

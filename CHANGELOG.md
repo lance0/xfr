@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **QUIC IPv6 support** (issue #17) - QUIC clients can now connect to IPv6 addresses without requiring `-6` flag; endpoint now binds to matching address family
 - **mDNS discovery** (issue #15) - Server now advertises addresses via `enable_addr_auto()`; client uses non-blocking receive with proper timeout handling
+- **TCP RTT and retransmits display** (issue #13) - TUI now shows correct retransmit count from stream results (captured after transfer); TCP_INFO captured after transfer for accurate RTT/cwnd
 
 ### Testing
 - Added regression test for QUIC IPv6 connectivity

@@ -334,8 +334,16 @@ impl App {
     pub fn on_result(&mut self, result: TestResult) {
         self.state = AppState::Completed;
         self.elapsed = self.duration; // Show full duration on completion
+
+        // Sum retransmits from streams (captured after transfer, accurate for download mode)
+        self.total_retransmits = result
+            .streams
+            .iter()
+            .filter_map(|s| s.retransmits)
+            .sum();
+
+        // Use tcp_info for RTT and cwnd (connection-level stats)
         if let Some(tcp_info) = &result.tcp_info {
-            self.total_retransmits = tcp_info.retransmits;
             self.rtt_us = tcp_info.rtt_us;
             self.cwnd = tcp_info.cwnd;
         }

@@ -1598,12 +1598,19 @@ async fn spawn_tcp_handlers(
             match direction {
                 Direction::Upload => {
                     // Server receives data
-                    let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config).await;
+                    if let Ok(Some(info)) =
+                        tcp::receive_data(stream, stream_stats.clone(), cancel, config).await
+                    {
+                        test_stats.add_tcp_info(info);
+                    }
                 }
                 Direction::Download => {
-                    // Server sends data
-                    let _ = tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
-                        .await;
+                    // Server sends data - capture final TCP_INFO for RTT/retransmits
+                    if let Ok(Some(info)) =
+                        tcp::send_data(stream, stream_stats.clone(), duration, config, cancel).await
+                    {
+                        test_stats.add_tcp_info(info);
+                    }
                 }
                 Direction::Bidir => {
                     // Configure socket BEFORE splitting (nodelay, window, buffers)
@@ -1650,6 +1657,7 @@ async fn spawn_tcp_handlers(
                         && let Some(info) = tcp::get_stream_tcp_info(&stream)
                     {
                         final_stats.add_retransmits(info.retransmits);
+                        test_stats.add_tcp_info(info);
                     }
                 }
             }
@@ -1708,18 +1716,25 @@ async fn spawn_tcp_stream_handlers(
 
                     match direction {
                         Direction::Upload => {
-                            let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config)
-                                .await;
+                            if let Ok(Some(info)) =
+                                tcp::receive_data(stream, stream_stats.clone(), cancel, config)
+                                    .await
+                            {
+                                test_stats.add_tcp_info(info);
+                            }
                         }
                         Direction::Download => {
-                            let _ = tcp::send_data(
+                            if let Ok(Some(info)) = tcp::send_data(
                                 stream,
                                 stream_stats.clone(),
                                 duration,
                                 config,
                                 cancel,
                             )
-                            .await;
+                            .await
+                            {
+                                test_stats.add_tcp_info(info);
+                            }
                         }
                         Direction::Bidir => {
                             if let Err(e) = tcp::configure_stream(&stream, &config) {
@@ -1729,6 +1744,7 @@ async fn spawn_tcp_stream_handlers(
 
                             let send_stats = stream_stats.clone();
                             let recv_stats = stream_stats.clone();
+                            let final_stats = stream_stats.clone();
                             let send_cancel = cancel.clone();
                             let recv_cancel = cancel;
                             let send_config = config.clone();
@@ -1755,7 +1771,15 @@ async fn spawn_tcp_stream_handlers(
                                 .await
                             });
 
-                            let _ = tokio::join!(send_handle, recv_handle);
+                            let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
+                            if let (Ok(Ok(write_half)), Ok(Ok(read_half))) =
+                                (send_result, recv_result)
+                                && let Ok(stream) = read_half.reunite(write_half)
+                                && let Some(info) = tcp::get_stream_tcp_info(&stream)
+                            {
+                                final_stats.add_retransmits(info.retransmits);
+                                test_stats.add_tcp_info(info);
+                            }
                         }
                     }
                 });
