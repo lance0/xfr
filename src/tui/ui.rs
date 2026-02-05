@@ -109,10 +109,11 @@ fn draw_update_banner(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if let Some(ref version) = app.update_available {
         let install_method = crate::update::InstallMethod::detect();
         let update_cmd = install_method.update_command();
+        let new_ver = version.strip_prefix('v').unwrap_or(version);
         let text = format!(
             " Update available: v{} → v{} | {} | Press 'u' to dismiss ",
             env!("CARGO_PKG_VERSION"),
-            version,
+            new_ver,
             update_cmd
         );
         let banner = Paragraph::new(text)
