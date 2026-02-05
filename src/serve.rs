@@ -172,6 +172,9 @@ impl Server {
         // Semaphore to limit concurrent handlers (defense against connection floods)
         let handler_semaphore = Arc::new(Semaphore::new(self.config.max_concurrent as usize));
 
+        // Shutdown channel for one-off mode (watch allows multiple receivers)
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
         // Spawn QUIC acceptor task (only if QUIC is enabled)
         if let Some(quic_endpoint) = quic_endpoint {
             let quic_security = security.clone();
@@ -179,8 +182,27 @@ impl Server {
             let quic_max_duration = self.config.max_duration;
             let quic_rate_limiter = rate_limiter.clone();
             let quic_semaphore = handler_semaphore.clone();
+            let quic_one_off = self.config.one_off;
+            let quic_shutdown_tx = shutdown_tx.clone();
+            let mut quic_shutdown_rx = shutdown_rx.clone();
             tokio::spawn(async move {
-                while let Some(incoming) = quic_endpoint.accept().await {
+                loop {
+                    // Use select! to accept connections OR receive shutdown signal
+                    let incoming = tokio::select! {
+                        result = quic_endpoint.accept() => {
+                            match result {
+                                Some(incoming) => incoming,
+                                None => break, // Endpoint closed
+                            }
+                        }
+                        _ = quic_shutdown_rx.changed() => {
+                            if *quic_shutdown_rx.borrow() {
+                                debug!("QUIC shutdown signal received");
+                                break;
+                            }
+                            continue;
+                        }
+                    };
                     let peer_addr = incoming.remote_address();
                     let peer_ip = peer_addr.ip();
 
@@ -221,8 +243,10 @@ impl Server {
                     let security = quic_security.clone();
                     let active_tests = quic_active_tests.clone();
                     let rate_limiter = quic_rate_limiter.clone();
+                    let shutdown_tx = quic_shutdown_tx.clone();
+                    let one_off = quic_one_off;
 
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         let _permit = permit; // Held until task completes
 
                         let result = handle_quic_client(
@@ -243,6 +267,15 @@ impl Server {
                             error!("QUIC client error {}: {}", peer_addr, e);
                         }
                     });
+
+                    if one_off {
+                        // In one-off mode, signal shutdown when test completes
+                        let shutdown_tx = shutdown_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            let _ = shutdown_tx.send(true);
+                        });
+                    }
                 }
             });
         }
@@ -264,16 +297,19 @@ impl Server {
             });
         }
 
-        // Shutdown channel for one-off mode
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+        // TCP accept loop uses the same shutdown channel as QUIC
+        let mut tcp_shutdown_rx = shutdown_rx.clone();
 
         loop {
             // Use select! to accept connections OR receive shutdown signal
             let (mut stream, peer_addr) = tokio::select! {
                 result = listener.accept() => result?,
-                _ = shutdown_rx.recv() => {
-                    debug!("Shutdown signal received, exiting accept loop");
-                    break;
+                _ = tcp_shutdown_rx.changed() => {
+                    if *tcp_shutdown_rx.borrow() {
+                        debug!("Shutdown signal received, exiting accept loop");
+                        break;
+                    }
+                    continue;
                 }
             };
             let peer_ip = peer_addr.ip();
@@ -390,7 +426,7 @@ impl Server {
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
                             let _ = handle.await;
-                            let _ = shutdown_tx.send(()).await;
+                            let _ = shutdown_tx.send(true);
                         });
                     }
                 }

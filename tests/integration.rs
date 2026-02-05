@@ -1231,3 +1231,119 @@ async fn test_quic_ipv6() {
         result
     );
 }
+
+/// Test one-off mode with TCP multi-stream
+/// Regression test for single-port TCP deadlock in one-off mode
+#[tokio::test]
+async fn test_tcp_one_off_multi_stream() {
+    let port = get_test_port();
+
+    // Start server in one-off mode
+    let config = ServerConfig {
+        port,
+        one_off: true, // This is the key difference
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+
+    let server_handle = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Run client with multiple streams
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 4, // Multiple streams to test DataHello routing
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(
+        result.is_ok(),
+        "TCP one-off test should complete (not hang)"
+    );
+    let result = result.unwrap();
+    assert!(result.is_ok(), "TCP one-off should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.bytes_total > 0, "Should have transferred bytes");
+    assert!(result.duration_ms > 0, "Should have duration");
+
+    // Server should have exited after the test
+    let server_result = timeout(Duration::from_secs(2), server_handle).await;
+    assert!(
+        server_result.is_ok(),
+        "Server should exit after one-off test"
+    );
+}
+
+/// Test one-off mode with QUIC
+#[tokio::test]
+async fn test_quic_one_off() {
+    let port = get_test_port();
+
+    // Start server in one-off mode
+    let config = ServerConfig {
+        port,
+        one_off: true,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+
+    let server_handle = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 2,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC one-off test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "QUIC one-off should succeed: {:?}", result);
+
+    let result = result.unwrap();
+    assert!(result.bytes_total > 0, "Should have transferred bytes");
+
+    // Server should have exited after the test
+    let server_result = timeout(Duration::from_secs(2), server_handle).await;
+    assert!(
+        server_result.is_ok(),
+        "Server should exit after QUIC one-off test"
+    );
+}
