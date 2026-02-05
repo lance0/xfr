@@ -46,7 +46,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 ### QUIC Accept Loop Timeout
 
-**Issue:** If a QUIC connection is accepted but the client never opens a stream, the server waits indefinitely in `accept_uni()`.
+**Issue:** If a QUIC connection is accepted but the client never opens a stream, the server waits indefinitely in `accept_bi()`.
 
 **Impact:** Low probability - requires malicious client holding connections.
 
@@ -71,20 +71,6 @@ This document tracks known limitations and edge cases that are documented but no
 **Impact:** Client may see lower throughput without explicit error indication.
 
 **Workaround:** Check server logs if UDP reverse shows unexpected results.
-
----
-
-### Rate Limiter Slowloris Vulnerability
-
-**Issue:** A malicious client could hold open a test slot by connecting but sending data very slowly.
-
-**Impact:** Could exhaust rate limit slots, denying service to legitimate clients.
-
-**Mitigation:**
-- Handshake timeout (30s) limits connection phase
-- Test duration limits via `--max-duration`
-- Semaphore prevents unbounded connections
-- For public servers, consider firewall-level rate limiting
 
 ---
 
@@ -122,9 +108,9 @@ QUIC transport uses self-signed certificates and does not verify the server's id
 
 ### Protocol Extensions Require Major Version Bump
 
-The control protocol uses strict JSON deserialization. Unrecognized message types or fields cause parse errors, meaning protocol extensions require a major version bump.
+The control protocol uses a tagged JSON enum for message types. Unknown fields within known message types are silently ignored (serde default), but unrecognized message *types* cause parse errors. Adding new message types requires a protocol version bump.
 
-**Rationale:** This favors simplicity over complex version negotiation. The version handshake ensures compatibility.
+**Rationale:** This favors simplicity over complex version negotiation. The version handshake and client capabilities negotiation ensure compatibility.
 
 ### UDP Data Plane Unauthenticated
 
@@ -141,6 +127,21 @@ IPv6 link-local addresses with zone IDs (e.g., `fe80::1%eth0`) are not supported
 **Impact:** Cannot bind to or connect to link-local addresses that require zone specification.
 
 **Workaround:** Use global or unique-local IPv6 addresses instead.
+
+---
+
+## Previously Known Issues (Resolved)
+
+The following issues have been fixed and are listed here for reference.
+
+- **One-off mode deadlock** - `--one-off` previously blocked the accept loop waiting for test completion. Now uses a `tokio::sync::watch` shutdown channel to signal exit after the test finishes. Both TCP and QUIC accept loops respond to the shutdown signal.
+- **IPv4-mapped IPv6 comparison** - DataHello IP validation previously failed on dual-stack systems where control and data connections used different address representations (`::ffff:x.x.x.x` vs `x.x.x.x`). Fixed by `normalize_ip()` which converts IPv4-mapped IPv6 addresses to their IPv4 form before comparison.
+- **DataHello IP validation** - The server now validates that DataHello connections originate from the same IP as the control connection, preventing connection hijacking.
+- **Slow-loris protection** - The accept loop now spawns per-connection tasks immediately, with a 5-second initial read timeout (`INITIAL_READ_TIMEOUT`). Slow clients can no longer block the listener or other connections.
+- **DataHello flood protection** - The server validates that the `test_id` in a DataHello message corresponds to an active test before processing, rejecting unknown test IDs immediately.
+- **cancel.changed() busy-loop** - The stream collection `select!` loop now handles the sender-dropped error from `cancel.changed()` instead of spinning on `Err`, preventing CPU spin when the cancel sender is dropped.
+- **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
+- **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 
 ---
 

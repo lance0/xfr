@@ -37,6 +37,7 @@ See [Installation](#installation) below for setup instructions.
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP, UDP, and QUIC** with configurable bitrate and parallel streams
+- **Single-port TCP** - firewall-friendly, only port 5201 needed (no ephemeral data ports)
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
 - **Result comparison** - `xfr diff` to detect performance regressions
@@ -51,6 +52,7 @@ See [Installation](#installation) below for setup instructions.
 |---------|--------|-----|
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
+| Single-port TCP | No (needs ephemeral ports) | Yes (only port 5201) |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
 | Compare runs | No | `xfr diff` |
@@ -402,11 +404,13 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--psk-file` | | none | Read PSK from file |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
 | `--rate-limit-window` | | 60s | Rate limit time window (server) |
-| `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell) |
+| `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
+| `--acl-file` | | none | ACL rules file (server) |
+| `--max-duration` | | none | Maximum test duration, server-side limit (server) |
 | `--tui` | | false | Enable live dashboard (server) |
-| `--one-off` | | false | Exit after one test (server) |
+| `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
 
 ## Security Considerations
 
@@ -434,10 +438,18 @@ xfr <host> -Q --psk "secretkey"
 
 ### Network Considerations
 
-- **Data ports are unauthenticated**: Once a test starts, data ports are open to any host that knows the port number. Use `--psk` authentication on untrusted networks.
+- **Single-port TCP**: TCP uses single-port mode by default -- control and data connections share port 5201. Data connections are validated against the control connection's IP address, preventing unauthorized access.
 - **UDP on untrusted networks**: UDP mode may be susceptible to reflection attacks from spoofed source addresses. Use TCP or QUIC on public networks.
 - **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
 - **ACLs**: Use `--allow`/`--deny` to restrict client access.
+
+### DoS Protections
+
+- **Slow-loris resistance**: New connections must send their first message within 5 seconds, preventing slow-loris attacks from blocking the accept loop.
+- **DataHello flood protection**: DataHello messages for unknown test IDs are rejected immediately without allocating resources.
+- **Bounded reads**: All control messages are limited to 8KB, preventing memory exhaustion from oversized messages.
+- **Capability negotiation**: Client and server exchange capabilities during the Hello handshake (protocol version 1.1), enabling safe feature evolution.
+- **Concurrent connection limits**: Server limits concurrent handlers (default 100) to prevent connection floods.
 
 ### Server Resource Usage
 
@@ -449,7 +461,7 @@ Each stream allocates 128KB-4MB for buffers depending on speed mode. Memory usag
 | 8 (`-P 8`) | 1MB - 32MB | 10MB - 320MB |
 | 128 (`-P 128`) | 16MB - 512MB | 160MB - 5GB |
 
-Use `--max-concurrent` to limit simultaneous tests on memory-constrained systems.
+The server limits concurrent handlers (default 100) to prevent resource exhaustion. Use `--rate-limit` to restrict tests per IP.
 
 ## Platform Support
 
@@ -474,7 +486,7 @@ xfr serve -p 9000
 
 ### Connection refused
 
-Ensure the server is running and the port is not blocked by a firewall.
+Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open -- no additional ephemeral data ports are needed. For UDP, each stream uses a separate port allocated by the server.
 
 ### Low throughput
 

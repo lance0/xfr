@@ -14,6 +14,23 @@ xfr <host> --csv            # CSV output
 xfr <host> -q               # Quiet mode (summary only)
 ```
 
+### One-Off Server Mode
+
+For scripted or CI tests, use `--one-off` so the server exits after a single test
+completes. This works with both TCP and QUIC clients:
+
+```bash
+# Server: start in one-off mode (exits after one test)
+xfr serve --one-off &
+SERVER_PID=$!
+
+# Client: run the test
+xfr localhost --json --no-tui -t 10s > result.json
+
+# Server will exit automatically after the test completes
+wait $SERVER_PID
+```
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -21,7 +38,21 @@ xfr <host> -q               # Quiet mode (summary only)
 | 0 | Test completed successfully |
 | 1 | Connection or protocol error |
 | 2 | Invalid arguments |
-| 3 | Server rejected test (auth, rate limit, ACL) |
+
+## Firewall / Port Requirements
+
+**TCP** uses single-port mode: both the control channel and all data streams
+run over port 5201 (or whichever port you configure with `-p`). No ephemeral
+data ports are opened, so only one port needs to be allowed through the
+firewall.
+
+**QUIC** also uses a single port (5201/UDP by default). The server listens on
+the same port number for both TCP and QUIC simultaneously.
+
+**UDP** mode allocates separate ephemeral data ports on the server for each
+stream. The control channel still uses TCP port 5201, but data transfer happens
+on dynamically assigned UDP ports. If you are behind a restrictive firewall,
+you may need to allow a range of high ports or use TCP/QUIC instead.
 
 ## JSON Output
 
@@ -31,6 +62,8 @@ xfr <host> -q               # Quiet mode (summary only)
 xfr <host> --json --no-tui > result.json
 ```
 
+The output matches the `TestResult` structure (protocol version 1.1):
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -38,11 +71,28 @@ xfr <host> --json --no-tui > result.json
   "duration_ms": 10000,
   "throughput_mbps": 987.65,
   "streams": [
-    {"id": 0, "bytes": 1234567890, "throughput_mbps": 987.65, "retransmits": 42}
+    {
+      "id": 0,
+      "bytes": 1234567890,
+      "throughput_mbps": 987.65,
+      "retransmits": 42
+    }
   ],
-  "tcp_info": {"retransmits": 42, "rtt_us": 1200, "rtt_var_us": 100, "cwnd": 10}
+  "tcp_info": {
+    "retransmits": 42,
+    "rtt_us": 1200,
+    "rtt_var_us": 100,
+    "cwnd": 10
+  }
 }
 ```
+
+Notes:
+- `tcp_info` is present only for TCP tests.
+- `udp_stats` (with fields `packets_sent`, `packets_received`, `lost`,
+  `lost_percent`, `jitter_ms`, `out_of_order`) is present only for UDP tests.
+- Per-stream `retransmits` appears for TCP, `jitter_ms` and `lost` for UDP.
+  Fields that do not apply are omitted (not set to zero).
 
 ### Streaming JSON (`--json-stream`)
 
@@ -53,10 +103,13 @@ xfr <host> --json-stream --no-tui
 ```
 
 ```
-{"elapsed_ms":1000,"throughput_mbps":950.2,"bytes":118775000}
-{"elapsed_ms":2000,"throughput_mbps":980.5,"bytes":122562500}
+{"timestamp":"1.000","elapsed_secs":1.0,"bytes":118775000,"throughput_mbps":950.2}
+{"timestamp":"2.000","elapsed_secs":2.0,"bytes":122562500,"throughput_mbps":980.5}
 ...
 ```
+
+Each line may also include optional fields `retransmits` (TCP), `jitter_ms`
+and `lost` (UDP) when applicable.
 
 ### Parsing with jq
 
@@ -69,6 +122,9 @@ xfr <host> --json-stream --no-tui | jq -s 'map(.throughput_mbps) | add / length'
 
 # Check if throughput meets threshold
 xfr <host> --json --no-tui | jq -e '.throughput_mbps > 900' || echo "FAIL"
+
+# Get TCP retransmits from summary
+xfr <host> --json --no-tui | jq '.tcp_info.retransmits // 0'
 ```
 
 ## CSV Output
@@ -77,11 +133,17 @@ xfr <host> --json --no-tui | jq -e '.throughput_mbps > 900' || echo "FAIL"
 xfr <host> --csv --no-tui > results.csv
 ```
 
-Output format:
+Interval output format (one line per reporting interval):
 ```
-timestamp,elapsed_ms,throughput_mbps,bytes,retransmits
-2024-01-15T10:30:00Z,1000,950.2,118775000,0
-2024-01-15T10:30:01Z,2000,980.5,122562500,2
+timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost
+1.000,1.00,118775000,950.20,0,0,0
+2.000,2.00,122562500,980.50,2,0,0
+```
+
+After intervals, a summary line is printed:
+```
+test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent
+550e8400-...,10.00,1234567890,987.65,42,0.00,0,0.00
 ```
 
 ## CI/CD Examples
@@ -124,6 +186,27 @@ jobs:
           path: result.json
 ```
 
+### GitHub Actions (Self-Contained with One-Off Server)
+
+For integration tests that do not depend on an external server:
+
+```yaml
+jobs:
+  bandwidth-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install xfr
+        run: cargo install xfr
+
+      - name: Run self-contained test
+        run: |
+          xfr serve --one-off &
+          sleep 1
+          xfr localhost --json --no-tui -t 5s > result.json
+          wait
+          jq '.throughput_mbps' result.json
+```
+
 ### GitLab CI
 
 ```yaml
@@ -147,10 +230,14 @@ network-test:
 
 xfr doesn't require special capabilities (unlike tools needing raw sockets).
 
+For TCP and QUIC, only port 5201 needs to be exposed. UDP tests require
+additional ephemeral ports for data transfer.
+
 ### Run as Server
 
 ```bash
-docker run --rm -p 5201:5201 rust:slim sh -c \
+# TCP + QUIC (single port)
+docker run --rm -p 5201:5201 -p 5201:5201/udp rust:slim sh -c \
   'cargo install xfr && xfr serve'
 ```
 
@@ -170,7 +257,8 @@ services:
     image: rust:slim
     command: sh -c 'cargo install xfr && xfr serve'
     ports:
-      - "5201:5201"
+      - "5201:5201"       # TCP control + data
+      - "5201:5201/udp"   # QUIC
 ```
 
 ## Shell Script Examples
@@ -246,7 +334,7 @@ MIN_THROUGHPUT=${2:-100}  # Minimum acceptable Mbps
 # Run test
 RESULT=$(xfr $SERVER --json --no-tui -t 30s)
 THROUGHPUT=$(echo "$RESULT" | jq '.throughput_mbps')
-RETRANSMITS=$(echo "$RESULT" | jq '.retransmits // 0')
+RETRANSMITS=$(echo "$RESULT" | jq '.tcp_info.retransmits // 0')
 
 echo "Throughput: $THROUGHPUT Mbps"
 echo "Retransmits: $RETRANSMITS"
@@ -281,13 +369,13 @@ xfr serve --push-gateway http://pushgateway:9091
 xfr <host> --json --no-tui | jq -r '
   "xfr_throughput_mbps \(.throughput_mbps)\n" +
   "xfr_bytes_total \(.bytes_total)\n" +
-  "xfr_retransmits_total \(.retransmits // 0)"
+  "xfr_tcp_retransmits_total \(.tcp_info.retransmits // 0)"
 ' | curl --data-binary @- http://pushgateway:9091/metrics/job/xfr/instance/$(hostname)
 ```
 
 ### Metrics Endpoint
 
-For continuous monitoring (requires `--features prometheus`):
+For continuous monitoring (requires `--features prometheus` at build time):
 
 ```bash
 xfr serve --prometheus 9090
@@ -298,15 +386,15 @@ Metrics available at `http://localhost:9090/metrics`:
 ```
 # HELP xfr_bytes_total Total bytes transferred
 # TYPE xfr_bytes_total counter
-xfr_bytes_total{direction="upload"} 1234567890
+xfr_bytes_total 1234567890
 
 # HELP xfr_throughput_mbps Current throughput
 # TYPE xfr_throughput_mbps gauge
-xfr_throughput_mbps{direction="upload"} 987.65
+xfr_throughput_mbps 987.65
 
-# HELP xfr_active_tests Number of active tests
-# TYPE xfr_active_tests gauge
-xfr_active_tests 2
+# HELP xfr_duration_seconds Test duration
+# TYPE xfr_duration_seconds gauge
+xfr_duration_seconds 10.0
 ```
 
 ### Grafana Dashboard
@@ -323,17 +411,23 @@ See `examples/grafana-dashboard.json` for a pre-built dashboard with:
 Configure xfr via environment for containerized deployments:
 
 ```bash
-export XFR_PORT=9000
-export XFR_DURATION=30s
-export XFR_LOG_LEVEL=debug
-export XFR_LOG_FILE=/var/log/xfr.log
+export XFR_PORT=9000           # Server/client port (-p)
+export XFR_DURATION=30s        # Test duration (-t)
+export XFR_LOG_LEVEL=debug     # Log level (--log-level)
+export XFR_LOG_FILE=/var/log/xfr.log  # Log file (--log-file)
+export XFR_PSK=my-secret-key   # Pre-shared key (--psk)
+export XFR_PUSH_GATEWAY=http://pushgateway:9091  # Push gateway URL (serve only)
+export XFR_TIMESTAMP_FORMAT=iso8601  # Timestamp format (--timestamp-format)
 ```
 
 ## Tips for Automation
 
-1. **Always use `--no-tui`** in scripts - prevents terminal escape codes in output
-2. **Use `--json-stream`** for real-time monitoring - parse each line as it arrives
-3. **Set explicit durations** with `-t` - don't rely on defaults
-4. **Use `xfr diff`** for regression detection - handles threshold comparison
-5. **Check exit codes** - non-zero means failure
-6. **Log to file** with `--log-file` for debugging - keeps stdout clean for JSON
+1. **Always use `--no-tui`** in scripts -- prevents terminal escape codes in output
+2. **Use `--json-stream`** for real-time monitoring -- parse each line as it arrives
+3. **Set explicit durations** with `-t` -- don't rely on defaults
+4. **Use `xfr diff`** for regression detection -- handles threshold comparison
+5. **Use `--one-off`** for CI servers -- server exits after one test completes
+6. **Check exit codes** -- non-zero means failure
+7. **Log to file** with `--log-file` for debugging -- keeps stdout clean for JSON
+8. **TCP needs only port 5201** -- single-port mode means no ephemeral data ports
+9. **UDP needs extra ports** -- data ports are dynamically allocated on the server

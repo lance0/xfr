@@ -53,54 +53,78 @@ src/
 │ CLIENT                                                              │
 │                                                                     │
 │  1. Connect TCP to server:5201 (control channel)                   │
-│  2. Exchange Hello (version, capabilities)                          │
-│  3. If PSK: complete challenge-response auth                        │
-│  4. Send TestStart (protocol, streams, duration, direction)         │
-│  5. Receive TestAck                                                 │
-│  6. Open data connections to port 5201, send DataHello              │
-│  7. Transfer data, receive Interval messages                        │
-│  8. Receive Result message                                          │
-│  9. Display results                                                  │
+│  2. Send Hello (version 1.1, capabilities list)                     │
+│     Capabilities: tcp, udp, quic, multistream, single_port_tcp      │
+│  3. Receive server Hello (version, auth challenge if PSK)           │
+│  4. If PSK: complete challenge-response auth                        │
+│  5. Send TestStart (protocol, streams, duration, direction)         │
+│  6. Receive TestAck (with data_ports: empty for single-port TCP)    │
+│  7. Open data connections to port 5201, send DataHello              │
+│     (single-port TCP is default for clients with that capability;   │
+│      multi-port fallback for legacy clients without single_port_tcp)│
+│  8. Transfer data, receive Interval messages                        │
+│  9. Receive Result message                                          │
+│ 10. Display results                                                  │
 └────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────────────────────────────────────────────────────────┐
 │ SERVER                                                              │
 │                                                                     │
-│  1. Accept connection, read first message                           │
-│  2. If Hello: control connection                                    │
-│     - Send Hello (version, auth challenge if PSK)                   │
-│     - If PSK: verify auth response                                  │
-│     - Receive TestStart, send TestAck                               │
-│  3. If DataHello: route to active test's data channel               │
+│  1. Accept connection, spawn task via handle_new_connection()       │
+│  2. Read first line (5s INITIAL_READ_TIMEOUT, resist slow-loris)   │
+│  3. Parse message, route:                                           │
+│     - If Hello: acquire rate-limit + semaphore, spawn client task   │
+│       - Send Hello (version, auth challenge if PSK)                 │
+│       - If PSK: verify auth response                                │
+│       - Receive TestStart, send TestAck                             │
+│     - If DataHello: validate test_id against active_tests,          │
+│       verify peer IP matches control connection, route to test      │
 │  4. Transfer data, send Interval messages                           │
 │  5. Send Result message                                             │
 │  6. Clean up, ready for next client                                 │
+│     (one-off mode: signal shutdown via watch channel)               │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Control Protocol
 
-The control channel uses newline-delimited JSON messages (one JSON object per line):
+The control channel uses newline-delimited JSON messages (one JSON object per line).
+Protocol version is **1.1** (major version must match for compatibility).
+
+Messages use a tagged enum format with a `"type"` field:
 
 ```
-{"Hello":{"version":"0.3.0","capabilities":[]}}\n
-{"TestStart":{"protocol":"tcp","streams":4,...}}\n
+{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp"]}\n
+{"type":"test_start","id":"...","protocol":"tcp","streams":4,...}\n
 ```
 
 Each message is serialized as compact JSON followed by a newline character.
 The receiver reads line-by-line and deserializes each line as a `ControlMessage`.
 
 Message types (see `protocol.rs`):
-- `Hello` - Version and capability exchange
-- `AuthResponse` - PSK authentication
-- `AuthSuccess` - Auth confirmation
-- `TestStart` - Test parameters
-- `TestAck` - Test acknowledgment
-- `DataHello` - Data connection identification (test_id, stream_index)
-- `Interval` - Periodic statistics
-- `Result` - Final test result
-- `Cancel` / `Cancelled` - Test cancellation
-- `Error` - Error messages
+- `hello` - Version and capability exchange (client sends capabilities list)
+- `auth_response` - PSK authentication
+- `auth_success` - Auth confirmation
+- `test_start` - Test parameters
+- `test_ack` - Test acknowledgment (includes data_ports, empty for single-port TCP)
+- `data_hello` - Data connection identification (test_id, stream_index)
+- `interval` - Periodic statistics
+- `result` - Final test result
+- `cancel` / `cancelled` - Test cancellation
+- `error` - Error messages
+
+### TCP Connection Modes
+
+**Single-port TCP** (default for clients advertising `single_port_tcp` capability):
+All data connections come to the same port as the control connection (5201).
+Each data connection sends a `DataHello` as its first message to identify which
+test and stream it belongs to. The server routes these via an mpsc channel to the
+active test's stream handler.
+
+**Multi-port TCP** (legacy fallback for clients without `single_port_tcp`):
+The server allocates per-stream ephemeral TCP listeners and returns their ports
+in the `TestAck` message. Clients connect to each port directly. No `DataHello`
+routing is needed since the port uniquely identifies the stream.
 
 ### Data Transfer
 
@@ -128,23 +152,56 @@ xfr uses Tokio for async I/O. Key patterns:
 
 ### Server
 
+The TCP accept loop spawns a task per connection to prevent slow-loris attacks
+from blocking accepts:
+
 ```rust
-// Main accept loop
+// Main accept loop (uses select! with shutdown_rx for one-off mode)
 loop {
-    let (stream, addr) = listener.accept().await?;
-    tokio::spawn(handle_client(stream, addr, state.clone()));
+    let (stream, peer_addr) = tokio::select! {
+        result = listener.accept() => result?,
+        _ = shutdown_rx.changed() => break, // one-off shutdown
+    };
+    // ACL check (inline, cheap)
+    // Spawn task per connection for first-line read + routing
+    tokio::spawn(handle_new_connection(stream, peer_addr, ...));
 }
 
+// handle_new_connection: reads first line (5s timeout), parses, routes
+async fn handle_new_connection(...) {
+    let line = timeout(INITIAL_READ_TIMEOUT, read_first_line(&mut stream)).await?;
+    match parse(line) {
+        DataHello { test_id, .. } => {
+            // Validate test_id exists in active_tests, then route
+            route_data_hello(stream, active_tests, test_id, stream_index).await;
+        }
+        Hello { .. } => {
+            // Acquire rate-limit + semaphore, then spawn client handler
+            tokio::spawn(handle_client_with_first_message(...));
+        }
+    }
+}
+```
+
+The QUIC accept loop runs in a separate spawned task, also using `select!` with
+a shared `watch` channel for shutdown signaling in one-off mode.
+
+JoinErrors from stream handler `join_all` are logged (panics logged as errors).
+
+```rust
 // Per-client task spawns data handlers
 async fn handle_client(...) {
     // Control channel handling
-    // Spawn data transfer tasks
-    let handles: Vec<JoinHandle<_>> = (0..streams)
-        .map(|i| tokio::spawn(transfer_data(i, ...)))
-        .collect();
+    // Spawn data transfer tasks via channel (single-port TCP)
+    // or per-port listeners (multi-port TCP)
 
-    // Aggregate stats from channels
-    // Send Interval messages
+    // Wait for handlers, log JoinErrors
+    let results = futures::future::join_all(handles).await;
+    for result in results {
+        if let Err(e) = result && e.is_panic() {
+            error!("stream handler panicked: {:?}", e);
+        }
+    }
 }
 ```
 
@@ -202,16 +259,12 @@ loop {
 ```rust
 pub struct TestResult {
     pub id: String,
-    pub protocol: Protocol,
-    pub direction: Direction,
-    pub duration_secs: f64,
-    pub bytes_transferred: u64,
+    pub bytes_total: u64,
+    pub duration_ms: u64,
     pub throughput_mbps: f64,
     pub streams: Vec<StreamResult>,
-    pub retransmits: Option<u32>,
-    pub jitter_ms: Option<f64>,
-    pub lost_packets: Option<u64>,
-    pub total_packets: Option<u64>,
+    pub tcp_info: Option<TcpInfoSnapshot>,   // RTT, retransmits, cwnd
+    pub udp_stats: Option<UdpStats>,         // loss, jitter, out-of-order
 }
 ```
 

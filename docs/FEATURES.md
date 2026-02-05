@@ -19,6 +19,12 @@ TCP provides:
 - Congestion control
 - TCP_INFO statistics (RTT, retransmits, cwnd)
 
+#### Single-Port TCP (Default)
+
+By default, all TCP connections (control and data) use a single port (5201) via the DataHello protocol. When the client connects data streams, each one sends a `DataHello` message containing the `test_id` and `stream_index` to identify itself to the server. This eliminates the need to open additional ports for data transfer.
+
+If the server detects that a client does not advertise the `single_port_tcp` capability, it falls back to multi-port mode (allocating separate ephemeral ports per stream) for legacy compatibility.
+
 ### UDP
 
 Unreliable datagram transfer for testing network capacity:
@@ -42,7 +48,7 @@ UDP provides:
 Encrypted transport over UDP using TLS 1.3:
 
 ```bash
-xfr <host> --quic              # QUIC transport
+xfr <host> --quic              # QUIC transport (short: -Q)
 xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
 xfr <host> --quic --psk secret # QUIC with PSK authentication
 ```
@@ -54,6 +60,38 @@ QUIC provides:
 - Head-of-line blocking avoidance
 
 **Security Note**: QUIC encrypts traffic but uses self-signed certificates by default. For authenticated connections, combine with `--psk` to prevent MITM attacks.
+
+## Protocol
+
+### Version and Compatibility
+
+The control protocol version is 1.1. Client and server exchange version information during the Hello handshake. Compatibility is checked by comparing the major version number numerically -- major versions must match exactly, while minor version differences are allowed (backwards compatible).
+
+### Capability Negotiation
+
+Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, and `single_port_tcp`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port TCP mode).
+
+### Message Flow
+
+The control channel uses newline-delimited JSON over TCP or QUIC:
+
+```
+Client                          Server
+  |                               |
+  |-------- Hello --------------->|  (control connection)
+  |<------- Hello (+ auth?) -----|
+  |-------- AuthResponse? ------>|
+  |<------- AuthSuccess? --------|
+  |-------- TestStart ---------->|
+  |<------- TestAck -------------|
+  |                               |
+  |-------- DataHello ---------->|  (data connection 1, same port)
+  |-------- DataHello ---------->|  (data connection 2, same port)
+  |      [Data Transfer]          |
+  |                               |
+  |<------- Interval ------------|  (periodic, on control)
+  |<------- Result --------------|
+```
 
 ## Multi-Stream Testing
 
@@ -118,6 +156,19 @@ xfr <host> --bind [::1]                 # IPv6 address
 ```
 
 **Note:** TCP mode does not support explicit port binding (use IP only).
+
+## Dual-Stack and IPv6 Support
+
+The server defaults to dual-stack mode, accepting both IPv4 and IPv6 connections on a single socket. You can restrict to a specific address family:
+
+```bash
+xfr serve -4                   # IPv4 only
+xfr serve -6                   # IPv6 only
+xfr <host> -4                  # Client: force IPv4
+xfr <host> -6                  # Client: force IPv6
+```
+
+IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically normalized to their IPv4 form when comparing peer IPs. This ensures consistent behavior in dual-stack environments, such as when validating that a DataHello connection comes from the same client as the control connection.
 
 ## Output Formats
 
@@ -217,8 +268,10 @@ Unlike iperf3, xfr's server handles multiple simultaneous clients:
 
 ```bash
 xfr serve                    # Accept unlimited clients
-xfr serve --one-off          # Exit after one test
+xfr serve --one-off          # Exit after one test (TCP or QUIC)
 ```
+
+The `--one-off` flag causes the server to shut down after a single test completes. This works for both TCP and QUIC connections. When one-off mode is active, the shutdown signal is shared between the TCP accept loop and the QUIC acceptor task, so whichever protocol completes a test first triggers the server exit.
 
 ### Server TUI Dashboard
 
@@ -233,6 +286,16 @@ Shows:
 - Per-client throughput
 - Connection duration
 - Protocol and direction
+
+### Connection Security
+
+The server implements several protections against connection-based attacks:
+
+- **Slow-loris protection**: Each accepted TCP connection is immediately spawned into its own task. A 5-second initial read timeout (`INITIAL_READ_TIMEOUT`) is applied to the first line read, preventing idle connections from blocking the accept loop.
+- **DataHello flood protection**: When a data connection sends a `DataHello`, the server validates the `test_id` against active tests before processing. Unknown test IDs are rejected immediately. The server also verifies that the DataHello originates from the same IP address as the control connection for that test (using IPv4-mapped IPv6 normalization for dual-stack compatibility).
+- **Bounded message length**: Control messages are limited to 8192 bytes to prevent memory exhaustion.
+- **Handshake timeouts**: A 30-second timeout is applied to control-plane handshake reads after the initial connection.
+- **Concurrent handler limit**: A configurable semaphore (default: 100) limits the number of concurrent client handlers.
 
 ### Rate Limiting
 
@@ -383,11 +446,13 @@ See `xfr --help` for complete CLI documentation.
 | `--theme` | | default | Color theme |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
 | `--window` | | OS default | TCP window size |
-| `--quic` | | false | Use QUIC transport |
+| `--quic` | `-Q` | false | Use QUIC transport |
 | `--psk` | | none | Pre-shared key |
 | `--timestamp-format` | | relative | Timestamp format |
 | `--log-file` | | none | Log file path |
 | `--log-level` | | info | Log level |
+| `--ipv4` | `-4` | false | Force IPv4 only |
+| `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (IP or IP:port) |
 
 ### Server-Specific Flags
@@ -395,7 +460,7 @@ See `xfr --help` for complete CLI documentation.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--tui` | false | Enable server dashboard |
-| `--one-off` | false | Exit after one test |
+| `--one-off` | false | Exit after one test (TCP or QUIC) |
 | `--max-duration` | none | Maximum test duration |
 | `--rate-limit` | none | Max concurrent tests per IP |
 | `--allow` | none | Allow IP/subnet (repeatable) |
