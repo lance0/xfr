@@ -50,9 +50,13 @@ pub const DEFAULT_PORT: u16 = 5201;
 /// - Major versions must match exactly
 /// - Minor version differences are allowed (backwards compatible)
 pub fn versions_compatible(version_a: &str, version_b: &str) -> bool {
-    let major_a = version_a.split('.').next().unwrap_or("0");
-    let major_b = version_b.split('.').next().unwrap_or("0");
-    major_a == major_b
+    let parse_major = |v: &str| -> u32 {
+        v.split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    };
+    parse_major(version_a) == parse_major(version_b)
 }
 
 /// Authentication challenge sent by server
@@ -311,7 +315,13 @@ impl ControlMessage {
             version: PROTOCOL_VERSION.to_string(),
             client: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
             server: None,
-            capabilities: None,
+            capabilities: Some(vec![
+                "tcp".to_string(),
+                "udp".to_string(),
+                "quic".to_string(),
+                "multistream".to_string(),
+                "single_port_tcp".to_string(),
+            ]),
             auth: None,
         }
     }

@@ -1284,6 +1284,7 @@ async fn test_tcp_one_off_multi_stream() {
     let result = result.unwrap();
     assert!(result.bytes_total > 0, "Should have transferred bytes");
     assert!(result.duration_ms > 0, "Should have duration");
+    assert_eq!(result.streams.len(), 4, "Should have 4 stream results");
 
     // Server should have exited after the test
     let server_result = timeout(Duration::from_secs(2), server_handle).await;
@@ -1339,6 +1340,8 @@ async fn test_quic_one_off() {
 
     let result = result.unwrap();
     assert!(result.bytes_total > 0, "Should have transferred bytes");
+    assert!(result.duration_ms > 0, "Should have duration");
+    assert_eq!(result.streams.len(), 2, "Should have 2 stream results");
 
     // Server should have exited after the test
     let server_result = timeout(Duration::from_secs(2), server_handle).await;

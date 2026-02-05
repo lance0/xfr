@@ -13,6 +13,8 @@ fn test_hello_serialization() {
     assert!(json.contains("\"type\":\"hello\""));
     assert!(json.contains("\"version\":\"1.1\""));
     assert!(json.contains("\"client\":\"xfr/"));
+    assert!(json.contains("\"capabilities\""));
+    assert!(json.contains("\"single_port_tcp\""));
 }
 
 #[test]
@@ -206,7 +208,6 @@ fn test_data_hello_serialization() {
         stream_index: 0,
     };
     let json = msg.serialize().unwrap();
-    println!("DataHello JSON: {}", json);
 
     assert!(json.contains("\"type\":\"data_hello\""));
     assert!(json.contains("\"test_id\":\"test-123\""));
