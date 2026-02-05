@@ -198,3 +198,29 @@ fn test_direction_display() {
     assert_eq!(format!("{}", Direction::Download), "Download");
     assert_eq!(format!("{}", Direction::Bidir), "Bidirectional");
 }
+
+#[test]
+fn test_data_hello_serialization() {
+    let msg = ControlMessage::DataHello {
+        test_id: "test-123".to_string(),
+        stream_index: 0,
+    };
+    let json = msg.serialize().unwrap();
+    println!("DataHello JSON: {}", json);
+
+    assert!(json.contains("\"type\":\"data_hello\""));
+    assert!(json.contains("\"test_id\":\"test-123\""));
+
+    // Test roundtrip
+    let decoded = ControlMessage::deserialize(&json).unwrap();
+    match decoded {
+        ControlMessage::DataHello {
+            test_id,
+            stream_index,
+        } => {
+            assert_eq!(test_id, "test-123");
+            assert_eq!(stream_index, 0);
+        }
+        _ => panic!("Expected DataHello"),
+    }
+}

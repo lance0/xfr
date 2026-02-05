@@ -264,8 +264,18 @@ impl Server {
             });
         }
 
+        // Shutdown channel for one-off mode
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
         loop {
-            let (mut stream, peer_addr) = listener.accept().await?;
+            // Use select! to accept connections OR receive shutdown signal
+            let (mut stream, peer_addr) = tokio::select! {
+                result = listener.accept() => result?,
+                _ = shutdown_rx.recv() => {
+                    debug!("Shutdown signal received, exiting accept loop");
+                    break;
+                }
+            };
             let peer_ip = peer_addr.ip();
 
             // Check ACL (cheap, no state change)
@@ -374,9 +384,14 @@ impl Server {
                     });
 
                     if self.config.one_off {
-                        // Wait for the test to complete
-                        let _ = handle.await;
-                        break;
+                        // In one-off mode, we need to keep accepting connections
+                        // (for DataHello data streams) until the test completes.
+                        // Spawn a task to wait for the test and signal shutdown.
+                        let shutdown_tx = shutdown_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            let _ = shutdown_tx.send(()).await;
+                        });
                     }
                 }
                 other => {
