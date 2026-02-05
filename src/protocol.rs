@@ -3,7 +3,7 @@
 //! The control channel uses newline-delimited JSON messages over TCP/QUIC:
 //!
 //! ```text
-//! {"type":"Hello","version":"1.0",...}\n
+//! {"type":"Hello","version":"1.1",...}\n
 //! {"type":"ServerHello",...}\n
 //! {"type":"TestStart",...}\n
 //! ```
@@ -41,7 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: &str = "1.0";
+pub const PROTOCOL_VERSION: &str = "1.1";
 pub const DEFAULT_PORT: u16 = 5201;
 
 /// Check if two protocol versions are compatible.
@@ -326,6 +326,7 @@ impl ControlMessage {
                 "udp".to_string(),
                 "quic".to_string(),
                 "multistream".to_string(),
+                "single_port_tcp".to_string(),
             ]),
             auth: None,
         }
@@ -341,6 +342,7 @@ impl ControlMessage {
                 "udp".to_string(),
                 "quic".to_string(),
                 "multistream".to_string(),
+                "single_port_tcp".to_string(),
             ]),
             auth: Some(AuthChallenge {
                 method: "psk".to_string(),
@@ -381,7 +383,7 @@ mod tests {
         let msg = ControlMessage::client_hello();
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"type\":\"hello\""));
-        assert!(json.contains("\"version\":\"1.0\""));
+        assert!(json.contains("\"version\":\"1.1\""));
     }
 
     #[test]

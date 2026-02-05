@@ -11,7 +11,7 @@ fn test_hello_serialization() {
     let json = msg.serialize().unwrap();
 
     assert!(json.contains("\"type\":\"hello\""));
-    assert!(json.contains("\"version\":\"1.0\""));
+    assert!(json.contains("\"version\":\"1.1\""));
     assert!(json.contains("\"client\":\"xfr/"));
 }
 

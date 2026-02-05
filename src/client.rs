@@ -138,6 +138,9 @@ impl Client {
         read_bounded_line(&mut reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
+        // Track server capabilities for feature detection
+        let server_capabilities;
+
         match msg {
             ControlMessage::Hello {
                 version,
@@ -153,6 +156,7 @@ impl Client {
                     ));
                 }
                 debug!("Server capabilities: {:?}", capabilities);
+                server_capabilities = capabilities;
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {
@@ -223,6 +227,21 @@ impl Client {
                 return Err(anyhow::anyhow!("Expected test_ack"));
             }
         };
+
+        // Validate single-port mode: empty data_ports requires server capability
+        if data_ports.is_empty() && self.config.protocol == Protocol::Tcp {
+            let has_single_port = server_capabilities
+                .as_ref()
+                .map(|caps| caps.iter().any(|c| c == "single_port_tcp"))
+                .unwrap_or(false);
+
+            if !has_single_port {
+                return Err(anyhow::anyhow!(
+                    "Server returned empty data_ports but doesn't support single_port_tcp capability. \
+                    The server may be an older version that is incompatible with this client."
+                ));
+            }
+        }
 
         // Create stats
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
@@ -366,7 +385,14 @@ impl Client {
             let port = if single_port_mode {
                 control_port
             } else {
-                data_ports[i]
+                // Bounds check: server may return fewer ports than requested streams
+                *data_ports.get(i).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Server returned {} data ports but {} streams were requested",
+                        data_ports.len(),
+                        self.config.streams
+                    )
+                })?
             };
             let addr = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
@@ -394,8 +420,15 @@ impl Client {
                                 test_id,
                                 stream_index,
                             };
+                            let serialized = match hello.serialize() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    error!("Failed to serialize DataHello: {}", e);
+                                    return;
+                                }
+                            };
                             if let Err(e) = stream
-                                .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+                                .write_all(format!("{}\n", serialized).as_bytes())
                                 .await
                             {
                                 error!("Failed to send DataHello: {}", e);

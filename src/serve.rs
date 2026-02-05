@@ -101,6 +101,8 @@ struct ActiveTest {
     /// Channel for receiving data connections in single-port TCP mode
     #[allow(dead_code)]
     data_stream_tx: Option<mpsc::Sender<(TcpStream, u16)>>, // (stream, stream_index)
+    /// Control connection peer IP (for DataHello validation)
+    control_peer_ip: std::net::IpAddr,
 }
 
 pub struct Server {
@@ -263,10 +265,10 @@ impl Server {
         }
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (mut stream, peer_addr) = listener.accept().await?;
             let peer_ip = peer_addr.ip();
 
-            // Check ACL
+            // Check ACL (cheap, no state change)
             if !security.acl.is_allowed(peer_ip) {
                 warn!("Connection rejected by ACL: {}", peer_addr);
                 if let Some(tx) = &security.tui_tx {
@@ -276,62 +278,110 @@ impl Server {
                 continue;
             }
 
-            // Check rate limit and create guard for RAII cleanup
-            let rate_limit_guard = if let Some(limiter) = &security.rate_limiter {
-                if let Err(e) = limiter.check(peer_ip) {
-                    warn!("Rate limit exceeded for {}: {}", peer_addr, e);
-                    if let Some(tx) = &security.tui_tx {
-                        let _ = tx.try_send(ServerEvent::ConnectionBlocked);
-                    }
-                    drop(stream);
+            // Read first line to determine connection type BEFORE acquiring permits
+            // This allows DataHello (data connections) to bypass rate-limit and semaphore
+            let line = match tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH),
+            )
+            .await
+            {
+                Ok(Ok(line)) => line,
+                Ok(Err(e)) => {
+                    debug!("Failed to read first line from {}: {}", peer_addr, e);
                     continue;
                 }
-                Some(RateLimitGuard::new(limiter.clone(), peer_ip))
-            } else {
-                None
-            };
-
-            // Acquire semaphore permit to limit concurrent handlers
-            let permit = match handler_semaphore.clone().try_acquire_owned() {
-                Ok(permit) => permit,
                 Err(_) => {
-                    warn!("Max concurrent handlers reached, rejecting: {}", peer_addr);
-                    drop(stream);
-                    // rate_limit_guard drops here, releasing the slot
+                    debug!("Handshake timeout from {}", peer_addr);
                     continue;
                 }
             };
 
-            info!("Client connected: {}", peer_addr);
-
-            let active_tests = self.active_tests.clone();
-            let base_port = self.config.port;
-            let max_duration = self.config.max_duration;
-            let security = security.clone();
-
-            let handle = tokio::spawn(async move {
-                let _permit = permit; // Held until task completes
-                let _rate_guard = rate_limit_guard; // Released on drop (even on panic)
-
-                let result = route_connection(
-                    stream,
-                    peer_addr,
-                    active_tests,
-                    base_port,
-                    max_duration,
-                    &security,
-                )
-                .await;
-
-                if let Err(e) = result {
-                    error!("Client error {}: {}", peer_addr, e);
+            let msg: ControlMessage = match ControlMessage::deserialize(line.trim()) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    debug!("Invalid first message from {}: {}", peer_addr, e);
+                    continue;
                 }
-            });
+            };
 
-            if self.config.one_off {
-                // Wait for the test to complete
-                let _ = handle.await;
-                break;
+            match msg {
+                ControlMessage::DataHello {
+                    test_id,
+                    stream_index,
+                } => {
+                    // Data connection - route directly without consuming rate-limit or semaphore
+                    // (the control connection already acquired those resources)
+                    let active_tests = self.active_tests.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            route_data_hello(stream, peer_addr, active_tests, test_id, stream_index)
+                                .await
+                        {
+                            debug!("DataHello routing error from {}: {}", peer_addr, e);
+                        }
+                    });
+                }
+                ControlMessage::Hello { .. } => {
+                    // Control connection - acquire rate limit and semaphore
+                    let rate_limit_guard = if let Some(limiter) = &security.rate_limiter {
+                        if let Err(e) = limiter.check(peer_ip) {
+                            warn!("Rate limit exceeded for {}: {}", peer_addr, e);
+                            if let Some(tx) = &security.tui_tx {
+                                let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                            }
+                            continue;
+                        }
+                        Some(RateLimitGuard::new(limiter.clone(), peer_ip))
+                    } else {
+                        None
+                    };
+
+                    let permit = match handler_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("Max concurrent handlers reached, rejecting: {}", peer_addr);
+                            // rate_limit_guard drops here, releasing the slot
+                            continue;
+                        }
+                    };
+
+                    info!("Client connected: {}", peer_addr);
+
+                    let active_tests = self.active_tests.clone();
+                    let base_port = self.config.port;
+                    let max_duration = self.config.max_duration;
+                    let security = security.clone();
+
+                    let handle = tokio::spawn(async move {
+                        let _permit = permit; // Held until task completes
+                        let _rate_guard = rate_limit_guard; // Released on drop (even on panic)
+
+                        let result = handle_client_with_first_message(
+                            stream,
+                            peer_addr,
+                            active_tests,
+                            base_port,
+                            max_duration,
+                            &security,
+                            msg,
+                        )
+                        .await;
+
+                        if let Err(e) = result {
+                            error!("Client error {}: {}", peer_addr, e);
+                        }
+                    });
+
+                    if self.config.one_off {
+                        // Wait for the test to complete
+                        let _ = handle.await;
+                        break;
+                    }
+                }
+                other => {
+                    warn!("Unexpected first message from {}: {:?}", peer_addr, other);
+                }
             }
         }
 
@@ -348,7 +398,7 @@ async fn read_first_line_unbuffered(
     let mut line = Vec::with_capacity(256);
     let mut buf = [0u8; 1];
 
-    while line.len() < max_len {
+    loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
             return Err(anyhow::anyhow!("Connection closed"));
@@ -357,12 +407,68 @@ async fn read_first_line_unbuffered(
             break;
         }
         line.push(buf[0]);
+
+        // DoS guard: reject lines that exceed maximum length
+        if line.len() >= max_len {
+            return Err(anyhow::anyhow!(
+                "Line exceeds maximum length of {} bytes",
+                max_len
+            ));
+        }
     }
 
     Ok(String::from_utf8_lossy(&line).to_string())
 }
 
+/// Route DataHello connection to its test (no rate-limit/semaphore needed)
+async fn route_data_hello(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
+    test_id: String,
+    stream_index: u16,
+) -> anyhow::Result<()> {
+    debug!(
+        "DataHello from {} for test {} stream {}",
+        peer_addr, test_id, stream_index
+    );
+
+    // Look up the test and validate peer IP matches control connection
+    let tx = {
+        let tests = active_tests.lock().await;
+        if let Some(test) = tests.get(&test_id) {
+            // Security: Validate DataHello comes from same IP as control connection
+            if test.control_peer_ip != peer_addr.ip() {
+                warn!(
+                    "DataHello IP mismatch for test {}: expected {}, got {}",
+                    test_id, test.control_peer_ip, peer_addr.ip()
+                );
+                return Err(anyhow::anyhow!("DataHello from unauthorized IP"));
+            }
+            test.data_stream_tx.clone()
+        } else {
+            None
+        }
+    };
+
+    if let Some(tx) = tx {
+        // Stream is ready for data transfer
+        if tx.send((stream, stream_index)).await.is_err() {
+            warn!("Failed to route data stream - test may have ended");
+        }
+    } else {
+        warn!(
+            "DataHello for unknown/completed test {} from {}",
+            test_id, peer_addr
+        );
+    }
+
+    Ok(())
+}
+
 /// Route incoming connection: either DataHello (route to test) or Hello (control connection)
+/// Note: Currently unused - kept for potential multi-port mode fallback
+#[allow(dead_code)]
 async fn route_connection(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
@@ -392,10 +498,22 @@ async fn route_connection(
                 peer_addr, test_id, stream_index
             );
 
-            // Look up the test and send stream to its channel
+            // Look up the test and validate peer IP matches control connection
             let tx = {
                 let tests = active_tests.lock().await;
-                tests.get(&test_id).and_then(|t| t.data_stream_tx.clone())
+                if let Some(test) = tests.get(&test_id) {
+                    // Security: Validate DataHello comes from same IP as control connection
+                    if test.control_peer_ip != peer_addr.ip() {
+                        warn!(
+                            "DataHello IP mismatch for test {}: expected {}, got {}",
+                            test_id, test.control_peer_ip, peer_addr.ip()
+                        );
+                        return Err(anyhow::anyhow!("DataHello from unauthorized IP"));
+                    }
+                    test.data_stream_tx.clone()
+                } else {
+                    None
+                }
             };
 
             if let Some(tx) = tx {
@@ -1020,6 +1138,7 @@ async fn run_quic_test(
                 cancel_tx,
                 data_ports: vec![],
                 data_stream_tx: None,
+                control_peer_ip: peer_addr.ip(),
             },
         );
     }
@@ -1317,6 +1436,7 @@ async fn run_test(
                 cancel_tx,
                 data_ports: data_ports.clone(),
                 data_stream_tx,
+                control_peer_ip: peer_addr.ip(),
             },
         );
     }
@@ -1350,26 +1470,33 @@ async fn run_test(
     crate::output::prometheus::on_test_start();
 
     // Spawn data stream handlers
-    let handles: Vec<JoinHandle<()>> = match protocol {
+    // For TCP: spawn stream collection in background to not block interval loop
+    // For UDP: handlers are spawned immediately
+    let (tcp_collection_handle, udp_handles) = match protocol {
         Protocol::Tcp => {
-            // Single-port mode: wait for streams via channel from main accept loop
+            // Single-port mode: spawn stream collection in background
+            // This allows interval loop and cancel handling to run while waiting for streams
             if let Some(rx) = data_stream_rx {
-                spawn_tcp_stream_handlers(
-                    rx,
-                    streams as usize,
-                    stats.clone(),
-                    direction,
-                    duration,
-                    cancel_rx.clone(),
-                )
-                .await
+                let stats_clone = stats.clone();
+                let cancel_clone = cancel_rx.clone();
+                let handle = tokio::spawn(async move {
+                    spawn_tcp_stream_handlers(
+                        rx,
+                        streams as usize,
+                        stats_clone,
+                        direction,
+                        duration,
+                        cancel_clone,
+                    )
+                    .await
+                });
+                (Some(handle), Vec::new())
             } else {
-                // Fallback (shouldn't happen for TCP)
-                Vec::new()
+                (None, Vec::new())
             }
         }
         Protocol::Udp => {
-            spawn_udp_handlers(
+            let handles = spawn_udp_handlers(
                 udp_sockets,
                 stats.clone(),
                 direction,
@@ -1377,15 +1504,16 @@ async fn run_test(
                 bitrate.unwrap_or(1_000_000_000),
                 cancel_rx.clone(),
             )
-            .await
+            .await;
+            (None, handles)
         }
         Protocol::Quic => {
             // Unreachable - QUIC returns early above
-            Vec::new()
+            (None, Vec::new())
         }
     };
 
-    // Send interval updates
+    // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
     let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
     let start = std::time::Instant::now();
 
@@ -1460,7 +1588,19 @@ async fn run_test(
     }
 
     // Wait for all data handlers to complete
-    futures::future::join_all(handles).await;
+    match (tcp_collection_handle, udp_handles) {
+        (Some(handle), _) => {
+            // TCP: wait for stream collection task, then wait for individual handlers
+            if let Ok(tcp_handles) = handle.await {
+                futures::future::join_all(tcp_handles).await;
+            }
+        }
+        (None, handles) if !handles.is_empty() => {
+            // UDP: wait for handlers directly
+            futures::future::join_all(handles).await;
+        }
+        _ => {}
+    }
 
     // Send final result
     let duration_ms = stats.elapsed_ms();

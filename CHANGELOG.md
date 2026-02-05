@@ -9,11 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Single-port TCP mode** (issue #16) - TCP tests now use only port 5201 for all connections, making them firewall-friendly. Data connections identify themselves via `DataHello` message instead of using ephemeral ports.
+- **Protocol version bump to 1.1** - Signals DataHello support; adds `single_port_tcp` capability for backward compatibility detection
 
 ### Fixed
 - **QUIC IPv6 support** (issue #17) - QUIC clients can now connect to IPv6 addresses without requiring `-6` flag; endpoint now binds to matching address family
 - **mDNS discovery** (issue #15) - Server now advertises addresses via `enable_addr_auto()`; client uses non-blocking receive with proper timeout handling
 - **TCP RTT and retransmits display** (issue #13) - TUI now shows correct retransmit count from stream results (captured after transfer); TCP_INFO captured after transfer for accurate RTT/cwnd
+- **Data connections no longer consume rate-limit/semaphore slots** - Only control (Hello) connections acquire permits; DataHello connections route directly without resource consumption
+- **Cancel messages processed during TCP stream collection** - Interval loop now starts immediately; stream collection runs concurrently in background
+- **Client OOB panic on port mismatch** - Added bounds check when server returns fewer ports than requested streams
+- **DoS guard on oversized lines** - `read_first_line_unbuffered()` now returns error instead of truncating
+- **DataHello serialization panic** - Replaced `unwrap()` with proper error handling in spawned task
+
+### Security
+- **DataHello IP validation** - Server validates DataHello connections come from same IP as control connection to prevent connection hijacking
 
 ### Testing
 - Added regression test for QUIC IPv6 connectivity
