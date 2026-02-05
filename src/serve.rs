@@ -98,6 +98,9 @@ struct ActiveTest {
     cancel_tx: watch::Sender<bool>,
     #[allow(dead_code)]
     data_ports: Vec<u16>,
+    /// Channel for receiving data connections in single-port TCP mode
+    #[allow(dead_code)]
+    data_stream_tx: Option<mpsc::Sender<(TcpStream, u16)>>, // (stream, stream_index)
 }
 
 pub struct Server {
@@ -310,7 +313,7 @@ impl Server {
                 let _permit = permit; // Held until task completes
                 let _rate_guard = rate_limit_guard; // Released on drop (even on panic)
 
-                let result = handle_client_secure(
+                let result = route_connection(
                     stream,
                     peer_addr,
                     active_tests,
@@ -336,7 +339,101 @@ impl Server {
     }
 }
 
+/// Read first line without buffering (to avoid losing data after DataHello)
+async fn read_first_line_unbuffered(
+    stream: &mut TcpStream,
+    max_len: usize,
+) -> anyhow::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::with_capacity(256);
+    let mut buf = [0u8; 1];
+
+    while line.len() < max_len {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Err(anyhow::anyhow!("Connection closed"));
+        }
+        if buf[0] == b'\n' {
+            break;
+        }
+        line.push(buf[0]);
+    }
+
+    Ok(String::from_utf8_lossy(&line).to_string())
+}
+
+/// Route incoming connection: either DataHello (route to test) or Hello (control connection)
+async fn route_connection(
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
+    base_port: u16,
+    server_max_duration: Option<Duration>,
+    security: &SecurityContext,
+) -> anyhow::Result<()> {
+    // Read first line without buffering to avoid losing data bytes after DataHello
+    let line = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Handshake timeout"))??;
+
+    let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+    match msg {
+        ControlMessage::DataHello {
+            test_id,
+            stream_index,
+        } => {
+            // This is a data connection for an active test
+            debug!(
+                "DataHello from {} for test {} stream {}",
+                peer_addr, test_id, stream_index
+            );
+
+            // Look up the test and send stream to its channel
+            let tx = {
+                let tests = active_tests.lock().await;
+                tests.get(&test_id).and_then(|t| t.data_stream_tx.clone())
+            };
+
+            if let Some(tx) = tx {
+                // Stream is ready for data transfer (no buffered bytes lost)
+                if tx.send((stream, stream_index)).await.is_err() {
+                    warn!("Failed to route data stream - test may have ended");
+                }
+            } else {
+                warn!(
+                    "DataHello for unknown/completed test {} from {}",
+                    test_id, peer_addr
+                );
+            }
+            Ok(())
+        }
+        ControlMessage::Hello { .. } => {
+            // This is a control connection - proceed with normal handling
+            handle_client_with_first_message(
+                stream,
+                peer_addr,
+                active_tests,
+                base_port,
+                server_max_duration,
+                security,
+                msg,
+            )
+            .await
+        }
+        other => {
+            warn!("Unexpected first message from {}: {:?}", peer_addr, other);
+            Err(anyhow::anyhow!("Expected Hello or DataHello"))
+        }
+    }
+}
+
 /// Handle client with security checks (auth)
+/// Note: Currently unused - kept for potential multi-port mode fallback
+#[allow(dead_code)]
 async fn handle_client_secure(
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -566,7 +663,105 @@ async fn handle_quic_client(
     Ok(())
 }
 
+/// Handle client with pre-read first message (Hello already parsed in route_connection)
+async fn handle_client_with_first_message(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
+    _base_port: u16,
+    server_max_duration: Option<Duration>,
+    security: &SecurityContext,
+    first_msg: ControlMessage,
+) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    // Process pre-read Hello message
+    let auth_nonce = match first_msg {
+        ControlMessage::Hello { version, .. } => {
+            if !versions_compatible(&version, PROTOCOL_VERSION) {
+                let error = ControlMessage::error(format!(
+                    "Incompatible protocol version: {} (server: {})",
+                    version, PROTOCOL_VERSION
+                ));
+                writer
+                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                    .await?;
+                return Err(anyhow::anyhow!("Protocol version mismatch"));
+            }
+
+            // Send server hello (with auth challenge if required)
+            if security.psk.is_some() {
+                let nonce = auth::generate_nonce();
+                let hello = ControlMessage::server_hello_with_auth(nonce.clone());
+                writer
+                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+                    .await?;
+                Some(nonce)
+            } else {
+                let hello = ControlMessage::server_hello();
+                writer
+                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+                    .await?;
+                None
+            }
+        }
+        _ => {
+            return Err(anyhow::anyhow!("Expected Hello message"));
+        }
+    };
+
+    // Handle auth response if needed
+    if let Some(nonce) = auth_nonce {
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
+            .await
+            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
+        let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+        match msg {
+            ControlMessage::AuthResponse { response } => {
+                let psk = security.psk.as_ref().unwrap();
+                if !auth::verify_response(&nonce, psk, &response) {
+                    if let Some(tx) = &security.tui_tx {
+                        let _ = tx.try_send(ServerEvent::AuthFailure);
+                    }
+                    let error = ControlMessage::error("Authentication failed");
+                    writer
+                        .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                        .await?;
+                    return Err(anyhow::anyhow!("Authentication failed"));
+                }
+
+                let success = ControlMessage::auth_success();
+                writer
+                    .write_all(format!("{}\n", success.serialize()?).as_bytes())
+                    .await?;
+            }
+            _ => {
+                let error = ControlMessage::error("Expected auth response");
+                writer
+                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                    .await?;
+                return Err(anyhow::anyhow!("Expected auth response"));
+            }
+        }
+    }
+
+    // Continue with test handling
+    handle_test_request(
+        &mut reader,
+        &mut writer,
+        peer_addr,
+        active_tests,
+        server_max_duration,
+        security,
+    )
+    .await
+}
+
 /// Handle client with authentication (for plain TCP)
+#[allow(dead_code)]
 async fn handle_client_with_auth(
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -632,6 +827,7 @@ async fn handle_client_with_auth(
 }
 
 /// Perform authentication handshake, returns nonce if auth was required
+#[allow(dead_code)]
 async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut W,
@@ -823,6 +1019,7 @@ async fn run_quic_test(
                 stats: stats.clone(),
                 cancel_tx,
                 data_ports: vec![],
+                data_stream_tx: None,
             },
         );
     }
@@ -1077,30 +1274,25 @@ async fn run_test(
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
-    // Dynamically allocate data ports (bind to 0 for OS-assigned ports)
+    // For TCP: single-port mode (data connections come on control port)
+    // For UDP: allocate per-stream sockets
     let mut data_ports = Vec::new();
+    let mut udp_sockets: Vec<Arc<UdpSocket>> = Vec::new();
 
-    // Pre-bind listeners/sockets to get actual ports
-    let (tcp_listeners, udp_sockets) = match protocol {
+    let (data_stream_tx, data_stream_rx) = match protocol {
         Protocol::Tcp => {
-            let mut listeners = Vec::new();
-            for _ in 0..streams {
-                let listener = net::create_tcp_listener(0, address_family).await?;
-                data_ports.push(listener.local_addr()?.port());
-                debug!("Data port {} allocated", data_ports.last().unwrap());
-                listeners.push(listener);
-            }
-            (listeners, Vec::new())
+            // Single-port mode: data connections will be routed via channel
+            let (tx, rx) = mpsc::channel::<(TcpStream, u16)>(streams as usize);
+            (Some(tx), Some(rx))
         }
         Protocol::Udp => {
-            let mut sockets = Vec::new();
             for _ in 0..streams {
                 let socket = net::create_udp_socket(0, address_family).await?;
                 data_ports.push(socket.local_addr()?.port());
                 debug!("UDP port {} allocated", data_ports.last().unwrap());
-                sockets.push(Arc::new(socket));
+                udp_sockets.push(Arc::new(socket));
             }
-            (Vec::new(), sockets)
+            (None, None)
         }
         Protocol::Quic => {
             // QUIC uses its own connection model with multiplexed streams
@@ -1110,20 +1302,12 @@ async fn run_test(
         }
     };
 
-    // Send test ack with allocated ports
-    let ack = ControlMessage::TestAck {
-        id: id.to_string(),
-        data_ports: data_ports.clone(),
-    };
-    writer
-        .write_all(format!("{}\n", ack.serialize()?).as_bytes())
-        .await?;
-
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
-    // Store active test
+    // Store active test BEFORE sending TestAck to avoid race condition
+    // (client may send DataHello immediately after receiving TestAck)
     {
         let mut tests = active_tests.lock().await;
         tests.insert(
@@ -1132,9 +1316,19 @@ async fn run_test(
                 stats: stats.clone(),
                 cancel_tx,
                 data_ports: data_ports.clone(),
+                data_stream_tx,
             },
         );
     }
+
+    // Send test ack with allocated ports
+    let ack = ControlMessage::TestAck {
+        id: id.to_string(),
+        data_ports: data_ports.clone(),
+    };
+    writer
+        .write_all(format!("{}\n", ack.serialize()?).as_bytes())
+        .await?;
 
     // Notify TUI that test started
     if let Some(tx) = &tui_tx {
@@ -1158,14 +1352,21 @@ async fn run_test(
     // Spawn data stream handlers
     let handles: Vec<JoinHandle<()>> = match protocol {
         Protocol::Tcp => {
-            spawn_tcp_handlers(
-                tcp_listeners,
-                stats.clone(),
-                direction,
-                duration,
-                cancel_rx.clone(),
-            )
-            .await
+            // Single-port mode: wait for streams via channel from main accept loop
+            if let Some(rx) = data_stream_rx {
+                spawn_tcp_stream_handlers(
+                    rx,
+                    streams as usize,
+                    stats.clone(),
+                    direction,
+                    duration,
+                    cancel_rx.clone(),
+                )
+                .await
+            } else {
+                // Fallback (shouldn't happen for TCP)
+                Vec::new()
+            }
         }
         Protocol::Udp => {
             spawn_udp_handlers(
@@ -1353,6 +1554,8 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// Legacy multi-port TCP handler (kept for potential fallback)
+#[allow(dead_code)]
 async fn spawn_tcp_handlers(
     listeners: Vec<TcpListener>,
     stats: Arc<TestStats>,
@@ -1452,6 +1655,121 @@ async fn spawn_tcp_handlers(
             }
         });
         handles.push(handle);
+    }
+
+    handles
+}
+
+/// Single-port TCP mode: receive streams from channel and spawn handlers
+async fn spawn_tcp_stream_handlers(
+    mut rx: mpsc::Receiver<(TcpStream, u16)>,
+    num_streams: usize,
+    stats: Arc<TestStats>,
+    direction: Direction,
+    duration: Duration,
+    cancel: watch::Receiver<bool>,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
+    let mut received = vec![false; num_streams];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    // Receive all expected streams from channel
+    while received.iter().any(|&r| !r) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            warn!("Timeout waiting for all data streams");
+            break;
+        }
+
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some((stream, stream_index))) => {
+                let i = stream_index as usize;
+                if i >= num_streams {
+                    warn!("Invalid stream index: {}", stream_index);
+                    continue;
+                }
+                if received[i] {
+                    warn!("Duplicate stream index: {}", stream_index);
+                    continue;
+                }
+                received[i] = true;
+
+                let cancel = cancel.clone();
+                let stream_stats = stats.streams[i].clone();
+                let test_stats = stats.clone();
+
+                let handle = tokio::spawn(async move {
+                    let config = TcpConfig::high_speed();
+
+                    // Capture TCP_INFO before transfer starts
+                    if let Some(info) = tcp::get_stream_tcp_info(&stream) {
+                        test_stats.add_tcp_info(info);
+                    }
+
+                    match direction {
+                        Direction::Upload => {
+                            let _ = tcp::receive_data(stream, stream_stats.clone(), cancel, config)
+                                .await;
+                        }
+                        Direction::Download => {
+                            let _ = tcp::send_data(
+                                stream,
+                                stream_stats.clone(),
+                                duration,
+                                config,
+                                cancel,
+                            )
+                            .await;
+                        }
+                        Direction::Bidir => {
+                            if let Err(e) = tcp::configure_stream(&stream, &config) {
+                                tracing::error!("Failed to configure TCP socket: {}", e);
+                            }
+                            let (read_half, write_half) = stream.into_split();
+
+                            let send_stats = stream_stats.clone();
+                            let recv_stats = stream_stats.clone();
+                            let send_cancel = cancel.clone();
+                            let recv_cancel = cancel;
+                            let send_config = config.clone();
+                            let recv_config = config;
+
+                            let send_handle = tokio::spawn(async move {
+                                tcp::send_data_half(
+                                    write_half,
+                                    send_stats,
+                                    duration,
+                                    send_config,
+                                    send_cancel,
+                                )
+                                .await
+                            });
+
+                            let recv_handle = tokio::spawn(async move {
+                                tcp::receive_data_half(
+                                    read_half,
+                                    recv_stats,
+                                    recv_cancel,
+                                    recv_config,
+                                )
+                                .await
+                            });
+
+                            let _ = tokio::join!(send_handle, recv_handle);
+                        }
+                    }
+                });
+                handles.push(handle);
+            }
+            Ok(None) => {
+                warn!("Data stream channel closed");
+                break;
+            }
+            Err(_) => {
+                warn!("Timeout waiting for data stream");
+                break;
+            }
+        }
     }
 
     handles

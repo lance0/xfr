@@ -23,16 +23,18 @@
 //! ```text
 //! Client                          Server
 //!   │                               │
-//!   │──────── Hello ───────────────>│
+//!   │──────── Hello ───────────────>│  (control connection)
 //!   │<─────── Hello (+ auth?) ──────│
 //!   │──────── AuthResponse? ───────>│
 //!   │<─────── AuthSuccess? ─────────│
 //!   │──────── TestStart ───────────>│
 //!   │<─────── TestAck ──────────────│
 //!   │                               │
+//!   │──────── DataHello ───────────>│  (data connection 1, same port)
+//!   │──────── DataHello ───────────>│  (data connection 2, same port)
 //!   │      [Data Transfer]          │
 //!   │                               │
-//!   │<─────── Interval ─────────────│ (periodic)
+//!   │<─────── Interval ─────────────│ (periodic, on control)
 //!   │<─────── Result ───────────────│
 //!   │                               │
 //! ```
@@ -113,6 +115,12 @@ pub enum ControlMessage {
     },
     Error {
         message: String,
+    },
+    /// Data channel handshake for single-port TCP mode
+    /// Sent by client on each data connection to identify stream
+    DataHello {
+        test_id: String,
+        stream_index: u16,
     },
 }
 

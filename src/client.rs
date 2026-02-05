@@ -236,8 +236,14 @@ impl Client {
         // Connect data streams using the resolved IP from control connection
         match self.config.protocol {
             Protocol::Tcp => {
-                self.spawn_tcp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
-                    .await?;
+                self.spawn_tcp_streams(
+                    &data_ports,
+                    server_ip,
+                    stats.clone(),
+                    cancel_rx.clone(),
+                    &test_id,
+                )
+                .await?;
             }
             Protocol::Udp => {
                 self.spawn_udp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
@@ -348,14 +354,28 @@ impl Client {
         server_addr: SocketAddr,
         stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
+        test_id: &str,
     ) -> anyhow::Result<()> {
-        for (i, &port) in data_ports.iter().enumerate() {
+        // Single-port mode: connect all streams to control port with DataHello
+        let single_port_mode = data_ports.is_empty();
+        let control_port = self.config.port;
+        let test_id = test_id.to_string();
+
+        #[allow(clippy::needless_range_loop)] // Intentional: single-port mode has empty data_ports
+        for i in 0..self.config.streams as usize {
+            let port = if single_port_mode {
+                control_port
+            } else {
+                data_ports[i]
+            };
             let addr = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
             let bind_addr = self.config.bind_addr;
+            let test_id = test_id.clone();
+            let stream_index = i as u16;
 
             let config = TcpConfig::with_auto_detect(
                 self.config.tcp_nodelay,
@@ -365,8 +385,23 @@ impl Client {
 
             tokio::spawn(async move {
                 match net::connect_tcp_with_bind(addr, bind_addr).await {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
                         debug!("Connected to data port {}", port);
+
+                        // Single-port mode: send DataHello to identify stream
+                        if single_port_mode {
+                            let hello = ControlMessage::DataHello {
+                                test_id,
+                                stream_index,
+                            };
+                            if let Err(e) = stream
+                                .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+                                .await
+                            {
+                                error!("Failed to send DataHello: {}", e);
+                                return;
+                            }
+                        }
 
                         match direction {
                             Direction::Upload => {

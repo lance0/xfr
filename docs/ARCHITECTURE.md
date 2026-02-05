@@ -56,8 +56,8 @@ src/
 │  2. Exchange Hello (version, capabilities)                          │
 │  3. If PSK: complete challenge-response auth                        │
 │  4. Send TestStart (protocol, streams, duration, direction)         │
-│  5. Receive TestAck (data ports)                                    │
-│  6. Open data connections (TCP/UDP/QUIC) to data ports              │
+│  5. Receive TestAck                                                 │
+│  6. Open data connections to port 5201, send DataHello              │
 │  7. Transfer data, receive Interval messages                        │
 │  8. Receive Result message                                          │
 │  9. Display results                                                  │
@@ -66,16 +66,15 @@ src/
 ┌────────────────────────────────────────────────────────────────────┐
 │ SERVER                                                              │
 │                                                                     │
-│  1. Accept control connection                                       │
-│  2. Send Hello (version, auth challenge if PSK)                     │
-│  3. If PSK: verify auth response                                    │
-│  4. Receive TestStart                                               │
-│  5. Allocate dynamic data ports                                     │
-│  6. Send TestAck with data ports                                    │
-│  7. Accept data connections                                         │
-│  8. Transfer data, send Interval messages                           │
-│  9. Send Result message                                             │
-│ 10. Clean up, ready for next client                                 │
+│  1. Accept connection, read first message                           │
+│  2. If Hello: control connection                                    │
+│     - Send Hello (version, auth challenge if PSK)                   │
+│     - If PSK: verify auth response                                  │
+│     - Receive TestStart, send TestAck                               │
+│  3. If DataHello: route to active test's data channel               │
+│  4. Transfer data, send Interval messages                           │
+│  5. Send Result message                                             │
+│  6. Clean up, ready for next client                                 │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,7 +95,8 @@ Message types (see `protocol.rs`):
 - `AuthResponse` - PSK authentication
 - `AuthSuccess` - Auth confirmation
 - `TestStart` - Test parameters
-- `TestAck` - Data port assignments
+- `TestAck` - Test acknowledgment
+- `DataHello` - Data connection identification (test_id, stream_index)
 - `Interval` - Periodic statistics
 - `Result` - Final test result
 - `Cancel` / `Cancelled` - Test cancellation

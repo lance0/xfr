@@ -17,6 +17,7 @@ use crate::tcp_info::get_tcp_info;
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 
+#[derive(Clone)]
 pub struct TcpConfig {
     pub buffer_size: usize,
     pub nodelay: bool,

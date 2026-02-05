@@ -114,10 +114,12 @@
 - [ ] **Structured error types** - replace `anyhow::Error` with `thiserror` enum for library users
 - [x] **Lower default max_concurrent** - reduce from 1000 to 100 for safer defaults
 - [ ] **Config file versioning** - add version field and migration support for breaking changes
+- [ ] **Protocol version bump** - bump to 1.1 at next release to signal DataHello support
 
 ### Security Enhancements
 - [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use
 - [ ] **Data-plane authentication** - per-test tokens/cookies to prevent port hijacking on untrusted networks
+- [ ] **Rate limiting on data connections** - apply per-IP limits to data connections (currently control-only)
 
 ### Code Quality
 - [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers
@@ -136,6 +138,7 @@
 - [ ] **Rate limiting and ACL tests** - allow/deny precedence, IPv4-mapped IPv6
 - [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
+- [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
 
 ### Documentation
 - [ ] **API documentation** - add examples to public functions in net module
