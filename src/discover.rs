@@ -31,16 +31,19 @@ mod mdns_impl {
         info!("Searching for xfr servers...");
 
         loop {
-            if tokio::time::Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 break;
             }
 
-            let event =
-                tokio::time::timeout(Duration::from_millis(100), async { receiver.recv() }).await;
+            // Use recv_timeout to avoid blocking indefinitely
+            // Cap at 100ms to allow periodic deadline checks
+            let wait_time = remaining.min(Duration::from_millis(100));
+            let event = receiver.recv_timeout(wait_time);
 
             match event {
-                Ok(Ok(ServiceEvent::ServiceResolved(info))) => {
-                    debug!("Found service: {:?}", info);
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    debug!("Service resolved: {:?}", info);
 
                     for addr in info.get_addresses() {
                         let server = DiscoveredServer {
@@ -65,11 +68,17 @@ mod mdns_impl {
                         }
                     }
                 }
-                Ok(Ok(_)) => {
-                    // Other events
+                Ok(ServiceEvent::ServiceFound(service_type, name)) => {
+                    debug!("Service found: {} {}", service_type, name);
                 }
-                Ok(Err(_)) | Err(_) => {
-                    // Timeout or error
+                Ok(ServiceEvent::SearchStarted(_)) => {
+                    debug!("mDNS search started");
+                }
+                Ok(event) => {
+                    debug!("mDNS event: {:?}", event);
+                }
+                Err(_) => {
+                    // Timeout or disconnected - continue to check deadline
                 }
             }
         }
@@ -94,7 +103,8 @@ mod mdns_impl {
             "",
             port,
             [("version", env!("CARGO_PKG_VERSION"))].as_ref(),
-        )?;
+        )?
+        .enable_addr_auto();
 
         mdns.register(service)?;
         info!("Registered mDNS service: {}", hostname);
