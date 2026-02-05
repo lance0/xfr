@@ -589,9 +589,7 @@ impl Client {
     ) -> anyhow::Result<TestResult> {
         use tokio::io::BufReader;
 
-        // Create QUIC endpoint and connect
-        let endpoint =
-            quic::create_client_endpoint(self.config.address_family, self.config.bind_addr)?;
+        // Resolve target address first, then create endpoint with matching address family
         let addr = net::resolve_host(
             &self.config.host,
             self.config.port,
@@ -600,6 +598,9 @@ impl Client {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("No address found for {}", self.config.host))?;
+
+        // Create QUIC endpoint with address family matching the target
+        let endpoint = quic::create_client_endpoint(addr, self.config.bind_addr)?;
 
         info!("Connecting via QUIC to {}...", addr);
         let connection = quic::connect(&endpoint, addr).await?;

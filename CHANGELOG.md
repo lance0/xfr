@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **QUIC IPv6 support** (issue #17) - QUIC clients can now connect to IPv6 addresses without requiring `-6` flag; endpoint now binds to matching address family
+
+### Testing
+- Added regression test for QUIC IPv6 connectivity
+
 ## [0.4.4] - 2026-02-04
 
 ### Changed

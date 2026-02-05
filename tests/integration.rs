@@ -1178,3 +1178,56 @@ async fn test_udp_bitrate_underflow_regression() {
         );
     }
 }
+
+/// Regression test for QUIC IPv6 support (issue #17)
+/// Verifies that QUIC clients can connect to IPv6 addresses without needing -6 flag
+#[tokio::test]
+async fn test_quic_ipv6() {
+    let port = get_test_port();
+
+    // Start server bound to IPv6 only
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Client connects with DualStack (default) - the bug was that DualStack
+    // bound to 0.0.0.0 which couldn't connect to IPv6
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::DualStack, // Default, was broken
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC with IPv6 and DualStack should succeed: {:?}",
+        result
+    );
+}

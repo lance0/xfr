@@ -46,7 +46,6 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
-use crate::net::AddressFamily;
 use crate::stats::StreamStats;
 
 /// Default buffer size for QUIC send/receive operations (128 KB)
@@ -93,7 +92,7 @@ pub fn create_server_endpoint(
 
 /// Create a QUIC client endpoint with optional local bind address
 pub fn create_client_endpoint(
-    address_family: AddressFamily,
+    remote_addr: SocketAddr,
     local_bind: Option<SocketAddr>,
 ) -> anyhow::Result<Endpoint> {
     // Client accepts any certificate (xfr uses its own auth mechanism)
@@ -112,11 +111,12 @@ pub fn create_client_endpoint(
     let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
     client_config.transport_config(Arc::new(transport));
 
-    // Use provided bind address, or default based on address family
+    // Use provided bind address, or match the remote address family
     let bind_addr: SocketAddr = local_bind.unwrap_or_else(|| {
-        match address_family {
-            AddressFamily::V6Only => "[::]:0".parse().unwrap(),
-            _ => "0.0.0.0:0".parse().unwrap(), // IPv4 or dual-stack default to IPv4 bind
+        if remote_addr.is_ipv6() {
+            "[::]:0".parse().unwrap()
+        } else {
+            "0.0.0.0:0".parse().unwrap()
         }
     });
 
