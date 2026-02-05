@@ -360,6 +360,24 @@ pub fn normalize_addr(addr: SocketAddr) -> SocketAddr {
     }
 }
 
+/// Normalize an IP address for comparison.
+///
+/// Converts IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to their IPv4 form.
+/// This ensures that addresses representing the same endpoint compare equal
+/// regardless of whether they arrived via dual-stack or IPv4-only.
+pub fn normalize_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                addr
+            }
+        }
+        IpAddr::V4(_) => addr,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +435,28 @@ mod tests {
         assert!(!is_ipv4_mapped(&"192.168.1.1".parse().unwrap()));
         assert!(!is_ipv4_mapped(&"::1".parse().unwrap()));
         assert!(is_ipv4_mapped(&"::ffff:192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_normalize_ip() {
+        // Regular IPv4 unchanged
+        let v4: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(normalize_ip(v4), v4);
+
+        // Regular IPv6 unchanged
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(normalize_ip(v6), v6);
+
+        // IPv4-mapped IPv6 should convert to IPv4
+        let mapped: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        let normalized = normalize_ip(mapped);
+        assert!(normalized.is_ipv4());
+        assert_eq!(normalized.to_string(), "192.168.1.1");
+
+        // Comparing normalized addresses should work across representations
+        let v4_addr: IpAddr = "127.0.0.1".parse().unwrap();
+        let mapped_addr: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert_eq!(normalize_ip(v4_addr), normalize_ip(mapped_addr));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-.TH XFR 1 "February 2026" "xfr 0.3.0" "User Commands"
+.TH XFR 1 "February 2026" "xfr 0.4.4" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -29,7 +29,7 @@ Test duration (default: 10s). Supports units: s, m, h. Environment: XFR_DURATION
 .B \-u ", " \-\-udp
 Use UDP instead of TCP
 .TP
-.B \-\-quic
+.B \-Q ", " \-\-quic
 Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
 .BI \-b ", " \-\-bitrate " RATE"
@@ -97,6 +97,9 @@ Force IPv4 only
 .TP
 .B \-6 ", " \-\-ipv6
 Force IPv6 only
+.TP
+.BI \-\-bind " ADDR"
+Local address to bind to (e.g., 192.168.1.100 or 192.168.1.100:0)
 .TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish

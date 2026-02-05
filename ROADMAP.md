@@ -114,7 +114,7 @@
 - [ ] **Structured error types** - replace `anyhow::Error` with `thiserror` enum for library users
 - [x] **Lower default max_concurrent** - reduce from 1000 to 100 for safer defaults
 - [ ] **Config file versioning** - add version field and migration support for breaking changes
-- [ ] **Protocol version bump** - bump to 1.1 at next release to signal DataHello support
+- [x] **Protocol version bump** - bump to 1.1 at next release to signal DataHello support
 
 ### Security Enhancements
 - [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use

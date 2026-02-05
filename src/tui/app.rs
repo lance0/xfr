@@ -336,11 +336,7 @@ impl App {
         self.elapsed = self.duration; // Show full duration on completion
 
         // Sum retransmits from streams (captured after transfer, accurate for download mode)
-        self.total_retransmits = result
-            .streams
-            .iter()
-            .filter_map(|s| s.retransmits)
-            .sum();
+        self.total_retransmits = result.streams.iter().filter_map(|s| s.retransmits).sum();
 
         // Use tcp_info for RTT and cwnd (connection-level stats)
         if let Some(tcp_info) = &result.tcp_info {

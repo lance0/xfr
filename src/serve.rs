@@ -438,10 +438,15 @@ async fn route_data_hello(
         let tests = active_tests.lock().await;
         if let Some(test) = tests.get(&test_id) {
             // Security: Validate DataHello comes from same IP as control connection
-            if test.control_peer_ip != peer_addr.ip() {
+            // Use normalize_ip to handle IPv4-mapped IPv6 addresses (::ffff:x.x.x.x vs x.x.x.x)
+            let expected_ip = net::normalize_ip(test.control_peer_ip);
+            let actual_ip = net::normalize_ip(peer_addr.ip());
+            if expected_ip != actual_ip {
                 warn!(
                     "DataHello IP mismatch for test {}: expected {}, got {}",
-                    test_id, test.control_peer_ip, peer_addr.ip()
+                    test_id,
+                    test.control_peer_ip,
+                    peer_addr.ip()
                 );
                 return Err(anyhow::anyhow!("DataHello from unauthorized IP"));
             }
@@ -503,10 +508,15 @@ async fn route_connection(
                 let tests = active_tests.lock().await;
                 if let Some(test) = tests.get(&test_id) {
                     // Security: Validate DataHello comes from same IP as control connection
-                    if test.control_peer_ip != peer_addr.ip() {
+                    // Use normalize_ip to handle IPv4-mapped IPv6 addresses (::ffff:x.x.x.x vs x.x.x.x)
+                    let expected_ip = net::normalize_ip(test.control_peer_ip);
+                    let actual_ip = net::normalize_ip(peer_addr.ip());
+                    if expected_ip != actual_ip {
                         warn!(
                             "DataHello IP mismatch for test {}: expected {}, got {}",
-                            test_id, test.control_peer_ip, peer_addr.ip()
+                            test_id,
+                            test.control_peer_ip,
+                            peer_addr.ip()
                         );
                         return Err(anyhow::anyhow!("DataHello from unauthorized IP"));
                     }
@@ -1591,8 +1601,17 @@ async fn run_test(
     match (tcp_collection_handle, udp_handles) {
         (Some(handle), _) => {
             // TCP: wait for stream collection task, then wait for individual handlers
-            if let Ok(tcp_handles) = handle.await {
-                futures::future::join_all(tcp_handles).await;
+            match handle.await {
+                Ok(tcp_handles) => {
+                    futures::future::join_all(tcp_handles).await;
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("TCP stream collection task panicked: {:?}", e);
+                    } else {
+                        warn!("TCP stream collection task was cancelled");
+                    }
+                }
             }
         }
         (None, handles) if !handles.is_empty() => {
@@ -1820,16 +1839,36 @@ async fn spawn_tcp_stream_handlers(
     let mut handles = Vec::new();
     let mut received = vec![false; num_streams];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut cancel = cancel;
 
     // Receive all expected streams from channel
     while received.iter().any(|&r| !r) {
+        // Check cancel signal first
+        if *cancel.borrow() {
+            warn!("Test cancelled during stream collection");
+            break;
+        }
+
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             warn!("Timeout waiting for all data streams");
             break;
         }
 
-        match tokio::time::timeout(remaining, rx.recv()).await {
+        // Use select! to check both stream arrival and cancel signal
+        let stream_result = tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    warn!("Test cancelled during stream collection");
+                    break;
+                }
+                continue;
+            }
+            result = tokio::time::timeout(remaining, rx.recv()) => result,
+        };
+
+        match stream_result {
             Ok(Some((stream, stream_index))) => {
                 let i = stream_index as usize;
                 if i >= num_streams {
