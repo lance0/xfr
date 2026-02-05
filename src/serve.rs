@@ -174,6 +174,11 @@ impl Server {
         // Semaphore to limit concurrent handlers (defense against connection floods)
         let handler_semaphore = Arc::new(Semaphore::new(self.config.max_concurrent as usize));
 
+        // Pre-handshake semaphore: limits concurrent connections that haven't yet been
+        // classified (Hello vs DataHello). Prevents connection-flood DoS where attackers
+        // open many sockets that stall during the 5s initial read timeout.
+        let conn_semaphore = Arc::new(Semaphore::new(self.config.max_concurrent as usize * 4));
+
         // Shutdown channel for one-off mode (watch allows multiple receivers)
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -265,17 +270,22 @@ impl Server {
                             limiter.release(peer_ip);
                         }
 
-                        if let Err(e) = result {
-                            error!("QUIC client error {}: {}", peer_addr, e);
+                        match &result {
+                            Ok(()) => true,
+                            Err(e) => {
+                                error!("QUIC client error {}: {}", peer_addr, e);
+                                false
+                            }
                         }
                     });
 
                     if one_off {
-                        // In one-off mode, signal shutdown when test completes
+                        // Only signal shutdown if test completed successfully
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
-                            let _ = handle.await;
-                            let _ = shutdown_tx.send(true);
+                            if let Ok(true) = handle.await {
+                                let _ = shutdown_tx.send(true);
+                            }
                         });
                     }
                 }
@@ -326,6 +336,19 @@ impl Server {
                 continue;
             }
 
+            // Acquire pre-handshake permit (limits concurrent unclassified connections)
+            let conn_permit = match conn_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    debug!(
+                        "Pre-handshake connection limit reached, dropping: {}",
+                        peer_addr
+                    );
+                    drop(stream);
+                    continue;
+                }
+            };
+
             // Spawn a task per connection to avoid slow-loris blocking the accept loop.
             // The spawned task reads the first line, parses, and routes.
             let active_tests = self.active_tests.clone();
@@ -337,7 +360,7 @@ impl Server {
             let shutdown_tx = shutdown_tx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_new_connection(
+                let result = handle_new_connection(
                     stream,
                     peer_addr,
                     active_tests,
@@ -348,8 +371,10 @@ impl Server {
                     one_off,
                     shutdown_tx,
                 )
-                .await
-                {
+                .await;
+                // Release pre-handshake permit when connection is classified/done
+                drop(conn_permit);
+                if let Err(e) = result {
                     debug!("Connection handling error from {}: {}", peer_addr, e);
                 }
             });
@@ -440,15 +465,21 @@ async fn handle_new_connection(
                 )
                 .await;
 
-                if let Err(e) = result {
-                    error!("Client error {}: {}", peer_addr, e);
+                match &result {
+                    Ok(()) => true, // test completed successfully
+                    Err(e) => {
+                        error!("Client error {}: {}", peer_addr, e);
+                        false // handshake/auth/test failed
+                    }
                 }
             });
 
             if one_off {
-                // Wait for the test to complete and signal shutdown
-                let _ = handle.await;
-                let _ = shutdown_tx.send(true);
+                // Only signal shutdown if a test actually completed successfully
+                // (failed handshakes/auth should not terminate the server)
+                if let Ok(true) = handle.await {
+                    let _ = shutdown_tx.send(true);
+                }
             }
         }
         other => {
@@ -1500,6 +1531,9 @@ async fn run_test(
     let mut data_ports = Vec::new();
     let mut udp_sockets: Vec<Arc<UdpSocket>> = Vec::new();
 
+    // Create cancel channel early so fallback listeners can use it
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+
     let (data_stream_tx, data_stream_rx) = match protocol {
         Protocol::Tcp if client_supports_single_port => {
             // Single-port mode: data connections will be routed via channel
@@ -1509,6 +1543,7 @@ async fn run_test(
         Protocol::Tcp => {
             // Multi-port fallback for legacy clients without single_port_tcp capability
             let (tx, rx) = mpsc::channel::<(TcpStream, u16)>(streams as usize);
+            let expected_ip = net::normalize_ip(peer_addr.ip());
             for i in 0..streams {
                 let listener = net::create_tcp_listener(0, address_family).await?;
                 data_ports.push(listener.local_addr()?.port());
@@ -1519,9 +1554,25 @@ async fn run_test(
                 );
                 let tx = tx.clone();
                 let stream_index = i as u16;
+                let mut cancel = cancel_rx.clone();
                 tokio::spawn(async move {
-                    match listener.accept().await {
-                        Ok((stream, _)) => {
+                    // Use select! with cancel to avoid leaking listener tasks
+                    let accept_result = tokio::select! {
+                        result = listener.accept() => result,
+                        _ = cancel.changed() => return,
+                    };
+                    match accept_result {
+                        Ok((stream, data_peer)) => {
+                            // Validate peer IP matches control connection
+                            let actual_ip = net::normalize_ip(data_peer.ip());
+                            if actual_ip != expected_ip {
+                                warn!(
+                                    "Multi-port data connection from unauthorized IP {} (expected {})",
+                                    data_peer.ip(),
+                                    expected_ip
+                                );
+                                return;
+                            }
                             let _ = tx.send((stream, stream_index)).await;
                         }
                         Err(e) => {
@@ -1552,7 +1603,6 @@ async fn run_test(
 
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
-    let (cancel_tx, cancel_rx) = watch::channel(false);
 
     // Store active test BEFORE sending TestAck to avoid race condition
     // (client may send DataHello immediately after receiving TestAck)
