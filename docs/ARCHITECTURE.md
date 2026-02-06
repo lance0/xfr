@@ -30,17 +30,23 @@ src/
 │
 ├── diff.rs          # Result comparison
 ├── discover.rs      # mDNS discovery
+├── update.rs        # GitHub release update notifications
 │
 ├── output/          # Output formatters
 │   ├── mod.rs
 │   ├── json.rs
 │   ├── csv.rs
-│   └── plain.rs
+│   ├── plain.rs
+│   ├── prometheus.rs    # Prometheus metrics endpoint
+│   └── push_gateway.rs # Push gateway integration
 │
 └── tui/             # Terminal UI
     ├── mod.rs
-    ├── client.rs    # Client TUI
+    ├── app.rs       # Application state and event loop
+    ├── ui.rs        # Layout and rendering
     ├── server.rs    # Server dashboard
+    ├── settings.rs  # Settings modal
+    ├── widgets.rs   # Sparkline, progress bar
     └── theme.rs     # Color themes
 ```
 
@@ -284,6 +290,8 @@ pub struct StreamStats {
     pub udp_jitter_us: AtomicU64,
     pub udp_lost: AtomicU64,
     pub last_udp_lost: AtomicU64,
+    // Raw fd for live TCP_INFO polling (-1 = not set)
+    pub tcp_info_fd: AtomicI32,
 }
 ```
 
@@ -302,6 +310,28 @@ Platform-specific extraction of TCP statistics:
 - **Windows**: Not implemented (no equivalent)
 
 See `tcp_info.rs` for implementations.
+
+### Live TCP_INFO Polling
+
+TCP_INFO is polled live during tests, not just captured at the end. Each
+`StreamStats` stores the raw file descriptor (`tcp_info_fd: AtomicI32`) so the
+interval loop can call `getsockopt(TCP_INFO)` without holding a reference to
+the `TcpStream` (which may be moved or split for bidir mode).
+
+Lifecycle:
+1. **Set** — after accepting/connecting the data socket, before transfer starts
+2. **Poll** — `record_interval()` calls `poll_tcp_info()` each second to capture RTT/cwnd
+3. **Clear** — at the end of each stream handler task (including early-return error paths)
+   to prevent stale fd reuse if the OS reassigns the descriptor
+
+### Congestion Control Validation
+
+The `--congestion` algorithm is validated early, before any streams are spawned:
+- **Client**: `tcp::validate_congestion()` probes the kernel with a temporary socket
+  before sending `TestStart`. Invalid algorithms exit immediately with a helpful
+  error listing available algorithms from `/proc/sys/net/ipv4/tcp_available_congestion_control`.
+- **Server**: Same validation in `handle_test_request()` sends `ControlMessage::Error`
+  back to the client (same pattern as stream count validation).
 
 ### Socket Buffers
 

@@ -103,13 +103,13 @@ xfr <host> --json-stream --no-tui
 ```
 
 ```
-{"timestamp":"1.000","elapsed_secs":1.0,"bytes":118775000,"throughput_mbps":950.2}
-{"timestamp":"2.000","elapsed_secs":2.0,"bytes":122562500,"throughput_mbps":980.5}
+{"timestamp":"1.000","elapsed_secs":1.0,"bytes":118775000,"throughput_mbps":950.2,"retransmits":0,"rtt_us":1200,"cwnd":65535}
+{"timestamp":"2.000","elapsed_secs":2.0,"bytes":122562500,"throughput_mbps":980.5,"retransmits":2,"rtt_us":1150,"cwnd":65535}
 ...
 ```
 
-Each line may also include optional fields `retransmits` (TCP), `jitter_ms`
-and `lost` (UDP) when applicable.
+Each line may also include optional fields: `retransmits`, `rtt_us`, `cwnd`
+(TCP), `jitter_ms` and `lost` (UDP). Fields that do not apply are omitted.
 
 ### Parsing with jq
 
@@ -135,9 +135,9 @@ xfr <host> --csv --no-tui > results.csv
 
 Interval output format (one line per reporting interval):
 ```
-timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost
-1.000,1.00,118775000,950.20,0,0,0
-2.000,2.00,122562500,980.50,2,0,0
+timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd
+1.000,1.00,118775000,950.20,0,0,0,1200,65535
+2.000,2.00,122562500,980.50,2,0,0,1150,65535
 ```
 
 After intervals, a summary line is printed:
