@@ -144,6 +144,24 @@ fn test_interval_message() {
 }
 
 #[test]
+fn test_interval_forward_compat() {
+    // Interval JSON with extra unknown fields should still deserialize (serde ignores them)
+    let json = r#"{"type":"interval","id":"test-1","elapsed_ms":1000,"streams":[{"id":0,"bytes":100,"retransmits":0,"rtt_us":500,"cwnd":1024,"future_field":99}],"aggregate":{"bytes":100,"throughput_mbps":0.8,"retransmits":0,"rtt_us":500,"cwnd":1024,"future_field":99}}"#;
+    let decoded = ControlMessage::deserialize(json).unwrap();
+    match decoded {
+        ControlMessage::Interval {
+            streams, aggregate, ..
+        } => {
+            assert_eq!(streams[0].rtt_us, Some(500));
+            assert_eq!(streams[0].cwnd, Some(1024));
+            assert_eq!(aggregate.rtt_us, Some(500));
+            assert_eq!(aggregate.cwnd, Some(1024));
+        }
+        _ => panic!("Expected Interval"),
+    }
+}
+
+#[test]
 fn test_interval_backward_compat() {
     // Interval JSON without rtt_us/cwnd should deserialize with None
     let json = r#"{"type":"interval","id":"test-1","elapsed_ms":1000,"streams":[{"id":0,"bytes":100,"retransmits":0}],"aggregate":{"bytes":100,"throughput_mbps":0.8,"retransmits":0}}"#;

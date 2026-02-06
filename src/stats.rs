@@ -62,6 +62,11 @@ impl StreamStats {
         self.tcp_info_fd.store(fd, Ordering::Relaxed);
     }
 
+    /// Clear the stored fd to prevent stale fd reuse after stream closes.
+    pub fn clear_tcp_info_fd(&self) {
+        self.tcp_info_fd.store(-1, Ordering::Relaxed);
+    }
+
     /// Poll current TCP_INFO snapshot using stored fd.
     /// Returns None if fd is not set or getsockopt fails.
     pub fn poll_tcp_info(&self) -> Option<TcpInfoSnapshot> {

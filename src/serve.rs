@@ -1970,24 +1970,27 @@ async fn spawn_tcp_handlers(
             match direction {
                 Direction::Upload => {
                     // Server receives data
-                    if let Ok(Some(info)) =
-                        tcp::receive_data(stream, stream_stats.clone(), cancel, config).await
-                    {
-                        test_stats.add_tcp_info(info);
+                    match tcp::receive_data(stream, stream_stats.clone(), cancel, config).await {
+                        Ok(Some(info)) => test_stats.add_tcp_info(info),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
                     }
                 }
                 Direction::Download => {
                     // Server sends data - capture final TCP_INFO for RTT/retransmits
-                    if let Ok(Some(info)) =
-                        tcp::send_data(stream, stream_stats.clone(), duration, config, cancel).await
+                    match tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
+                        .await
                     {
-                        test_stats.add_tcp_info(info);
+                        Ok(Some(info)) => test_stats.add_tcp_info(info),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
                     }
                 }
                 Direction::Bidir => {
                     // Configure socket BEFORE splitting (nodelay, window, buffers)
                     if let Err(e) = tcp::configure_stream(&stream, &config) {
                         tracing::error!("Failed to configure TCP socket: {}", e);
+                        return;
                     }
 
                     // Split socket for concurrent send/receive
@@ -2034,6 +2037,9 @@ async fn spawn_tcp_handlers(
                     }
                 }
             }
+
+            // Clear fd to prevent stale fd reuse after stream closes
+            stream_stats.clear_tcp_info_fd();
         });
         handles.push(handle);
     }
@@ -2125,15 +2131,16 @@ async fn spawn_tcp_stream_handlers(
 
                     match direction {
                         Direction::Upload => {
-                            if let Ok(Some(info)) =
-                                tcp::receive_data(stream, stream_stats.clone(), cancel, config)
-                                    .await
+                            match tcp::receive_data(stream, stream_stats.clone(), cancel, config)
+                                .await
                             {
-                                test_stats.add_tcp_info(info);
+                                Ok(Some(info)) => test_stats.add_tcp_info(info),
+                                Ok(None) => {}
+                                Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
                             }
                         }
                         Direction::Download => {
-                            if let Ok(Some(info)) = tcp::send_data(
+                            match tcp::send_data(
                                 stream,
                                 stream_stats.clone(),
                                 duration,
@@ -2142,12 +2149,15 @@ async fn spawn_tcp_stream_handlers(
                             )
                             .await
                             {
-                                test_stats.add_tcp_info(info);
+                                Ok(Some(info)) => test_stats.add_tcp_info(info),
+                                Ok(None) => {}
+                                Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
                             }
                         }
                         Direction::Bidir => {
                             if let Err(e) = tcp::configure_stream(&stream, &config) {
                                 tracing::error!("Failed to configure TCP socket: {}", e);
+                                return;
                             }
                             let (read_half, write_half) = stream.into_split();
 
@@ -2191,6 +2201,9 @@ async fn spawn_tcp_stream_handlers(
                             }
                         }
                     }
+
+                    // Clear fd to prevent stale fd reuse after stream closes
+                    stream_stats.clear_tcp_info_fd();
                 });
                 handles.push(handle);
             }
