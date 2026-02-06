@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Live TCP_INFO polling** - RTT, cwnd now reported per interval during tests, not just in final result. Enables real-time TCP metric monitoring in TUI, plain text (`rtt: X.XXms`), JSON streaming, and CSV output. Essential for `-t 0` infinite tests where results are never finalized (issue #13).
 
 ### Fixed
+- **Congestion config errors surfaced** - Invalid `--congestion` algorithm now logs errors and aborts affected streams instead of silently producing 0 throughput
+- **TCP_INFO stale fd cleared** - Stream handlers now clear the stored file descriptor on completion, preventing `poll_tcp_info()` from reading an unrelated socket if the OS reuses the fd
 - **Update banner double "v" prefix** - Version display now strips leading `v` from update-informer output to avoid showing `vv0.5.0`
 - **PSK unwrap panics** - Server no longer panics if PSK is misconfigured during auth; returns error instead
 - **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before writing
