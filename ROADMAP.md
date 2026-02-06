@@ -153,30 +153,31 @@
 
 ## Future Ideas
 
-### CLI & Scripting
-- [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
+*Prioritized by effort vs user impact. Quick wins first, then bigger lifts.*
+
+### Quick Wins (low effort, high impact)
+- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); just a `setsockopt` call. High demand for BBR vs CUBIC comparison on WAN/cloud links
+- [ ] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
+- [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
-- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); high demand for BBR vs CUBIC comparison on WAN/cloud links
-- [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+
+### Medium Effort (moderate effort, high impact)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
-
-### TUI Enhancements
-- [ ] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); essential for `-t 0` where results are never finalized
-- [ ] **Test profiles** - save/load named test configurations
-- [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
-
-### High-Speed Optimization (10-25G)
-
-*Target: Saturate 10G home lab and 25G data center links.*
-
-*Current limitation: UDP pacing tops out around 2 Gbps due to per-packet syscall overhead. TCP achieves 35+ Gbps on localhost.*
-
+- [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. No CLI tool does this well; xfr already has bidir + RTT infrastructure
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
+
+### Larger Projects (high effort, high impact)
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
-- [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **CPU affinity options** (`--affinity`) - pin streams to specific cores, reduces page faults and context switches (rperf has this)
 - [ ] **Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed
+
+### Nice to Have
+- [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
+- [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+- [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **Batch atomic counter updates** - reduce per-packet atomic operations at high PPS (flush once per interval)
+- [ ] **Test profiles** - save/load named test configurations
+- [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 
 ---
 
