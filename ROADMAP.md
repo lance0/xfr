@@ -125,6 +125,7 @@
 - [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
 ### Code Quality
+- [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
 - [ ] **Fix PSK unwrap panics** - serve.rs lines 762, 957, 1028 use `.unwrap()` on `security.psk`; replace with `?` error propagation
 - [ ] **UDP encode bounds check** - `UdpPacketHeader::encode()` indexes buffer without length validation; `decode()` does it right
 - [ ] **Timestamp clock skew** - ISO8601/Unix timestamp formats call `SystemTime::now()` instead of using the passed `Instant`, causing inconsistency
