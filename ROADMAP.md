@@ -156,8 +156,9 @@
 ### CLI & Scripting
 - [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
-- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno)
+- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); high demand for BBR vs CUBIC comparison on WAN/cloud links
 - [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+- [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
 
 ### TUI Enhancements
 - [ ] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); essential for `-t 0` where results are never finalized
@@ -170,6 +171,7 @@
 
 *Current limitation: UDP pacing tops out around 2 Gbps due to per-packet syscall overhead. TCP achieves 35+ Gbps on localhost.*
 
+- [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **CPU affinity options** (`--affinity`) - pin streams to specific cores, reduces page faults and context switches (rperf has this)
