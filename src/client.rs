@@ -201,6 +201,13 @@ impl Client {
             }
         }
 
+        // Validate congestion algorithm before starting test
+        if let Some(ref algo) = self.config.tcp_congestion {
+            tcp::validate_congestion(algo).map_err(|e| {
+                anyhow::anyhow!("Unsupported congestion control algorithm '{}': {}", algo, e)
+            })?;
+        }
+
         // Send test start
         let test_id = Uuid::new_v4().to_string();
         let test_start = ControlMessage::TestStart {

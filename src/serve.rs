@@ -1213,6 +1213,21 @@ async fn handle_test_request(
                 }
             }
 
+            // Validate congestion control algorithm (TCP only)
+            if protocol == Protocol::Tcp
+                && let Some(ref algo) = congestion
+                && let Err(e) = tcp::validate_congestion(algo)
+            {
+                let error = ControlMessage::error(format!(
+                    "Unsupported congestion control algorithm '{}': {}",
+                    algo, e
+                ));
+                writer
+                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                    .await?;
+                return Err(anyhow::anyhow!("Invalid congestion algorithm"));
+            }
+
             let duration_display = if duration == Duration::ZERO {
                 "∞".to_string()
             } else {
@@ -1990,6 +2005,7 @@ async fn spawn_tcp_handlers(
                     // Configure socket BEFORE splitting (nodelay, window, buffers)
                     if let Err(e) = tcp::configure_stream(&stream, &config) {
                         tracing::error!("Failed to configure TCP socket: {}", e);
+                        stream_stats.clear_tcp_info_fd();
                         return;
                     }
 
@@ -2157,6 +2173,7 @@ async fn spawn_tcp_stream_handlers(
                         Direction::Bidir => {
                             if let Err(e) = tcp::configure_stream(&stream, &config) {
                                 tracing::error!("Failed to configure TCP socket: {}", e);
+                                stream_stats.clear_tcp_info_fd();
                                 return;
                             }
                             let (read_half, write_half) = stream.into_split();

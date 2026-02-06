@@ -161,6 +161,40 @@ fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Validate that a congestion control algorithm is available on this kernel.
+/// Creates a temporary socket to test the setsockopt call.
+#[cfg(unix)]
+pub fn validate_congestion(algo: &str) -> std::io::Result<()> {
+    // SAFETY: socket() returns a valid fd or -1 on error (checked below).
+    // setsockopt uses the fd with valid pointer/length from algo slice.
+    // close() is called unconditionally to avoid fd leak.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONGESTION,
+            algo.as_ptr() as *const libc::c_void,
+            algo.len() as libc::socklen_t,
+        )
+    };
+    let result = if ret != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    unsafe { libc::close(fd) };
+    result
+}
+
+#[cfg(not(unix))]
+pub fn validate_congestion(_algo: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub fn configure_stream(stream: &TcpStream, config: &TcpConfig) -> std::io::Result<()> {
     stream.set_nodelay(config.nodelay)?;
 
