@@ -125,14 +125,19 @@
 - [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
 ### Code Quality
-- [ ] **Refactor run_test()** - split long function in serve.rs into protocol-specific helpers
-- [ ] **Refactor main.rs** - split CLI, config, and TUI setup into separate modules
+- [ ] **Fix PSK unwrap panics** - serve.rs lines 762, 957, 1028 use `.unwrap()` on `security.psk`; replace with `?` error propagation
+- [ ] **UDP encode bounds check** - `UdpPacketHeader::encode()` indexes buffer without length validation; `decode()` does it right
+- [ ] **Timestamp clock skew** - ISO8601/Unix timestamp formats call `SystemTime::now()` instead of using the passed `Instant`, causing inconsistency
+- [ ] **Extract magic number constants** - hardcoded timeouts (30s stream collection, 10ms cancel check, 100ms connect delay, 1 Gbps default bitrate) should be named constants
+- [ ] **Refactor run_test()** - serve.rs (352 lines), run_quic_test (269 lines), client equivalents similarly oversized; split into protocol-specific helpers
+- [ ] **Refactor main.rs** - 340-line main() mixing CLI parsing, config building, PSK handling, dispatch; split into modules
+- [ ] **Deduplicate TUI event loop** - main.rs has ~90 lines copy-pasted between active test loop and result wait loop
 - [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
 - [x] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
-- [ ] **Audit unwrap()/expect() calls** - reduce 61 calls in production code, especially auth.rs HMAC init
+- [ ] **Audit unwrap()/expect() calls** - reduce calls in production code, especially auth.rs HMAC init and serve.rs PSK handling
 - [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime, async-trait
 - [ ] **Join client data tasks** - ensure Client::run waits for all data tasks before returning (library safety)
-- [ ] **Extract shared handshake logic** - reduce duplication between TCP and QUIC control-plane paths
+- [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
 
 ### Testing
 - [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
