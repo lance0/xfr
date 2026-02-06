@@ -133,7 +133,7 @@ fn configure_socket_buffers(_stream: &TcpStream, _buffer_size: usize) -> std::io
 }
 
 /// Set TCP congestion control algorithm (e.g. "cubic", "bbr", "reno")
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn set_tcp_congestion(stream: &TcpStream, algo: &str) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
@@ -156,14 +156,14 @@ fn set_tcp_congestion(stream: &TcpStream, algo: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
     Ok(())
 }
 
 /// Validate that a congestion control algorithm is available on this kernel.
 /// Creates a temporary socket to test the setsockopt call.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn validate_congestion(algo: &str) -> Result<(), String> {
     // SAFETY: socket() returns a valid fd or -1 on error (checked below).
     // setsockopt uses the fd with valid pointer/length from algo slice.
@@ -200,7 +200,7 @@ pub fn validate_congestion(algo: &str) -> Result<(), String> {
     result
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub fn validate_congestion(_algo: &str) -> Result<(), String> {
     Ok(())
 }
@@ -449,12 +449,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_validate_congestion_cubic() {
         // cubic is available on all Linux kernels
         assert!(validate_congestion("cubic").is_ok());
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_validate_congestion_invalid() {
         let result = validate_congestion("nonexistent_algo_xyz");
         assert!(result.is_err());
