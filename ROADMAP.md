@@ -108,7 +108,7 @@
 
 ---
 
-## v0.5 - Code Quality & Robustness
+## Pre-1.0 - Code Quality & Robustness
 
 ### Pre-1.0 Requirements
 - [ ] **Structured error types** - replace `anyhow::Error` with `thiserror` enum for library users
