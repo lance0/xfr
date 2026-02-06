@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Update banner double "v" prefix** - Version display now strips leading `v` from update-informer output to avoid showing `vv0.5.0`
+- **PSK unwrap panics** - Server no longer panics if PSK is misconfigured during auth; returns error instead
+- **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before writing
+- **Timestamp clock skew** - ISO8601/Unix timestamps now derived from monotonic elapsed time instead of calling `SystemTime::now()`
+
+### Code Quality
+- **Named constants** - Replaced 12 hardcoded magic numbers in serve.rs with 6 named constants (STATS_INTERVAL, CANCEL_CHECK_TIMEOUT, RESULT_FLUSH_DELAY, STREAM_ACCEPT_TIMEOUT, STREAM_COLLECTION_TIMEOUT, DEFAULT_BITRATE_BPS)
 
 ## [0.5.0] - 2026-02-05
 

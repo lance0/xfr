@@ -37,6 +37,18 @@ const MAX_TEST_DURATION: Duration = Duration::from_secs(3600);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for initial first-line read on new connections (shorter to resist slow-loris)
 const INITIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Interval between progress/stats updates sent to the client
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// How often to check for cancellation in send/receive loops
+const CANCEL_CHECK_TIMEOUT: Duration = Duration::from_millis(10);
+/// Brief delay before sending final result to allow buffered writes to flush
+const RESULT_FLUSH_DELAY: Duration = Duration::from_millis(100);
+/// Timeout for accepting a data stream connection on per-stream listeners
+const STREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time to wait for all expected data streams to connect
+const STREAM_COLLECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default UDP/QUIC bitrate when not specified by client (1 Gbps)
+const DEFAULT_BITRATE_BPS: u64 = 1_000_000_000;
 
 pub struct ServerConfig {
     pub port: u16,
@@ -759,7 +771,9 @@ async fn handle_quic_client(
 
         match msg {
             ControlMessage::AuthResponse { response } => {
-                let psk = security.psk.as_ref().unwrap();
+                let psk = security.psk.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("PSK required for authentication but not configured")
+                })?;
                 if !auth::verify_response(&nonce, psk, &response) {
                     if let Some(tx) = &security.tui_tx {
                         let _ = tx.try_send(ServerEvent::AuthFailure);
@@ -954,7 +968,9 @@ async fn handle_client_with_first_message(
 
         match msg {
             ControlMessage::AuthResponse { response } => {
-                let psk = security.psk.as_ref().unwrap();
+                let psk = security.psk.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("PSK required for authentication but not configured")
+                })?;
                 if !auth::verify_response(&nonce, psk, &response) {
                     if let Some(tx) = &security.tui_tx {
                         let _ = tx.try_send(ServerEvent::AuthFailure);
@@ -1025,7 +1041,9 @@ async fn handle_client_with_auth(
 
         match msg {
             ControlMessage::AuthResponse { response } => {
-                let psk = security.psk.as_ref().unwrap();
+                let psk = security.psk.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("PSK required for authentication but not configured")
+                })?;
                 if !auth::verify_response(&nonce, psk, &response) {
                     if let Some(tx) = &security.tui_tx {
                         let _ = tx.try_send(ServerEvent::AuthFailure);
@@ -1366,7 +1384,7 @@ async fn run_quic_test(
     }
 
     // Send interval updates
-    let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
+    let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
     let start = std::time::Instant::now();
     let mut line = String::new();
 
@@ -1409,7 +1427,7 @@ async fn run_quic_test(
 
         // Check for cancel message (non-blocking, bounded read)
         let read_result = tokio::time::timeout(
-            Duration::from_millis(10),
+            CANCEL_CHECK_TIMEOUT,
             read_bounded_line(&mut ctrl_reader, &mut line),
         )
         .await;
@@ -1482,7 +1500,7 @@ async fn run_quic_test(
     ctrl_send.finish()?;
 
     // Give client time to receive the result before connection closes
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(RESULT_FLUSH_DELAY).await;
 
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_complete(&stats);
@@ -1680,7 +1698,7 @@ async fn run_test(
                 stats.clone(),
                 direction,
                 duration,
-                bitrate.unwrap_or(1_000_000_000),
+                bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
                 cancel_rx.clone(),
             )
             .await;
@@ -1693,7 +1711,7 @@ async fn run_test(
     };
 
     // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
-    let mut interval_timer = tokio::time::interval(Duration::from_secs(1));
+    let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
     let start = std::time::Instant::now();
 
     loop {
@@ -1735,11 +1753,8 @@ async fn run_test(
         }
 
         // Check for cancel message (bounded read)
-        let read_result = tokio::time::timeout(
-            Duration::from_millis(10),
-            read_bounded_line(reader, &mut line),
-        )
-        .await;
+        let read_result =
+            tokio::time::timeout(CANCEL_CHECK_TIMEOUT, read_bounded_line(reader, &mut line)).await;
 
         if let Ok(Ok(n)) = read_result
             && n > 0
@@ -1915,7 +1930,7 @@ async fn spawn_tcp_handlers(
         let handle = tokio::spawn(async move {
             // Timeout on accept to prevent blocking forever if client never connects
             let accept_result =
-                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+                tokio::time::timeout(STREAM_ACCEPT_TIMEOUT, listener.accept()).await;
 
             let stream = match accept_result {
                 Ok(Ok((stream, _))) => stream,
@@ -2021,7 +2036,7 @@ async fn spawn_tcp_stream_handlers(
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let mut received = vec![false; num_streams];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + STREAM_COLLECTION_TIMEOUT;
     let mut cancel = cancel;
 
     // Receive all expected streams from channel
@@ -2204,7 +2219,7 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Download => {
                     // Wait for client's hello packet to learn their address
-                    match udp::wait_for_client(&socket, Duration::from_secs(10)).await {
+                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
                         Ok(client_addr) => {
                             // Server sends UDP at per-stream rate to client
                             let _ = udp::send_udp_paced(
@@ -2224,7 +2239,7 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Bidir => {
                     // Wait for client's first packet to learn their address
-                    match udp::wait_for_client(&socket, Duration::from_secs(10)).await {
+                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
                         Ok(client_addr) => {
                             // UDP can send/receive concurrently on same socket
                             let send_socket = socket.clone();

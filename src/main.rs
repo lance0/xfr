@@ -866,6 +866,7 @@ async fn run_client_plain(
     let interval_secs = opts.interval_secs;
     let timestamp_format = opts.timestamp_format;
     let test_start = std::time::Instant::now();
+    let test_start_system = std::time::SystemTime::now();
 
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
@@ -896,7 +897,7 @@ async fn run_client_plain(
             let lost = progress.streams.first().and_then(|s| s.lost);
 
             let now = std::time::Instant::now();
-            let timestamp = timestamp_format.format(test_start, now);
+            let timestamp = timestamp_format.format(test_start, now, test_start_system);
 
             let interval_output = if json_stream {
                 format!(

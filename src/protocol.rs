@@ -253,22 +253,30 @@ impl TimestampFormat {
     /// Format a timestamp based on the format type
     ///
     /// # Arguments
-    /// * `test_start` - When the test started (for relative calculation)
-    /// * `now` - Current time to format
-    pub fn format(&self, test_start: std::time::Instant, now: std::time::Instant) -> String {
+    /// * `test_start` - When the test started (monotonic, for relative calculation)
+    /// * `now` - Current monotonic time
+    /// * `system_start` - Wall clock time when test started (for ISO8601/Unix)
+    pub fn format(
+        &self,
+        test_start: std::time::Instant,
+        now: std::time::Instant,
+        system_start: std::time::SystemTime,
+    ) -> String {
         match self {
             TimestampFormat::Relative => {
                 let elapsed = now.duration_since(test_start);
                 format!("{:.3}", elapsed.as_secs_f64())
             }
             TimestampFormat::Iso8601 => {
-                let now_system = std::time::SystemTime::now();
-                let datetime = chrono::DateTime::<chrono::Utc>::from(now_system);
+                let elapsed = now.duration_since(test_start);
+                let wall_time = system_start + elapsed;
+                let datetime = chrono::DateTime::<chrono::Utc>::from(wall_time);
                 datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
             }
             TimestampFormat::Unix => {
-                let now_system = std::time::SystemTime::now();
-                let duration_since_epoch = now_system
+                let elapsed = now.duration_since(test_start);
+                let wall_time = system_start + elapsed;
+                let duration_since_epoch = wall_time
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
                 format!("{:.3}", duration_since_epoch.as_secs_f64())

@@ -126,10 +126,10 @@
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
-- [ ] **Fix PSK unwrap panics** - serve.rs lines 762, 957, 1028 use `.unwrap()` on `security.psk`; replace with `?` error propagation
-- [ ] **UDP encode bounds check** - `UdpPacketHeader::encode()` indexes buffer without length validation; `decode()` does it right
-- [ ] **Timestamp clock skew** - ISO8601/Unix timestamp formats call `SystemTime::now()` instead of using the passed `Instant`, causing inconsistency
-- [ ] **Extract magic number constants** - hardcoded timeouts (30s stream collection, 10ms cancel check, 100ms connect delay, 1 Gbps default bitrate) should be named constants
+- [x] **Fix PSK unwrap panics** - serve.rs PSK `.unwrap()` replaced with `.ok_or_else()` error propagation
+- [x] **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before indexing
+- [x] **Timestamp clock skew** - ISO8601/Unix timestamps now derive wall clock from `system_start + elapsed` instead of `SystemTime::now()`
+- [x] **Extract magic number constants** - 6 named constants replace 12 hardcoded values (STATS_INTERVAL, CANCEL_CHECK_TIMEOUT, etc.)
 - [ ] **Refactor run_test()** - serve.rs (352 lines), run_quic_test (269 lines), client equivalents similarly oversized; split into protocol-specific helpers
 - [ ] **Refactor main.rs** - 340-line main() mixing CLI parsing, config building, PSK handling, dispatch; split into modules
 - [ ] **Deduplicate TUI event loop** - main.rs has ~90 lines copy-pasted between active test loop and result wait loop

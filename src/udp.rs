@@ -31,9 +31,13 @@ pub struct UdpPacketHeader {
 }
 
 impl UdpPacketHeader {
-    pub fn encode(&self, buffer: &mut [u8]) {
+    pub fn encode(&self, buffer: &mut [u8]) -> bool {
+        if buffer.len() < UDP_HEADER_SIZE {
+            return false;
+        }
         buffer[0..8].copy_from_slice(&self.sequence.to_be_bytes());
         buffer[8..16].copy_from_slice(&self.timestamp_us.to_be_bytes());
+        true
     }
 
     pub fn decode(buffer: &[u8]) -> Option<Self> {
@@ -447,7 +451,7 @@ mod tests {
             timestamp_us: 67890,
         };
         let mut buffer = [0u8; 16];
-        header.encode(&mut buffer);
+        assert!(header.encode(&mut buffer));
 
         let decoded = UdpPacketHeader::decode(&buffer).unwrap();
         assert_eq!(decoded.sequence, 12345);
