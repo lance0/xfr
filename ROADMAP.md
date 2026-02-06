@@ -160,7 +160,7 @@
 *Prioritized by effort vs user impact. Quick wins first, then bigger lifts.*
 
 ### Quick Wins (low effort, high impact)
-- [ ] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); just a `setsockopt` call. High demand for BBR vs CUBIC comparison on WAN/cloud links
+- [x] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); just a `setsockopt` call. High demand for BBR vs CUBIC comparison on WAN/cloud links
 - [ ] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Congestion control selection** (`--congestion`) - Select TCP congestion control algorithm (e.g. cubic, bbr, reno). Applied on both client and server sockets. Useful for BBR vs CUBIC comparison on WAN/cloud links.
+
 ### Fixed
 - **Update banner double "v" prefix** - Version display now strips leading `v` from update-informer output to avoid showing `vv0.5.0`
 - **PSK unwrap panics** - Server no longer panics if PSK is misconfigured during auth; returns error instead

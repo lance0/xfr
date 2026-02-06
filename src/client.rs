@@ -36,6 +36,7 @@ pub struct ClientConfig {
     pub direction: Direction,
     pub bitrate: Option<u64>,
     pub tcp_nodelay: bool,
+    pub tcp_congestion: Option<String>,
     pub window_size: Option<usize>,
     /// Pre-shared key for authentication
     pub psk: Option<String>,
@@ -56,6 +57,7 @@ impl Default for ClientConfig {
             direction: Direction::Upload,
             bitrate: None,
             tcp_nodelay: false,
+            tcp_congestion: None,
             window_size: None,
             psk: None,
             address_family: AddressFamily::default(),
@@ -206,6 +208,7 @@ impl Client {
             duration_secs: self.config.duration.as_secs() as u32,
             direction: self.config.direction,
             bitrate: self.config.bitrate,
+            congestion: self.config.tcp_congestion.clone(),
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -403,11 +406,12 @@ impl Client {
             let test_id = test_id.clone();
             let stream_index = i as u16;
 
-            let config = TcpConfig::with_auto_detect(
+            let mut config = TcpConfig::with_auto_detect(
                 self.config.tcp_nodelay,
                 self.config.window_size,
                 self.config.bitrate,
             );
+            config.congestion = self.config.tcp_congestion.clone();
 
             tokio::spawn(async move {
                 match net::connect_tcp_with_bind(addr, bind_addr).await {
@@ -472,6 +476,7 @@ impl Client {
                                     buffer_size: config.buffer_size,
                                     nodelay: config.nodelay,
                                     window_size: config.window_size,
+                                    congestion: config.congestion.clone(),
                                 };
                                 let recv_config = config;
 
@@ -752,6 +757,7 @@ impl Client {
             duration_secs: self.config.duration.as_secs() as u32,
             direction: self.config.direction,
             bitrate: self.config.bitrate,
+            congestion: None,
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())

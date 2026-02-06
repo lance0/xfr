@@ -36,9 +36,11 @@ fn test_test_start_roundtrip() {
         duration_secs: 30,
         direction: Direction::Upload,
         bitrate: None,
+        congestion: Some("bbr".to_string()),
     };
 
     let json = msg.serialize().unwrap();
+    assert!(json.contains("\"congestion\":\"bbr\""));
     let decoded = ControlMessage::deserialize(&json).unwrap();
 
     match decoded {
@@ -49,6 +51,7 @@ fn test_test_start_roundtrip() {
             duration_secs,
             direction,
             bitrate,
+            congestion,
         } => {
             assert_eq!(id, "test-123");
             assert_eq!(protocol, Protocol::Tcp);
@@ -56,6 +59,7 @@ fn test_test_start_roundtrip() {
             assert_eq!(duration_secs, 30);
             assert_eq!(direction, Direction::Upload);
             assert!(bitrate.is_none());
+            assert_eq!(congestion, Some("bbr".to_string()));
         }
         _ => panic!("Wrong message type"),
     }
@@ -70,6 +74,7 @@ fn test_udp_test_start() {
         duration_secs: 10,
         direction: Direction::Download,
         bitrate: Some(1_000_000_000),
+        congestion: None,
     };
 
     let json = msg.serialize().unwrap();

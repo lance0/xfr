@@ -77,6 +77,9 @@ Disable Nagle algorithm (TCP_NODELAY)
 .BI \-\-window " SIZE"
 TCP window size (e.g., 512K, 1M, 4M)
 .TP
+.BI \-\-congestion " ALGO"
+TCP congestion control algorithm (e.g., cubic, bbr, reno). Applied on both client and server sockets via setsockopt(TCP_CONGESTION). Requires kernel support for the selected algorithm.
+.TP
 .BI \-\-timestamp\-format " FORMAT"
 Timestamp format: relative (default), iso8601, unix
 .TP

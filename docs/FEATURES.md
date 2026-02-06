@@ -12,11 +12,12 @@ Standard TCP bulk transfer with configurable options:
 xfr <host>                     # Basic TCP test
 xfr <host> --tcp-nodelay       # Disable Nagle's algorithm
 xfr <host> --window 4M         # Set TCP window size
+xfr <host> --congestion bbr    # Use BBR congestion control
 ```
 
 TCP provides:
 - Reliable, ordered delivery
-- Congestion control
+- Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
 - TCP_INFO statistics (RTT, retransmits, cwnd)
 
 #### Single-Port TCP (Default)
@@ -446,6 +447,7 @@ See `xfr --help` for complete CLI documentation.
 | `--theme` | | default | Color theme |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
 | `--window` | | OS default | TCP window size |
+| `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
 | `--quic` | `-Q` | false | Use QUIC transport |
 | `--psk` | | none | Pre-shared key |
 | `--timestamp-format` | | relative | Timestamp format |

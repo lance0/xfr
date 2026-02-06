@@ -98,6 +98,8 @@ pub enum ControlMessage {
         direction: Direction,
         #[serde(skip_serializing_if = "Option::is_none")]
         bitrate: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        congestion: Option<String>,
     },
     TestAck {
         id: String,
@@ -413,6 +415,7 @@ mod tests {
             duration_secs: 10,
             direction: Direction::Upload,
             bitrate: None,
+            congestion: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();

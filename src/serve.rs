@@ -817,6 +817,7 @@ async fn handle_quic_client(
             duration_secs,
             direction,
             bitrate: _,
+            congestion: _,
         } => {
             if protocol != Protocol::Quic {
                 let error = ControlMessage::error("Expected QUIC protocol for QUIC connection");
@@ -1165,6 +1166,7 @@ async fn handle_test_request(
             duration_secs,
             direction,
             bitrate,
+            congestion,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1231,6 +1233,7 @@ async fn handle_test_request(
                 duration,
                 direction,
                 bitrate,
+                congestion,
                 active_tests.clone(),
                 security.address_family,
                 peer_addr,
@@ -1535,6 +1538,7 @@ async fn run_test(
     duration: Duration,
     direction: Direction,
     bitrate: Option<u64>,
+    congestion: Option<String>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     address_family: AddressFamily,
     peer_addr: SocketAddr,
@@ -1684,6 +1688,7 @@ async fn run_test(
                         direction,
                         duration,
                         cancel_clone,
+                        congestion.clone(),
                     )
                     .await
                 });
@@ -1919,6 +1924,7 @@ async fn spawn_tcp_handlers(
     direction: Direction,
     duration: Duration,
     cancel: watch::Receiver<bool>,
+    congestion: Option<String>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -1926,6 +1932,7 @@ async fn spawn_tcp_handlers(
         let cancel = cancel.clone();
         let stream_stats = stats.streams[i].clone();
         let test_stats = stats.clone();
+        let congestion = congestion.clone();
 
         let handle = tokio::spawn(async move {
             // Timeout on accept to prevent blocking forever if client never connects
@@ -1945,7 +1952,8 @@ async fn spawn_tcp_handlers(
             };
 
             // Use high-speed config for server - we want maximum throughput
-            let config = TcpConfig::high_speed();
+            let mut config = TcpConfig::high_speed();
+            config.congestion = congestion.clone();
 
             // Capture TCP_INFO before transfer starts
             if let Some(info) = tcp::get_stream_tcp_info(&stream) {
@@ -1988,6 +1996,7 @@ async fn spawn_tcp_handlers(
                         buffer_size: config.buffer_size,
                         nodelay: config.nodelay,
                         window_size: config.window_size,
+                        congestion: config.congestion.clone(),
                     };
                     let recv_config = config;
 
@@ -2033,6 +2042,7 @@ async fn spawn_tcp_stream_handlers(
     direction: Direction,
     duration: Duration,
     cancel: watch::Receiver<bool>,
+    congestion: Option<String>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let mut received = vec![false; num_streams];
@@ -2089,8 +2099,10 @@ async fn spawn_tcp_stream_handlers(
                 let stream_stats = stats.streams[i].clone();
                 let test_stats = stats.clone();
 
+                let congestion = congestion.clone();
                 let handle = tokio::spawn(async move {
-                    let config = TcpConfig::high_speed();
+                    let mut config = TcpConfig::high_speed();
+                    config.congestion = congestion;
 
                     // Capture TCP_INFO before transfer starts
                     if let Some(info) = tcp::get_stream_tcp_info(&stream) {

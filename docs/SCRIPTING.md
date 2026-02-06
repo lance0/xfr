@@ -307,6 +307,9 @@ xfr $SERVER -u -b 1G --json --no-tui -t 10s > "$RESULTS_DIR/udp.json"
 echo "Testing QUIC..."
 xfr $SERVER --quic --json --no-tui -t 10s > "$RESULTS_DIR/quic.json"
 
+echo "Testing BBR congestion control..."
+xfr $SERVER --congestion bbr --json --no-tui -t 10s > "$RESULTS_DIR/tcp-bbr.json"
+
 echo "Testing multi-stream..."
 xfr $SERVER -P 4 --json --no-tui -t 10s > "$RESULTS_DIR/multi.json"
 

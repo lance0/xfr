@@ -22,6 +22,7 @@ pub struct TcpConfig {
     pub buffer_size: usize,
     pub nodelay: bool,
     pub window_size: Option<usize>,
+    pub congestion: Option<String>,
 }
 
 impl Default for TcpConfig {
@@ -30,6 +31,7 @@ impl Default for TcpConfig {
             buffer_size: DEFAULT_BUFFER_SIZE,
             nodelay: false,
             window_size: None,
+            congestion: None,
         }
     }
 }
@@ -43,6 +45,7 @@ impl TcpConfig {
             buffer_size: HIGH_SPEED_BUFFER,
             nodelay: true,
             window_size: Some(HIGH_SPEED_BUFFER),
+            congestion: None,
         }
     }
 
@@ -72,6 +75,7 @@ impl TcpConfig {
                 buffer_size: window_size.unwrap_or(DEFAULT_BUFFER_SIZE),
                 nodelay,
                 window_size,
+                congestion: None,
             }
         }
     }
@@ -128,11 +132,44 @@ fn configure_socket_buffers(_stream: &TcpStream, _buffer_size: usize) -> std::io
     Ok(())
 }
 
+/// Set TCP congestion control algorithm (e.g. "cubic", "bbr", "reno")
+#[cfg(unix)]
+fn set_tcp_congestion(stream: &TcpStream, algo: &str) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
+    // algo.as_ptr() points to valid bytes, and algo.len() is the correct length.
+    // setsockopt returns -1 on error which we check below.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONGESTION,
+            algo.as_ptr() as *const libc::c_void,
+            algo.len() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub fn configure_stream(stream: &TcpStream, config: &TcpConfig) -> std::io::Result<()> {
     stream.set_nodelay(config.nodelay)?;
 
     if let Some(window) = config.window_size {
         configure_socket_buffers(stream, window)?;
+    }
+
+    if let Some(ref algo) = config.congestion {
+        set_tcp_congestion(stream, algo)?;
     }
 
     Ok(())

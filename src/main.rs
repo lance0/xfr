@@ -225,6 +225,10 @@ struct Cli {
     #[arg(long)]
     tcp_nodelay: bool,
 
+    /// TCP congestion control algorithm (e.g. cubic, bbr, reno)
+    #[arg(long = "congestion", value_name = "ALGO")]
+    congestion: Option<String>,
+
     /// TCP window size (e.g., 512K, 1M)
     #[arg(long, value_parser = parse_size)]
     window: Option<usize>,
@@ -801,6 +805,7 @@ async fn main() -> Result<()> {
                 direction,
                 bitrate: cli.bitrate,
                 tcp_nodelay,
+                tcp_congestion: cli.congestion.clone(),
                 window_size,
                 psk: client_psk,
                 address_family: client_address_family,
