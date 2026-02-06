@@ -14,9 +14,9 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP MTU Hardcoded to 1472 Bytes
+### UDP Payload Size Hardcoded to 1400 Bytes
 
-**Issue:** UDP packet size is hardcoded assuming standard Ethernet MTU (1500 - 20 IP - 8 UDP = 1472).
+**Issue:** UDP payload size is hardcoded to 1400 bytes, leaving headroom for IP/UDP headers and tunneling overhead.
 
 **Impact:** May not be optimal for jumbo frames or networks with different MTUs.
 

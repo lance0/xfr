@@ -198,6 +198,9 @@ xfr --completions fish > ~/.config/fish/completions/xfr.fish
 
 # PowerShell (add to $PROFILE)
 xfr --completions powershell >> $PROFILE
+
+# Elvish
+xfr --completions elvish > ~/.elvish/lib/xfr.elv
 ```
 
 ## Usage
