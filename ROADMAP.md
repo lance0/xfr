@@ -164,6 +164,8 @@
 - [x] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
+- [ ] **DSCP/TOS marking** (`--dscp`) - set IP_TOS on sockets for QoS policy testing; single `setsockopt` call, same pattern as `--congestion`. iperf3 has `-S`
+- [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 
 ### Medium Effort (moderate effort, high impact)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
@@ -182,6 +184,7 @@
 - [ ] **Batch atomic counter updates** - reduce per-packet atomic operations at high PPS (flush once per interval)
 - [ ] **Test profiles** - save/load named test configurations
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
+- [ ] **Server health check** (`--health-check`) - simple HTTP endpoint for load balancer integration; tiny listener on separate port or same port responding to `GET /health`
 
 ---
 
@@ -254,6 +257,7 @@
 - [x] `install.sh` - Cross-platform installer
 - [x] Enhanced README with real-world use cases
 - [x] Module-level rustdoc (lib.rs, protocol.rs, quic.rs)
+- [ ] **JSON schema for output** - publish a JSON Schema file so programmatic consumers can validate xfr's JSON and JSON-stream output
 
 ---
 
