@@ -201,8 +201,10 @@ impl Client {
             }
         }
 
-        // Validate congestion algorithm before starting test
-        if let Some(ref algo) = self.config.tcp_congestion {
+        // Validate congestion algorithm before starting test (TCP only)
+        if self.config.protocol == Protocol::Tcp
+            && let Some(ref algo) = self.config.tcp_congestion
+        {
             tcp::validate_congestion(algo).map_err(|e| {
                 anyhow::anyhow!("Unsupported congestion control algorithm '{}': {}", algo, e)
             })?;
