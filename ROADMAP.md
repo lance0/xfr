@@ -76,8 +76,6 @@
 ### Enterprise Features
 - [x] **Server access control lists** (`--allow`, `--deny`, `--acl-file`) - IP/subnet allowlists
 - [x] **In-app update notifications** - yellow banner when newer version available, `u` to dismiss
-- [ ] **Bandwidth quotas per client** - limit resource usage
-
 *Note: TLS was removed in favor of QUIC, which provides built-in encryption.*
 
 ---
@@ -163,7 +161,7 @@
 
 ### Medium Effort (moderate effort, high impact)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
-- [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. No CLI tool does this well; xfr already has bidir + RTT infrastructure
+- [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. Scope: single flag, simple A-F grade output, not a full latency monitoring suite
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
 
 ### Larger Projects (high effort, high impact)
@@ -220,23 +218,6 @@
 
 *Rationale: Very few deployments have MPTCP enabled.*
 
-### Integrations & Bindings
-- [ ] Web UI for long-running servers
-- [ ] Cloud discovery (AWS/GCP/Azure)
-- [ ] Grafana plugin (native data source)
-- [ ] OpenTelemetry export
-- [ ] libxfr C FFI
-- [ ] Python bindings
-
-*Rationale: Scope creep. Prometheus export and CLI cover most use cases.*
-
-### Storage & Analysis
-- [ ] Historical data storage (SQLite)
-- [ ] Scheduled tests
-- [ ] Baseline management
-
-*Rationale: Use external tools (cron, databases). `xfr diff` covers basic comparison.*
-
 ### 100G+ Optimization
 - [ ] io_uring on Linux
 - [ ] Zerocopy send/receive (MSG_ZEROCOPY)
@@ -276,8 +257,8 @@
 |------|----------|--------------|-----|------|-------------------|
 | iperf3 | C | No | No | No | Maintenance only |
 | iperf2 | C | Yes | No | No | Active |
-| rperf | Rust | Yes | No | No | Active |
-| nperf | Rust | ? | No | Yes | Active |
+| rperf | Rust | Yes | No | No | Stale (since 2023) |
+| nperf | Rust | ? | No | Yes | Low activity |
 | **xfr** | Rust | Yes | Yes | Yes | Active |
 
 ---
@@ -293,6 +274,8 @@ xfr is a **CLI bandwidth testing tool**. The following are explicitly out of sco
 - **Historical database** - Use external storage. `xfr diff` covers basic comparison.
 - **Scheduled tests** - Use cron or CI/CD schedulers.
 - **Configuration management** - Manage config files with your preferred tools.
+- **Language bindings / FFI** - Prometheus export and CLI cover most integration use cases.
+- **Built-in storage / baselines** - Use external databases. `xfr diff` covers comparison.
 
 If you need these features, combine xfr with purpose-built tools.
 
@@ -304,7 +287,6 @@ See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for documented edge cases and limitations
 
 **Potential future improvements** (from known issues):
 - [ ] QUIC bitrate pacing support
-- [ ] Configurable UDP MTU/packet size
 - [ ] UDP reverse mode error reporting to client
 
 ---
