@@ -71,6 +71,8 @@ pub struct TestProgress {
     pub total_bytes: u64,
     pub throughput_mbps: f64,
     pub streams: Vec<StreamInterval>,
+    pub rtt_us: Option<u32>,
+    pub cwnd: Option<u32>,
 }
 
 pub struct Client {
@@ -344,6 +346,8 @@ impl Client {
                                 elapsed_ms,
                                 total_bytes: aggregate.bytes,
                                 throughput_mbps: aggregate.throughput_mbps,
+                                rtt_us: aggregate.rtt_us,
+                                cwnd: aggregate.cwnd,
                                 streams,
                             })
                             .await;
@@ -918,6 +922,8 @@ impl Client {
                                 elapsed_ms,
                                 total_bytes: aggregate.bytes,
                                 throughput_mbps: aggregate.throughput_mbps,
+                                rtt_us: aggregate.rtt_us,
+                                cwnd: aggregate.cwnd,
                                 streams,
                             })
                             .await;

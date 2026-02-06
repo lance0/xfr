@@ -18,7 +18,7 @@ xfr <host> --congestion bbr    # Use BBR congestion control
 TCP provides:
 - Reliable, ordered delivery
 - Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
-- TCP_INFO statistics (RTT, retransmits, cwnd)
+- TCP_INFO statistics (RTT, retransmits, cwnd) — polled live per interval, not just at test end
 
 #### Single-Port TCP (Default)
 

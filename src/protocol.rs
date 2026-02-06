@@ -180,6 +180,10 @@ pub struct StreamInterval {
     pub lost: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwnd: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +196,10 @@ pub struct AggregateInterval {
     pub jitter_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwnd: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

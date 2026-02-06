@@ -285,6 +285,14 @@ impl App {
         // Sum retransmits
         self.total_retransmits = self.streams.iter().map(|s| s.retransmits).sum();
 
+        // Update live TCP_INFO from interval data
+        if let Some(rtt) = progress.rtt_us {
+            self.rtt_us = rtt;
+        }
+        if let Some(cwnd) = progress.cwnd {
+            self.cwnd = cwnd;
+        }
+
         // Update UDP stats (average jitter across streams)
         if jitter_count > 0 {
             self.udp_jitter_ms = total_jitter / jitter_count as f64;

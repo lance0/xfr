@@ -900,6 +900,8 @@ async fn run_client_plain(
             let retransmits = progress.streams.first().and_then(|s| s.retransmits);
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
             let lost = progress.streams.first().and_then(|s| s.lost);
+            let rtt_us = progress.rtt_us;
+            let cwnd = progress.cwnd;
 
             let now = std::time::Instant::now();
             let timestamp = timestamp_format.format(test_start, now, test_start_system);
@@ -915,6 +917,8 @@ async fn run_client_plain(
                         retransmits,
                         jitter_ms,
                         lost,
+                        rtt_us,
+                        cwnd,
                     )
                 )
             } else if csv {
@@ -926,6 +930,8 @@ async fn run_client_plain(
                     retransmits,
                     jitter_ms,
                     lost,
+                    rtt_us,
+                    cwnd,
                 )
             } else {
                 xfr::output::plain::output_interval_plain(
@@ -934,6 +940,7 @@ async fn run_client_plain(
                     progress.throughput_mbps,
                     progress.total_bytes,
                     retransmits,
+                    rtt_us,
                 )
             };
             print!("{}", interval_output);

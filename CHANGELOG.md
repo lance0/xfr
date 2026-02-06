@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Congestion control selection** (`--congestion`) - Select TCP congestion control algorithm (e.g. cubic, bbr, reno). Applied on both client and server sockets. Useful for BBR vs CUBIC comparison on WAN/cloud links.
+- **Live TCP_INFO polling** - RTT, cwnd now reported per interval during tests, not just in final result. Enables real-time TCP metric monitoring in TUI, plain text (`rtt: X.XXms`), JSON streaming, and CSV output. Essential for `-t 0` infinite tests where results are never finalized (issue #13).
 
 ### Fixed
 - **Update banner double "v" prefix** - Version display now strips leading `v` from update-informer output to avoid showing `vv0.5.0`

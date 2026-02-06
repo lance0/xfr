@@ -96,6 +96,8 @@ fn test_interval_message() {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                rtt_us: Some(1234),
+                cwnd: Some(65535),
             },
             StreamInterval {
                 id: 1,
@@ -104,6 +106,8 @@ fn test_interval_message() {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                rtt_us: Some(1200),
+                cwnd: Some(32768),
             },
         ],
         aggregate: AggregateInterval {
@@ -112,6 +116,8 @@ fn test_interval_message() {
             retransmits: Some(3),
             jitter_ms: None,
             lost: None,
+            rtt_us: Some(1217),
+            cwnd: Some(98303),
         },
     };
 
@@ -128,8 +134,30 @@ fn test_interval_message() {
             assert_eq!(elapsed_ms, 1000);
             assert_eq!(streams.len(), 2);
             assert_eq!(aggregate.throughput_mbps, 2000.0);
+            assert_eq!(aggregate.rtt_us, Some(1217));
+            assert_eq!(aggregate.cwnd, Some(98303));
+            assert_eq!(streams[0].rtt_us, Some(1234));
+            assert_eq!(streams[1].cwnd, Some(32768));
         }
         _ => panic!("Wrong message type"),
+    }
+}
+
+#[test]
+fn test_interval_backward_compat() {
+    // Interval JSON without rtt_us/cwnd should deserialize with None
+    let json = r#"{"type":"interval","id":"test-1","elapsed_ms":1000,"streams":[{"id":0,"bytes":100,"retransmits":0}],"aggregate":{"bytes":100,"throughput_mbps":0.8,"retransmits":0}}"#;
+    let decoded = ControlMessage::deserialize(json).unwrap();
+    match decoded {
+        ControlMessage::Interval {
+            streams, aggregate, ..
+        } => {
+            assert!(streams[0].rtt_us.is_none());
+            assert!(streams[0].cwnd.is_none());
+            assert!(aggregate.rtt_us.is_none());
+            assert!(aggregate.cwnd.is_none());
+        }
+        _ => panic!("Expected Interval"),
     }
 }
 

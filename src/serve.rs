@@ -1955,6 +1955,13 @@ async fn spawn_tcp_handlers(
             let mut config = TcpConfig::high_speed();
             config.congestion = congestion.clone();
 
+            // Store fd for TCP_INFO interval polling
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                stream_stats.set_tcp_info_fd(stream.as_raw_fd());
+            }
+
             // Capture TCP_INFO before transfer starts
             if let Some(info) = tcp::get_stream_tcp_info(&stream) {
                 test_stats.add_tcp_info(info);
@@ -2103,6 +2110,13 @@ async fn spawn_tcp_stream_handlers(
                 let handle = tokio::spawn(async move {
                     let mut config = TcpConfig::high_speed();
                     config.congestion = congestion;
+
+                    // Store fd for TCP_INFO interval polling
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        stream_stats.set_tcp_info_fd(stream.as_raw_fd());
+                    }
 
                     // Capture TCP_INFO before transfer starts
                     if let Some(info) = tcp::get_stream_tcp_info(&stream) {

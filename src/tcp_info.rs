@@ -55,11 +55,15 @@ mod linux {
     }
 
     pub fn get_tcp_info<S: AsRawFd>(socket: &S) -> std::io::Result<TcpInfoSnapshot> {
-        let fd = socket.as_raw_fd();
+        get_tcp_info_from_fd(socket.as_raw_fd())
+    }
+
+    /// Poll TCP_INFO using a raw file descriptor (for interval polling without owning the socket)
+    pub fn get_tcp_info_from_fd(fd: i32) -> std::io::Result<TcpInfoSnapshot> {
         let mut info: TcpInfo = Default::default();
         let mut len = mem::size_of::<TcpInfo>() as libc::socklen_t;
 
-        // SAFETY: fd is a valid file descriptor from socket.as_raw_fd(),
+        // SAFETY: fd must be a valid file descriptor for an open TCP socket.
         // info is zeroed TcpInfo struct with correct size, len is initialized
         // to the struct size. getsockopt will write at most len bytes.
         let ret = unsafe {
@@ -135,11 +139,15 @@ mod macos {
     }
 
     pub fn get_tcp_info<S: AsRawFd>(socket: &S) -> std::io::Result<TcpInfoSnapshot> {
-        let fd = socket.as_raw_fd();
+        get_tcp_info_from_fd(socket.as_raw_fd())
+    }
+
+    /// Poll TCP_INFO using a raw file descriptor (for interval polling without owning the socket)
+    pub fn get_tcp_info_from_fd(fd: i32) -> std::io::Result<TcpInfoSnapshot> {
         let mut info: TcpConnectionInfo = Default::default();
         let mut len = mem::size_of::<TcpConnectionInfo>() as libc::socklen_t;
 
-        // SAFETY: fd is a valid file descriptor from socket.as_raw_fd(),
+        // SAFETY: fd must be a valid file descriptor for an open TCP socket.
         // info is zeroed TcpConnectionInfo struct with correct size, len is
         // initialized to the struct size. getsockopt will write at most len bytes.
         let ret = unsafe {
@@ -170,7 +178,15 @@ mod fallback {
     use super::*;
 
     pub fn get_tcp_info<S>(_socket: &S) -> std::io::Result<TcpInfoSnapshot> {
-        // Return empty stats on unsupported platforms
+        Ok(TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 0,
+            rtt_var_us: 0,
+            cwnd: 0,
+        })
+    }
+
+    pub fn get_tcp_info_from_fd(_fd: i32) -> std::io::Result<TcpInfoSnapshot> {
         Ok(TcpInfoSnapshot {
             retransmits: 0,
             rtt_us: 0,
@@ -181,10 +197,10 @@ mod fallback {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::get_tcp_info;
+pub use linux::{get_tcp_info, get_tcp_info_from_fd};
 
 #[cfg(target_os = "macos")]
-pub use macos::get_tcp_info;
+pub use macos::{get_tcp_info, get_tcp_info_from_fd};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub use fallback::get_tcp_info;
+pub use fallback::{get_tcp_info, get_tcp_info_from_fd};

@@ -30,9 +30,14 @@ pub struct StreamInterval {
     pub jitter_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwnd: Option<u32>,
 }
 
 /// Output interval as JSON line (for --json-stream)
+#[allow(clippy::too_many_arguments)]
 pub fn output_interval_json(
     timestamp: &str,
     elapsed_secs: f64,
@@ -41,6 +46,8 @@ pub fn output_interval_json(
     retransmits: Option<u64>,
     jitter_ms: Option<f64>,
     lost: Option<u64>,
+    rtt_us: Option<u32>,
+    cwnd: Option<u32>,
 ) -> String {
     let interval = StreamInterval {
         timestamp: timestamp.to_string(),
@@ -50,6 +57,8 @@ pub fn output_interval_json(
         retransmits,
         jitter_ms,
         lost,
+        rtt_us,
+        cwnd,
     };
     serde_json::to_string(&interval).unwrap_or_else(|_| "{}".to_string())
 }

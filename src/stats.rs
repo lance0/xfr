@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpStats};
@@ -22,6 +22,8 @@ pub struct StreamStats {
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
     pub udp_lost: AtomicU64,      // Total lost packets
     pub last_udp_lost: AtomicU64, // For interval calculation
+    /// Raw file descriptor for TCP_INFO polling (-1 = not set)
+    pub tcp_info_fd: AtomicI32,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct IntervalStats {
     pub retransmits: u64,
     pub jitter_ms: f64,
     pub lost: u64,
+    pub rtt_us: Option<u32>,
+    pub cwnd: Option<u32>,
 }
 
 impl StreamStats {
@@ -48,7 +52,24 @@ impl StreamStats {
             udp_jitter_us: AtomicU64::new(0),
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
+            tcp_info_fd: AtomicI32::new(-1),
         }
+    }
+
+    /// Store raw file descriptor for TCP_INFO polling.
+    /// Must be called before the TcpStream is moved or split.
+    pub fn set_tcp_info_fd(&self, fd: i32) {
+        self.tcp_info_fd.store(fd, Ordering::Relaxed);
+    }
+
+    /// Poll current TCP_INFO snapshot using stored fd.
+    /// Returns None if fd is not set or getsockopt fails.
+    pub fn poll_tcp_info(&self) -> Option<TcpInfoSnapshot> {
+        let fd = self.tcp_info_fd.load(Ordering::Relaxed);
+        if fd < 0 {
+            return None;
+        }
+        crate::tcp_info::get_tcp_info_from_fd(fd).ok()
     }
 
     pub fn add_bytes_sent(&self, bytes: u64) {
@@ -128,6 +149,7 @@ impl StreamStats {
         let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
         let interval_lost = total_lost.saturating_sub(last_lost);
 
+        let tcp_info = self.poll_tcp_info();
         let stats = IntervalStats {
             timestamp: now,
             bytes: interval_bytes,
@@ -135,6 +157,8 @@ impl StreamStats {
             retransmits: interval_retransmits,
             jitter_ms,
             lost: interval_lost,
+            rtt_us: tcp_info.as_ref().map(|t| t.rtt_us),
+            cwnd: tcp_info.as_ref().map(|t| t.cwnd),
         };
 
         let mut intervals = self.intervals.lock();
@@ -163,6 +187,8 @@ impl StreamStats {
                 None
             },
             error: None,
+            rtt_us: interval_stats.rtt_us,
+            cwnd: interval_stats.cwnd,
         }
     }
 
@@ -274,6 +300,25 @@ impl TestStats {
             Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
         };
 
+        // Average RTT across streams that have TCP_INFO
+        let rtt_values: Vec<u32> = intervals.iter().filter_map(|i| i.rtt_us).collect();
+        let avg_rtt = if rtt_values.is_empty() {
+            None
+        } else {
+            Some(
+                (rtt_values.iter().map(|&r| r as u64).sum::<u64>() / rtt_values.len() as u64)
+                    as u32,
+            )
+        };
+
+        // Sum cwnd across streams (total sending capacity)
+        let cwnd_values: Vec<u32> = intervals.iter().filter_map(|i| i.cwnd).collect();
+        let total_cwnd = if cwnd_values.is_empty() {
+            None
+        } else {
+            Some(cwnd_values.iter().sum())
+        };
+
         AggregateInterval {
             bytes: total_bytes,
             throughput_mbps: total_throughput,
@@ -284,6 +329,8 @@ impl TestStats {
             } else {
                 None
             },
+            rtt_us: avg_rtt,
+            cwnd: total_cwnd,
         }
     }
 

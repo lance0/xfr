@@ -34,6 +34,7 @@ pub fn output_csv(result: &TestResult) -> String {
 }
 
 /// Output interval as CSV line
+#[allow(clippy::too_many_arguments)]
 pub fn output_interval_csv(
     timestamp: &str,
     elapsed_secs: f64,
@@ -42,9 +43,11 @@ pub fn output_interval_csv(
     retransmits: Option<u64>,
     jitter_ms: Option<f64>,
     lost: Option<u64>,
+    rtt_us: Option<u32>,
+    cwnd: Option<u32>,
 ) -> String {
     format!(
-        "{},{:.2},{},{:.2},{},{},{}\n",
+        "{},{:.2},{},{:.2},{},{},{},{},{}\n",
         timestamp,
         elapsed_secs,
         bytes,
@@ -52,17 +55,13 @@ pub fn output_interval_csv(
         retransmits.unwrap_or(0),
         jitter_ms.unwrap_or(0.0),
         lost.unwrap_or(0),
+        rtt_us.map(|r| r.to_string()).unwrap_or_default(),
+        cwnd.map(|c| c.to_string()).unwrap_or_default(),
     )
 }
 
 /// CSV header for interval output
-pub fn csv_interval_header(timestamp_format: &TimestampFormat) -> String {
-    match timestamp_format {
-        TimestampFormat::Relative => {
-            "timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost\n".to_string()
-        }
-        _ => {
-            "timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost\n".to_string()
-        }
-    }
+pub fn csv_interval_header(_timestamp_format: &TimestampFormat) -> String {
+    "timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd\n"
+        .to_string()
 }

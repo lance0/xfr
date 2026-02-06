@@ -96,6 +96,7 @@ pub fn output_interval_plain(
     throughput_mbps: f64,
     bytes: u64,
     retransmits: Option<u64>,
+    rtt_us: Option<u32>,
 ) -> String {
     let mut output = format!(
         "[{}]  {}  {}",
@@ -106,6 +107,10 @@ pub fn output_interval_plain(
 
     if let Some(rtx) = retransmits {
         output.push_str(&format!("  rtx: {}", rtx));
+    }
+
+    if let Some(rtt) = rtt_us {
+        output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
     }
 
     output.push('\n');
