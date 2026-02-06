@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Congestion config errors surfaced** - Invalid `--congestion` algorithm is now validated before the test starts; client exits non-zero immediately and server sends an error message back to the client
-- **TCP_INFO stale fd cleared** - Stream handlers now clear the stored file descriptor on completion, preventing `poll_tcp_info()` from reading an unrelated socket if the OS reuses the fd
+- **TCP_INFO stale fd cleared** - Stream handlers now clear the stored file descriptor on completion and on early-return error paths, preventing `poll_tcp_info()` from reading an unrelated socket if the OS reuses the fd
 - **Update banner double "v" prefix** - Version display now strips leading `v` from update-informer output to avoid showing `vv0.5.0`
 - **PSK unwrap panics** - Server no longer panics if PSK is misconfigured during auth; returns error instead
 - **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before writing

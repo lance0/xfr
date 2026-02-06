@@ -164,13 +164,16 @@ fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
 /// Validate that a congestion control algorithm is available on this kernel.
 /// Creates a temporary socket to test the setsockopt call.
 #[cfg(unix)]
-pub fn validate_congestion(algo: &str) -> std::io::Result<()> {
+pub fn validate_congestion(algo: &str) -> Result<(), String> {
     // SAFETY: socket() returns a valid fd or -1 on error (checked below).
     // setsockopt uses the fd with valid pointer/length from algo slice.
     // close() is called unconditionally to avoid fd leak.
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(format!(
+            "failed to create test socket: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let ret = unsafe {
         libc::setsockopt(
@@ -182,7 +185,14 @@ pub fn validate_congestion(algo: &str) -> std::io::Result<()> {
         )
     };
     let result = if ret != 0 {
-        Err(std::io::Error::last_os_error())
+        let mut msg = "not available on this kernel".to_string();
+        // Try to list available algorithms for a helpful error
+        if let Ok(available) =
+            std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_congestion_control")
+        {
+            msg = format!("not available (available: {})", available.trim());
+        }
+        Err(msg)
     } else {
         Ok(())
     };
@@ -191,7 +201,7 @@ pub fn validate_congestion(algo: &str) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn validate_congestion(_algo: &str) -> std::io::Result<()> {
+pub fn validate_congestion(_algo: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -436,5 +446,19 @@ mod tests {
         let config = TcpConfig::high_speed();
         assert_eq!(config.buffer_size, HIGH_SPEED_BUFFER);
         assert!(config.nodelay);
+    }
+
+    #[test]
+    fn test_validate_congestion_cubic() {
+        // cubic is available on all Linux kernels
+        assert!(validate_congestion("cubic").is_ok());
+    }
+
+    #[test]
+    fn test_validate_congestion_invalid() {
+        let result = validate_congestion("nonexistent_algo_xyz");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("not available"), "unexpected error: {}", msg);
     }
 }

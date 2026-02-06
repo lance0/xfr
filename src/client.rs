@@ -105,6 +105,12 @@ impl Client {
         if self.config.protocol == Protocol::Quic && self.config.bitrate.is_some() {
             warn!("Bitrate limit (-b) not implemented for QUIC; running at full speed");
         }
+        if self.config.protocol != Protocol::Tcp && self.config.tcp_congestion.is_some() {
+            warn!(
+                "--congestion is only supported for TCP; ignoring for {}",
+                self.config.protocol
+            );
+        }
 
         // Use QUIC transport if selected
         if self.config.protocol == Protocol::Quic {
