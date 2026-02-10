@@ -13,8 +13,8 @@ src/
 ├── serve.rs         # Server-side connection handling
 │
 ├── protocol.rs      # Control protocol (JSON messages)
-├── tcp.rs           # TCP data transfer
-├── udp.rs           # UDP data transfer with pacing
+├── tcp.rs           # TCP data transfer with bitrate pacing
+├── udp.rs           # UDP data transfer with bitrate pacing
 ├── quic.rs          # QUIC transport (quinn)
 ├── net.rs           # Network utilities (address resolution, sockets)
 │
@@ -134,7 +134,7 @@ routing is needed since the port uniquely identifies the stream.
 
 ### Data Transfer
 
-**TCP**: Simple bulk send/receive with large buffers (128KB default, 4MB for high-speed mode).
+**TCP**: Bulk send/receive with large buffers (128KB default, 4MB for high-speed mode). Supports optional bitrate pacing via `-b` using a byte-budget sleep approach with interruptible sleeps.
 
 **UDP**: Paced sending with sequence numbers for loss detection:
 ```
@@ -338,7 +338,7 @@ The `--congestion` algorithm is validated early, before any streams are spawned:
 Large buffers are used for high throughput:
 
 ```rust
-// TCP (default, auto-bumps to 4MB for unlimited bitrate)
+// TCP (default, auto-bumps to 4MB when no bitrate limit set)
 socket.set_send_buffer_size(131072)?;   // 128KB
 socket.set_recv_buffer_size(131072)?;
 

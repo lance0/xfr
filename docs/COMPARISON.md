@@ -21,6 +21,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **Result comparison** | `xfr diff` | No | No | No | No |
 | **LAN discovery** | `xfr discover` (mDNS) | No | No | No | No |
 | **Config file** | Yes (TOML) | No | No | No | No |
+| **TCP/UDP bitrate pacing** | Yes (`-b`) | Yes (`-b`) | Yes (`-b`) | No | ? |
 | **Congestion control selection** | Yes (`--congestion`) | Yes (`--congestion`) | Yes (`-Z`) | No | ? |
 | **PSK authentication** | Yes | Yes | No | No | ? |
 | **Capability negotiation** | Yes (protocol v1.1) | No | No | No | ? |
@@ -96,6 +97,11 @@ xfr serve -p 9000
 iperf3 -c host -P 4 -t 30
 # xfr equivalent
 xfr <host> -P 4 -t 30s
+
+# iperf3: TCP at 100 Mbps
+iperf3 -c host -b 100M
+# xfr equivalent
+xfr <host> -b 100M
 
 # iperf3: UDP at 1 Gbps
 iperf3 -c host -u -b 1G

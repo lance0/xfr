@@ -98,10 +98,6 @@ impl Client {
     ) -> anyhow::Result<TestResult> {
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
 
-        // Warn if bitrate limit is set for non-UDP protocols (only UDP supports pacing)
-        if self.config.protocol == Protocol::Tcp && self.config.bitrate.is_some() {
-            warn!("Bitrate limit (-b) only works for UDP; TCP will run at full speed");
-        }
         if self.config.protocol == Protocol::Quic && self.config.bitrate.is_some() {
             warn!("Bitrate limit (-b) not implemented for QUIC; running at full speed");
         }
@@ -402,6 +398,14 @@ impl Client {
         let control_port = self.config.port;
         let test_id = test_id.to_string();
 
+        let per_stream_bitrate = self.config.bitrate.map(|b| {
+            if b == 0 {
+                0
+            } else {
+                (b / self.config.streams as u64).max(1)
+            }
+        });
+
         #[allow(clippy::needless_range_loop)] // Intentional: single-port mode has empty data_ports
         for i in 0..self.config.streams as usize {
             let port = if single_port_mode {
@@ -462,9 +466,15 @@ impl Client {
                         match direction {
                             Direction::Upload => {
                                 // Client sends data
-                                if let Err(e) =
-                                    tcp::send_data(stream, stream_stats, duration, config, cancel)
-                                        .await
+                                if let Err(e) = tcp::send_data(
+                                    stream,
+                                    stream_stats,
+                                    duration,
+                                    config,
+                                    cancel,
+                                    per_stream_bitrate,
+                                )
+                                .await
                                 {
                                     error!("Send error: {}", e);
                                 }
@@ -507,6 +517,7 @@ impl Client {
                                         duration,
                                         send_config,
                                         send_cancel,
+                                        per_stream_bitrate,
                                     )
                                     .await
                                     {

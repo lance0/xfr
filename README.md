@@ -19,6 +19,7 @@ xfr serve
 
 # Client (in another terminal or machine)
 xfr 192.168.1.1              # Basic TCP test
+xfr 192.168.1.1 -b 100M      # TCP at 100 Mbps
 xfr 192.168.1.1 -P 4         # 4 parallel streams
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 ```
@@ -36,7 +37,7 @@ See [Installation](#installation) below for setup instructions.
 - **Live TUI** with real-time throughput graphs and per-stream stats
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
-- **TCP, UDP, and QUIC** with configurable bitrate and parallel streams
+- **TCP, UDP, and QUIC** with configurable bitrate pacing and parallel streams
 - **Single-port TCP** - firewall-friendly, only port 5201 needed (no ephemeral data ports)
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
@@ -380,7 +381,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
-| `--bitrate` | `-b` | 1G | Target bitrate for UDP (e.g., 1G, 100M). Use `-b 0` for unlimited |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

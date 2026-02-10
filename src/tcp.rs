@@ -58,11 +58,11 @@ impl TcpConfig {
     ) -> Self {
         // Auto-select high-speed mode when:
         // 1. Window size is explicitly set to > 1MB, or
-        // 2. No bitrate limit is set (unlimited speed)
+        // 2. No bitrate limit is set (unlimited speed, including explicit -b 0)
         let use_high_speed = window_size
             .map(|w| w > HIGH_SPEED_WINDOW_THRESHOLD)
             .unwrap_or(false)
-            || bitrate_limit.is_none();
+            || !matches!(bitrate_limit, Some(bps) if bps > 0);
 
         if use_high_speed && window_size.is_none() {
             // Use full high-speed config with large buffers
@@ -226,12 +226,23 @@ pub async fn send_data(
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    bitrate: Option<u64>,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
 
-    let buffer = vec![0u8; config.buffer_size];
-    let deadline = tokio::time::Instant::now() + duration;
+    // Cap buffer size for rate-limited sends to prevent large first-write burst
+    let buf_size = match bitrate {
+        Some(bps) if bps > 0 => {
+            let bytes_per_sec = bps / 8;
+            // Target ~10 writes/sec minimum, capped at config buffer size
+            config.buffer_size.min((bytes_per_sec / 10).max(1) as usize)
+        }
+        _ => config.buffer_size,
+    };
+    let buffer = vec![0u8; buf_size];
+    let start = tokio::time::Instant::now();
+    let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
 
     loop {
@@ -248,6 +259,27 @@ pub async fn send_data(
         match stream.write(&buffer).await {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
+                // Pace sends to target bitrate using byte-budget approach
+                if let Some(bps) = bitrate
+                    && bps > 0
+                {
+                    let bytes_per_sec = bps as f64 / 8.0;
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let expected = elapsed * bytes_per_sec;
+                    let total = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                    if total > expected {
+                        let overshoot = Duration::from_secs_f64((total - expected) / bytes_per_sec);
+                        // Interruptible sleep: wake on cancel to avoid blocking shutdown
+                        tokio::select! {
+                            biased;
+                            _ = cancel.changed() => {
+                                debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
+                                break;
+                            }
+                            _ = tokio::time::sleep(overshoot) => {}
+                        }
+                    }
+                }
             }
             Err(e) => {
                 error!("Send error on stream {}: {}", stats.stream_id, e);
@@ -342,10 +374,20 @@ pub async fn send_data_half(
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    bitrate: Option<u64>,
 ) -> anyhow::Result<OwnedWriteHalf> {
-    let buffer = vec![0u8; config.buffer_size];
-    let deadline = tokio::time::Instant::now() + duration;
+    // Cap buffer size for rate-limited sends to prevent large first-write burst
+    let buf_size = match bitrate {
+        Some(bps) if bps > 0 => {
+            let bytes_per_sec = bps / 8;
+            config.buffer_size.min((bytes_per_sec / 10).max(1) as usize)
+        }
+        _ => config.buffer_size,
+    };
+    let buffer = vec![0u8; buf_size];
+    let start = tokio::time::Instant::now();
+    let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
 
     loop {
@@ -362,6 +404,27 @@ pub async fn send_data_half(
         match write_half.write(&buffer).await {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
+                // Pace sends to target bitrate using byte-budget approach
+                if let Some(bps) = bitrate
+                    && bps > 0
+                {
+                    let bytes_per_sec = bps as f64 / 8.0;
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let expected = elapsed * bytes_per_sec;
+                    let total = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                    if total > expected {
+                        let overshoot = Duration::from_secs_f64((total - expected) / bytes_per_sec);
+                        // Interruptible sleep: wake on cancel to avoid blocking shutdown
+                        tokio::select! {
+                            biased;
+                            _ = cancel.changed() => {
+                                debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
+                                break;
+                            }
+                            _ = tokio::time::sleep(overshoot) => {}
+                        }
+                    }
+                }
             }
             Err(e) => {
                 error!("Send error on stream {}: {}", stats.stream_id, e);

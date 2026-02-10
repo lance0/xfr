@@ -169,7 +169,7 @@ struct Cli {
     #[arg(short = 'Q', long, conflicts_with = "udp")]
     quic: bool,
 
-    /// Target bitrate for UDP (e.g., 1G, 100M). TCP runs at full speed.
+    /// Target bitrate (e.g., 1G, 100M). Applies to TCP and UDP. 0 = unlimited.
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
     bitrate: Option<u64>,
 

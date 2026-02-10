@@ -10,6 +10,7 @@ Standard TCP bulk transfer with configurable options:
 
 ```bash
 xfr <host>                     # Basic TCP test
+xfr <host> -b 100M             # TCP at 100 Mbps
 xfr <host> --tcp-nodelay       # Disable Nagle's algorithm
 xfr <host> --window 4M         # Set TCP window size
 xfr <host> --congestion bbr    # Use BBR congestion control
@@ -17,6 +18,7 @@ xfr <host> --congestion bbr    # Use BBR congestion control
 
 TCP provides:
 - Reliable, ordered delivery
+- Bitrate pacing (`-b`) with byte-budget sleep approach
 - Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
 - TCP_INFO statistics (RTT, retransmits, cwnd) — polled live per interval, not just at test end
 
@@ -432,7 +434,7 @@ See `xfr --help` for complete CLI documentation.
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
-| `--bitrate` | `-b` | unlimited | Target bitrate (e.g., 1G, 100M) |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

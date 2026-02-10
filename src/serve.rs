@@ -1704,6 +1704,7 @@ async fn run_test(
                         duration,
                         cancel_clone,
                         congestion.clone(),
+                        bitrate,
                     )
                     .await
                 });
@@ -1940,7 +1941,10 @@ async fn spawn_tcp_handlers(
     duration: Duration,
     cancel: watch::Receiver<bool>,
     congestion: Option<String>,
+    bitrate: Option<u64>,
 ) -> Vec<JoinHandle<()>> {
+    let num_streams = listeners.len().max(1) as u64;
+    let per_stream_bitrate = bitrate.map(|b| if b == 0 { 0 } else { (b / num_streams).max(1) });
     let mut handles = Vec::new();
 
     for (i, listener) in listeners.into_iter().enumerate() {
@@ -1993,8 +1997,15 @@ async fn spawn_tcp_handlers(
                 }
                 Direction::Download => {
                     // Server sends data - capture final TCP_INFO for RTT/retransmits
-                    match tcp::send_data(stream, stream_stats.clone(), duration, config, cancel)
-                        .await
+                    match tcp::send_data(
+                        stream,
+                        stream_stats.clone(),
+                        duration,
+                        config,
+                        cancel,
+                        per_stream_bitrate,
+                    )
+                    .await
                     {
                         Ok(Some(info)) => test_stats.add_tcp_info(info),
                         Ok(None) => {}
@@ -2033,6 +2044,7 @@ async fn spawn_tcp_handlers(
                             duration,
                             send_config,
                             send_cancel,
+                            per_stream_bitrate,
                         )
                         .await
                     });
@@ -2064,6 +2076,7 @@ async fn spawn_tcp_handlers(
 }
 
 /// Single-port TCP mode: receive streams from channel and spawn handlers
+#[allow(clippy::too_many_arguments)]
 async fn spawn_tcp_stream_handlers(
     mut rx: mpsc::Receiver<(TcpStream, u16)>,
     num_streams: usize,
@@ -2072,7 +2085,15 @@ async fn spawn_tcp_stream_handlers(
     duration: Duration,
     cancel: watch::Receiver<bool>,
     congestion: Option<String>,
+    bitrate: Option<u64>,
 ) -> Vec<JoinHandle<()>> {
+    let per_stream_bitrate = bitrate.map(|b| {
+        if b == 0 {
+            0
+        } else {
+            (b / num_streams as u64).max(1)
+        }
+    });
     let mut handles = Vec::new();
     let mut received = vec![false; num_streams];
     let deadline = tokio::time::Instant::now() + STREAM_COLLECTION_TIMEOUT;
@@ -2162,6 +2183,7 @@ async fn spawn_tcp_stream_handlers(
                                 duration,
                                 config,
                                 cancel,
+                                per_stream_bitrate,
                             )
                             .await
                             {
@@ -2193,6 +2215,7 @@ async fn spawn_tcp_stream_handlers(
                                     duration,
                                     send_config,
                                     send_cancel,
+                                    per_stream_bitrate,
                                 )
                                 .await
                             });
