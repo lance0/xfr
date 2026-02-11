@@ -44,6 +44,7 @@ pub mod diff;
 pub mod discover;
 pub mod net;
 pub mod output;
+mod pause;
 pub mod prefs;
 pub mod protocol;
 pub mod quic;

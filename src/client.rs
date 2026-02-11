@@ -26,6 +26,17 @@ use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
 use crate::udp;
 
+/// Result of a pause toggle attempt
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseResult {
+    /// Pause/resume applied to transport and server
+    Applied,
+    /// Server doesn't support pause/resume
+    Unsupported,
+    /// No active test running or channels not ready
+    NotReady,
+}
+
 #[derive(Clone)]
 pub struct ClientConfig {
     pub host: String,
@@ -81,6 +92,12 @@ pub struct Client {
     cancel_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
     /// Signals the control loop to send a Cancel message to server
     cancel_request_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    /// Signals data stream handlers to pause/resume
+    pause_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    /// Signals the control loop to send a Pause/Resume message to server
+    pause_request_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    /// Whether the server supports pause/resume capability
+    server_supports_pause: Arc<Mutex<Option<bool>>>,
 }
 
 impl Client {
@@ -89,6 +106,9 @@ impl Client {
             config,
             cancel_tx: Arc::new(Mutex::new(None)),
             cancel_request_tx: Arc::new(Mutex::new(None)),
+            pause_tx: Arc::new(Mutex::new(None)),
+            pause_request_tx: Arc::new(Mutex::new(None)),
+            server_supports_pause: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -130,6 +150,11 @@ impl Client {
         server_ip: SocketAddr,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
+        // Reset pause state from any previous run
+        *self.server_supports_pause.lock() = None;
+        *self.pause_tx.lock() = None;
+        *self.pause_request_tx.lock() = None;
+
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
@@ -203,6 +228,13 @@ impl Client {
             }
         }
 
+        // Check server pause/resume capability
+        let supports_pause = server_capabilities
+            .as_ref()
+            .map(|caps| caps.iter().any(|c| c == "pause_resume"))
+            .unwrap_or(false);
+        *self.server_supports_pause.lock() = Some(supports_pause);
+
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -268,6 +300,12 @@ impl Client {
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
         *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
+        // Create pause channels
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (pause_request_tx, mut pause_request_rx) = watch::channel(false);
+        *self.pause_tx.lock() = Some(pause_tx.clone());
+        *self.pause_request_tx.lock() = Some(pause_request_tx);
+
         // Connect data streams using the resolved IP from control connection
         match self.config.protocol {
             Protocol::Tcp => {
@@ -277,12 +315,19 @@ impl Client {
                     stats.clone(),
                     cancel_rx.clone(),
                     &test_id,
+                    pause_rx.clone(),
                 )
                 .await?;
             }
             Protocol::Udp => {
-                self.spawn_udp_streams(&data_ports, server_ip, stats.clone(), cancel_rx.clone())
-                    .await?;
+                self.spawn_udp_streams(
+                    &data_ports,
+                    server_ip,
+                    stats.clone(),
+                    cancel_rx.clone(),
+                    pause_rx.clone(),
+                )
+                .await?;
             }
             Protocol::Quic => {
                 // QUIC uses its own connection model - should not reach here
@@ -334,6 +379,22 @@ impl Client {
                         let _ = writer.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
                         let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
+                    }
+                }
+                _ = pause_request_rx.changed() => {
+                    let paused = *pause_request_rx.borrow();
+                    // Always pause local data loops
+                    let _ = pause_tx.send(paused);
+                    // Send protocol message only if server supports it
+                    if supports_pause {
+                        let msg = if paused {
+                            ControlMessage::Pause { id: test_id.clone() }
+                        } else {
+                            ControlMessage::Resume { id: test_id.clone() }
+                        };
+                        if writer.write_all(format!("{}\n", msg.serialize()?).as_bytes()).await.is_err() {
+                            warn!("Failed to send pause/resume to server");
+                        }
                     }
                 }
             }
@@ -392,6 +453,7 @@ impl Client {
         stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
         test_id: &str,
+        pause: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         // Single-port mode: connect all streams to control port with DataHello
         let single_port_mode = data_ports.is_empty();
@@ -423,6 +485,7 @@ impl Client {
             let addr = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
+            let pause = pause.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
             let bind_addr = self.config.bind_addr;
@@ -473,6 +536,7 @@ impl Client {
                                     config,
                                     cancel,
                                     per_stream_bitrate,
+                                    pause,
                                 )
                                 .await
                                 {
@@ -501,6 +565,7 @@ impl Client {
                                 let recv_stats = stream_stats.clone();
                                 let send_cancel = cancel.clone();
                                 let recv_cancel = cancel;
+                                let send_pause = pause;
 
                                 let send_config = TcpConfig {
                                     buffer_size: config.buffer_size,
@@ -518,6 +583,7 @@ impl Client {
                                         send_config,
                                         send_cancel,
                                         per_stream_bitrate,
+                                        send_pause,
                                     )
                                     .await
                                     {
@@ -560,6 +626,7 @@ impl Client {
         server_addr: SocketAddr,
         stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
+        pause: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
 
@@ -576,6 +643,7 @@ impl Client {
             let server_port = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
+            let pause = pause.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
             let bind_addr = self.config.bind_addr;
@@ -617,6 +685,7 @@ impl Client {
                             duration,
                             stream_stats,
                             cancel,
+                            pause,
                         )
                         .await
                         {
@@ -639,7 +708,8 @@ impl Client {
                             }
                         });
 
-                        if let Err(e) = udp::receive_udp(socket, stream_stats, cancel).await {
+                        if let Err(e) = udp::receive_udp(socket, stream_stats, cancel, pause).await
+                        {
                             error!("UDP receive error: {}", e);
                         }
                         hello_handle.abort();
@@ -652,6 +722,8 @@ impl Client {
                         let recv_stats = stream_stats;
                         let send_cancel = cancel.clone();
                         let recv_cancel = cancel;
+                        let send_pause = pause.clone();
+                        let recv_pause = pause;
 
                         let send_handle = tokio::spawn(async move {
                             if let Err(e) = udp::send_udp_paced(
@@ -661,6 +733,7 @@ impl Client {
                                 duration,
                                 send_stats,
                                 send_cancel,
+                                send_pause,
                             )
                             .await
                             {
@@ -670,7 +743,8 @@ impl Client {
 
                         let recv_handle = tokio::spawn(async move {
                             if let Err(e) =
-                                udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
+                                udp::receive_udp(recv_socket, recv_stats, recv_cancel, recv_pause)
+                                    .await
                             {
                                 error!("UDP bidir receive error: {}", e);
                             }
@@ -692,6 +766,11 @@ impl Client {
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         use tokio::io::BufReader;
+
+        // Reset pause state from any previous run
+        *self.server_supports_pause.lock() = None;
+        *self.pause_tx.lock() = None;
+        *self.pause_request_tx.lock() = None;
 
         // Resolve target address first, then create endpoint with matching address family
         let addr = net::resolve_host(
@@ -724,6 +803,7 @@ impl Client {
         read_bounded_line(&mut ctrl_reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
+        let server_capabilities;
         match msg {
             ControlMessage::Hello {
                 version,
@@ -739,6 +819,7 @@ impl Client {
                     ));
                 }
                 debug!("Server capabilities: {:?}", capabilities);
+                server_capabilities = capabilities;
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {
@@ -779,6 +860,13 @@ impl Client {
             }
         }
 
+        // Check server pause/resume capability
+        let supports_pause = server_capabilities
+            .as_ref()
+            .map(|caps| caps.iter().any(|c| c == "pause_resume"))
+            .unwrap_or(false);
+        *self.server_supports_pause.lock() = Some(supports_pause);
+
         // Send test start
         let test_id = Uuid::new_v4().to_string();
         let test_start = ControlMessage::TestStart {
@@ -818,10 +906,17 @@ impl Client {
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
         *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
+        // Create pause channels
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (pause_request_tx, mut pause_request_rx) = watch::channel(false);
+        *self.pause_tx.lock() = Some(pause_tx.clone());
+        *self.pause_request_tx.lock() = Some(pause_request_tx);
+
         // Spawn data streams based on direction
         for i in 0..self.config.streams {
             let stream_stats = stats.streams[i as usize].clone();
             let cancel = cancel_rx.clone();
+            let pause = pause_rx.clone();
             let duration = self.config.duration;
             let direction = self.config.direction;
             let conn = connection.clone();
@@ -832,8 +927,14 @@ impl Client {
                         // Open unidirectional stream for sending
                         match conn.open_uni().await {
                             Ok(send) => {
-                                if let Err(e) =
-                                    quic::send_quic_data(send, stream_stats, duration, cancel).await
+                                if let Err(e) = quic::send_quic_data(
+                                    send,
+                                    stream_stats,
+                                    duration,
+                                    cancel,
+                                    pause,
+                                )
+                                .await
                                 {
                                     error!("QUIC send error: {}", e);
                                 }
@@ -862,6 +963,7 @@ impl Client {
                                 let recv_stats = stream_stats;
                                 let send_cancel = cancel.clone();
                                 let recv_cancel = cancel;
+                                let send_pause = pause;
 
                                 let send_handle = tokio::spawn(async move {
                                     if let Err(e) = quic::send_quic_data(
@@ -869,6 +971,7 @@ impl Client {
                                         send_stats,
                                         duration,
                                         send_cancel,
+                                        send_pause,
                                     )
                                     .await
                                     {
@@ -926,6 +1029,20 @@ impl Client {
                         };
                         let _ = ctrl_send.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
                         let _ = cancel_tx.send(true);
+                    }
+                }
+                _ = pause_request_rx.changed() => {
+                    let paused = *pause_request_rx.borrow();
+                    let _ = pause_tx.send(paused);
+                    if supports_pause {
+                        let msg = if paused {
+                            ControlMessage::Pause { id: test_id.clone() }
+                        } else {
+                            ControlMessage::Resume { id: test_id.clone() }
+                        };
+                        if ctrl_send.write_all(format!("{}\n", msg.serialize()?).as_bytes()).await.is_err() {
+                            warn!("Failed to send pause/resume to server");
+                        }
                     }
                 }
             }
@@ -990,6 +1107,24 @@ impl Client {
         } else {
             Err(anyhow::anyhow!("No test is currently running"))
         }
+    }
+
+    /// Toggle pause on a running test.
+    /// Returns Applied if pause was toggled, Unsupported if server lacks capability,
+    /// or NotReady if capabilities aren't negotiated yet or no active channel exists.
+    pub fn pause(&self) -> PauseResult {
+        match *self.server_supports_pause.lock() {
+            None => return PauseResult::NotReady,
+            Some(false) => return PauseResult::Unsupported,
+            Some(true) => {}
+        }
+        if let Some(tx) = self.pause_request_tx.lock().as_ref() {
+            let current = *tx.borrow();
+            if tx.send(!current).is_ok() {
+                return PauseResult::Applied;
+            }
+        }
+        PauseResult::NotReady
     }
 }
 

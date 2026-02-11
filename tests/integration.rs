@@ -1383,3 +1383,31 @@ async fn test_quic_one_off() {
         "Server should exit after QUIC one-off test"
     );
 }
+
+#[test]
+fn test_pause_not_ready_before_test_run() {
+    // Client::pause() should return NotReady when no test is running
+    // (server_supports_pause defaults to None — not yet negotiated)
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+    };
+
+    let client = Client::new(config);
+    assert_eq!(
+        client.pause(),
+        xfr::client::PauseResult::NotReady,
+        "pause() should return NotReady before capability negotiation"
+    );
+}

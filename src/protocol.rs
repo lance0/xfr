@@ -119,6 +119,12 @@ pub enum ControlMessage {
     Cancelled {
         id: String,
     },
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
     Error {
         message: String,
     },
@@ -339,6 +345,7 @@ impl ControlMessage {
                 "quic".to_string(),
                 "multistream".to_string(),
                 "single_port_tcp".to_string(),
+                "pause_resume".to_string(),
             ]),
             auth: None,
         }
@@ -355,6 +362,7 @@ impl ControlMessage {
                 "quic".to_string(),
                 "multistream".to_string(),
                 "single_port_tcp".to_string(),
+                "pause_resume".to_string(),
             ]),
             auth: None,
         }
@@ -371,6 +379,7 @@ impl ControlMessage {
                 "quic".to_string(),
                 "multistream".to_string(),
                 "single_port_tcp".to_string(),
+                "pause_resume".to_string(),
             ]),
             auth: Some(AuthChallenge {
                 method: "psk".to_string(),

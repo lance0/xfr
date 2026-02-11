@@ -228,6 +228,7 @@ pub async fn send_data(
     config: TcpConfig,
     mut cancel: watch::Receiver<bool>,
     bitrate: Option<u64>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
 
@@ -244,11 +245,23 @@ pub async fn send_data(
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut pace_start = start;
+    let mut pace_bytes_offset: u64 = 0;
 
     loop {
         if *cancel.borrow() {
             debug!("Send cancelled for stream {}", stats.stream_id);
             break;
+        }
+
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            // Reset pacing baseline after resume to prevent catch-up burst
+            pace_start = tokio::time::Instant::now();
+            pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+            continue;
         }
 
         // Duration::ZERO means infinite - only check deadline if finite
@@ -264,18 +277,20 @@ pub async fn send_data(
                     && bps > 0
                 {
                     let bytes_per_sec = bps as f64 / 8.0;
-                    let elapsed = start.elapsed().as_secs_f64();
+                    let elapsed = pace_start.elapsed().as_secs_f64();
                     let expected = elapsed * bytes_per_sec;
-                    let total = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                    let total = (stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+                        - pace_bytes_offset) as f64;
                     if total > expected {
                         let overshoot = Duration::from_secs_f64((total - expected) / bytes_per_sec);
-                        // Interruptible sleep: wake on cancel to avoid blocking shutdown
+                        // Interruptible sleep: wake on cancel/pause to avoid blocking
                         tokio::select! {
                             biased;
                             _ = cancel.changed() => {
                                 debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
                                 break;
                             }
+                            _ = pause.changed() => {} // will check pause at top of next loop
                             _ = tokio::time::sleep(overshoot) => {}
                         }
                     }
@@ -376,6 +391,7 @@ pub async fn send_data_half(
     config: TcpConfig,
     mut cancel: watch::Receiver<bool>,
     bitrate: Option<u64>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<OwnedWriteHalf> {
     // Cap buffer size for rate-limited sends to prevent large first-write burst
     let buf_size = match bitrate {
@@ -389,11 +405,22 @@ pub async fn send_data_half(
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut pace_start = start;
+    let mut pace_bytes_offset: u64 = 0;
 
     loop {
         if *cancel.borrow() {
             debug!("Send cancelled for stream {}", stats.stream_id);
             break;
+        }
+
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            pace_start = tokio::time::Instant::now();
+            pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+            continue;
         }
 
         // Duration::ZERO means infinite - only check deadline if finite
@@ -409,18 +436,19 @@ pub async fn send_data_half(
                     && bps > 0
                 {
                     let bytes_per_sec = bps as f64 / 8.0;
-                    let elapsed = start.elapsed().as_secs_f64();
+                    let elapsed = pace_start.elapsed().as_secs_f64();
                     let expected = elapsed * bytes_per_sec;
-                    let total = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                    let total = (stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+                        - pace_bytes_offset) as f64;
                     if total > expected {
                         let overshoot = Duration::from_secs_f64((total - expected) / bytes_per_sec);
-                        // Interruptible sleep: wake on cancel to avoid blocking shutdown
                         tokio::select! {
                             biased;
                             _ = cancel.changed() => {
                                 debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
                                 break;
                             }
+                            _ = pause.changed() => {}
                             _ = tokio::time::sleep(overshoot) => {}
                         }
                     }

@@ -276,3 +276,52 @@ fn test_data_hello_serialization() {
         _ => panic!("Expected DataHello"),
     }
 }
+
+#[test]
+fn test_pause_message_roundtrip() {
+    let msg = ControlMessage::Pause {
+        id: "test-456".to_string(),
+    };
+    let json = msg.serialize().unwrap();
+    let decoded = ControlMessage::deserialize(&json).unwrap();
+
+    match decoded {
+        ControlMessage::Pause { id } => {
+            assert_eq!(id, "test-456");
+        }
+        _ => panic!("Expected Pause"),
+    }
+}
+
+#[test]
+fn test_resume_message_roundtrip() {
+    let msg = ControlMessage::Resume {
+        id: "test-789".to_string(),
+    };
+    let json = msg.serialize().unwrap();
+    let decoded = ControlMessage::deserialize(&json).unwrap();
+
+    match decoded {
+        ControlMessage::Resume { id } => {
+            assert_eq!(id, "test-789");
+        }
+        _ => panic!("Expected Resume"),
+    }
+}
+
+#[test]
+fn test_pause_resume_capability_in_hello() {
+    let client = ControlMessage::client_hello();
+    let client_json = client.serialize().unwrap();
+    assert!(
+        client_json.contains("\"pause_resume\""),
+        "client_hello should advertise pause_resume capability"
+    );
+
+    let server = ControlMessage::server_hello();
+    let server_json = server.serialize().unwrap();
+    assert!(
+        server_json.contains("\"pause_resume\""),
+        "server_hello should advertise pause_resume capability"
+    );
+}

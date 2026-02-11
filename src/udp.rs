@@ -174,13 +174,14 @@ pub async fn send_udp_paced(
     target_bitrate: u64,
     duration: Duration,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
 
     // Unlimited mode: no pacing, send as fast as possible
     if target_bitrate == 0 {
-        return send_udp_unlimited(socket, target, duration, stats, cancel).await;
+        return send_udp_unlimited(socket, target, duration, stats, cancel, pause).await;
     }
 
     let bits_per_packet = (packet_size * 8) as u64;
@@ -218,7 +219,23 @@ pub async fn send_udp_paced(
             break;
         }
 
-        ticker.tick().await;
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            continue;
+        }
+
+        // Wait for ticker, interruptible by cancel/pause
+        tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                if *cancel.borrow() { break; }
+                continue;
+            }
+            _ = pause.changed() => { continue; } // re-check at top
+            _ = ticker.tick() => {}
+        }
 
         // Duration::ZERO means infinite - only check deadline if finite
         if !is_infinite && Instant::now() >= deadline {
@@ -227,6 +244,9 @@ pub async fn send_udp_paced(
 
         // Send packets_per_tick packets in this burst
         for _ in 0..packets_per_tick {
+            if *cancel.borrow() || *pause.borrow() {
+                break;
+            }
             if !is_infinite && Instant::now() >= deadline {
                 break;
             }
@@ -269,7 +289,8 @@ async fn send_udp_unlimited(
     target: Option<SocketAddr>,
     duration: Duration,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
     let mut sequence: u64 = 0;
@@ -287,6 +308,13 @@ async fn send_udp_unlimited(
             break;
         }
 
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            continue;
+        }
+
         // Duration::ZERO means infinite - only check deadline if finite
         if !is_infinite && Instant::now() >= deadline {
             break;
@@ -294,6 +322,9 @@ async fn send_udp_unlimited(
 
         // Send a burst of packets before yielding
         for _ in 0..BURST_SIZE {
+            if *cancel.borrow() || *pause.borrow() {
+                break;
+            }
             if !is_infinite && Instant::now() >= deadline {
                 break;
             }
@@ -335,7 +366,8 @@ async fn send_udp_unlimited(
 pub async fn receive_udp(
     socket: Arc<UdpSocket>,
     stats: Arc<StreamStats>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<(UdpStats, u64)> {
     let mut buffer = vec![0u8; UDP_PAYLOAD_SIZE + 100];
     let mut jitter_calc = JitterCalculator::new();
@@ -347,6 +379,14 @@ pub async fn receive_udp(
         if *cancel.borrow() {
             debug!("UDP receive cancelled");
             break;
+        }
+
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            last_recv = Instant::now();
+            continue;
         }
 
         // Check for client inactivity (handles abrupt disconnects)

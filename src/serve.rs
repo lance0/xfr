@@ -111,6 +111,8 @@ struct ActiveTest {
     #[allow(dead_code)]
     cancel_tx: watch::Sender<bool>,
     #[allow(dead_code)]
+    pause_tx: watch::Sender<bool>,
+    #[allow(dead_code)]
     data_ports: Vec<u16>,
     /// Channel for receiving data connections in single-port TCP mode
     #[allow(dead_code)]
@@ -1288,6 +1290,7 @@ async fn run_quic_test(
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (pause_tx, pause_rx) = watch::channel(false);
 
     // Store active test
     {
@@ -1297,6 +1300,7 @@ async fn run_quic_test(
             ActiveTest {
                 stats: stats.clone(),
                 cancel_tx,
+                pause_tx,
                 data_ports: vec![],
                 data_stream_tx: None,
                 control_peer_ip: peer_addr.ip(),
@@ -1327,6 +1331,7 @@ async fn run_quic_test(
     for i in 0..streams {
         let stream_stats = stats.streams[i as usize].clone();
         let cancel = cancel_rx.clone();
+        let pause = pause_rx.clone();
         let conn = connection.clone();
 
         let handle = tokio::spawn(async move {
@@ -1356,7 +1361,8 @@ async fn run_quic_test(
                     match conn.open_uni().await {
                         Ok(send) => {
                             if let Err(e) =
-                                quic::send_quic_data(send, stream_stats, duration, cancel).await
+                                quic::send_quic_data(send, stream_stats, duration, cancel, pause)
+                                    .await
                             {
                                 debug!("QUIC send ended: {}", e);
                             }
@@ -1383,10 +1389,17 @@ async fn run_quic_test(
                         let recv_stats = stream_stats;
                         let send_cancel = cancel.clone();
                         let recv_cancel = cancel;
+                        let send_pause = pause;
 
                         let send_handle = tokio::spawn(async move {
-                            let _ =
-                                quic::send_quic_data(send, send_stats, duration, send_cancel).await;
+                            let _ = quic::send_quic_data(
+                                send,
+                                send_stats,
+                                duration,
+                                send_cancel,
+                                send_pause,
+                            )
+                            .await;
                         });
 
                         let recv_handle = tokio::spawn(async move {
@@ -1452,21 +1465,36 @@ async fn run_quic_test(
 
         if let Ok(Ok(n)) = read_result
             && n > 0
-            && let Ok(ControlMessage::Cancel {
-                id: cancel_id,
-                reason,
-            }) = ControlMessage::deserialize(line.trim())
-            && cancel_id == id
         {
-            info!("QUIC test {} cancelled: {}", id, reason);
-            if let Some(test) = active_tests.lock().await.get(id) {
-                let _ = test.cancel_tx.send(true);
+            match ControlMessage::deserialize(line.trim()) {
+                Ok(ControlMessage::Cancel {
+                    id: cancel_id,
+                    reason,
+                }) if cancel_id == id => {
+                    info!("QUIC test {} cancelled: {}", id, reason);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.cancel_tx.send(true);
+                    }
+                    let cancelled = ControlMessage::Cancelled { id: id.to_string() };
+                    ctrl_send
+                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                        .await?;
+                    break;
+                }
+                Ok(ControlMessage::Pause { id: pause_id }) if pause_id == id => {
+                    info!("QUIC test {} paused", id);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.pause_tx.send(true);
+                    }
+                }
+                Ok(ControlMessage::Resume { id: resume_id }) if resume_id == id => {
+                    info!("QUIC test {} resumed", id);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.pause_tx.send(false);
+                    }
+                }
+                _ => {}
             }
-            let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-            ctrl_send
-                .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
-                .await?;
-            break;
         }
     }
 
@@ -1570,6 +1598,7 @@ async fn run_test(
 
     // Create cancel channel early so fallback listeners can use it
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (pause_tx, pause_rx) = watch::channel(false);
 
     let (data_stream_tx, data_stream_rx) = match protocol {
         Protocol::Tcp if client_supports_single_port => {
@@ -1650,6 +1679,7 @@ async fn run_test(
             ActiveTest {
                 stats: stats.clone(),
                 cancel_tx,
+                pause_tx,
                 data_ports: data_ports.clone(),
                 data_stream_tx,
                 control_peer_ip: peer_addr.ip(),
@@ -1695,6 +1725,7 @@ async fn run_test(
             if let Some(rx) = data_stream_rx {
                 let stats_clone = stats.clone();
                 let cancel_clone = cancel_rx.clone();
+                let pause_clone = pause_rx.clone();
                 let handle = tokio::spawn(async move {
                     spawn_tcp_stream_handlers(
                         rx,
@@ -1705,6 +1736,7 @@ async fn run_test(
                         cancel_clone,
                         congestion.clone(),
                         bitrate,
+                        pause_clone,
                     )
                     .await
                 });
@@ -1721,6 +1753,7 @@ async fn run_test(
                 duration,
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
                 cancel_rx.clone(),
+                pause_rx.clone(),
             )
             .await;
             (None, handles)
@@ -1773,27 +1806,42 @@ async fn run_test(
             }
         }
 
-        // Check for cancel message (bounded read)
+        // Check for cancel/pause/resume messages (bounded read)
         let read_result =
             tokio::time::timeout(CANCEL_CHECK_TIMEOUT, read_bounded_line(reader, &mut line)).await;
 
         if let Ok(Ok(n)) = read_result
             && n > 0
-            && let Ok(ControlMessage::Cancel {
-                id: cancel_id,
-                reason,
-            }) = ControlMessage::deserialize(line.trim())
-            && cancel_id == id
         {
-            info!("Test {} cancelled: {}", id, reason);
-            if let Some(test) = active_tests.lock().await.get(id) {
-                let _ = test.cancel_tx.send(true);
+            match ControlMessage::deserialize(line.trim()) {
+                Ok(ControlMessage::Cancel {
+                    id: cancel_id,
+                    reason,
+                }) if cancel_id == id => {
+                    info!("Test {} cancelled: {}", id, reason);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.cancel_tx.send(true);
+                    }
+                    let cancelled = ControlMessage::Cancelled { id: id.to_string() };
+                    writer
+                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                        .await?;
+                    break;
+                }
+                Ok(ControlMessage::Pause { id: pause_id }) if pause_id == id => {
+                    info!("Test {} paused", id);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.pause_tx.send(true);
+                    }
+                }
+                Ok(ControlMessage::Resume { id: resume_id }) if resume_id == id => {
+                    info!("Test {} resumed", id);
+                    if let Some(test) = active_tests.lock().await.get(id) {
+                        let _ = test.pause_tx.send(false);
+                    }
+                }
+                _ => {}
             }
-            let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-            writer
-                .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
-                .await?;
-            break;
         }
     }
 
@@ -1933,7 +1981,7 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 /// Legacy multi-port TCP handler (kept for potential fallback)
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 async fn spawn_tcp_handlers(
     listeners: Vec<TcpListener>,
     stats: Arc<TestStats>,
@@ -1942,6 +1990,7 @@ async fn spawn_tcp_handlers(
     cancel: watch::Receiver<bool>,
     congestion: Option<String>,
     bitrate: Option<u64>,
+    pause: watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
     let num_streams = listeners.len().max(1) as u64;
     let per_stream_bitrate = bitrate.map(|b| if b == 0 { 0 } else { (b / num_streams).max(1) });
@@ -1949,6 +1998,7 @@ async fn spawn_tcp_handlers(
 
     for (i, listener) in listeners.into_iter().enumerate() {
         let cancel = cancel.clone();
+        let pause = pause.clone();
         let stream_stats = stats.streams[i].clone();
         let test_stats = stats.clone();
         let congestion = congestion.clone();
@@ -2004,6 +2054,7 @@ async fn spawn_tcp_handlers(
                         config,
                         cancel,
                         per_stream_bitrate,
+                        pause,
                     )
                     .await
                     {
@@ -2028,6 +2079,7 @@ async fn spawn_tcp_handlers(
                     let final_stats = stream_stats.clone();
                     let send_cancel = cancel.clone();
                     let recv_cancel = cancel;
+                    let send_pause = pause;
 
                     let send_config = TcpConfig {
                         buffer_size: config.buffer_size,
@@ -2045,6 +2097,7 @@ async fn spawn_tcp_handlers(
                             send_config,
                             send_cancel,
                             per_stream_bitrate,
+                            send_pause,
                         )
                         .await
                     });
@@ -2086,6 +2139,7 @@ async fn spawn_tcp_stream_handlers(
     cancel: watch::Receiver<bool>,
     congestion: Option<String>,
     bitrate: Option<u64>,
+    pause: watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
     let per_stream_bitrate = bitrate.map(|b| {
         if b == 0 {
@@ -2146,6 +2200,7 @@ async fn spawn_tcp_stream_handlers(
                 received[i] = true;
 
                 let cancel = cancel.clone();
+                let pause = pause.clone();
                 let stream_stats = stats.streams[i].clone();
                 let test_stats = stats.clone();
 
@@ -2184,6 +2239,7 @@ async fn spawn_tcp_stream_handlers(
                                 config,
                                 cancel,
                                 per_stream_bitrate,
+                                pause,
                             )
                             .await
                             {
@@ -2205,6 +2261,7 @@ async fn spawn_tcp_stream_handlers(
                             let final_stats = stream_stats.clone();
                             let send_cancel = cancel.clone();
                             let recv_cancel = cancel;
+                            let send_pause = pause;
                             let send_config = config.clone();
                             let recv_config = config;
 
@@ -2216,6 +2273,7 @@ async fn spawn_tcp_stream_handlers(
                                     send_config,
                                     send_cancel,
                                     per_stream_bitrate,
+                                    send_pause,
                                 )
                                 .await
                             });
@@ -2268,6 +2326,7 @@ async fn spawn_udp_handlers(
     duration: Duration,
     bitrate: u64,
     cancel: watch::Receiver<bool>,
+    pause: watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -2285,13 +2344,14 @@ async fn spawn_udp_handlers(
         let stream_stats = stats.streams[i].clone();
         let test_stats = stats.clone();
         let cancel = cancel.clone();
+        let pause = pause.clone();
 
         let handle = tokio::spawn(async move {
             match direction {
                 Direction::Upload => {
                     // Server receives UDP - capture stats
                     if let Ok((udp_stats, _bytes)) =
-                        udp::receive_udp(socket, stream_stats, cancel).await
+                        udp::receive_udp(socket, stream_stats, cancel, pause).await
                     {
                         test_stats.add_udp_stats(udp_stats);
                     }
@@ -2308,6 +2368,7 @@ async fn spawn_udp_handlers(
                                 duration,
                                 stream_stats,
                                 cancel,
+                                pause,
                             )
                             .await;
                         }
@@ -2327,6 +2388,8 @@ async fn spawn_udp_handlers(
                             let recv_stats = stream_stats;
                             let send_cancel = cancel.clone();
                             let recv_cancel = cancel;
+                            let send_pause = pause.clone();
+                            let recv_pause = pause;
                             let test_stats_copy = test_stats.clone();
 
                             let send_handle = tokio::spawn(async move {
@@ -2337,13 +2400,19 @@ async fn spawn_udp_handlers(
                                     duration,
                                     send_stats,
                                     send_cancel,
+                                    send_pause,
                                 )
                                 .await;
                             });
 
                             let recv_handle = tokio::spawn(async move {
-                                if let Ok((udp_stats, _bytes)) =
-                                    udp::receive_udp(recv_socket, recv_stats, recv_cancel).await
+                                if let Ok((udp_stats, _bytes)) = udp::receive_udp(
+                                    recv_socket,
+                                    recv_stats,
+                                    recv_cancel,
+                                    recv_pause,
+                                )
+                                .await
                                 {
                                     test_stats_copy.add_udp_stats(udp_stats);
                                 }

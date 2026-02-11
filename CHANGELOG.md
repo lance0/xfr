@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-02-11
+
+### Added
+- **Real pause/resume** (`p` key) - pressing `p` now pauses actual data transfer, not just the TUI display. Uses `Pause`/`Resume` protocol messages and a dedicated `watch` channel to stop/resume data loops across TCP, UDP, and QUIC. Capability-gated via `pause_resume` in Hello messages: older servers without support fall back to display-only pause. TCP bitrate pacing resets its baseline on resume to prevent catch-up bursts. UDP receiver resets its inactivity timer during pause to prevent false timeouts. Resolves issue #19.
+
 ## [0.6.1] - 2026-02-10
 
 ### Added
@@ -340,6 +345,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
+[0.7.0]: https://github.com/lance0/xfr/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/lance0/xfr/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/lance0/xfr/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lance0/xfr/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/lance0/xfr/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/lance0/xfr/compare/v0.4.2...v0.4.3

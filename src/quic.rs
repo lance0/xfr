@@ -174,7 +174,8 @@ pub async fn send_quic_data(
     mut send: SendStream,
     stats: Arc<StreamStats>,
     duration: Duration,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
+    mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
     let deadline = tokio::time::Instant::now() + duration;
@@ -184,6 +185,13 @@ pub async fn send_quic_data(
         if *cancel.borrow() {
             debug!("QUIC send cancelled");
             break;
+        }
+
+        if *pause.borrow() {
+            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+                break;
+            }
+            continue;
         }
 
         // Duration::ZERO means infinite - only check deadline if finite

@@ -372,8 +372,14 @@ impl App {
 
     pub fn toggle_pause(&mut self) {
         match self.state {
-            AppState::Running => self.state = AppState::Paused,
-            AppState::Paused => self.state = AppState::Running,
+            AppState::Running => {
+                self.state = AppState::Paused;
+                self.log("Test paused");
+            }
+            AppState::Paused => {
+                self.state = AppState::Running;
+                self.log("Test resumed");
+            }
             _ => {}
         }
     }

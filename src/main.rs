@@ -33,8 +33,10 @@ struct OutputOptions {
     interval_secs: f64,
     timestamp_format: TimestampFormat,
 }
+use xfr::client::PauseResult;
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
+use xfr::tui::app::AppState;
 use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
 use xfr::tui::settings::SettingsAction;
 use xfr::tui::{App, draw};
@@ -1138,7 +1140,32 @@ async fn run_tui_loop(
                     return Ok((app.result, prefs, print_json_on_exit));
                 }
                 KeyCode::Char('p') => {
-                    app.toggle_pause();
+                    match client.pause() {
+                        PauseResult::Applied => {
+                            app.toggle_pause();
+                        }
+                        PauseResult::Unsupported => {
+                            // UI-only: server doesn't support pause/resume
+                            match app.state {
+                                AppState::Running => {
+                                    app.state = AppState::Paused;
+                                    app.log(
+                                        "Display paused (server does not support pause/resume)",
+                                    );
+                                }
+                                AppState::Paused => {
+                                    app.state = AppState::Running;
+                                    app.log(
+                                        "Display resumed (server does not support pause/resume)",
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                        PauseResult::NotReady => {
+                            // Test not running yet or already finished — ignore
+                        }
+                    }
                 }
                 KeyCode::Char('t') => {
                     app.cycle_theme();
