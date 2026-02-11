@@ -169,6 +169,7 @@
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 
 ### Medium Effort (moderate effort, high impact)
+- [ ] **Pause/resume** (`p` key) - real traffic pause via `Pause`/`Resume` protocol messages and a second `watch` channel to data loops; currently display-only (issue #19). ~200 lines across 6 files
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
 - [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. Scope: single flag, simple A-F grade output, not a full latency monitoring suite
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
