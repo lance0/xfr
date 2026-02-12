@@ -124,6 +124,9 @@
 - [x] **Pre-handshake connection gate** - limits concurrent unclassified connections to prevent connection-flood DoS
 - [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
+### Polish
+- [ ] **Suppress send errors on graceful shutdown** - TCP shows `Connection reset by peer (os error 104)`, UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy
+
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
 - [x] **Fix PSK unwrap panics** - serve.rs PSK `.unwrap()` replaced with `.ok_or_else()` error propagation
