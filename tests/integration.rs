@@ -1240,6 +1240,58 @@ async fn test_udp_cport_dualstack_ipv6_target() {
 }
 
 #[tokio::test]
+async fn test_quic_cport_dualstack_ipv6_target() {
+    // Regression test: QUIC with --cport in dual-stack mode should work with IPv6 targets.
+    let port = get_test_port();
+    let cport = get_test_port();
+
+    let server_cfg = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(server_cfg);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::DualStack,
+        bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
+        sequential_ports: false,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC --cport IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC dual-stack --cport should succeed with IPv6 target: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn test_udp_invalid_sequential_ports_config_fails() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
