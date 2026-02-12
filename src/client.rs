@@ -693,6 +693,14 @@ impl Client {
             (bitrate / self.config.streams as u64).max(1)
         };
 
+        if data_ports.len() != self.config.streams as usize {
+            return Err(anyhow::anyhow!(
+                "Server returned {} data ports but {} streams were requested",
+                data_ports.len(),
+                self.config.streams
+            ));
+        }
+
         for (i, &port) in data_ports.iter().enumerate() {
             let server_port = SocketAddr::new(server_addr.ip(), port);
             let stream_stats = stats.streams[i].clone();
