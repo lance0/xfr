@@ -38,7 +38,7 @@ See [Installation](#installation) below for setup instructions.
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP, UDP, and QUIC** with configurable bitrate pacing and parallel streams
-- **Single-port TCP** - firewall-friendly, only port 5201 needed (no ephemeral data ports)
+- **Firewall-friendly** - single-port TCP, QUIC multiplexing, and `--cport` for pinning UDP/QUIC source ports
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
 - **Result comparison** - `xfr diff` to detect performance regressions
@@ -53,7 +53,7 @@ See [Installation](#installation) below for setup instructions.
 |---------|--------|-----|
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
-| Single-port TCP | No (needs ephemeral ports) | Yes (only port 5201) |
+| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP + `--cport` (UDP/QUIC) |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
 | Compare runs | No | `xfr diff` |
@@ -388,6 +388,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
+| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
@@ -491,7 +492,7 @@ xfr serve -p 9000
 
 ### Connection refused
 
-Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open -- no additional ephemeral data ports are needed. For UDP, each stream uses a separate port allocated by the server.
+Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open -- no additional ephemeral data ports are needed. For UDP behind strict firewalls, use `--cport` to pin client source ports, or use QUIC which multiplexes on a single port.
 
 ### Low throughput
 

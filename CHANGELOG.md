@@ -5,10 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-02-12
 
 ### Added
-- **Client source port pinning** (`--cport`) - pin the client's local port for firewall traversal (issue #16). Works with UDP and QUIC. Multi-stream UDP (`-P N`) assigns sequential ports starting from the specified port (e.g., `--cport 5300 -P 4` uses ports 5300-5303). QUIC multiplexes all streams on the single specified port. TCP rejects `--cport` since single-port mode already handles firewall traversal. Combines with `--bind` for full control (`--bind 10.0.0.1 --cport 5300`).
+- **Client source port pinning** (`--cport`) - pin the client's local port for firewall traversal (issue #16). Works with UDP and QUIC. Multi-stream UDP (`-P N`) assigns sequential ports starting from the specified port (e.g., `--cport 5300 -P 4` uses ports 5300-5303). QUIC multiplexes all streams on the single specified port. TCP rejects `--cport` since single-port mode already handles firewall traversal. Combines with `--bind` for full control (`--bind 10.0.0.1 --cport 5300`). Automatically matches the remote's address family so `--cport` works transparently with both IPv4 and IPv6 targets.
+
+### Fixed
+- **`--bind` with IPv6 targets** — `--bind` with an unspecified IP (e.g., `0.0.0.0:0`) now auto-matches the remote's address family at socket creation time across TCP, UDP, and QUIC. Previously failed when connecting to IPv6 targets from dual-stack clients.
+- **UDP data_ports length validation** — server returning mismatched port count could panic on `stats.streams[i]`; now validates length before iterating, matching the existing TCP guard
 
 ## [0.7.1] - 2026-02-12
 
@@ -361,6 +365,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
+[0.8.0]: https://github.com/lance0/xfr/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/lance0/xfr/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/lance0/xfr/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/lance0/xfr/compare/v0.6.0...v0.6.1
