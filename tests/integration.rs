@@ -1,5 +1,6 @@
 //! Integration tests for xfr
 
+use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -53,6 +54,7 @@ async fn test_tcp_single_stream() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -89,6 +91,7 @@ async fn test_tcp_multi_stream() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -118,6 +121,7 @@ async fn test_connection_refused() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -147,6 +151,7 @@ async fn test_tcp_download() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -181,6 +186,7 @@ async fn test_tcp_bidir() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -215,6 +221,7 @@ async fn test_udp_upload() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -250,6 +257,7 @@ async fn test_udp_download() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -282,6 +290,7 @@ async fn test_udp_bidir() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -316,6 +325,7 @@ async fn test_udp_multi_stream() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -355,6 +365,7 @@ async fn test_multi_client_concurrent() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let config2 = ClientConfig {
@@ -371,6 +382,7 @@ async fn test_multi_client_concurrent() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client1 = Client::new(config1);
@@ -453,6 +465,7 @@ async fn test_psk_auth_success() {
         psk: Some(psk),
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -491,6 +504,7 @@ async fn test_psk_auth_failure() {
         psk: Some("wrong-secret".to_string()),
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -529,6 +543,7 @@ async fn test_psk_auth_missing_client_key() {
         psk: None, // No PSK provided
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -565,6 +580,7 @@ async fn test_acl_allow() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -598,6 +614,7 @@ async fn test_rate_limit() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client1 = Client::new(config1.clone());
@@ -621,6 +638,7 @@ async fn test_rate_limit() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client2 = Client::new(config2);
@@ -665,6 +683,7 @@ async fn test_quic_upload() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -700,6 +719,7 @@ async fn test_quic_download() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -734,6 +754,7 @@ async fn test_quic_multi_stream() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -772,6 +793,7 @@ async fn test_quic_bidir() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -807,6 +829,7 @@ async fn test_quic_with_psk() {
         psk: Some(psk),
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -844,6 +867,7 @@ async fn test_acl_deny() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -896,6 +920,7 @@ async fn test_ipv6_localhost() {
         psk: None,
         address_family: xfr::net::AddressFamily::V6Only,
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -935,6 +960,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -982,6 +1008,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1025,6 +1052,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1090,6 +1118,7 @@ async fn test_udp_ipv4_explicit() {
         psk: None,
         address_family: xfr::net::AddressFamily::V4Only,
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1142,6 +1171,7 @@ async fn test_udp_ipv6_explicit() {
         psk: None,
         address_family: xfr::net::AddressFamily::V6Only,
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1153,6 +1183,98 @@ async fn test_udp_ipv6_explicit() {
         result.is_ok(),
         "UDP with explicit IPv6 should succeed: {:?}",
         result
+    );
+}
+
+#[tokio::test]
+async fn test_udp_cport_dualstack_ipv6_target() {
+    // Regression test: --cport in dual-stack mode should work with IPv6 targets.
+    // Control TCP bind starts as 0.0.0.0:PORT and must be re-familied to [::]:PORT.
+    let port = get_test_port();
+    let cport = get_test_port();
+
+    let server_cfg = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(server_cfg);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(100_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::DualStack,
+        bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
+        sequential_ports: false,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "UDP --cport IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "UDP dual-stack --cport should succeed with IPv6 target: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_udp_invalid_sequential_ports_config_fails() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // This config can only be built through library usage (CLI prevents it).
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 4,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        bitrate: Some(1_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: true,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Invalid config test should complete");
+    let result = result.unwrap();
+    assert!(result.is_err(), "Invalid sequential config should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("sequential_ports"),
+        "Error should mention sequential_ports, got: {}",
+        err
     );
 }
 
@@ -1183,6 +1305,7 @@ async fn test_udp_bitrate_underflow_regression() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1249,6 +1372,7 @@ async fn test_quic_ipv6() {
         psk: None,
         address_family: xfr::net::AddressFamily::DualStack, // Default, was broken
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1301,6 +1425,7 @@ async fn test_tcp_one_off_multi_stream() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1362,6 +1487,7 @@ async fn test_quic_one_off() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1402,6 +1528,7 @@ fn test_pause_not_ready_before_test_run() {
         psk: None,
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
+        sequential_ports: false,
     };
 
     let client = Client::new(config);
@@ -1409,5 +1536,25 @@ fn test_pause_not_ready_before_test_run() {
         client.pause(),
         xfr::client::PauseResult::NotReady,
         "pause() should return NotReady before capability negotiation"
+    );
+}
+
+#[test]
+fn test_cli_cport_overflow_error_message() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "-u", "--cport", "65535", "-P", "2", "--no-tui"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "command should fail when --cport range overflows"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires ports 65535-65536, which exceeds 65535"),
+        "unexpected stderr: {}",
+        stderr
     );
 }

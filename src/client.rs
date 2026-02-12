@@ -55,6 +55,8 @@ pub struct ClientConfig {
     pub address_family: AddressFamily,
     /// Local address to bind to
     pub bind_addr: Option<SocketAddr>,
+    /// Use sequential ports for multi-stream (--cport with -P)
+    pub sequential_ports: bool,
 }
 
 impl Default for ClientConfig {
@@ -73,6 +75,7 @@ impl Default for ClientConfig {
             psk: None,
             address_family: AddressFamily::default(),
             bind_addr: None,
+            sequential_ports: false,
         }
     }
 }
@@ -654,6 +657,31 @@ impl Client {
         cancel: watch::Receiver<bool>,
         pause: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
+        let base_bind_addr = if self.config.sequential_ports {
+            let addr = self.config.bind_addr.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid client config: sequential_ports requires bind_addr with a fixed port"
+                )
+            })?;
+            if addr.port() == 0 {
+                return Err(anyhow::anyhow!(
+                    "Invalid client config: sequential_ports requires a non-zero bind port"
+                ));
+            }
+            let max_port = u32::from(addr.port()) + data_ports.len().saturating_sub(1) as u32;
+            if max_port > u16::MAX as u32 {
+                return Err(anyhow::anyhow!(
+                    "Invalid client config: sequential_ports requires ports {}-{}, which exceeds {}",
+                    addr.port(),
+                    max_port,
+                    u16::MAX
+                ));
+            }
+            Some(addr)
+        } else {
+            self.config.bind_addr
+        };
+
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
 
         // Calculate per-stream bitrate, clamping to at least 1 bps to prevent
@@ -672,12 +700,22 @@ impl Client {
             let pause = pause.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
-            let bind_addr = self.config.bind_addr;
+            let bind_addr = if self.config.sequential_ports {
+                // --cport with multi-stream: assign sequential ports (cport, cport+1, ...)
+                base_bind_addr.map(|mut addr| {
+                    let stream_offset = i as u16;
+                    addr.set_port(addr.port() + stream_offset);
+                    addr
+                })
+            } else {
+                base_bind_addr
+            };
 
             tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
                 // macOS dual-stack sockets behave differently than Linux, so we match the server's family.
                 let socket = if let Some(local) = bind_addr {
+                    let local = net::match_bind_family(local, server_port);
                     match net::create_udp_socket_bound(local).await {
                         Ok(s) => Arc::new(s),
                         Err(e) => {

@@ -118,6 +118,23 @@ pub async fn create_udp_socket(port: u16, family: AddressFamily) -> io::Result<U
     Ok(udp)
 }
 
+/// Re-family a bind address to match the remote address's IP version.
+/// Preserves the port but swaps UNSPECIFIED IPv4 ↔ IPv6 as needed.
+/// If the bind IP is not unspecified (i.e., user specified a concrete IP), it is left unchanged.
+pub fn match_bind_family(bind: SocketAddr, remote: SocketAddr) -> SocketAddr {
+    if bind.ip().is_unspecified() && bind.is_ipv4() != remote.is_ipv4() {
+        // Swap unspecified address to match remote family
+        let ip = if remote.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        };
+        SocketAddr::new(ip, bind.port())
+    } else {
+        bind
+    }
+}
+
 /// Create a UDP socket bound to a specific address
 pub async fn create_udp_socket_bound(addr: SocketAddr) -> io::Result<UdpSocket> {
     let domain = if addr.is_ipv4() {
@@ -218,11 +235,10 @@ pub async fn connect_tcp(
 
     for addr in addrs {
         debug!("Trying to connect to {}", addr);
-        let result = if bind_addr.is_some() {
-            connect_tcp_with_bind(addr, bind_addr).await
-        } else {
-            TcpStream::connect(addr).await
-        };
+        // When bind IP is unspecified (0.0.0.0 / ::), match the remote family
+        // so dual-stack clients can connect across IPv4/IPv6 targets.
+        let local_bind = bind_addr.map(|local| match_bind_family(local, addr));
+        let result = connect_tcp_with_bind(addr, local_bind).await;
         match result {
             Ok(stream) => {
                 info!("Connected to {}", addr);
@@ -459,6 +475,35 @@ mod tests {
         assert_eq!(normalize_ip(v4_addr), normalize_ip(mapped_addr));
     }
 
+    #[test]
+    fn test_match_bind_family() {
+        // IPv4 bind + IPv6 remote → swap to IPv6 unspecified
+        let bind: SocketAddr = "0.0.0.0:5300".parse().unwrap();
+        let remote: SocketAddr = "[::1]:5201".parse().unwrap();
+        let result = match_bind_family(bind, remote);
+        assert!(result.is_ipv6());
+        assert_eq!(result.port(), 5300);
+        assert!(result.ip().is_unspecified());
+
+        // IPv6 bind + IPv4 remote → swap to IPv4 unspecified
+        let bind: SocketAddr = "[::]:5300".parse().unwrap();
+        let remote: SocketAddr = "192.168.1.1:5201".parse().unwrap();
+        let result = match_bind_family(bind, remote);
+        assert!(result.is_ipv4());
+        assert_eq!(result.port(), 5300);
+        assert!(result.ip().is_unspecified());
+
+        // Matching families → unchanged
+        let bind: SocketAddr = "0.0.0.0:5300".parse().unwrap();
+        let remote: SocketAddr = "192.168.1.1:5201".parse().unwrap();
+        assert_eq!(match_bind_family(bind, remote), bind);
+
+        // Concrete (non-unspecified) IP → unchanged even if family mismatches
+        let bind: SocketAddr = "10.0.0.1:5300".parse().unwrap();
+        let remote: SocketAddr = "[::1]:5201".parse().unwrap();
+        assert_eq!(match_bind_family(bind, remote), bind);
+    }
+
     #[tokio::test]
     async fn test_resolve_localhost_v4() {
         let addrs = resolve_host("localhost", 5201, AddressFamily::V4Only).unwrap();
@@ -472,5 +517,28 @@ mod tests {
         if let Ok(addrs) = resolve_host("localhost", 5201, AddressFamily::V6Only) {
             assert!(addrs.iter().all(|a| a.is_ipv6()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_connect_tcp_refamilies_unspecified_bind() {
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(_) => return, // IPv6 not configured in this environment
+        };
+        let port = listener.local_addr().unwrap().port();
+
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let result = connect_tcp("::1", port, AddressFamily::V6Only, Some(bind)).await;
+
+        assert!(
+            result.is_ok(),
+            "connect_tcp should re-family unspecified bind addr for IPv6 target"
+        );
+
+        let _ = accept_task.await;
     }
 }

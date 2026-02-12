@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Client source port pinning** (`--cport`) - pin the client's local port for firewall traversal (issue #16). Works with UDP and QUIC. Multi-stream UDP (`-P N`) assigns sequential ports starting from the specified port (e.g., `--cport 5300 -P 4` uses ports 5300-5303). QUIC multiplexes all streams on the single specified port. TCP rejects `--cport` since single-port mode already handles firewall traversal. Combines with `--bind` for full control (`--bind 10.0.0.1 --cport 5300`).
+
 ## [0.7.1] - 2026-02-12
 
 ### Fixed

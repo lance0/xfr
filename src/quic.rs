@@ -112,13 +112,16 @@ pub fn create_client_endpoint(
     client_config.transport_config(Arc::new(transport));
 
     // Use provided bind address, or match the remote address family
-    let bind_addr: SocketAddr = local_bind.unwrap_or_else(|| {
-        if remote_addr.is_ipv6() {
-            "[::]:0".parse().unwrap()
-        } else {
-            "0.0.0.0:0".parse().unwrap()
+    let bind_addr: SocketAddr = match local_bind {
+        Some(addr) => crate::net::match_bind_family(addr, remote_addr),
+        None => {
+            if remote_addr.is_ipv6() {
+                "[::]:0".parse().unwrap()
+            } else {
+                "0.0.0.0:0".parse().unwrap()
+            }
         }
-    });
+    };
 
     let mut endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_config);

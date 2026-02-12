@@ -266,6 +266,10 @@ struct Cli {
     /// Local address to bind to (e.g., 192.168.1.100 or 192.168.1.100:0)
     #[arg(long, value_name = "ADDR")]
     bind: Option<String>,
+
+    /// Client source port for firewall traversal (UDP/QUIC only)
+    #[arg(long, value_name = "PORT")]
+    cport: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -455,11 +459,13 @@ fn validate_bind_address(
     bind_addr: Option<std::net::SocketAddr>,
     protocol: xfr::protocol::Protocol,
     streams: u8,
+    has_cport: bool,
 ) -> anyhow::Result<()> {
     if let Some(addr) = bind_addr
         && addr.port() != 0
     {
         // TCP: explicit port causes EADDRINUSE (control + data both try to bind same port)
+        // (--cport + TCP is caught earlier with a better error message)
         if protocol == xfr::protocol::Protocol::Tcp {
             anyhow::bail!(
                 "Cannot use explicit bind port {} with TCP (control and data connections conflict). \
@@ -468,14 +474,16 @@ fn validate_bind_address(
                 addr.ip()
             );
         }
-        // UDP/QUIC with multiple streams: can't reuse same port for multiple sockets
-        if streams > 1 {
+        // UDP/QUIC with multiple streams: --cport uses sequential ports, --bind does not
+        if streams > 1 && !has_cport {
             anyhow::bail!(
                 "Cannot use explicit bind port {} with multiple streams (-P {}). \
-                 Use just the IP address (e.g., --bind {}) to let the OS assign ports.",
+                 Use just the IP address (e.g., --bind {}) to let the OS assign ports, \
+                 or use --cport {} for sequential port assignment.",
                 addr.port(),
                 streams,
-                addr.ip()
+                addr.ip(),
+                addr.port()
             );
         }
     }
@@ -789,14 +797,64 @@ async fn main() -> Result<()> {
             };
 
             // Parse bind address (can be "IP" or "IP:port")
-            let bind_addr = if let Some(ref bind_str) = cli.bind {
+            let mut bind_addr = if let Some(ref bind_str) = cli.bind {
                 Some(parse_bind_address(bind_str)?)
             } else {
                 None
             };
 
+            // Merge --cport into bind_addr
+            let cport = cli.cport;
+            if let Some(port) = cport {
+                if port == 0 {
+                    anyhow::bail!("--cport must be a non-zero port number");
+                }
+                if protocol == xfr::protocol::Protocol::Tcp {
+                    anyhow::bail!(
+                        "--cport is not supported with TCP. TCP already uses single-port mode \
+                         (all connections go through port {}).",
+                        cli.port
+                    );
+                }
+                // Validate port range for sequential multi-stream UDP
+                if protocol == xfr::protocol::Protocol::Udp && streams > 1 {
+                    let max_port = port as u32 + streams as u32 - 1;
+                    if max_port > 65535 {
+                        anyhow::bail!(
+                            "--cport {} with -P {} requires ports {}-{}, which exceeds 65535",
+                            port,
+                            streams,
+                            port,
+                            max_port
+                        );
+                    }
+                }
+                if let Some(ref addr) = bind_addr {
+                    if addr.port() != 0 {
+                        anyhow::bail!(
+                            "Cannot use --cport with --bind {}:{} (conflicting port). \
+                             Use --bind {} --cport {} instead.",
+                            addr.ip(),
+                            addr.port(),
+                            addr.ip(),
+                            port
+                        );
+                    }
+                    // --bind IP + --cport PORT → combine
+                    bind_addr = Some(std::net::SocketAddr::new(addr.ip(), port));
+                } else {
+                    // --cport only → use unspecified IP with the given port
+                    let ip = if client_address_family == xfr::net::AddressFamily::V6Only {
+                        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+                    } else {
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+                    };
+                    bind_addr = Some(std::net::SocketAddr::new(ip, port));
+                }
+            }
+
             // Validate bind address compatibility with protocol and stream count
-            validate_bind_address(bind_addr, protocol, streams)?;
+            validate_bind_address(bind_addr, protocol, streams, cport.is_some())?;
 
             let config = ClientConfig {
                 host: host.clone(),
@@ -812,6 +870,7 @@ async fn main() -> Result<()> {
                 psk: client_psk,
                 address_family: client_address_family,
                 bind_addr,
+                sequential_ports: protocol == Protocol::Udp && cport.is_some() && streams > 1,
             };
 
             // Determine output format
@@ -1520,7 +1579,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             5000,
         ));
-        let result = validate_bind_address(addr, Protocol::Tcp, 1);
+        let result = validate_bind_address(addr, Protocol::Tcp, 1, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("TCP"));
 
@@ -1529,11 +1588,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             0,
         ));
-        let result = validate_bind_address(addr, Protocol::Tcp, 1);
+        let result = validate_bind_address(addr, Protocol::Tcp, 1, false);
         assert!(result.is_ok());
 
         // TCP + no bind should work
-        let result = validate_bind_address(None, Protocol::Tcp, 4);
+        let result = validate_bind_address(None, Protocol::Tcp, 4, false);
         assert!(result.is_ok());
     }
 
@@ -1547,12 +1606,12 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             5000,
         ));
-        let result = validate_bind_address(addr, Protocol::Udp, 4);
+        let result = validate_bind_address(addr, Protocol::Udp, 4, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("multiple streams"));
 
         // UDP + explicit port + single stream should work
-        let result = validate_bind_address(addr, Protocol::Udp, 1);
+        let result = validate_bind_address(addr, Protocol::Udp, 1, false);
         assert!(result.is_ok());
 
         // UDP + port 0 + multiple streams should work
@@ -1560,7 +1619,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             0,
         ));
-        let result = validate_bind_address(addr, Protocol::Udp, 4);
+        let result = validate_bind_address(addr, Protocol::Udp, 4, false);
         assert!(result.is_ok());
     }
 
@@ -1574,11 +1633,39 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             5000,
         ));
-        let result = validate_bind_address(addr, Protocol::Quic, 4);
+        let result = validate_bind_address(addr, Protocol::Quic, 4, false);
         assert!(result.is_err());
 
         // QUIC + explicit port + single stream should work
-        let result = validate_bind_address(addr, Protocol::Quic, 1);
+        let result = validate_bind_address(addr, Protocol::Quic, 1, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_bind_address_cport() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use xfr::protocol::Protocol;
+
+        let addr = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 5300));
+
+        // --cport + TCP → error
+        let result = validate_bind_address(addr, Protocol::Tcp, 1, true);
+        assert!(result.is_err());
+
+        // --cport + UDP single stream → ok
+        let result = validate_bind_address(addr, Protocol::Udp, 1, true);
+        assert!(result.is_ok());
+
+        // --cport + UDP multi-stream → ok (sequential ports)
+        let result = validate_bind_address(addr, Protocol::Udp, 4, true);
+        assert!(result.is_ok());
+
+        // --cport + QUIC single stream → ok
+        let result = validate_bind_address(addr, Protocol::Quic, 1, true);
+        assert!(result.is_ok());
+
+        // --cport + QUIC multi-stream → ok (QUIC multiplexes on one socket)
+        let result = validate_bind_address(addr, Protocol::Quic, 4, true);
         assert!(result.is_ok());
     }
 

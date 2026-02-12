@@ -160,6 +160,21 @@ xfr <host> --bind [::1]                 # IPv6 address
 
 **Note:** TCP mode does not support explicit port binding (use IP only).
 
+## Client Source Port (`--cport`)
+
+Pin the client's local source port for firewall traversal (UDP and QUIC only):
+
+```bash
+xfr <host> -u --cport 5300              # UDP with source port 5300
+xfr <host> -u --cport 5300 -P 4         # 4 UDP streams on ports 5300-5303
+xfr <host> --quic --cport 5300          # QUIC with source port 5300
+xfr <host> --bind 10.0.0.1 --cport 5300 # Combine with --bind for IP + port
+```
+
+Multi-stream UDP assigns sequential ports starting from the specified port. QUIC multiplexes all streams on a single port, so only one port is needed regardless of `-P`.
+
+**Not supported with TCP** — TCP already uses single-port mode (all connections go through port 5201), so source port pinning is unnecessary. Stateful firewalls handle TCP ephemeral source ports automatically.
+
 ## Dual-Stack and IPv6 Support
 
 The server defaults to dual-stack mode, accepting both IPv4 and IPv6 connections on a single socket. You can restrict to a specific address family:
@@ -458,6 +473,7 @@ See `xfr --help` for complete CLI documentation.
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (IP or IP:port) |
+| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC only) |
 
 ### Server-Specific Flags
 

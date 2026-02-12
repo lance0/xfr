@@ -163,15 +163,53 @@
 - [x] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); just a `setsockopt` call. High demand for BBR vs CUBIC comparison on WAN/cloud links
 - [x] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
 - [x] **TCP bitrate pacing** (`-b` for TCP) - byte-budget sleep pacing with interruptible sleeps and buffer auto-capping; `-b` flag now applies to TCP and UDP (issue #14)
+- [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP uses sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [ ] **DSCP/TOS marking** (`--dscp`) - set IP_TOS on sockets for QoS policy testing; single `setsockopt` call, same pattern as `--congestion`. iperf3 has `-S`
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 
+### Firewall Traversal Decision Tree
+
+Issue #16 revealed that strict firewalls need predictable ports on both sides. Here's how xfr handles each protocol through firewalls:
+
+```
+Client behind strict firewall → which protocol?
+│
+├─ TCP
+│  └─ Already works ✓ (single-port mode since v0.5.0)
+│     All connections use destination port 5201.
+│     Stateful firewalls track ephemeral source ports automatically.
+│     --cport is rejected (not needed).
+│
+├─ QUIC
+│  └─ Already works ✓ through stateful firewalls (one UDP socket, multiplexed)
+│     --cport pins the local port for strict egress rules.
+│
+└─ UDP
+   ├─ Stateful firewall?
+   │  └─ Works if outbound traffic auto-allows return.
+   │     --cport pins the source port(s) for strict egress rules.
+   │     Multi-stream (-P N) uses sequential ports: cport, cport+1, ..., cport+N-1
+   │
+   └─ Strict ingress+egress (both sides pinned)?
+      └─ --cport handles the client source side.
+         Server control port is configurable via -p.
+         Server data ports are still ephemeral (random).
+         → Use QUIC as workaround (single port, multiplexed).
+         → Future: UDP single-port mode would multiplex all
+           streams through one port (like TCP's DataHello).
+```
+
+**Why not TCP `--cport`?** TCP already uses single-port mode — all connections go through the server port. The OS assigns ephemeral source ports, which any stateful firewall handles. Pinning TCP source ports would require `SO_REUSEADDR` tricks and could cause port conflicts with the server port.
+
+**Future work:** UDP single-port mode (multiplex all streams through one socket) would be the full solution for environments where even sequential ports aren't acceptable. This is a larger protocol change tracked separately.
+
 ### Medium Effort (moderate effort, high impact)
 - [x] **Pause/resume** (`p` key) - real traffic pause via `Pause`/`Resume` protocol messages and a second `watch` channel to data loops (v0.7.0, issue #19)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
 - [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. Scope: single flag, simple A-F grade output, not a full latency monitoring suite
+- [ ] **UDP single-port mode** - multiplex all UDP streams through a single port, eliminating per-stream port allocation. Analogous to TCP's DataHello approach. Would make UDP fully firewall-friendly without `--cport`
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
 
 ### Larger Projects (high effort, high impact)
