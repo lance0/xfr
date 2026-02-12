@@ -25,6 +25,7 @@ pub enum ServerEvent {
     AuthFailure,
 }
 
+use crate::stats::mbps_to_human;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -189,13 +190,7 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     ]);
     frame.render_widget(active, stats_chunks[0]);
 
-    // Current bandwidth
-    let bandwidth = app.current_bandwidth();
-    let bw_str = if bandwidth >= 1000.0 {
-        format!("{:.1} Gbps", bandwidth / 1000.0)
-    } else {
-        format!("{:.1} Mbps", bandwidth)
-    };
+    let bw_str = mbps_to_human(app.current_bandwidth());
     let bw_widget = Paragraph::new(vec![
         Line::from(Span::styled(
             "Bandwidth",
@@ -267,11 +262,7 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, area: Rect) {
         .iter()
         .map(|test| {
             let elapsed = test.started.elapsed().as_secs();
-            let throughput = if test.throughput_mbps >= 1000.0 {
-                format!("{:.1} Gbps", test.throughput_mbps / 1000.0)
-            } else {
-                format!("{:.1} Mbps", test.throughput_mbps)
-            };
+            let throughput = mbps_to_human(test.throughput_mbps);
 
             Row::new(vec![
                 test.client_ip.to_string(),

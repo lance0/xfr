@@ -84,6 +84,8 @@ pub struct TestProgress {
     pub streams: Vec<StreamInterval>,
     pub rtt_us: Option<u32>,
     pub cwnd: Option<u32>,
+    /// Cumulative retransmits from local TCP_INFO (sender-side, for upload/bidir)
+    pub total_retransmits: Option<u64>,
 }
 
 pub struct Client {
@@ -413,13 +415,27 @@ impl Client {
                     ..
                 } => {
                     if let Some(ref tx) = progress_tx {
+                        // Only overlay local TCP_INFO for sender-side contexts (Upload/Bidir).
+                        // In Download mode, server is the sender and has the correct metrics.
+                        let is_sender =
+                            matches!(self.config.direction, Direction::Upload | Direction::Bidir);
+                        let (rtt_us, cwnd, total_retransmits) = if is_sender {
+                            if let Some((rtt, retrans, cw)) = stats.poll_local_tcp_info() {
+                                (Some(rtt), Some(cw), Some(retrans))
+                            } else {
+                                (aggregate.rtt_us, aggregate.cwnd, None)
+                            }
+                        } else {
+                            (aggregate.rtt_us, aggregate.cwnd, None)
+                        };
                         let _ = tx
                             .send(TestProgress {
                                 elapsed_ms,
                                 total_bytes: aggregate.bytes,
                                 throughput_mbps: aggregate.throughput_mbps,
-                                rtt_us: aggregate.rtt_us,
-                                cwnd: aggregate.cwnd,
+                                rtt_us,
+                                cwnd,
+                                total_retransmits,
                                 streams,
                             })
                             .await;
@@ -526,12 +542,19 @@ impl Client {
                             }
                         }
 
+                        // Store fd for local TCP_INFO polling (sender-side only)
+                        #[cfg(unix)]
+                        if matches!(direction, Direction::Upload | Direction::Bidir) {
+                            use std::os::unix::io::AsRawFd;
+                            stream_stats.set_tcp_info_fd(stream.as_raw_fd());
+                        }
+
                         match direction {
                             Direction::Upload => {
                                 // Client sends data
                                 if let Err(e) = tcp::send_data(
                                     stream,
-                                    stream_stats,
+                                    stream_stats.clone(),
                                     duration,
                                     config,
                                     cancel,
@@ -546,7 +569,8 @@ impl Client {
                             Direction::Download => {
                                 // Client receives data
                                 if let Err(e) =
-                                    tcp::receive_data(stream, stream_stats, cancel, config).await
+                                    tcp::receive_data(stream, stream_stats.clone(), cancel, config)
+                                        .await
                                 {
                                     error!("Receive error: {}", e);
                                 }
@@ -555,6 +579,7 @@ impl Client {
                                 // Configure socket BEFORE splitting (nodelay, window, buffers)
                                 if let Err(e) = tcp::configure_stream(&stream, &config) {
                                     error!("Failed to configure TCP socket: {}", e);
+                                    stream_stats.clear_tcp_info_fd();
                                     return;
                                 }
 
@@ -607,6 +632,7 @@ impl Client {
                                 let _ = tokio::join!(send_handle, recv_handle);
                             }
                         }
+                        stream_stats.clear_tcp_info_fd();
                     }
                     Err(e) => {
                         error!("Failed to connect to data port {}: {}", port, e);
@@ -1068,6 +1094,7 @@ impl Client {
                                 throughput_mbps: aggregate.throughput_mbps,
                                 rtt_us: aggregate.rtt_us,
                                 cwnd: aggregate.cwnd,
+                                total_retransmits: None,
                                 streams,
                             })
                             .await;

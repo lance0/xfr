@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::protocol::TestResult;
+use crate::stats::normalize_for_display;
 
 #[derive(Debug)]
 pub struct DiffConfig {
@@ -36,9 +37,9 @@ impl DiffResult {
 
         output.push_str(&format!(
             "Throughput: {:.1} Mbps → {:.1} Mbps ({:+.1}%)",
-            self.baseline.throughput_mbps,
-            self.current.throughput_mbps,
-            self.throughput_change_percent
+            normalize_for_display(self.baseline.throughput_mbps, 1),
+            normalize_for_display(self.current.throughput_mbps, 1),
+            normalize_for_display(self.throughput_change_percent, 1)
         ));
 
         if self.throughput_change_percent < -5.0 {
@@ -166,6 +167,18 @@ mod tests {
         let diff = compare(baseline, current, &DiffConfig::default());
         assert!(!diff.is_regression);
         assert!(diff.throughput_change_percent > 0.0);
+    }
+
+    #[test]
+    fn test_equal_throughput_no_negative_zero() {
+        let baseline = make_result(1000.0, 10, 1000);
+        let current = make_result(1000.0, 10, 1000);
+
+        let diff = compare(baseline, current, &DiffConfig::default());
+        let output = diff.format_plain();
+        // Should show +0.0%, not -0.0%
+        assert!(output.contains("+0.0%"), "got: {}", output);
+        assert!(!output.contains("-0.0"), "got: {}", output);
     }
 
     #[test]

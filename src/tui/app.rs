@@ -282,8 +282,12 @@ impl App {
             }
         }
 
-        // Sum retransmits
-        self.total_retransmits = self.streams.iter().map(|s| s.retransmits).sum();
+        // Use local TCP_INFO retransmits when available (sender-side), otherwise sum from server
+        if let Some(total) = progress.total_retransmits {
+            self.total_retransmits = total;
+        } else {
+            self.total_retransmits = self.streams.iter().map(|s| s.retransmits).sum();
+        }
 
         // Update live TCP_INFO from interval data
         if let Some(rtt) = progress.rtt_us {

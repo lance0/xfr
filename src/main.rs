@@ -899,7 +899,15 @@ async fn run_client_plain(
             }
             last_printed_interval = current_interval;
 
-            let retransmits = progress.streams.first().and_then(|s| s.retransmits);
+            let retransmits = progress.total_retransmits.or_else(|| {
+                // Return sum if any stream reports retransmits (even zero)
+                let has_any = progress.streams.iter().any(|s| s.retransmits.is_some());
+                if has_any {
+                    Some(progress.streams.iter().filter_map(|s| s.retransmits).sum())
+                } else {
+                    None
+                }
+            });
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
             let lost = progress.streams.first().and_then(|s| s.lost);
             let rtt_us = progress.rtt_us;

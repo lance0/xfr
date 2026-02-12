@@ -17,7 +17,7 @@ pub struct StreamStats {
     pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
     pub last_bytes: AtomicU64,
-    pub last_retransmits: AtomicU64,
+    pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
     pub udp_lost: AtomicU64,      // Total lost packets
@@ -48,7 +48,7 @@ impl StreamStats {
             intervals: Mutex::new(VecDeque::new()),
             retransmits: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
-            last_retransmits: AtomicU64::new(0),
+            last_tcp_retransmits: AtomicU64::new(0),
             udp_jitter_us: AtomicU64::new(0),
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
@@ -127,12 +127,6 @@ impl StreamStats {
         let last_bytes = self.last_bytes.swap(total_bytes, Ordering::Relaxed);
         let interval_bytes = total_bytes.saturating_sub(last_bytes);
 
-        let total_retransmits = self.retransmits.load(Ordering::Relaxed);
-        let last_retransmits = self
-            .last_retransmits
-            .swap(total_retransmits, Ordering::Relaxed);
-        let interval_retransmits = total_retransmits.saturating_sub(last_retransmits);
-
         let elapsed = now.duration_since(self.start_time);
         let intervals = self.intervals.lock();
         let interval_duration = if let Some(last) = intervals.back() {
@@ -154,7 +148,15 @@ impl StreamStats {
         let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
         let interval_lost = total_lost.saturating_sub(last_lost);
 
+        // TCP_INFO: live RTT, cwnd, and retransmit deltas
         let tcp_info = self.poll_tcp_info();
+        let interval_retransmits = if let Some(ref info) = tcp_info {
+            let total = info.retransmits;
+            let last = self.last_tcp_retransmits.swap(total, Ordering::Relaxed);
+            total.saturating_sub(last)
+        } else {
+            0
+        };
         let stats = IntervalStats {
             timestamp: now,
             bytes: interval_bytes,
@@ -352,6 +354,28 @@ impl TestStats {
         let infos = self.tcp_info.lock();
         infos.last().cloned()
     }
+
+    /// Poll local TCP_INFO across all streams for live client-side metrics.
+    /// Returns (avg_rtt_us, total_retransmits, total_cwnd) if any stream has a valid fd.
+    pub fn poll_local_tcp_info(&self) -> Option<(u32, u64, u32)> {
+        let mut rtt_sum = 0u64;
+        let mut retransmits = 0u64;
+        let mut cwnd = 0u32;
+        let mut count = 0u64;
+        for stream in &self.streams {
+            if let Some(info) = stream.poll_tcp_info() {
+                rtt_sum += info.rtt_us as u64;
+                retransmits += info.retransmits;
+                cwnd += info.cwnd;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            Some(((rtt_sum / count) as u32, retransmits, cwnd))
+        } else {
+            None
+        }
+    }
 }
 
 pub fn bytes_to_human(bytes: u64) -> String {
@@ -373,11 +397,23 @@ pub fn bytes_to_human(bytes: u64) -> String {
     }
 }
 
+/// Normalize a float for display at a given decimal precision.
+/// Handles both IEEE 754 `-0.0` and tiny negatives (e.g. `-1e-12`)
+/// that would round to `-0.0` at the given precision.
+#[inline]
+pub fn normalize_for_display(v: f64, decimals: i32) -> f64 {
+    let scale = 10f64.powi(decimals);
+    let rounded = (v * scale).round() / scale;
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
 pub fn mbps_to_human(mbps: f64) -> String {
-    if mbps >= 1000.0 {
-        format!("{:.2} Gbps", mbps / 1000.0)
+    // Branch on rounded value so e.g. 999.95 displays as "1.00 Gbps" not "1000.0 Mbps"
+    let rounded_1dp = normalize_for_display(mbps, 1);
+    if rounded_1dp >= 1000.0 {
+        format!("{:.2} Gbps", normalize_for_display(mbps / 1000.0, 2))
     } else {
-        format!("{:.1} Mbps", mbps)
+        format!("{:.1} Mbps", rounded_1dp)
     }
 }
 
@@ -405,5 +441,53 @@ mod tests {
     fn test_mbps_to_human() {
         assert_eq!(mbps_to_human(500.0), "500.0 Mbps");
         assert_eq!(mbps_to_human(1500.0), "1.50 Gbps");
+    }
+
+    #[test]
+    fn test_mbps_to_human_negative_zero() {
+        assert_eq!(mbps_to_human(-0.0), "0.0 Mbps");
+        assert_eq!(mbps_to_human(-0.0 / 1.0), "0.0 Mbps");
+    }
+
+    #[test]
+    fn test_mbps_to_human_boundary() {
+        // 999.95 rounds to 1000.0 at 1dp — should switch to Gbps
+        assert_eq!(mbps_to_human(999.95), "1.00 Gbps");
+        // 999.94 rounds to 999.9 — stays Mbps
+        assert_eq!(mbps_to_human(999.94), "999.9 Mbps");
+        // Exact boundary
+        assert_eq!(mbps_to_human(1000.0), "1.00 Gbps");
+        assert_eq!(mbps_to_human(999.9), "999.9 Mbps");
+    }
+
+    #[test]
+    fn test_normalize_for_display_special_values() {
+        // NaN propagates (not a display concern — throughput is never NaN)
+        assert!(normalize_for_display(f64::NAN, 1).is_nan());
+        // Infinity propagates
+        assert_eq!(normalize_for_display(f64::INFINITY, 1), f64::INFINITY);
+        assert_eq!(
+            normalize_for_display(f64::NEG_INFINITY, 1),
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn test_normalize_for_display() {
+        // Exact -0.0 normalizes to 0.0
+        assert_eq!(normalize_for_display(-0.0, 1), 0.0);
+        assert!(normalize_for_display(-0.0, 1).is_sign_positive());
+
+        // Tiny negative that rounds to zero at given precision
+        assert_eq!(normalize_for_display(-1e-12, 1), 0.0);
+        assert!(normalize_for_display(-1e-12, 1).is_sign_positive());
+
+        // Normal values pass through
+        assert_eq!(normalize_for_display(42.56, 1), 42.6);
+        assert_eq!(normalize_for_display(-5.3, 1), -5.3);
+
+        // Zero stays zero
+        assert_eq!(normalize_for_display(0.0, 1), 0.0);
+        assert!(normalize_for_display(0.0, 1).is_sign_positive());
     }
 }
