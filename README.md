@@ -532,6 +532,7 @@ Ensure the server is running and the port is not blocked by a firewall. TCP only
 
 - [Terminal Trove](https://terminaltrove.com/xfr/) - xfr listing and discovery
 - [AUR](https://aur.archlinux.org/packages/xfr-bin) - Arch Linux package (community-maintained)
+- [pkgsrc](https://pkgsrc.se/net/xfr) - NetBSD package (community-maintained)
 
 ## License
 
