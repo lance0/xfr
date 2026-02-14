@@ -140,6 +140,18 @@ curl -LO https://github.com/lance0/xfr/releases/latest/download/xfr-x86_64-unkno
 tar xzf xfr-*.tar.gz && sudo mv xfr /usr/local/bin/
 ```
 
+### eget
+
+```bash
+eget lance0/xfr
+```
+
+### Arch Linux (AUR)
+
+```bash
+yay -S xfr-bin
+```
+
 ### From Source
 
 ```bash
@@ -515,6 +527,11 @@ Ensure the server is running and the port is not blocked by a firewall. TCP only
 - [Known Issues](KNOWN_ISSUES.md) - Edge cases and limitations
 - [Roadmap](ROADMAP.md) - Planned features
 - [Contributing](CONTRIBUTING.md) - Development guidelines
+
+## See Also
+
+- [Terminal Trove](https://terminaltrove.com/xfr/) - xfr listing and discovery
+- [AUR](https://aur.archlinux.org/packages/xfr-bin) - Arch Linux package (community-maintained)
 
 ## License
 
