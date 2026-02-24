@@ -64,6 +64,31 @@ QUIC provides:
 
 **Security Note**: QUIC encrypts traffic but uses self-signed certificates by default. For authenticated connections, combine with `--psk` to prevent MITM attacks.
 
+### MPTCP (Multi-Path TCP)
+
+Multi-Path TCP enables a single connection to use multiple network paths simultaneously (e.g., WiFi + Ethernet, or multiple WAN links). Requires Linux 5.6+ with `CONFIG_MPTCP=y`.
+
+```bash
+# Server
+xfr serve --mptcp
+
+# Client
+xfr <host> --mptcp                    # MPTCP single stream
+xfr <host> --mptcp -P 4               # MPTCP with 4 parallel streams
+xfr <host> --mptcp --bidir            # MPTCP bidirectional
+xfr <host> --mptcp --congestion bbr   # MPTCP with BBR congestion control
+```
+
+MPTCP is transparent at the application layer — all TCP features work unchanged:
+- Single-port mode, multi-stream, bidirectional
+- TCP_INFO stats (RTT, retransmits, cwnd)
+- Congestion control, window size, nodelay
+- PSK authentication
+
+**Mixed-mode operation**: If only one side uses `--mptcp`, the kernel falls back to regular TCP automatically. Both sides need `--mptcp` for actual multi-path behavior.
+
+**Platform**: Linux only. Non-Linux platforms receive a clear error message. The kernel must have MPTCP enabled (`CONFIG_MPTCP=y`, default on most modern distros).
+
 ## Protocol
 
 ### Version and Compatibility
@@ -474,6 +499,7 @@ See `xfr --help` for complete CLI documentation.
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (IP or IP:port) |
 | `--cport` | | none | Client source port for firewall traversal (UDP/QUIC only) |
+| `--mptcp` | | false | MPTCP mode (Multi-Path TCP, Linux 5.6+) |
 
 ### Server-Specific Flags
 
@@ -489,3 +515,4 @@ See `xfr --help` for complete CLI documentation.
 | `--psk-file` | none | Read PSK from file |
 | `--push-gateway` | none | Prometheus Push Gateway URL |
 | `--prometheus` | none | Metrics endpoint port |
+| `--mptcp` | false | Enable MPTCP for TCP listeners (Linux 5.6+) |

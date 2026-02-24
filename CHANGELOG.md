@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. Both client and server support `--mptcp`; mixed-mode connections (one side MPTCP, other side regular TCP) fall back gracefully via the kernel. Clear error message on non-Linux or kernels without `CONFIG_MPTCP=y`.
+
 ## [0.8.0] - 2026-02-12
 
 ### Added

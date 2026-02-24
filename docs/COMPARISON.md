@@ -164,6 +164,7 @@ xfr uses its own control protocol (v1.1) over newline-delimited JSON messages. K
 | **TCP data ports** | Single port (DataHello routing) | Separate port per stream |
 | **Capability exchange** | Client/server Hello with capabilities list | None |
 | **Authentication** | PSK with HMAC challenge-response | PSK (RSA-based) |
+| **MPTCP support** | Yes (`--mptcp`, Linux 5.6+) | No |
 | **Transport encryption** | QUIC mode: TLS 1.3 built-in | None |
 
 ### Single-Port TCP Architecture

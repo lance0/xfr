@@ -37,7 +37,7 @@ See [Installation](#installation) below for setup instructions.
 - **Live TUI** with real-time throughput graphs and per-stream stats
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
-- **TCP, UDP, and QUIC** with configurable bitrate pacing and parallel streams
+- **TCP, UDP, QUIC, and MPTCP** with configurable bitrate pacing and parallel streams
 - **Firewall-friendly** - single-port TCP, QUIC multiplexing, and `--cport` for pinning UDP/QUIC source ports
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
@@ -53,6 +53,7 @@ See [Installation](#installation) below for setup instructions.
 |---------|--------|-----|
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
+| MPTCP | No | Yes (`--mptcp`, Linux 5.6+) |
 | Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP + `--cport` (UDP/QUIC) |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
@@ -401,6 +402,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
 | `--cport` | | none | Client source port for firewall traversal (UDP/QUIC) |
+| `--mptcp` | | false | MPTCP mode (Multi-Path TCP, Linux 5.6+) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
