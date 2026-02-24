@@ -66,19 +66,22 @@ impl std::fmt::Display for AddressFamily {
 }
 
 /// Get the socket protocol for TCP or MPTCP.
-/// Caller must validate platform via `validate_mptcp()` before passing `mptcp: true`.
-fn tcp_protocol(mptcp: bool) -> Protocol {
+/// Returns an error on non-Linux platforms when `mptcp: true`, safe for library use.
+fn tcp_protocol(mptcp: bool) -> io::Result<Protocol> {
     if mptcp {
         #[cfg(target_os = "linux")]
         {
-            Protocol::MPTCP
+            Ok(Protocol::MPTCP)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            unreachable!("MPTCP is only supported on Linux; callers must validate first")
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MPTCP is only supported on Linux (kernel 5.6+ with CONFIG_MPTCP=y)",
+            ))
         }
     } else {
-        Protocol::TCP
+        Ok(Protocol::TCP)
     }
 }
 
@@ -123,7 +126,7 @@ pub async fn create_tcp_listener(
     family: AddressFamily,
     mptcp: bool,
 ) -> io::Result<TcpListener> {
-    let socket = Socket::new(family.domain(), Type::STREAM, Some(tcp_protocol(mptcp)))
+    let socket = Socket::new(family.domain(), Type::STREAM, Some(tcp_protocol(mptcp)?))
         .map_err(|e| wrap_mptcp_error(e, mptcp))?;
 
     // Allow address reuse
@@ -329,7 +332,7 @@ pub async fn connect_tcp_with_bind(
         } else {
             Domain::IPV4
         };
-        let socket = Socket::new(domain, Type::STREAM, Some(tcp_protocol(mptcp)))
+        let socket = Socket::new(domain, Type::STREAM, Some(tcp_protocol(mptcp)?))
             .map_err(|e| wrap_mptcp_error(e, mptcp))?;
         socket.set_nonblocking(true)?;
 
@@ -347,7 +350,7 @@ pub async fn connect_tcp_with_bind(
                     || e.raw_os_error() == Some(libc::EWOULDBLOCK) => {}
             #[cfg(windows)]
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(wrap_mptcp_error(e, mptcp)),
         }
 
         // Convert to tokio TcpStream
@@ -359,7 +362,7 @@ pub async fn connect_tcp_with_bind(
 
         // Check for connection errors
         if let Some(e) = stream.take_error()? {
-            return Err(e);
+            return Err(wrap_mptcp_error(e, mptcp));
         }
 
         if let Some(local) = bind_addr {

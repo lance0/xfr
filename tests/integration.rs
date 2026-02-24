@@ -1746,6 +1746,70 @@ async fn test_mptcp_download() {
     assert!(result.unwrap().is_ok());
 }
 
+// Mixed-mode: MPTCP client → regular TCP server (kernel falls back to TCP)
+#[tokio::test]
+async fn test_mptcp_client_to_tcp_server() {
+    if !mptcp_available() {
+        return;
+    }
+    let port = get_test_port();
+    let _server = start_test_server(port).await; // regular TCP server
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        mptcp: true,
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    assert!(result.is_ok(), "MPTCP client to TCP server should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "MPTCP client to TCP server should succeed (kernel falls back): {:?}",
+        result
+    );
+}
+
+// Mixed-mode: regular TCP client → MPTCP server (kernel falls back to TCP)
+#[tokio::test]
+async fn test_tcp_client_to_mptcp_server() {
+    if !mptcp_available() {
+        return;
+    }
+    let port = get_test_port();
+    let _server = start_test_server_mptcp(port).await; // MPTCP server
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        mptcp: false, // regular TCP client
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    assert!(result.is_ok(), "TCP client to MPTCP server should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "TCP client to MPTCP server should succeed (kernel falls back): {:?}",
+        result
+    );
+}
+
 #[test]
 fn test_cli_mptcp_conflicts() {
     // --mptcp conflicts with --udp
