@@ -55,6 +55,7 @@ async fn test_tcp_single_stream() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -92,6 +93,7 @@ async fn test_tcp_multi_stream() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -122,6 +124,7 @@ async fn test_connection_refused() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -152,6 +155,7 @@ async fn test_tcp_download() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -187,6 +191,7 @@ async fn test_tcp_bidir() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -222,6 +227,7 @@ async fn test_udp_upload() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -258,6 +264,7 @@ async fn test_udp_download() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -291,6 +298,7 @@ async fn test_udp_bidir() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -326,6 +334,7 @@ async fn test_udp_multi_stream() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -366,6 +375,7 @@ async fn test_multi_client_concurrent() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let config2 = ClientConfig {
@@ -383,6 +393,7 @@ async fn test_multi_client_concurrent() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client1 = Client::new(config1);
@@ -466,6 +477,7 @@ async fn test_psk_auth_success() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -505,6 +517,7 @@ async fn test_psk_auth_failure() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -544,6 +557,7 @@ async fn test_psk_auth_missing_client_key() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -581,6 +595,7 @@ async fn test_acl_allow() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -615,6 +630,7 @@ async fn test_rate_limit() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client1 = Client::new(config1.clone());
@@ -639,6 +655,7 @@ async fn test_rate_limit() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client2 = Client::new(config2);
@@ -684,6 +701,7 @@ async fn test_quic_upload() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -720,6 +738,7 @@ async fn test_quic_download() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -755,6 +774,7 @@ async fn test_quic_multi_stream() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -794,6 +814,7 @@ async fn test_quic_bidir() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -830,6 +851,7 @@ async fn test_quic_with_psk() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -868,6 +890,7 @@ async fn test_acl_deny() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -921,6 +944,7 @@ async fn test_ipv6_localhost() {
         address_family: xfr::net::AddressFamily::V6Only,
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -961,6 +985,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1009,6 +1034,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1053,6 +1079,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1119,6 +1146,7 @@ async fn test_udp_ipv4_explicit() {
         address_family: xfr::net::AddressFamily::V4Only,
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1172,6 +1200,7 @@ async fn test_udp_ipv6_explicit() {
         address_family: xfr::net::AddressFamily::V6Only,
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1225,6 +1254,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         address_family: xfr::net::AddressFamily::DualStack,
         bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1277,6 +1307,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         address_family: xfr::net::AddressFamily::DualStack,
         bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1314,6 +1345,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: true,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1358,6 +1390,7 @@ async fn test_udp_bitrate_underflow_regression() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1425,6 +1458,7 @@ async fn test_quic_ipv6() {
         address_family: xfr::net::AddressFamily::DualStack, // Default, was broken
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1478,6 +1512,7 @@ async fn test_tcp_one_off_multi_stream() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1540,6 +1575,7 @@ async fn test_quic_one_off() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1581,6 +1617,7 @@ fn test_pause_not_ready_before_test_run() {
         address_family: xfr::net::AddressFamily::default(),
         bind_addr: None,
         sequential_ports: false,
+        mptcp: false,
     };
 
     let client = Client::new(config);
@@ -1589,6 +1626,141 @@ fn test_pause_not_ready_before_test_run() {
         xfr::client::PauseResult::NotReady,
         "pause() should return NotReady before capability negotiation"
     );
+}
+
+/// Check if MPTCP is available on this system
+fn mptcp_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use socket2::{Domain, Protocol, Socket, Type};
+        Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::MPTCP)).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+async fn start_test_server_mptcp(port: u16) -> tokio::task::JoinHandle<()> {
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        mptcp: true,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    })
+}
+
+#[tokio::test]
+async fn test_mptcp_single_stream() {
+    if !mptcp_available() {
+        eprintln!("MPTCP not available, skipping test");
+        return;
+    }
+    let port = get_test_port();
+    let _server = start_test_server_mptcp(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        mptcp: true,
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    assert!(result.is_ok(), "MPTCP test should complete");
+    let result = result.unwrap();
+    assert!(result.is_ok(), "MPTCP test should succeed: {:?}", result);
+    let result = result.unwrap();
+    assert!(result.duration_ms > 0, "Should have duration");
+}
+
+#[tokio::test]
+async fn test_mptcp_multi_stream() {
+    if !mptcp_available() {
+        return;
+    }
+    let port = get_test_port();
+    let _server = start_test_server_mptcp(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        mptcp: true,
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "MPTCP multi-stream should succeed: {:?}",
+        result
+    );
+    assert_eq!(result.unwrap().streams.len(), 4);
+}
+
+#[tokio::test]
+async fn test_mptcp_download() {
+    if !mptcp_available() {
+        return;
+    }
+    let port = get_test_port();
+    let _server = start_test_server_mptcp(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        mptcp: true,
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_ok());
+}
+
+#[test]
+fn test_cli_mptcp_conflicts() {
+    // --mptcp conflicts with --udp
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "--mptcp", "--udp", "--no-tui"])
+        .output()
+        .expect("failed to run xfr binary");
+    assert!(!output.status.success());
+
+    // --mptcp conflicts with --quic
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "--mptcp", "--quic", "--no-tui"])
+        .output()
+        .expect("failed to run xfr binary");
+    assert!(!output.status.success());
 }
 
 #[test]

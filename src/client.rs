@@ -57,6 +57,8 @@ pub struct ClientConfig {
     pub bind_addr: Option<SocketAddr>,
     /// Use sequential ports for multi-stream (--cport with -P)
     pub sequential_ports: bool,
+    /// Use MPTCP (Multi-Path TCP) instead of regular TCP
+    pub mptcp: bool,
 }
 
 impl Default for ClientConfig {
@@ -76,6 +78,7 @@ impl Default for ClientConfig {
             address_family: AddressFamily::default(),
             bind_addr: None,
             sequential_ports: false,
+            mptcp: false,
         }
     }
 }
@@ -143,6 +146,7 @@ impl Client {
             self.config.port,
             self.config.address_family,
             self.config.bind_addr,
+            self.config.mptcp,
         )
         .await?;
 
@@ -508,6 +512,7 @@ impl Client {
             let direction = self.config.direction;
             let duration = self.config.duration;
             let bind_addr = self.config.bind_addr;
+            let mptcp = self.config.mptcp;
             let test_id = test_id.clone();
             let stream_index = i as u16;
 
@@ -519,7 +524,7 @@ impl Client {
             config.congestion = self.config.tcp_congestion.clone();
 
             tokio::spawn(async move {
-                match net::connect_tcp_with_bind(addr, bind_addr).await {
+                match net::connect_tcp_with_bind(addr, bind_addr, mptcp).await {
                     Ok(mut stream) => {
                         debug!("Connected to data port {}", port);
 

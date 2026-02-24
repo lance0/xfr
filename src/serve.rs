@@ -73,6 +73,8 @@ pub struct ServerConfig {
     pub enable_quic: bool,
     /// Maximum concurrent client handlers (defense against connection floods)
     pub max_concurrent: u32,
+    /// Use MPTCP (Multi-Path TCP) for TCP listeners
+    pub mptcp: bool,
 }
 
 impl Default for ServerConfig {
@@ -91,6 +93,7 @@ impl Default for ServerConfig {
             tui_tx: None,
             enable_quic: true,
             max_concurrent: 100,
+            mptcp: false,
         }
     }
 }
@@ -101,6 +104,7 @@ struct SecurityContext {
     acl: Acl,
     rate_limiter: Option<Arc<RateLimiter>>,
     address_family: AddressFamily,
+    mptcp: bool,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: Option<String>,
 }
@@ -135,8 +139,12 @@ impl Server {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        let listener =
-            net::create_tcp_listener(self.config.port, self.config.address_family).await?;
+        let listener = net::create_tcp_listener(
+            self.config.port,
+            self.config.address_family,
+            self.config.mptcp,
+        )
+        .await?;
 
         // Create QUIC endpoint on the same port (UDP) - only if enabled
         let quic_endpoint = if self.config.enable_quic {
@@ -176,6 +184,7 @@ impl Server {
             acl,
             rate_limiter: rate_limiter.clone(),
             address_family: self.config.address_family,
+            mptcp: self.config.mptcp,
             tui_tx: self.config.tui_tx.clone(),
             push_gateway_url: self.config.push_gateway_url.clone(),
         });
@@ -1253,6 +1262,7 @@ async fn handle_test_request(
                 congestion,
                 active_tests.clone(),
                 security.address_family,
+                security.mptcp,
                 peer_addr,
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
@@ -1584,6 +1594,7 @@ async fn run_test(
     congestion: Option<String>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     address_family: AddressFamily,
+    mptcp: bool,
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
@@ -1611,7 +1622,7 @@ async fn run_test(
             let (tx, rx) = mpsc::channel::<(TcpStream, u16)>(streams as usize);
             let expected_ip = net::normalize_ip(peer_addr.ip());
             for i in 0..streams {
-                let listener = net::create_tcp_listener(0, address_family).await?;
+                let listener = net::create_tcp_listener(0, address_family, mptcp).await?;
                 data_ports.push(listener.local_addr()?.port());
                 debug!(
                     "TCP data port {} allocated for stream {}",

@@ -65,9 +65,66 @@ impl std::fmt::Display for AddressFamily {
     }
 }
 
+/// Get the socket protocol for TCP or MPTCP.
+/// Caller must validate platform via `validate_mptcp()` before passing `mptcp: true`.
+fn tcp_protocol(mptcp: bool) -> Protocol {
+    if mptcp {
+        #[cfg(target_os = "linux")]
+        {
+            Protocol::MPTCP
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            unreachable!("MPTCP is only supported on Linux; callers must validate first")
+        }
+    } else {
+        Protocol::TCP
+    }
+}
+
+/// Validate that MPTCP is available on this platform.
+pub fn validate_mptcp() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MPTCP is only supported on Linux (kernel 5.6+ with CONFIG_MPTCP=y)",
+        ))
+    }
+}
+
+/// Wrap MPTCP socket creation errors with a clear message.
+fn wrap_mptcp_error(e: io::Error, mptcp: bool) -> io::Error {
+    if mptcp {
+        #[cfg(unix)]
+        if matches!(
+            e.raw_os_error(),
+            Some(libc::EPROTONOSUPPORT) | Some(libc::EINVAL) | Some(libc::ENOPROTOOPT)
+        ) {
+            return io::Error::new(
+                e.kind(),
+                format!(
+                    "MPTCP not available (kernel 5.6+ with CONFIG_MPTCP=y required): {}",
+                    e
+                ),
+            );
+        }
+    }
+    e
+}
+
 /// Create a TCP listener with proper address family handling
-pub async fn create_tcp_listener(port: u16, family: AddressFamily) -> io::Result<TcpListener> {
-    let socket = Socket::new(family.domain(), Type::STREAM, Some(Protocol::TCP))?;
+pub async fn create_tcp_listener(
+    port: u16,
+    family: AddressFamily,
+    mptcp: bool,
+) -> io::Result<TcpListener> {
+    let socket = Socket::new(family.domain(), Type::STREAM, Some(tcp_protocol(mptcp)))
+        .map_err(|e| wrap_mptcp_error(e, mptcp))?;
 
     // Allow address reuse
     socket.set_reuse_address(true)?;
@@ -89,7 +146,8 @@ pub async fn create_tcp_listener(port: u16, family: AddressFamily) -> io::Result
     let std_listener: std::net::TcpListener = socket.into();
     let listener = TcpListener::from_std(std_listener)?;
 
-    info!("Listening on {} ({})", addr, family);
+    let proto_label = if mptcp { "MPTCP" } else { "TCP" };
+    info!("{} listening on {} ({})", proto_label, addr, family);
     Ok(listener)
 }
 
@@ -228,6 +286,7 @@ pub async fn connect_tcp(
     port: u16,
     family: AddressFamily,
     bind_addr: Option<SocketAddr>,
+    mptcp: bool,
 ) -> io::Result<(TcpStream, SocketAddr)> {
     let addrs = resolve_host(host, port, family)?;
 
@@ -238,7 +297,7 @@ pub async fn connect_tcp(
         // When bind IP is unspecified (0.0.0.0 / ::), match the remote family
         // so dual-stack clients can connect across IPv4/IPv6 targets.
         let local_bind = bind_addr.map(|local| match_bind_family(local, addr));
-        let result = connect_tcp_with_bind(addr, local_bind).await;
+        let result = connect_tcp_with_bind(addr, local_bind, mptcp).await;
         match result {
             Ok(stream) => {
                 info!("Connected to {}", addr);
@@ -260,17 +319,23 @@ pub async fn connect_tcp(
 pub async fn connect_tcp_with_bind(
     remote: SocketAddr,
     bind_addr: Option<SocketAddr>,
+    mptcp: bool,
 ) -> io::Result<TcpStream> {
-    if let Some(local) = bind_addr {
-        // Create socket, bind to local address, then connect
+    if bind_addr.is_some() || mptcp {
+        // Use socket2 path for bind address or MPTCP (tokio's TcpStream::connect
+        // doesn't support setting the socket protocol)
         let domain = if remote.is_ipv6() {
             Domain::IPV6
         } else {
             Domain::IPV4
         };
-        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        let socket = Socket::new(domain, Type::STREAM, Some(tcp_protocol(mptcp)))
+            .map_err(|e| wrap_mptcp_error(e, mptcp))?;
         socket.set_nonblocking(true)?;
-        socket.bind(&SockAddr::from(local))?;
+
+        if let Some(local) = bind_addr {
+            socket.bind(&SockAddr::from(local))?;
+        }
 
         // Connect (non-blocking) - handle platform-specific "in progress" errors
         match socket.connect(&SockAddr::from(remote)) {
@@ -297,10 +362,14 @@ pub async fn connect_tcp_with_bind(
             return Err(e);
         }
 
-        debug!("Connected to {} from {}", remote, local);
+        if let Some(local) = bind_addr {
+            debug!("Connected to {} from {}", remote, local);
+        } else {
+            debug!("Connected to {} (MPTCP)", remote);
+        }
         Ok(stream)
     } else {
-        // No bind address, use normal connect
+        // No bind address and no MPTCP, use normal connect
         Ok(TcpStream::connect(remote).await?)
     }
 }
@@ -532,7 +601,7 @@ mod tests {
         });
 
         let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let result = connect_tcp("::1", port, AddressFamily::V6Only, Some(bind)).await;
+        let result = connect_tcp("::1", port, AddressFamily::V6Only, Some(bind), false).await;
 
         assert!(
             result.is_ok(),
@@ -540,5 +609,34 @@ mod tests {
         );
 
         let _ = accept_task.await;
+    }
+
+    #[test]
+    fn test_validate_mptcp() {
+        #[cfg(target_os = "linux")]
+        assert!(validate_mptcp().is_ok());
+
+        #[cfg(not(target_os = "linux"))]
+        assert!(validate_mptcp().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_mptcp_socket_creation() {
+        // Attempt to create an MPTCP socket — may fail if kernel lacks support
+        let result = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::MPTCP));
+        match result {
+            Ok(_) => {} // MPTCP available
+            Err(e) => {
+                // Expected on kernels without CONFIG_MPTCP
+                assert!(
+                    e.raw_os_error() == Some(libc::EPROTONOSUPPORT)
+                        || e.raw_os_error() == Some(libc::EINVAL)
+                        || e.raw_os_error() == Some(libc::ENOPROTOOPT),
+                    "Unexpected error: {}",
+                    e
+                );
+            }
+        }
     }
 }

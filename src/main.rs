@@ -270,6 +270,10 @@ struct Cli {
     /// Client source port for firewall traversal (UDP/QUIC only)
     #[arg(long, value_name = "PORT")]
     cport: Option<u16>,
+
+    /// MPTCP mode (Multi-Path TCP, Linux 5.6+)
+    #[arg(long, conflicts_with_all = ["udp", "quic"])]
+    mptcp: bool,
 }
 
 #[derive(Subcommand)]
@@ -345,6 +349,10 @@ enum Commands {
         /// Force IPv6 only
         #[arg(short = '6', long = "ipv6")]
         ipv6_only: bool,
+
+        /// Enable MPTCP for TCP listeners (Linux 5.6+)
+        #[arg(long)]
+        mptcp: bool,
     },
 
     /// Compare two test results
@@ -595,6 +603,7 @@ async fn main() -> Result<()> {
             acl_file,
             ipv4_only,
             ipv6_only,
+            mptcp,
         }) => {
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
@@ -657,6 +666,10 @@ async fn main() -> Result<()> {
                 xfr::net::AddressFamily::default()
             };
 
+            if mptcp {
+                xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
@@ -670,6 +683,7 @@ async fn main() -> Result<()> {
                 address_family,
                 tui_tx: None,
                 enable_quic: true, // Enable QUIC by default
+                mptcp,
                 ..Default::default()
             };
 
@@ -736,6 +750,10 @@ async fn main() -> Result<()> {
             } else {
                 Protocol::Tcp
             };
+
+            if cli.mptcp {
+                xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
 
             // Apply config file defaults where CLI didn't override
             let duration = if cli.time != Duration::from_secs(10) {
@@ -871,6 +889,7 @@ async fn main() -> Result<()> {
                 address_family: client_address_family,
                 bind_addr,
                 sequential_ports: protocol == Protocol::Udp && cport.is_some() && streams > 1,
+                mptcp: cli.mptcp,
             };
 
             // Determine output format

@@ -125,7 +125,7 @@
 - [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
 ### Polish
-- [ ] **Suppress send errors on graceful shutdown** - TCP shows `Connection reset by peer (os error 104)`, UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy
+- [ ] **Suppress send errors on graceful shutdown** - TCP shows `Connection reset by peer (os error 104)`, UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy. Also: final TCP_INFO poll can return zeroed RTT/Cwnd after socket teardown — summary uses averaged intervals so RTT is fine, but Cwnd shows `0 KB` and the last interval can lose metrics
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
@@ -266,9 +266,9 @@ Client behind strict firewall → which protocol?
 *Rationale: Niche use case, rarely needed.*
 
 ### MPTCP
-- [ ] Multi-Path TCP support
+- [x] Multi-Path TCP support (`--mptcp` flag, Linux 5.6+)
 
-*Rationale: Very few deployments have MPTCP enabled.*
+*Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24).*
 
 ### 100G+ Optimization
 - [ ] io_uring on Linux
