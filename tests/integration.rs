@@ -1641,23 +1641,6 @@ fn mptcp_available() -> bool {
     }
 }
 
-async fn start_test_server_mptcp(port: u16) -> tokio::task::JoinHandle<()> {
-    let config = ServerConfig {
-        port,
-        one_off: false,
-        max_duration: None,
-        #[cfg(feature = "prometheus")]
-        prometheus_port: None,
-        mptcp: true,
-        ..Default::default()
-    };
-
-    tokio::spawn(async move {
-        let server = Server::new(config);
-        let _ = server.run().await;
-    })
-}
-
 #[tokio::test]
 async fn test_mptcp_single_stream() {
     if !mptcp_available() {
@@ -1665,7 +1648,7 @@ async fn test_mptcp_single_stream() {
         return;
     }
     let port = get_test_port();
-    let _server = start_test_server_mptcp(port).await;
+    let _server = start_test_server(port).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let config = ClientConfig {
@@ -1694,7 +1677,7 @@ async fn test_mptcp_multi_stream() {
         return;
     }
     let port = get_test_port();
-    let _server = start_test_server_mptcp(port).await;
+    let _server = start_test_server(port).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let config = ClientConfig {
@@ -1726,7 +1709,7 @@ async fn test_mptcp_download() {
         return;
     }
     let port = get_test_port();
-    let _server = start_test_server_mptcp(port).await;
+    let _server = start_test_server(port).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let config = ClientConfig {
@@ -1746,7 +1729,7 @@ async fn test_mptcp_download() {
     assert!(result.unwrap().is_ok());
 }
 
-// Mixed-mode: MPTCP client → regular TCP server (kernel falls back to TCP)
+// MPTCP client connects to server (server auto-uses MPTCP if available)
 #[tokio::test]
 async fn test_mptcp_client_to_tcp_server() {
     if !mptcp_available() {
@@ -1778,14 +1761,14 @@ async fn test_mptcp_client_to_tcp_server() {
     );
 }
 
-// Mixed-mode: regular TCP client → MPTCP server (kernel falls back to TCP)
+// Regular TCP client connects to server (server auto-uses MPTCP, kernel falls back to TCP)
 #[tokio::test]
 async fn test_tcp_client_to_mptcp_server() {
     if !mptcp_available() {
         return;
     }
     let port = get_test_port();
-    let _server = start_test_server_mptcp(port).await; // MPTCP server
+    let _server = start_test_server(port).await; // server auto-uses MPTCP
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let config = ClientConfig {

@@ -154,6 +154,36 @@ pub async fn create_tcp_listener(
     Ok(listener)
 }
 
+/// Create a TCP listener that tries MPTCP first, falling back to regular TCP silently.
+///
+/// On Linux, MPTCP listeners accept both MPTCP and regular TCP connections transparently
+/// (the kernel handles the fallback). This means a server can always use MPTCP sockets
+/// without requiring clients to use MPTCP — regular TCP clients connect normally.
+///
+/// If the kernel doesn't support MPTCP (missing CONFIG_MPTCP or kernel < 5.6), this
+/// falls back to a regular TCP listener with a debug-level log message.
+pub async fn create_tcp_listener_auto_mptcp(
+    port: u16,
+    family: AddressFamily,
+) -> io::Result<TcpListener> {
+    #[cfg(target_os = "linux")]
+    {
+        match create_tcp_listener(port, family, true).await {
+            Ok(listener) => return Ok(listener),
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EPROTONOSUPPORT) | Some(libc::EINVAL) | Some(libc::ENOPROTOOPT)
+                ) =>
+            {
+                debug!("MPTCP not available, falling back to TCP: {}", e);
+            }
+            Err(e) => return Err(e), // Real error (bind/listen failure), don't mask it
+        }
+    }
+    create_tcp_listener(port, family, false).await
+}
+
 /// Create a UDP socket with proper address family handling
 pub async fn create_udp_socket(port: u16, family: AddressFamily) -> io::Result<UdpSocket> {
     let socket = Socket::new(family.domain(), Type::DGRAM, Some(Protocol::UDP))?;

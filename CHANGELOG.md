@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. Both client and server support `--mptcp`; mixed-mode connections (one side MPTCP, other side regular TCP) fall back gracefully via the kernel. Clear error message on non-Linux or kernels without `CONFIG_MPTCP=y`.
+- **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. The server automatically creates MPTCP listeners when available (no flag needed) — MPTCP listeners accept both MPTCP and regular TCP clients transparently, with silent fallback to TCP if the kernel lacks MPTCP support. Client uses `--mptcp` to opt in. Clear error message on non-Linux clients or kernels without `CONFIG_MPTCP=y`.
 
 ## [0.8.0] - 2026-02-12
 

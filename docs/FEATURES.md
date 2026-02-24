@@ -69,8 +69,8 @@ QUIC provides:
 Multi-Path TCP enables a single connection to use multiple network paths simultaneously (e.g., WiFi + Ethernet, or multiple WAN links). Requires Linux 5.6+ with `CONFIG_MPTCP=y`.
 
 ```bash
-# Server
-xfr serve --mptcp
+# Server — MPTCP is automatic, no flag needed
+xfr serve
 
 # Client
 xfr <host> --mptcp                    # MPTCP single stream
@@ -85,9 +85,11 @@ MPTCP is transparent at the application layer — all TCP features work unchange
 - Congestion control, window size, nodelay
 - PSK authentication
 
-**Mixed-mode operation**: If only one side uses `--mptcp`, the kernel falls back to regular TCP automatically. Both sides need `--mptcp` for actual multi-path behavior.
+**Server auto-MPTCP**: The server always tries to create MPTCP listeners. MPTCP listeners accept both MPTCP and regular TCP clients transparently — the kernel handles the fallback. If the kernel doesn't support MPTCP, the server silently falls back to regular TCP. No `--mptcp` flag is needed on the server side.
 
-**Platform**: Linux only. Non-Linux platforms receive a clear error message. The kernel must have MPTCP enabled (`CONFIG_MPTCP=y`, default on most modern distros).
+**Client `--mptcp`**: The client must explicitly opt in with `--mptcp` to request MPTCP connections. Both sides need MPTCP-capable sockets for actual multi-path behavior; otherwise the kernel falls back to regular TCP.
+
+**Platform**: Linux only. Non-Linux platforms receive a clear error message on the client. The server silently falls back to TCP on non-Linux. The kernel must have MPTCP enabled (`CONFIG_MPTCP=y`, default on most modern distros).
 
 ## Protocol
 
@@ -515,4 +517,3 @@ See `xfr --help` for complete CLI documentation.
 | `--psk-file` | none | Read PSK from file |
 | `--push-gateway` | none | Prometheus Push Gateway URL |
 | `--prometheus` | none | Metrics endpoint port |
-| `--mptcp` | false | Enable MPTCP for TCP listeners (Linux 5.6+) |

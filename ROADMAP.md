@@ -266,9 +266,11 @@ Client behind strict firewall → which protocol?
 *Rationale: Niche use case, rarely needed.*
 
 ### MPTCP
-- [x] Multi-Path TCP support (`--mptcp` flag, Linux 5.6+)
+- [x] Multi-Path TCP support (`--mptcp` client flag, Linux 5.6+)
+- [x] Server auto-MPTCP (try MPTCP listeners by default, silent fallback to TCP)
+- [ ] `MPTCP_FULL_INFO` per-subflow stats (RTT, cwnd per path via `MPTCP_INFO` / `TCP_INFO` per subflow)
 
-*Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24).*
+*Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24). Per-subflow stats via `MPTCP_FULL_INFO` would show multi-path behavior in the TUI.*
 
 ### 100G+ Optimization
 - [ ] io_uring on Linux

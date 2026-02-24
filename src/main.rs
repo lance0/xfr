@@ -350,9 +350,6 @@ enum Commands {
         #[arg(short = '6', long = "ipv6")]
         ipv6_only: bool,
 
-        /// Enable MPTCP for TCP listeners (Linux 5.6+)
-        #[arg(long)]
-        mptcp: bool,
     },
 
     /// Compare two test results
@@ -603,7 +600,6 @@ async fn main() -> Result<()> {
             acl_file,
             ipv4_only,
             ipv6_only,
-            mptcp,
         }) => {
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
@@ -666,10 +662,6 @@ async fn main() -> Result<()> {
                 xfr::net::AddressFamily::default()
             };
 
-            if mptcp {
-                xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
-            }
-
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
@@ -683,7 +675,6 @@ async fn main() -> Result<()> {
                 address_family,
                 tui_tx: None,
                 enable_quic: true, // Enable QUIC by default
-                mptcp,
                 ..Default::default()
             };
 
