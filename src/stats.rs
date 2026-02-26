@@ -16,6 +16,7 @@ pub struct StreamStats {
     pub start_time: Instant,
     pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
+    pub interval_retransmits_total: AtomicU64,
     pub last_bytes: AtomicU64,
     pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
@@ -47,6 +48,7 @@ impl StreamStats {
             start_time: Instant::now(),
             intervals: Mutex::new(VecDeque::new()),
             retransmits: AtomicU64::new(0),
+            interval_retransmits_total: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
             last_tcp_retransmits: AtomicU64::new(0),
             udp_jitter_us: AtomicU64::new(0),
@@ -157,6 +159,13 @@ impl StreamStats {
         } else {
             0
         };
+        if interval_retransmits > 0 {
+            let _ = self.interval_retransmits_total.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |current| Some(current.saturating_add(interval_retransmits)),
+            );
+        }
         let stats = IntervalStats {
             timestamp: now,
             bytes: interval_bytes,
@@ -211,7 +220,10 @@ impl StreamStats {
             id: self.stream_id,
             bytes,
             throughput_mbps,
-            retransmits: Some(self.retransmits.load(Ordering::Relaxed)),
+            retransmits: Some(
+                self.retransmits()
+                    .max(self.interval_retransmits_total.load(Ordering::Relaxed)),
+            ),
             jitter_ms: None,
             lost: None,
         }
@@ -427,6 +439,23 @@ mod tests {
         stats.add_bytes_sent(1000);
         stats.add_bytes_received(500);
         assert_eq!(stats.total_bytes(), 1500);
+    }
+
+    #[test]
+    fn test_to_result_uses_max_retransmit_source() {
+        let stats = StreamStats::new(0);
+
+        // Interval-based total can be higher when final TCP_INFO snapshot is unavailable.
+        stats.retransmits.store(3, Ordering::Relaxed);
+        stats.interval_retransmits_total.store(7, Ordering::Relaxed);
+        let result = stats.to_result(1000);
+        assert_eq!(result.retransmits, Some(7));
+
+        // Final TCP_INFO snapshot can include tail retransmits after last interval.
+        stats.retransmits.store(11, Ordering::Relaxed);
+        stats.interval_retransmits_total.store(7, Ordering::Relaxed);
+        let result = stats.to_result(1000);
+        assert_eq!(result.retransmits, Some(11));
     }
 
     #[test]

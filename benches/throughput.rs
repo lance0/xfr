@@ -121,6 +121,7 @@ fn bench_protocol_serialize_test_start(c: &mut Criterion) {
         protocol: Protocol::Tcp,
         direction: Direction::Upload,
         bitrate: Some(1_000_000_000),
+        mptcp: false,
     };
 
     c.bench_function("protocol_serialize_test_start", |b| {

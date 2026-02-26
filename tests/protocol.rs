@@ -37,10 +37,15 @@ fn test_test_start_roundtrip() {
         direction: Direction::Upload,
         bitrate: None,
         congestion: Some("bbr".to_string()),
+        mptcp: false,
     };
 
     let json = msg.serialize().unwrap();
     assert!(json.contains("\"congestion\":\"bbr\""));
+    assert!(
+        !json.contains("\"mptcp\""),
+        "mptcp=false should be omitted for backward compatibility"
+    );
     let decoded = ControlMessage::deserialize(&json).unwrap();
 
     match decoded {
@@ -52,6 +57,7 @@ fn test_test_start_roundtrip() {
             direction,
             bitrate,
             congestion,
+            ..
         } => {
             assert_eq!(id, "test-123");
             assert_eq!(protocol, Protocol::Tcp);
@@ -60,6 +66,21 @@ fn test_test_start_roundtrip() {
             assert_eq!(direction, Direction::Upload);
             assert!(bitrate.is_none());
             assert_eq!(congestion, Some("bbr".to_string()));
+        }
+        _ => panic!("Wrong message type"),
+    }
+}
+
+#[test]
+fn test_test_start_backward_compat_without_mptcp_field() {
+    // Simulates an older client that doesn't send the mptcp field.
+    let json = r#"{"type":"test_start","id":"legacy-123","protocol":"tcp","streams":2,"duration_secs":15,"direction":"upload"}"#;
+    let decoded = ControlMessage::deserialize(json).unwrap();
+
+    match decoded {
+        ControlMessage::TestStart { id, mptcp, .. } => {
+            assert_eq!(id, "legacy-123");
+            assert!(!mptcp);
         }
         _ => panic!("Wrong message type"),
     }
@@ -75,6 +96,7 @@ fn test_udp_test_start() {
         direction: Direction::Download,
         bitrate: Some(1_000_000_000),
         congestion: None,
+        mptcp: false,
     };
 
     let json = msg.serialize().unwrap();

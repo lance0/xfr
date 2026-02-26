@@ -349,7 +349,6 @@ enum Commands {
         /// Force IPv6 only
         #[arg(short = '6', long = "ipv6")]
         ipv6_only: bool,
-
     },
 
     /// Compare two test results

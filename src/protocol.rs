@@ -100,6 +100,8 @@ pub enum ControlMessage {
         bitrate: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         congestion: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mptcp: bool,
     },
     TestAck {
         id: String,
@@ -433,6 +435,7 @@ mod tests {
             direction: Direction::Upload,
             bitrate: None,
             congestion: None,
+            mptcp: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
