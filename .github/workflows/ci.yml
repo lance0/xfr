@@ -50,6 +50,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+  mptcp:
+    name: MPTCP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Run MPTCP namespace tests
+        run: sudo ./test-mptcp-ns.sh --ci
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
