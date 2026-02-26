@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. The server automatically creates MPTCP listeners when available (no flag needed) — MPTCP listeners accept both MPTCP and regular TCP clients transparently, with silent fallback to TCP if the kernel lacks MPTCP support. Client uses `--mptcp` to opt in. Clear error message on non-Linux clients or kernels without `CONFIG_MPTCP=y`.
 
+### Changed
+- **Library API** — `create_tcp_listener()`, `connect_tcp()`, and `connect_tcp_with_bind()` now take a `mptcp: bool` parameter. Library consumers should pass `false` to preserve existing behavior.
+
+### Fixed
+- **Per-stream retransmits showing 0 in final results** (issue #26) — final summary now uses max of TCP_INFO snapshot and cumulative interval total, preventing undercount from interval rolloff or missing final snapshot
+- **Broken pipe / connection reset at teardown** (issue #25) — client now joins stream task handles with a 2s timeout before returning, preventing writes to already-closed sockets
+- **MPTCP label in server log** — server now displays "MPTCP" instead of "TCP" in the test info log when client uses `--mptcp`; adds backward-compatible `mptcp` field to TestStart control message
+
 ## [0.8.0] - 2026-02-12
 
 ### Added

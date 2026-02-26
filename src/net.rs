@@ -1,7 +1,7 @@
-//! Network utilities for IPv4/IPv6 socket creation and address resolution.
+//! Network utilities for IPv4/IPv6 socket creation, MPTCP, and address resolution.
 //!
 //! Provides proper dual-stack socket handling using socket2 for cross-platform
-//! compatibility and IPv6 flow label support.
+//! compatibility, MPTCP auto-negotiation (Linux 5.6+), and IPv6 flow label support.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -102,22 +102,31 @@ pub fn validate_mptcp() -> io::Result<()> {
 
 /// Wrap MPTCP socket creation errors with a clear message.
 fn wrap_mptcp_error(e: io::Error, mptcp: bool) -> io::Error {
-    if mptcp {
-        #[cfg(unix)]
-        if matches!(
-            e.raw_os_error(),
-            Some(libc::EPROTONOSUPPORT) | Some(libc::EINVAL) | Some(libc::ENOPROTOOPT)
-        ) {
-            return io::Error::new(
-                e.kind(),
-                format!(
-                    "MPTCP not available (kernel 5.6+ with CONFIG_MPTCP=y required): {}",
-                    e
-                ),
-            );
-        }
+    if mptcp && is_mptcp_unavailable_error(&e) {
+        return io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "MPTCP not available (kernel 5.6+ with CONFIG_MPTCP=y required): {}",
+                e
+            ),
+        );
     }
     e
+}
+
+/// Returns true if an error means MPTCP is unavailable and TCP fallback is appropriate.
+#[cfg(unix)]
+fn is_mptcp_unavailable_error(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Unsupported
+        || matches!(
+            e.raw_os_error(),
+            Some(libc::EPROTONOSUPPORT) | Some(libc::EINVAL) | Some(libc::ENOPROTOOPT)
+        )
+}
+
+#[cfg(not(unix))]
+fn is_mptcp_unavailable_error(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Unsupported
 }
 
 /// Create a TCP listener with proper address family handling
@@ -170,12 +179,7 @@ pub async fn create_tcp_listener_auto_mptcp(
     {
         match create_tcp_listener(port, family, true).await {
             Ok(listener) => return Ok(listener),
-            Err(e)
-                if matches!(
-                    e.raw_os_error(),
-                    Some(libc::EPROTONOSUPPORT) | Some(libc::EINVAL) | Some(libc::ENOPROTOOPT)
-                ) =>
-            {
+            Err(e) if is_mptcp_unavailable_error(&e) => {
                 debug!("MPTCP not available, falling back to TCP: {}", e);
             }
             Err(e) => return Err(e), // Real error (bind/listen failure), don't mask it
@@ -651,6 +655,23 @@ mod tests {
 
         #[cfg(not(target_os = "linux"))]
         assert!(validate_mptcp().is_err());
+    }
+
+    #[test]
+    fn test_is_mptcp_unavailable_error_by_kind() {
+        let unsupported = io::Error::new(io::ErrorKind::Unsupported, "mptcp unavailable");
+        assert!(is_mptcp_unavailable_error(&unsupported));
+
+        let other = io::Error::new(io::ErrorKind::AddrInUse, "address in use");
+        assert!(!is_mptcp_unavailable_error(&other));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wrap_mptcp_error_marks_unsupported() {
+        let wrapped = wrap_mptcp_error(io::Error::from_raw_os_error(libc::EPROTONOSUPPORT), true);
+        assert_eq!(wrapped.kind(), io::ErrorKind::Unsupported);
+        assert!(is_mptcp_unavailable_error(&wrapped));
     }
 
     #[cfg(target_os = "linux")]
