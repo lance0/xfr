@@ -23,7 +23,9 @@ const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 fn is_peer_closed_error(err: &io::Error) -> bool {
     matches!(
         err.kind(),
-        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
     )
 }
 
@@ -257,6 +259,7 @@ pub async fn send_data(
     let is_infinite = duration == Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
+    let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
         if *cancel.borrow() {
@@ -310,16 +313,13 @@ pub async fn send_data(
                 let now = tokio::time::Instant::now();
                 let deadline_reached = !is_infinite && now >= deadline;
                 let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
+                let peer_closed = is_peer_closed_error(&e);
                 // Treat connection reset/pipe errors as clean teardown only when we are
                 // already cancelling or very close to the configured end time.
-                if *cancel.borrow()
-                    || deadline_reached
-                    || (is_peer_closed_error(&e) && near_deadline)
-                {
-                    debug!(
-                        "Send ended on stream {} during shutdown: {}",
-                        stats.stream_id, e
-                    );
+                if *cancel.borrow() || deadline_reached || (peer_closed && near_deadline) {
+                    if peer_closed {
+                        suppressed_teardown_errors += 1;
+                    }
                     break;
                 }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
@@ -340,6 +340,12 @@ pub async fn send_data(
         stats.stream_id,
         stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
     );
+    if suppressed_teardown_errors > 0 {
+        debug!(
+            "Stream {} suppressed {} expected teardown send errors",
+            stats.stream_id, suppressed_teardown_errors
+        );
+    }
 
     Ok(tcp_info)
 }
@@ -355,6 +361,7 @@ pub async fn receive_data(
     configure_stream(&stream, &config)?;
 
     let mut buffer = vec![0u8; config.buffer_size];
+    let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
         tokio::select! {
@@ -374,7 +381,9 @@ pub async fn receive_data(
                         // Receive-side reset/pipe before cancel is unexpected and should
                         // still be surfaced as an error.
                         if *cancel.borrow() {
-                            debug!("Receive ended on stream {} during shutdown: {}", stats.stream_id, e);
+                            if is_peer_closed_error(&e) {
+                                suppressed_teardown_errors += 1;
+                            }
                             break;
                         }
                         warn!("Receive error on stream {}: {}", stats.stream_id, e);
@@ -404,6 +413,12 @@ pub async fn receive_data(
             .bytes_received
             .load(std::sync::atomic::Ordering::Relaxed)
     );
+    if suppressed_teardown_errors > 0 {
+        debug!(
+            "Stream {} suppressed {} expected teardown receive errors",
+            stats.stream_id, suppressed_teardown_errors
+        );
+    }
 
     Ok(tcp_info)
 }
@@ -438,6 +453,7 @@ pub async fn send_data_half(
     let is_infinite = duration == Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
+    let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
         if *cancel.borrow() {
@@ -489,14 +505,11 @@ pub async fn send_data_half(
                 let now = tokio::time::Instant::now();
                 let deadline_reached = !is_infinite && now >= deadline;
                 let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
-                if *cancel.borrow()
-                    || deadline_reached
-                    || (is_peer_closed_error(&e) && near_deadline)
-                {
-                    debug!(
-                        "Send ended on stream {} during shutdown: {}",
-                        stats.stream_id, e
-                    );
+                let peer_closed = is_peer_closed_error(&e);
+                if *cancel.borrow() || deadline_reached || (peer_closed && near_deadline) {
+                    if peer_closed {
+                        suppressed_teardown_errors += 1;
+                    }
                     break;
                 }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
@@ -511,6 +524,12 @@ pub async fn send_data_half(
         stats.stream_id,
         stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
     );
+    if suppressed_teardown_errors > 0 {
+        debug!(
+            "Stream {} suppressed {} expected teardown send-half errors",
+            stats.stream_id, suppressed_teardown_errors
+        );
+    }
 
     Ok(write_half)
 }
@@ -524,6 +543,7 @@ pub async fn receive_data_half(
     config: TcpConfig,
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
+    let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
         tokio::select! {
@@ -541,7 +561,9 @@ pub async fn receive_data_half(
                             continue;
                         }
                         if *cancel.borrow() {
-                            debug!("Receive ended on stream {} during shutdown: {}", stats.stream_id, e);
+                            if is_peer_closed_error(&e) {
+                                suppressed_teardown_errors += 1;
+                            }
                             break;
                         }
                         warn!("Receive error on stream {}: {}", stats.stream_id, e);
@@ -565,6 +587,12 @@ pub async fn receive_data_half(
             .bytes_received
             .load(std::sync::atomic::Ordering::Relaxed)
     );
+    if suppressed_teardown_errors > 0 {
+        debug!(
+            "Stream {} suppressed {} expected teardown receive-half errors",
+            stats.stream_id, suppressed_teardown_errors
+        );
+    }
 
     Ok(read_half)
 }
