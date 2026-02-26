@@ -125,7 +125,8 @@
 - [x] **Multi-port TCP IP validation** - per-stream fallback listeners validate peer IP against control connection
 
 ### Polish
-- [ ] **Suppress send errors on graceful shutdown** - TCP shows `Connection reset by peer (os error 104)`, UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy. Also: final TCP_INFO poll can return zeroed RTT/Cwnd after socket teardown — summary uses averaged intervals so RTT is fine, but Cwnd shows `0 KB` and the last interval can lose metrics
+- [x] **Suppress TCP send errors on graceful shutdown** - TCP `Connection reset by peer` / `Broken pipe` / `Connection aborted` at teardown now suppressed via targeted grace window (issue #25)
+- [ ] **Suppress UDP/QUIC send errors on graceful shutdown** - UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
@@ -140,7 +141,7 @@
 - [x] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
 - [ ] **Audit unwrap()/expect() calls** - reduce calls in production code, especially auth.rs HMAC init and serve.rs PSK handling
 - [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime, async-trait
-- [ ] **Join client data tasks** - ensure Client::run waits for all data tasks before returning (library safety)
+- [x] **Join client data tasks** - Client::run now collects JoinHandles and joins with 2s timeout + abort before returning
 - [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
 
 ### Testing

@@ -265,6 +265,16 @@ QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single
 
 **Security Note:** QUIC encrypts traffic but does not verify server identity by default. For authenticated connections, use `--psk` on both client and server to prevent MITM attacks.
 
+### MPTCP Mode
+
+```bash
+xfr 192.168.1.1 --mptcp       # MPTCP (Multi-Path TCP, Linux 5.6+)
+xfr 192.168.1.1 --mptcp -P 4  # MPTCP with 4 parallel streams
+xfr 192.168.1.1 --mptcp -R    # MPTCP download test
+```
+
+MPTCP enables a single connection to use multiple network paths simultaneously (e.g., WiFi + Ethernet). The server automatically creates MPTCP listeners — no flag needed on the server side. All TCP features (nodelay, congestion control, window size, bidir, multi-stream) work transparently with MPTCP.
+
 ### Output Formats
 
 ```bash

@@ -86,12 +86,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ## By Design
 
-### TCP Bitrate Limiting Not Implemented
-
-TCP mode ignores the `-b/--bitrate` flag. This is intentional - TCP should run at maximum sustainable rate.
-
-A warning is logged when `-b` is used with TCP.
-
 ### QUIC Bitrate Limiting Not Implemented
 
 QUIC mode ignores the `-b/--bitrate` flag. Pacing support may be added in a future release.
@@ -140,6 +134,7 @@ The following issues have been fixed and are listed here for reference.
 - **Slow-loris protection** - The accept loop now spawns per-connection tasks immediately, with a 5-second initial read timeout (`INITIAL_READ_TIMEOUT`). Slow clients can no longer block the listener or other connections.
 - **DataHello flood protection** - The server validates that the `test_id` in a DataHello message corresponds to an active test before processing, rejecting unknown test IDs immediately.
 - **cancel.changed() busy-loop** - The stream collection `select!` loop now handles the sender-dropped error from `cancel.changed()` instead of spinning on `Err`, preventing CPU spin when the cancel sender is dropped.
+- **TCP bitrate limiting** - TCP bitrate pacing (`-b` for TCP) was added in v0.6.1 using a byte-budget sleep approach with interruptible sleeps and buffer auto-capping.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 

@@ -9,6 +9,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **Multi-client server** | Yes | No | Yes | Yes | ? |
 | **Live TUI** | Yes (client & server) | No | No | No | No |
 | **QUIC support** | Yes (TLS 1.3) | No | No | No | Yes |
+| **MPTCP** | Yes (auto on server, `--mptcp` on client) | Yes (`--mptcp` both sides, 3.14+) | No | No | No |
 | **TCP/UDP** | Yes | Yes | Yes | Yes | Yes |
 | **Single-port TCP** | Yes | No (port per stream) | No | No | ? |
 | **Multi-stream** | Yes | Yes | Yes | Yes | Yes |
@@ -164,7 +165,7 @@ xfr uses its own control protocol (v1.1) over newline-delimited JSON messages. K
 | **TCP data ports** | Single port (DataHello routing) | Separate port per stream |
 | **Capability exchange** | Client/server Hello with capabilities list | None |
 | **Authentication** | PSK with HMAC challenge-response | PSK (RSA-based) |
-| **MPTCP support** | Yes (auto on server, `--mptcp` on client, Linux 5.6+) | No |
+| **MPTCP support** | Yes (auto on server, `--mptcp` on client, Linux 5.6+) | Yes (`--mptcp` on both sides, 3.14+) |
 | **Transport encryption** | QUIC mode: TLS 1.3 built-in | None |
 
 ### Single-Port TCP Architecture
