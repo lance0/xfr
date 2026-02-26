@@ -3,6 +3,7 @@
 //! Handles bulk TCP data transfer for bandwidth testing, with support for
 //! configurable buffer sizes and TCP tuning options.
 
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +17,15 @@ use crate::tcp_info::get_tcp_info;
 
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
+const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+
+#[inline]
+fn is_peer_closed_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    )
+}
 
 #[derive(Clone)]
 pub struct TcpConfig {
@@ -297,6 +307,21 @@ pub async fn send_data(
                 }
             }
             Err(e) => {
+                let now = tokio::time::Instant::now();
+                let deadline_reached = !is_infinite && now >= deadline;
+                let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
+                // Treat connection reset/pipe errors as clean teardown only when we are
+                // already cancelling or very close to the configured end time.
+                if *cancel.borrow()
+                    || deadline_reached
+                    || (is_peer_closed_error(&e) && near_deadline)
+                {
+                    debug!(
+                        "Send ended on stream {} during shutdown: {}",
+                        stats.stream_id, e
+                    );
+                    break;
+                }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
                 return Err(e.into());
             }
@@ -345,6 +370,12 @@ pub async fn receive_data(
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
+                        }
+                        // Receive-side reset/pipe before cancel is unexpected and should
+                        // still be surfaced as an error.
+                        if *cancel.borrow() {
+                            debug!("Receive ended on stream {} during shutdown: {}", stats.stream_id, e);
+                            break;
                         }
                         warn!("Receive error on stream {}: {}", stats.stream_id, e);
                         return Err(e.into());
@@ -455,6 +486,19 @@ pub async fn send_data_half(
                 }
             }
             Err(e) => {
+                let now = tokio::time::Instant::now();
+                let deadline_reached = !is_infinite && now >= deadline;
+                let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
+                if *cancel.borrow()
+                    || deadline_reached
+                    || (is_peer_closed_error(&e) && near_deadline)
+                {
+                    debug!(
+                        "Send ended on stream {} during shutdown: {}",
+                        stats.stream_id, e
+                    );
+                    break;
+                }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
                 return Err(e.into());
             }
@@ -495,6 +539,10 @@ pub async fn receive_data_half(
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
+                        }
+                        if *cancel.borrow() {
+                            debug!("Receive ended on stream {} during shutdown: {}", stats.stream_id, e);
+                            break;
                         }
                         warn!("Receive error on stream {}: {}", stats.stream_id, e);
                         return Err(e.into());
