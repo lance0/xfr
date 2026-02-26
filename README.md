@@ -4,7 +4,7 @@
   <img src="xfr-logo.png" alt="xfr logo" width="200">
 </p>
 
-A modern iperf3 alternative with a live TUI, multi-client server, and QUIC support. Built in Rust.
+A modern iperf3 alternative with a live TUI, multi-client server, MPTCP, and QUIC support. Built in Rust.
 
 [![Crates.io](https://img.shields.io/crates/v/xfr.svg)](https://crates.io/crates/xfr)
 [![CI](https://github.com/lance0/xfr/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/xfr/actions/workflows/ci.yml)
