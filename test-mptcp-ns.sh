@@ -195,6 +195,11 @@ if [[ "$CI" == "true" ]]; then
 	assert_gt "$LAST_MBPS" 20 "MPTCP multi-stream > 20 Mbps"
 
 	echo ""
+	echo "--- MPTCP 10-stream stress (JoinHandle panic regression, #24) ---"
+	run_json_test "MPTCP 10-stream" xfr_cli -t "$DURATION" -P 10
+	assert_gt "$LAST_MBPS" 20 "MPTCP 10-stream > 20 Mbps"
+
+	echo ""
 	if [[ "$FAILED" -eq 0 ]]; then
 		echo "=== All MPTCP tests passed ==="
 	else

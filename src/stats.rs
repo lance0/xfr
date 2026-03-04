@@ -25,6 +25,9 @@ pub struct StreamStats {
     pub last_udp_lost: AtomicU64, // For interval calculation
     /// Raw file descriptor for TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
+    /// Final TCP_INFO snapshot captured when the stream task exits.
+    /// Survives after clear_tcp_info_fd(), so the Result handler can read it.
+    final_tcp_info: Mutex<Option<TcpInfoSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,18 +58,25 @@ impl StreamStats {
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
             tcp_info_fd: AtomicI32::new(-1),
+            final_tcp_info: Mutex::new(None),
         }
     }
 
     /// Store raw file descriptor for TCP_INFO polling.
     /// Must be called before the TcpStream is moved or split.
     pub fn set_tcp_info_fd(&self, fd: i32) {
+        *self.final_tcp_info.lock() = None;
         self.tcp_info_fd.store(fd, Ordering::Relaxed);
     }
 
     /// Clear the stored fd to prevent stale fd reuse after stream closes.
     pub fn clear_tcp_info_fd(&self) {
         self.tcp_info_fd.store(-1, Ordering::Relaxed);
+    }
+
+    /// Store a final TCP_INFO snapshot captured before the socket is dropped.
+    pub fn set_final_tcp_info(&self, info: TcpInfoSnapshot) {
+        *self.final_tcp_info.lock() = Some(info);
     }
 
     /// Poll current TCP_INFO snapshot using stored fd.
@@ -77,6 +87,15 @@ impl StreamStats {
             return None;
         }
         crate::tcp_info::get_tcp_info_from_fd(fd).ok()
+    }
+
+    /// Get the final TCP_INFO snapshot captured when the stream task exited,
+    /// or poll live if the fd is still open.
+    pub fn final_tcp_info(&self) -> Option<TcpInfoSnapshot> {
+        self.final_tcp_info
+            .lock()
+            .clone()
+            .or_else(|| self.poll_tcp_info())
     }
 
     pub fn add_bytes_sent(&self, bytes: u64) {
@@ -388,6 +407,35 @@ impl TestStats {
             None
         }
     }
+
+    /// Get final TCP_INFO across all streams, using saved snapshots from completed tasks.
+    /// Unlike poll_local_tcp_info(), this works after stream tasks have exited.
+    pub fn final_local_tcp_info(&self) -> Option<TcpInfoSnapshot> {
+        let mut rtt_sum = 0u64;
+        let mut rtt_var_sum = 0u64;
+        let mut retransmits = 0u64;
+        let mut cwnd = 0u32;
+        let mut count = 0u64;
+        for stream in &self.streams {
+            if let Some(info) = stream.final_tcp_info() {
+                rtt_sum += info.rtt_us as u64;
+                rtt_var_sum += info.rtt_var_us as u64;
+                retransmits += info.retransmits;
+                cwnd += info.cwnd;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            Some(TcpInfoSnapshot {
+                retransmits,
+                rtt_us: (rtt_sum / count) as u32,
+                rtt_var_us: (rtt_var_sum / count) as u32,
+                cwnd,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 pub fn bytes_to_human(bytes: u64) -> String {
@@ -456,6 +504,53 @@ mod tests {
         stats.interval_retransmits_total.store(7, Ordering::Relaxed);
         let result = stats.to_result(1000);
         assert_eq!(result.retransmits, Some(11));
+    }
+
+    #[test]
+    fn test_final_tcp_info_survives_fd_clear() {
+        let stats = StreamStats::new(0);
+        let info = TcpInfoSnapshot {
+            retransmits: 7,
+            rtt_us: 1200,
+            rtt_var_us: 300,
+            cwnd: 64 * 1024,
+        };
+
+        stats.set_tcp_info_fd(123);
+        stats.set_final_tcp_info(info.clone());
+        stats.clear_tcp_info_fd();
+
+        let final_info = stats.final_tcp_info().expect("missing final tcp info");
+        assert_eq!(final_info.retransmits, info.retransmits);
+        assert_eq!(final_info.rtt_us, info.rtt_us);
+        assert_eq!(final_info.rtt_var_us, info.rtt_var_us);
+        assert_eq!(final_info.cwnd, info.cwnd);
+    }
+
+    #[test]
+    fn test_final_local_tcp_info_uses_saved_snapshots() {
+        let stats = TestStats::new("test".to_string(), 2);
+
+        stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 3,
+            rtt_us: 1000,
+            rtt_var_us: 200,
+            cwnd: 32 * 1024,
+        });
+        stats.streams[1].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 5,
+            rtt_us: 3000,
+            rtt_var_us: 600,
+            cwnd: 64 * 1024,
+        });
+
+        let info = stats
+            .final_local_tcp_info()
+            .expect("missing aggregated final tcp info");
+        assert_eq!(info.retransmits, 8);
+        assert_eq!(info.rtt_us, 2000);
+        assert_eq!(info.rtt_var_us, 400);
+        assert_eq!(info.cwnd, 96 * 1024);
     }
 
     #[test]

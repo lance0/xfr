@@ -478,7 +478,24 @@ impl Client {
                             .await;
                     }
                 }
-                ControlMessage::Result(result) => {
+                ControlMessage::Result(mut result) => {
+                    // Server (receiver) can't report sender-side TCP_INFO metrics
+                    // (retransmits, RTT, cwnd are all 0 on receiver side).
+                    // Overlay client-side snapshots when we're the sender.
+                    let is_sender =
+                        matches!(self.config.direction, Direction::Upload | Direction::Bidir);
+                    if is_sender {
+                        for (i, stream_result) in result.streams.iter_mut().enumerate() {
+                            if let Some(info) =
+                                stats.streams.get(i).and_then(|s| s.final_tcp_info())
+                            {
+                                stream_result.retransmits = Some(info.retransmits);
+                            }
+                        }
+                        if let Some(info) = stats.final_local_tcp_info() {
+                            result.tcp_info = Some(info);
+                        }
+                    }
                     test_result = Ok(result);
                     break;
                 }
@@ -519,11 +536,6 @@ impl Client {
                 for handle in &stream_handles {
                     handle.abort();
                 }
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(250),
-                    futures::future::join_all(stream_handles.iter_mut()),
-                )
-                .await;
             }
         }
 
@@ -624,7 +636,7 @@ impl Client {
                         match direction {
                             Direction::Upload => {
                                 // Client sends data
-                                if let Err(e) = tcp::send_data(
+                                match tcp::send_data(
                                     stream,
                                     stream_stats.clone(),
                                     duration,
@@ -635,7 +647,9 @@ impl Client {
                                 )
                                 .await
                                 {
-                                    error!("Send error: {}", e);
+                                    Ok(Some(info)) => stream_stats.set_final_tcp_info(info),
+                                    Ok(None) => {}
+                                    Err(e) => error!("Send error: {}", e),
                                 }
                             }
                             Direction::Download => {
@@ -672,8 +686,8 @@ impl Client {
                                 };
                                 let recv_config = config;
 
-                                let send_handle = tokio::spawn(async move {
-                                    if let Err(e) = tcp::send_data_half(
+                                let (send_result, recv_result) = tokio::join!(
+                                    tcp::send_data_half(
                                         write_half,
                                         send_stats,
                                         duration,
@@ -681,27 +695,28 @@ impl Client {
                                         send_cancel,
                                         per_stream_bitrate,
                                         send_pause,
-                                    )
-                                    .await
-                                    {
-                                        error!("Bidir send error: {}", e);
-                                    }
-                                });
-
-                                let recv_handle = tokio::spawn(async move {
-                                    if let Err(e) = tcp::receive_data_half(
+                                    ),
+                                    tcp::receive_data_half(
                                         read_half,
                                         recv_stats,
                                         recv_cancel,
                                         recv_config,
                                     )
-                                    .await
-                                    {
-                                        error!("Bidir receive error: {}", e);
-                                    }
-                                });
+                                );
 
-                                let _ = tokio::join!(send_handle, recv_handle);
+                                if let Err(e) = &send_result {
+                                    error!("Bidir send error: {}", e);
+                                }
+                                if let Err(e) = &recv_result {
+                                    error!("Bidir receive error: {}", e);
+                                }
+
+                                if let (Ok(write_half), Ok(read_half)) = (send_result, recv_result)
+                                    && let Ok(stream) = read_half.reunite(write_half)
+                                    && let Some(info) = tcp::get_stream_tcp_info(&stream)
+                                {
+                                    stream_stats.set_final_tcp_info(info);
+                                }
                             }
                         }
                         stream_stats.clear_tcp_info_fd();

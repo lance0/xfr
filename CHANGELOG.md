@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Library API** — `create_tcp_listener()`, `connect_tcp()`, and `connect_tcp_with_bind()` now take a `mptcp: bool` parameter. Library consumers should pass `false` to preserve existing behavior.
 
 ### Fixed
-- **Per-stream retransmits showing 0 in final results** (issue #26) — final summary now uses max of TCP_INFO snapshot and cumulative interval total, preventing undercount from interval rolloff or missing final snapshot
+- **JoinHandle panic with many parallel streams** (issue #24) — removed second `join_all` after aborting timed-out stream tasks, which polled already-completed handles
+- **Final summary showing 0 retransmits/RTT/cwnd** (issue #26) — each stream task now captures a final sender-side TCP_INFO snapshot before the socket closes; the Result handler overlays these saved snapshots deterministically instead of racing live fd polls
 - **Broken pipe / connection reset at teardown** (issue #25) — client now joins stream task handles with a 2s timeout before returning, preventing writes to already-closed sockets
 - **MPTCP label in server log** — server now displays "MPTCP" instead of "TCP" in the test info log when client uses `--mptcp`; adds backward-compatible `mptcp` field to TestStart control message
 
