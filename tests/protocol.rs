@@ -234,6 +234,52 @@ fn test_result_message() {
 }
 
 #[test]
+fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
+    // Regression coverage for high parallel stream counts on control channel:
+    // - old guard (8192) was too small
+    // - new guard (65536) should still provide DoS protection
+    let streams: Vec<StreamResult> = (0u8..128u8)
+        .map(|i| StreamResult {
+            id: i,
+            bytes: u64::MAX,
+            throughput_mbps: 99_999_999.9,
+            retransmits: Some(u64::MAX),
+            jitter_ms: None,
+            lost: None,
+        })
+        .collect();
+
+    let result = TestResult {
+        id: "wide-result".to_string(),
+        bytes_total: u64::MAX,
+        duration_ms: 10_000,
+        throughput_mbps: 99_999_999.9,
+        streams,
+        tcp_info: Some(TcpInfoSnapshot {
+            retransmits: u64::MAX,
+            rtt_us: 1234,
+            rtt_var_us: 567,
+            cwnd: u32::MAX,
+        }),
+        udp_stats: None,
+    };
+
+    let msg = ControlMessage::Result(result);
+    let json = msg.serialize().unwrap();
+
+    assert!(
+        json.len() > 8192,
+        "test fixture should exceed old 8KB guard, got {} bytes",
+        json.len()
+    );
+    assert!(
+        json.len() < 65536,
+        "control message should remain under 64KB guard, got {} bytes",
+        json.len()
+    );
+}
+
+#[test]
 fn test_error_message() {
     let msg = ControlMessage::error("Port already in use");
     let json = msg.serialize().unwrap();

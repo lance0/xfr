@@ -3,7 +3,7 @@
 use crate::protocol::TestResult;
 use crate::stats::{bytes_to_human, mbps_to_human};
 
-pub fn output_plain(result: &TestResult) -> String {
+pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     let mut output = String::new();
 
     output.push_str("─".repeat(60).as_str());
@@ -28,7 +28,11 @@ pub fn output_plain(result: &TestResult) -> String {
     output.push('\n');
 
     if let Some(ref tcp_info) = result.tcp_info {
-        output.push_str("  TCP Info:\n");
+        if mptcp {
+            output.push_str("  Sender TCP Info (initial subflow):\n");
+        } else {
+            output.push_str("  Sender TCP Info:\n");
+        }
         output.push_str(&format!("    Retransmits: {}\n", tcp_info.retransmits));
         output.push_str(&format!(
             "    RTT:         {:.2}ms\n",
@@ -115,4 +119,47 @@ pub fn output_interval_plain(
 
     output.push('\n');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{StreamResult, TcpInfoSnapshot};
+
+    fn make_result_with_tcp_info() -> TestResult {
+        TestResult {
+            id: "test-1".to_string(),
+            bytes_total: 1024,
+            duration_ms: 1000,
+            throughput_mbps: 8.0,
+            streams: vec![StreamResult {
+                id: 0,
+                bytes: 1024,
+                throughput_mbps: 8.0,
+                retransmits: Some(1),
+                jitter_ms: None,
+                lost: None,
+            }],
+            tcp_info: Some(TcpInfoSnapshot {
+                retransmits: 1,
+                rtt_us: 1000,
+                rtt_var_us: 100,
+                cwnd: 64 * 1024,
+            }),
+            udp_stats: None,
+        }
+    }
+
+    #[test]
+    fn test_output_plain_sender_tcp_label_tcp() {
+        let output = output_plain(&make_result_with_tcp_info(), false);
+        assert!(output.contains("Sender TCP Info:\n"));
+        assert!(!output.contains("initial subflow"));
+    }
+
+    #[test]
+    fn test_output_plain_sender_tcp_label_mptcp() {
+        let output = output_plain(&make_result_with_tcp_info(), true);
+        assert!(output.contains("Sender TCP Info (initial subflow):\n"));
+    }
 }

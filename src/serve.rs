@@ -28,7 +28,7 @@ use crate::udp;
 use tokio::sync::mpsc;
 
 /// Maximum control message line length to prevent memory DoS
-const MAX_LINE_LENGTH: usize = 8192;
+const MAX_LINE_LENGTH: usize = 65536;
 /// Maximum streams a client can request
 const MAX_STREAMS: u8 = 128;
 /// Maximum test duration a client can request (1 hour)

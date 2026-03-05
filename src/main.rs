@@ -1037,7 +1037,7 @@ async fn run_client_plain(
     } else if opts.csv {
         output_csv(&result)
     } else {
-        output_plain(&result)
+        output_plain(&result, config.mptcp)
     };
 
     println!("{}", output_str);
@@ -1076,7 +1076,7 @@ async fn run_client_tui(
                 if print_json {
                     println!("{}", output_json(test_result));
                 } else {
-                    println!("{}", output_plain(test_result));
+                    println!("{}", output_plain(test_result, config.mptcp));
                 }
 
                 if let Some(path) = output {

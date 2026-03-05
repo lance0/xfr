@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Maximum control message line length to prevent memory DoS
-const MAX_LINE_LENGTH: usize = 8192;
+const MAX_LINE_LENGTH: usize = 65536;
 
 use crate::auth;
 use crate::net::{self, AddressFamily};
