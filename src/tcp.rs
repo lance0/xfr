@@ -177,12 +177,22 @@ fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
 /// The kernel's FQ scheduler uses EDT for precise per-packet timing,
 /// eliminating burst behavior inherent in userspace sleep/wake cycles.
 /// Returns true if kernel pacing was successfully set.
+#[inline]
+fn pacing_rate_bytes_per_sec(bitrate_bps: u64) -> u32 {
+    if bitrate_bps == 0 {
+        return 0;
+    }
+    // Use ceil division so very low bitrates (e.g. 1 bps) map to 1 B/s
+    // instead of 0, which would disable pacing.
+    let bytes_per_sec = bitrate_bps.saturating_add(7) / 8;
+    bytes_per_sec.min(u32::MAX as u64) as u32
+}
+
 #[cfg(target_os = "linux")]
 fn try_set_pacing_rate(stream: &TcpStream, bitrate_bps: u64) -> bool {
     use std::os::unix::io::AsRawFd;
     let fd = stream.as_raw_fd();
-    let bytes_per_sec = bitrate_bps / 8;
-    let rate = bytes_per_sec.min(u32::MAX as u64) as u32;
+    let rate = pacing_rate_bytes_per_sec(bitrate_bps);
     // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
     // rate is a valid u32 pointer, and size_of::<u32>() is correct.
     // setsockopt returns -1 on error which we check below.
@@ -692,6 +702,23 @@ mod tests {
     }
 
     #[test]
+    fn test_pacing_rate_bytes_per_sec_conversion() {
+        assert_eq!(pacing_rate_bytes_per_sec(0), 0);
+        assert_eq!(pacing_rate_bytes_per_sec(1), 1);
+        assert_eq!(pacing_rate_bytes_per_sec(7), 1);
+        assert_eq!(pacing_rate_bytes_per_sec(8), 1);
+        assert_eq!(pacing_rate_bytes_per_sec(9), 2);
+        assert_eq!(
+            pacing_rate_bytes_per_sec((u32::MAX as u64).saturating_mul(8)),
+            u32::MAX
+        );
+        assert_eq!(
+            pacing_rate_bytes_per_sec((u32::MAX as u64).saturating_mul(8).saturating_add(7)),
+            u32::MAX
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn test_set_pacing_rate() {
         use std::os::unix::io::AsRawFd;
@@ -716,6 +743,26 @@ mod tests {
             "SO_MAX_PACING_RATE failed: {}",
             std::io::Error::last_os_error()
         );
+
+        let mut actual: u32 = 0;
+        let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_MAX_PACING_RATE,
+                &mut actual as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(
+            ret,
+            0,
+            "SO_MAX_PACING_RATE getsockopt failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(len as usize, std::mem::size_of::<u32>());
+        assert!(actual > 0, "SO_MAX_PACING_RATE should be non-zero");
     }
 
     #[test]
