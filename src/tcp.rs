@@ -173,6 +173,43 @@ fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Set kernel TCP pacing rate via SO_MAX_PACING_RATE.
+/// The kernel's FQ scheduler uses EDT for precise per-packet timing,
+/// eliminating burst behavior inherent in userspace sleep/wake cycles.
+/// Returns true if kernel pacing was successfully set.
+#[cfg(target_os = "linux")]
+fn try_set_pacing_rate(stream: &TcpStream, bitrate_bps: u64) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let bytes_per_sec = bitrate_bps / 8;
+    let rate = bytes_per_sec.min(u32::MAX as u64) as u32;
+    // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
+    // rate is a valid u32 pointer, and size_of::<u32>() is correct.
+    // setsockopt returns -1 on error which we check below.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_MAX_PACING_RATE,
+            &rate as *const _ as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        warn!(
+            "SO_MAX_PACING_RATE failed, using userspace pacing: {}",
+            std::io::Error::last_os_error()
+        );
+        return false;
+    }
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_set_pacing_rate(_stream: &TcpStream, _bitrate_bps: u64) -> bool {
+    false
+}
+
 /// Validate that a congestion control algorithm is available on this kernel.
 /// Creates a temporary socket to test the setsockopt call.
 #[cfg(target_os = "linux")]
@@ -244,6 +281,20 @@ pub async fn send_data(
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
 
+    let kernel_pacing = match bitrate {
+        Some(bps) if bps > 0 => {
+            let set = try_set_pacing_rate(&stream, bps);
+            if set {
+                debug!(
+                    "Stream {}: kernel TCP pacing set to {} bps",
+                    stats.stream_id, bps
+                );
+            }
+            set
+        }
+        _ => false,
+    };
+
     // Cap buffer size for rate-limited sends to prevent large first-write burst
     let buf_size = match bitrate {
         Some(bps) if bps > 0 => {
@@ -286,7 +337,9 @@ pub async fn send_data(
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
                 // Pace sends to target bitrate using byte-budget approach
-                if let Some(bps) = bitrate
+                // Skip userspace pacing when kernel pacing is active
+                if !kernel_pacing
+                    && let Some(bps) = bitrate
                     && bps > 0
                 {
                     let bytes_per_sec = bps as f64 / 8.0;
@@ -439,6 +492,20 @@ pub async fn send_data_half(
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<OwnedWriteHalf> {
+    let kernel_pacing = match bitrate {
+        Some(bps) if bps > 0 => {
+            let set = try_set_pacing_rate(write_half.as_ref(), bps);
+            if set {
+                debug!(
+                    "Stream {}: kernel TCP pacing set to {} bps",
+                    stats.stream_id, bps
+                );
+            }
+            set
+        }
+        _ => false,
+    };
+
     // Cap buffer size for rate-limited sends to prevent large first-write burst
     let buf_size = match bitrate {
         Some(bps) if bps > 0 => {
@@ -479,7 +546,9 @@ pub async fn send_data_half(
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
                 // Pace sends to target bitrate using byte-budget approach
-                if let Some(bps) = bitrate
+                // Skip userspace pacing when kernel pacing is active
+                if !kernel_pacing
+                    && let Some(bps) = bitrate
                     && bps > 0
                 {
                     let bytes_per_sec = bps as f64 / 8.0;
@@ -620,6 +689,33 @@ mod tests {
     fn test_validate_congestion_cubic() {
         // cubic is available on all Linux kernels
         assert!(validate_congestion("cubic").is_ok());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_set_pacing_rate() {
+        use std::os::unix::io::AsRawFd;
+        // Use a raw socket to avoid needing a tokio runtime
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        let fd = stream.as_raw_fd();
+        let rate: u32 = 100_000_000 / 8; // 100 Mbps in bytes/sec
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_MAX_PACING_RATE,
+                &rate as *const _ as *const libc::c_void,
+                std::mem::size_of::<u32>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            ret,
+            0,
+            "SO_MAX_PACING_RATE failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[test]

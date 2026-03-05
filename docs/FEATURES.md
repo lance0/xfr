@@ -18,7 +18,7 @@ xfr <host> --congestion bbr    # Use BBR congestion control
 
 TCP provides:
 - Reliable, ordered delivery
-- Bitrate pacing (`-b`) with byte-budget sleep approach
+- Bitrate pacing (`-b`) — on Linux, uses kernel `SO_MAX_PACING_RATE` with the FQ scheduler for precise per-packet timing; falls back to userspace byte-budget sleep pacing on other platforms
 - Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
 - TCP_INFO statistics (RTT, retransmits, cwnd) — polled live per interval, not just at test end
 
