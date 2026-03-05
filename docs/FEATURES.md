@@ -27,6 +27,8 @@ TCP provides:
 
 By default, all TCP connections (control and data) use a single port (5201) via the DataHello protocol. When the client connects data streams, each one sends a `DataHello` message containing the `test_id` and `stream_index` to identify itself to the server. This eliminates the need to open additional ports for data transfer.
 
+For high stream counts on constrained links, single-port setup is hardened: the client limits concurrent `connect + DataHello` handshakes (max 16 in flight) and the server adapts initial first-line read timeout to active stream count (capped at 20s). This reduces handshake-loss-driven mid-test stream failures.
+
 If the server detects that a client does not advertise the `single_port_tcp` capability, it falls back to multi-port mode (allocating separate ephemeral ports per stream) for legacy compatibility.
 
 ### UDP

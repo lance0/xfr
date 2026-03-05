@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ use uuid::Uuid;
 const MAX_LINE_LENGTH: usize = 65536;
 const STREAM_JOIN_TIMEOUT_BASE: Duration = Duration::from_secs(2);
 const STREAM_JOIN_TIMEOUT_PER_STREAM_MS: u64 = 50;
+const SINGLE_PORT_HANDSHAKE_FANOUT_MAX: usize = 16;
 
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
@@ -25,6 +26,10 @@ fn stream_join_timeout(streams: u8) -> Duration {
     } else {
         STREAM_JOIN_TIMEOUT_BASE
     }
+}
+
+fn single_port_handshake_parallelism(streams: u8) -> usize {
+    usize::from(streams).clamp(1, SINGLE_PORT_HANDSHAKE_FANOUT_MAX)
 }
 
 fn local_stop_deadline(
@@ -615,6 +620,13 @@ impl Client {
         });
 
         let mut handles = Vec::new();
+        let handshake_limiter = if single_port_mode {
+            Some(Arc::new(Semaphore::new(single_port_handshake_parallelism(
+                self.config.streams,
+            ))))
+        } else {
+            None
+        };
 
         #[allow(clippy::needless_range_loop)] // Intentional: single-port mode has empty data_ports
         for i in 0..self.config.streams as usize {
@@ -633,6 +645,7 @@ impl Client {
             let mptcp = self.config.mptcp;
             let test_id = test_id.clone();
             let stream_index = i as u16;
+            let handshake_limiter = handshake_limiter.clone();
 
             let mut config = TcpConfig::with_auto_detect(
                 self.config.tcp_nodelay,
@@ -642,6 +655,20 @@ impl Client {
             config.congestion = self.config.tcp_congestion.clone();
 
             handles.push(tokio::spawn(async move {
+                // In single-port mode, limit concurrent connect+DataHello handshakes
+                // to avoid control-port burst loss under high stream counts.
+                let handshake_permit = if let Some(limiter) = handshake_limiter {
+                    match limiter.acquire_owned().await {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            error!("Handshake limiter closed unexpectedly");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 match net::connect_tcp_with_bind(addr, bind_addr, mptcp).await {
                     Ok(mut stream) => {
                         debug!("Connected to data port {}", port);
@@ -667,6 +694,8 @@ impl Client {
                                 return;
                             }
                         }
+                        // Handshake is complete; release permit before data transfer.
+                        drop(handshake_permit);
 
                         // Store fd for local TCP_INFO polling (sender-side only)
                         #[cfg(unix)]
@@ -1374,6 +1403,15 @@ mod tests {
         assert_eq!(stream_join_timeout(1), Duration::from_secs(2));
         assert_eq!(stream_join_timeout(40), Duration::from_secs(2));
         assert_eq!(stream_join_timeout(128), Duration::from_millis(6400));
+    }
+
+    #[test]
+    fn test_single_port_handshake_parallelism() {
+        assert_eq!(single_port_handshake_parallelism(1), 1);
+        assert_eq!(single_port_handshake_parallelism(8), 8);
+        assert_eq!(single_port_handshake_parallelism(16), 16);
+        assert_eq!(single_port_handshake_parallelism(32), 16);
+        assert_eq!(single_port_handshake_parallelism(128), 16);
     }
 
     #[test]

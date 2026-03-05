@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Library API** — `create_tcp_listener()`, `connect_tcp()`, and `connect_tcp_with_bind()` now take a `mptcp: bool` parameter. Library consumers should pass `false` to preserve existing behavior.
 
 ### Fixed
-- **High stream-count teardown hardening** (issue #32) — client now stops local data streams at local duration expiry instead of waiting for server `Result`, scales stream join timeout with stream count (`max(2s, streams*50ms)`), and TCP receivers drain briefly after cancel to reduce reset-on-close bursts. Fixes post-test BrokenPipe/ConnectionReset cascades at high `-P` (e.g. 128 streams).
+- **High stream-count TCP robustness** (issues #25, #32) — client now stops local data streams at local duration expiry instead of waiting for server `Result`, scales stream join timeout with stream count (`max(2s, streams*50ms)`), and TCP receivers drain briefly after cancel to reduce reset-on-close bursts. For single-port TCP setup, client also limits concurrent `connect + DataHello` handshakes (max 16 in flight) and server initial first-line read timeout is now adaptive to active stream counts (capped at 20s), reducing mid-test handshake-loss failures on constrained links.
 - **Best-effort send shutdown** — `send_data()` shutdown no longer propagates errors during normal teardown races, matching `send_data_half()` behavior.
 - **Kernel pacing rate width** — `SO_MAX_PACING_RATE` now uses native `c_ulong` instead of `u32`, removing an unintended ~34 Gbps ceiling on 64-bit Linux.
 - **JoinHandle panic with many parallel streams** (issue #24) — removed second `join_all` after aborting timed-out stream tasks, which polled already-completed handles

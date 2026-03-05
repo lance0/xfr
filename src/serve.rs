@@ -37,6 +37,10 @@ const MAX_TEST_DURATION: Duration = Duration::from_secs(3600);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for initial first-line read on new connections (shorter to resist slow-loris)
 const INITIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Additional initial-read timeout budget per expected stream (high fan-out tests).
+const INITIAL_READ_TIMEOUT_PER_STREAM_MS: u64 = 80;
+/// Upper bound on adaptive first-line timeout to retain slow-loris resistance.
+const INITIAL_READ_TIMEOUT_MAX: Duration = Duration::from_secs(20);
 /// Interval between progress/stats updates sent to the client
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// How often to check for cancellation in send/receive loops
@@ -119,6 +123,29 @@ struct ActiveTest {
     data_stream_tx: Option<mpsc::Sender<(TcpStream, u16)>>, // (stream, stream_index)
     /// Control connection peer IP (for DataHello validation)
     control_peer_ip: std::net::IpAddr,
+    /// Number of streams expected for this test (for adaptive DataHello timeout).
+    expected_streams: u8,
+}
+
+fn initial_read_timeout_for_peer(
+    active_tests: &HashMap<String, ActiveTest>,
+    peer_ip: std::net::IpAddr,
+) -> Duration {
+    let peer_ip = net::normalize_ip(peer_ip);
+    let max_streams = active_tests
+        .values()
+        .filter(|t| net::normalize_ip(t.control_peer_ip) == peer_ip)
+        .map(|t| u64::from(t.expected_streams))
+        .max()
+        .unwrap_or(0);
+    let scaled =
+        Duration::from_millis(max_streams.saturating_mul(INITIAL_READ_TIMEOUT_PER_STREAM_MS));
+    let timeout = if scaled > INITIAL_READ_TIMEOUT {
+        scaled
+    } else {
+        INITIAL_READ_TIMEOUT
+    };
+    timeout.min(INITIAL_READ_TIMEOUT_MAX)
 }
 
 pub struct Server {
@@ -415,14 +442,24 @@ async fn handle_new_connection(
     shutdown_tx: watch::Sender<bool>,
 ) -> anyhow::Result<()> {
     let peer_ip = peer_addr.ip();
+    let initial_timeout = {
+        let tests = active_tests.lock().await;
+        initial_read_timeout_for_peer(&tests, peer_ip)
+    };
 
-    // Read first line with short timeout to resist slow-loris attacks
+    // Read first line with adaptive timeout: short by default to resist slow-loris,
+    // but extended for high fan-out active tests where DataHello bursts may retransmit.
     let line = tokio::time::timeout(
-        INITIAL_READ_TIMEOUT,
+        initial_timeout,
         read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Initial read timeout from {}", peer_addr))??;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Initial read timeout ({initial_timeout:?}) from {}",
+            peer_addr
+        )
+    })??;
 
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
@@ -1314,6 +1351,7 @@ async fn run_quic_test(
                 data_ports: vec![],
                 data_stream_tx: None,
                 control_peer_ip: peer_addr.ip(),
+                expected_streams: streams,
             },
         );
     }
@@ -1693,6 +1731,7 @@ async fn run_test(
                 data_ports: data_ports.clone(),
                 data_stream_tx,
                 control_peer_ip: peer_addr.ip(),
+                expected_streams: streams,
             },
         );
     }
@@ -2453,5 +2492,85 @@ fn register_mdns_service(port: u16) -> Option<mdns_sd::ServiceDaemon> {
             warn!("Failed to register mDNS service: {}", e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_active_test(streams: u8, ip: std::net::IpAddr) -> ActiveTest {
+        let (cancel_tx, _) = watch::channel(false);
+        let (pause_tx, _) = watch::channel(false);
+        ActiveTest {
+            stats: Arc::new(TestStats::new("test".to_string(), streams.max(1))),
+            cancel_tx,
+            pause_tx,
+            data_ports: vec![],
+            data_stream_tx: None,
+            control_peer_ip: ip,
+            expected_streams: streams,
+        }
+    }
+
+    #[test]
+    fn test_initial_read_timeout_for_peer_default() {
+        let tests: HashMap<String, ActiveTest> = HashMap::new();
+        assert_eq!(
+            initial_read_timeout_for_peer(
+                &tests,
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            ),
+            INITIAL_READ_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_initial_read_timeout_for_peer_scales_and_caps() {
+        let mut tests = HashMap::new();
+        let peer = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+        tests.insert("a".to_string(), make_active_test(4, peer));
+        assert_eq!(
+            initial_read_timeout_for_peer(&tests, peer),
+            INITIAL_READ_TIMEOUT
+        );
+
+        tests.insert("b".to_string(), make_active_test(128, peer));
+        assert_eq!(
+            initial_read_timeout_for_peer(&tests, peer),
+            Duration::from_millis(128 * INITIAL_READ_TIMEOUT_PER_STREAM_MS)
+        );
+
+        tests.insert("c".to_string(), make_active_test(255, peer));
+        assert_eq!(
+            initial_read_timeout_for_peer(&tests, peer),
+            INITIAL_READ_TIMEOUT_MAX
+        );
+    }
+
+    #[test]
+    fn test_initial_read_timeout_for_peer_ignores_other_clients() {
+        let mut tests = HashMap::new();
+        let peer_a = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+        let peer_b = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 3));
+        tests.insert("a".to_string(), make_active_test(128, peer_a));
+        tests.insert("b".to_string(), make_active_test(4, peer_b));
+
+        assert_eq!(
+            initial_read_timeout_for_peer(&tests, peer_b),
+            INITIAL_READ_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_initial_read_timeout_for_peer_normalizes_ipv4_mapped_ipv6() {
+        let mut tests = HashMap::new();
+        let mapped = std::net::IpAddr::V6("::ffff:10.0.0.2".parse().unwrap());
+        let v4 = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+        tests.insert("a".to_string(), make_active_test(128, mapped));
+        assert_eq!(
+            initial_read_timeout_for_peer(&tests, v4),
+            Duration::from_millis(128 * INITIAL_READ_TIMEOUT_PER_STREAM_MS)
+        );
     }
 }
