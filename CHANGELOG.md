@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.1] - 2026-03-05
 
-### Fixed
-- **High stream-count teardown hardening** (issue #32) — client now stops local data streams at local duration expiry instead of waiting for server `Result`, scales stream join timeout with stream count (`max(2s, streams*50ms)`), and TCP receivers drain briefly after cancel to reduce reset-on-close bursts. Fixes post-test BrokenPipe/ConnectionReset cascades at high `-P` (e.g. 128 streams).
-- **Best-effort send shutdown** — `send_data()` shutdown no longer propagates errors during normal teardown races, matching `send_data_half()` behavior.
-- **Kernel pacing rate width** — `SO_MAX_PACING_RATE` now uses native `c_ulong` instead of `u32`, removing an unintended ~34 Gbps ceiling on 64-bit Linux.
-
-## [0.9.0] - 2026-03-05
-
 ### Added
 - **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. The server automatically creates MPTCP listeners when available (no flag needed) — MPTCP listeners accept both MPTCP and regular TCP clients transparently, with silent fallback to TCP if the kernel lacks MPTCP support. Client uses `--mptcp` to opt in. Clear error message on non-Linux clients or kernels without `CONFIG_MPTCP=y`.
 - **Kernel TCP pacing via `SO_MAX_PACING_RATE`** (issue #30) - On Linux, TCP bitrate pacing (`-b`) now uses the kernel's FQ scheduler with EDT (Earliest Departure Time) for precise per-packet timing, eliminating burst behavior from userspace sleep/wake cycles. Falls back to userspace pacing on non-Linux, MPTCP sockets (not yet supported in kernel, see [mptcp_net-next#578](https://github.com/multipath-tcp/mptcp_net-next/issues/578)), or if the setsockopt fails. Note: `-b` sets a global bitrate shared across all parallel streams (unlike iperf3 where `-b` is per-stream). Suggested by the kernel MPTCP maintainer.
@@ -22,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Library API** — `create_tcp_listener()`, `connect_tcp()`, and `connect_tcp_with_bind()` now take a `mptcp: bool` parameter. Library consumers should pass `false` to preserve existing behavior.
 
 ### Fixed
+- **High stream-count teardown hardening** (issue #32) — client now stops local data streams at local duration expiry instead of waiting for server `Result`, scales stream join timeout with stream count (`max(2s, streams*50ms)`), and TCP receivers drain briefly after cancel to reduce reset-on-close bursts. Fixes post-test BrokenPipe/ConnectionReset cascades at high `-P` (e.g. 128 streams).
+- **Best-effort send shutdown** — `send_data()` shutdown no longer propagates errors during normal teardown races, matching `send_data_half()` behavior.
+- **Kernel pacing rate width** — `SO_MAX_PACING_RATE` now uses native `c_ulong` instead of `u32`, removing an unintended ~34 Gbps ceiling on 64-bit Linux.
 - **JoinHandle panic with many parallel streams** (issue #24) — removed second `join_all` after aborting timed-out stream tasks, which polled already-completed handles
 - **Final summary showing 0 retransmits/RTT/cwnd** (issue #26) — each stream task now captures a final sender-side TCP_INFO snapshot before the socket closes; the Result handler overlays these saved snapshots deterministically instead of racing live fd polls
-- **Broken pipe / connection reset at teardown** (issue #25) — client now joins stream task handles with a 2s timeout before returning, preventing writes to already-closed sockets
+- **Broken pipe / connection reset at teardown** (issue #25) — client now joins stream task handles with timeout before returning, preventing writes to already-closed sockets
 - **MPTCP label in server log** — server now displays "MPTCP" instead of "TCP" in the test info log when client uses `--mptcp`; adds backward-compatible `mptcp` field to TestStart control message
 
 ## [0.8.0] - 2026-02-12
@@ -387,8 +383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
-[0.9.1]: https://github.com/lance0/xfr/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/lance0/xfr/compare/v0.8.0...v0.9.0
+[0.9.1]: https://github.com/lance0/xfr/compare/v0.8.0...v0.9.1
 [0.8.0]: https://github.com/lance0/xfr/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/lance0/xfr/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/lance0/xfr/compare/v0.6.1...v0.7.0
