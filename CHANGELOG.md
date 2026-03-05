@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-03-05
 
 ### Added
 - **MPTCP support** (`--mptcp`) - Multi-Path TCP on Linux 5.6+ (issue #24). Uses `IPPROTO_MPTCP` at socket creation via socket2 — all TCP features (nodelay, congestion control, window size, bidir, multi-stream, single-port mode) work transparently. The server automatically creates MPTCP listeners when available (no flag needed) — MPTCP listeners accept both MPTCP and regular TCP clients transparently, with silent fallback to TCP if the kernel lacks MPTCP support. Client uses `--mptcp` to opt in. Clear error message on non-Linux clients or kernels without `CONFIG_MPTCP=y`.
@@ -380,6 +380,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
+[0.9.0]: https://github.com/lance0/xfr/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/lance0/xfr/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/lance0/xfr/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/lance0/xfr/compare/v0.6.1...v0.7.0
