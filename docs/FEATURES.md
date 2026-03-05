@@ -18,7 +18,7 @@ xfr <host> --congestion bbr    # Use BBR congestion control
 
 TCP provides:
 - Reliable, ordered delivery
-- Bitrate pacing (`-b`) — on Linux, uses kernel `SO_MAX_PACING_RATE` with the FQ scheduler for precise per-packet timing; falls back to userspace byte-budget sleep pacing on other platforms
+- Bitrate pacing (`-b`) — on Linux, uses kernel `SO_MAX_PACING_RATE` with the FQ scheduler for precise per-packet timing; falls back to userspace byte-budget sleep pacing on other platforms or MPTCP sockets. Note: `-b` sets a global bitrate shared across all parallel streams (unlike iperf3 where `-b` is per-stream)
 - Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
 - TCP_INFO statistics (RTT, retransmits, cwnd) — polled live per interval, not just at test end
 
@@ -476,7 +476,7 @@ See `xfr --help` for complete CLI documentation.
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
-| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited. Global across all streams (unlike iperf3 per-stream) |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

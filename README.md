@@ -404,7 +404,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
-| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

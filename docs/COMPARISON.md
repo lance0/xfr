@@ -86,6 +86,8 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 
 7. **QUIC transport**: xfr supports QUIC (`--quic` or `-Q`) with built-in TLS 1.3 encryption and multiplexed streams. iperf3 has no QUIC support.
 
+8. **Bitrate is global**: xfr's `-b` sets a total bitrate shared across all parallel streams. iperf3's `-b` is per-stream, so `iperf3 -c host -P 4 -b 100M` sends 400M total, while `xfr host -P 4 -b 100M` sends 100M total. Use `-b 400M` in xfr to match iperf3's behavior.
+
 ### Migration Examples
 
 ```bash
