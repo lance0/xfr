@@ -273,13 +273,14 @@ Client behind strict firewall → which protocol?
 
 *Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24). Per-subflow stats via `MPTCP_FULL_INFO` would show multi-path behavior in the TUI.*
 
-### 100G+ Optimization
-- [ ] io_uring on Linux
-- [ ] Zerocopy send/receive (MSG_ZEROCOPY)
+### IO Optimization / Zero-Copy (issue #33)
+- [ ] `sendfile()` + `mmap()` on the send path — create anonymous memory region via `mmap()` and pass fd to `sendfile()`, avoiding userspace buffer copies entirely. No temp file needed (iperf3 uses this approach). Lowest effort, biggest win on embedded/constrained devices (3x improvement measured on MIPS router: 30 → 100 Mbps)
+- [ ] `MSG_ZEROCOPY` on the send path — `setsockopt(SO_ZEROCOPY)` + `send()` with `MSG_ZEROCOPY` flag. Must be optional/flag-gated: MPTCP doesn't support it yet ([mptcp_net-next#578](https://github.com/multipath-tcp/mptcp_net-next/issues/578)). Linux 4.14+
+- [ ] io_uring with fixed buffers — biggest win but requires different async runtime story (tokio-uring or glommio)
 - [ ] Multi-queue NIC support
 - [ ] AF_XDP kernel bypass
 
-*Rationale: Diminishing returns. Most users have 1-25G. 100G+ needs specialized hardware and often dedicated tools like DPDK.*
+*Rationale: Zero-copy isn't just for 100G+ — it dramatically reduces CPU overhead on embedded/constrained devices where memory copies are the bottleneck. `sendfile()+mmap()` is the pragmatic first step; `MSG_ZEROCOPY` and io_uring are bigger lifts with diminishing returns for most users.*
 
 ---
 

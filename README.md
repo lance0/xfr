@@ -546,6 +546,10 @@ Ensure the server is running and the port is not blocked by a firewall. TCP only
 - [AUR](https://aur.archlinux.org/packages/xfr-bin) - Arch Linux package (community-maintained)
 - [pkgsrc](https://pkgsrc.se/net/xfr) - NetBSD package (community-maintained)
 
+## Acknowledgments
+
+Special thanks to [Matthieu Baerts (matttbe)](https://github.com/matttbe), Linux kernel MPTCP co-maintainer, for extensive testing, detailed bug reports with packet traces, and feature suggestions including MPTCP support, kernel TCP pacing, zero-copy IO, and high stream-count hardening. xfr is significantly better because of his contributions.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
