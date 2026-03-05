@@ -14,6 +14,29 @@ use uuid::Uuid;
 
 /// Maximum control message line length to prevent memory DoS
 const MAX_LINE_LENGTH: usize = 65536;
+const STREAM_JOIN_TIMEOUT_BASE: Duration = Duration::from_secs(2);
+const STREAM_JOIN_TIMEOUT_PER_STREAM_MS: u64 = 50;
+
+fn stream_join_timeout(streams: u8) -> Duration {
+    let scaled =
+        Duration::from_millis(u64::from(streams).saturating_mul(STREAM_JOIN_TIMEOUT_PER_STREAM_MS));
+    if scaled > STREAM_JOIN_TIMEOUT_BASE {
+        scaled
+    } else {
+        STREAM_JOIN_TIMEOUT_BASE
+    }
+}
+
+fn local_stop_deadline(
+    start: tokio::time::Instant,
+    duration: Duration,
+) -> Option<tokio::time::Instant> {
+    if duration == Duration::ZERO {
+        None
+    } else {
+        Some(start + duration)
+    }
+}
 
 use crate::auth;
 use crate::net::{self, AddressFamily};
@@ -355,6 +378,9 @@ impl Client {
             self.config.duration + Duration::from_secs(30)
         };
         let deadline = tokio::time::Instant::now() + timeout_duration;
+        let local_end_deadline =
+            local_stop_deadline(tokio::time::Instant::now(), self.config.duration);
+        let mut local_stop_sent = false;
 
         let mut test_result: anyhow::Result<TestResult> =
             Err(anyhow::anyhow!("Connection closed without result"));
@@ -429,6 +455,18 @@ impl Client {
                             warn!("Failed to send pause/resume to server");
                         }
                     }
+                }
+                _ = async {
+                    if let Some(local_end) = local_end_deadline {
+                        tokio::time::sleep_until(local_end).await;
+                    }
+                }, if !local_stop_sent && local_end_deadline.is_some() => {
+                    // Stop local data loops at local test end instead of waiting for Result.
+                    // This narrows the race where server-side teardown can trigger RSTs while
+                    // client send loops are still writing.
+                    local_stop_sent = true;
+                    let _ = cancel_tx.send(true);
+                    debug!("Local test duration reached; stopping data streams while awaiting final control message");
                 }
             }
 
@@ -516,8 +554,9 @@ impl Client {
         // Signal stream tasks to stop and wait for them to finish cleanly
         let _ = cancel_tx.send(true);
         let mut stream_handles = stream_handles;
+        let join_timeout = stream_join_timeout(self.config.streams);
         match tokio::time::timeout(
-            Duration::from_secs(2),
+            join_timeout,
             futures::future::join_all(stream_handles.iter_mut()),
         )
         .await
@@ -532,7 +571,10 @@ impl Client {
                 }
             }
             Err(_) => {
-                warn!("Timed out waiting for data streams to stop; aborting remaining tasks");
+                warn!(
+                    "Timed out waiting {:?} for {} data streams to stop; aborting remaining tasks",
+                    join_timeout, self.config.streams
+                );
                 for handle in &stream_handles {
                     handle.abort();
                 }
@@ -1320,5 +1362,30 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         buf.push_str(&String::from_utf8_lossy(bytes));
         reader.consume(len);
         total += len;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stream_join_timeout_scaling() {
+        assert_eq!(stream_join_timeout(1), Duration::from_secs(2));
+        assert_eq!(stream_join_timeout(40), Duration::from_secs(2));
+        assert_eq!(stream_join_timeout(128), Duration::from_millis(6400));
+    }
+
+    #[test]
+    fn test_local_stop_deadline_none_for_infinite_duration() {
+        let start = tokio::time::Instant::now();
+        assert!(local_stop_deadline(start, Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn test_local_stop_deadline_set_for_finite_duration() {
+        let start = tokio::time::Instant::now();
+        let duration = Duration::from_secs(10);
+        assert_eq!(local_stop_deadline(start, duration), Some(start + duration));
     }
 }

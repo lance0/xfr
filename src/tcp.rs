@@ -6,7 +6,7 @@
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
@@ -18,6 +18,7 @@ use crate::tcp_info::get_tcp_info;
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
@@ -27,6 +28,36 @@ fn is_peer_closed_error(err: &io::Error) -> bool {
             | io::ErrorKind::BrokenPipe
             | io::ErrorKind::ConnectionAborted
     )
+}
+
+/// Drain readable bytes briefly after cancel to reduce RST-on-close risk.
+/// Closing a socket with unread data can trigger a reset on the peer under load.
+async fn drain_after_cancel<R: AsyncRead + Unpin>(reader: &mut R, stream_id: u8) {
+    let mut buffer = [0u8; 16 * 1024];
+    let deadline = tokio::time::Instant::now() + RECEIVE_CANCEL_DRAIN_GRACE;
+    let mut drained = 0u64;
+
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, reader.read(&mut buffer)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(n)) => drained += n as u64,
+            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Ok(Err(e)) if is_peer_closed_error(&e) => break,
+            Ok(Err(_)) => break,
+            Err(_) => break, // grace window elapsed while waiting
+        }
+    }
+
+    if drained > 0 {
+        debug!(
+            "Stream {} drained {} bytes after cancel before close",
+            stream_id, drained
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -178,14 +209,14 @@ fn set_tcp_congestion(_stream: &TcpStream, _algo: &str) -> std::io::Result<()> {
 /// eliminating burst behavior inherent in userspace sleep/wake cycles.
 /// Returns true if kernel pacing was successfully set.
 #[inline]
-fn pacing_rate_bytes_per_sec(bitrate_bps: u64) -> u32 {
+fn pacing_rate_bytes_per_sec(bitrate_bps: u64) -> libc::c_ulong {
     if bitrate_bps == 0 {
         return 0;
     }
     // Use ceil division so very low bitrates (e.g. 1 bps) map to 1 B/s
     // instead of 0, which would disable pacing.
     let bytes_per_sec = bitrate_bps.saturating_add(7) / 8;
-    bytes_per_sec.min(u32::MAX as u64) as u32
+    libc::c_ulong::try_from(bytes_per_sec).unwrap_or(libc::c_ulong::MAX)
 }
 
 #[cfg(target_os = "linux")]
@@ -194,7 +225,7 @@ fn try_set_pacing_rate(stream: &TcpStream, bitrate_bps: u64) -> bool {
     let fd = stream.as_raw_fd();
     let rate = pacing_rate_bytes_per_sec(bitrate_bps);
     // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
-    // rate is a valid u32 pointer, and size_of::<u32>() is correct.
+    // rate is a valid c_ulong pointer, and size_of::<c_ulong>() is correct.
     // setsockopt returns -1 on error which we check below.
     let ret = unsafe {
         libc::setsockopt(
@@ -202,7 +233,7 @@ fn try_set_pacing_rate(stream: &TcpStream, bitrate_bps: u64) -> bool {
             libc::SOL_SOCKET,
             libc::SO_MAX_PACING_RATE,
             &rate as *const _ as *const libc::c_void,
-            std::mem::size_of::<u32>() as libc::socklen_t,
+            std::mem::size_of::<libc::c_ulong>() as libc::socklen_t,
         )
     };
     if ret != 0 {
@@ -385,6 +416,17 @@ pub async fn send_data(
                     }
                     break;
                 }
+                if peer_closed {
+                    warn!(
+                        "Unexpected peer-close on stream {} after {:.3}s (cancel={}, deadline_reached={}, near_deadline={}): {}",
+                        stats.stream_id,
+                        now.saturating_duration_since(start).as_secs_f64(),
+                        *cancel.borrow(),
+                        deadline_reached,
+                        near_deadline,
+                        e
+                    );
+                }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
                 return Err(e.into());
             }
@@ -397,7 +439,19 @@ pub async fn send_data(
         stats.add_retransmits(info.retransmits);
     }
 
-    stream.shutdown().await?;
+    if let Err(e) = stream.shutdown().await {
+        if *cancel.borrow() || is_peer_closed_error(&e) {
+            debug!(
+                "Stream {} shutdown ended during teardown: {}",
+                stats.stream_id, e
+            );
+        } else {
+            warn!(
+                "Stream {} shutdown error after send loop: {}",
+                stats.stream_id, e
+            );
+        }
+    }
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,
@@ -425,6 +479,7 @@ pub async fn receive_data(
 
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
+    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -444,6 +499,7 @@ pub async fn receive_data(
                         // Receive-side reset/pipe before cancel is unexpected and should
                         // still be surfaced as an error.
                         if *cancel.borrow() {
+                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -456,11 +512,16 @@ pub async fn receive_data(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
+                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
+    }
+
+    if cancelled {
+        drain_after_cancel(&mut stream, stats.stream_id).await;
     }
 
     // Capture final TCP_INFO
@@ -591,6 +652,17 @@ pub async fn send_data_half(
                     }
                     break;
                 }
+                if peer_closed {
+                    warn!(
+                        "Unexpected peer-close on stream {} after {:.3}s (cancel={}, deadline_reached={}, near_deadline={}): {}",
+                        stats.stream_id,
+                        now.saturating_duration_since(start).as_secs_f64(),
+                        *cancel.borrow(),
+                        deadline_reached,
+                        near_deadline,
+                        e
+                    );
+                }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
                 return Err(e.into());
             }
@@ -623,6 +695,7 @@ pub async fn receive_data_half(
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
+    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -640,6 +713,7 @@ pub async fn receive_data_half(
                             continue;
                         }
                         if *cancel.borrow() {
+                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -652,11 +726,16 @@ pub async fn receive_data_half(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
+                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
+    }
+
+    if cancelled {
+        drain_after_cancel(&mut read_half, stats.stream_id).await;
     }
 
     debug!(
@@ -708,14 +787,17 @@ mod tests {
         assert_eq!(pacing_rate_bytes_per_sec(7), 1);
         assert_eq!(pacing_rate_bytes_per_sec(8), 1);
         assert_eq!(pacing_rate_bytes_per_sec(9), 2);
-        assert_eq!(
-            pacing_rate_bytes_per_sec((u32::MAX as u64).saturating_mul(8)),
-            u32::MAX
-        );
-        assert_eq!(
-            pacing_rate_bytes_per_sec((u32::MAX as u64).saturating_mul(8).saturating_add(7)),
-            u32::MAX
-        );
+        let expected_max_input =
+            libc::c_ulong::try_from(u64::MAX.saturating_add(7) / 8).unwrap_or(libc::c_ulong::MAX);
+        assert_eq!(pacing_rate_bytes_per_sec(u64::MAX), expected_max_input);
+
+        // On 32-bit where c_ulong < u64, verify explicit clamp behavior.
+        if libc::c_ulong::BITS < 64 {
+            let max = u64::try_from(libc::c_ulong::MAX).unwrap_or(u64::MAX);
+            let overflow_bytes = max.saturating_add(1);
+            let bitrate = overflow_bytes.saturating_mul(8);
+            assert_eq!(pacing_rate_bytes_per_sec(bitrate), libc::c_ulong::MAX);
+        }
     }
 
     #[test]
@@ -727,14 +809,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let stream = std::net::TcpStream::connect(addr).unwrap();
         let fd = stream.as_raw_fd();
-        let rate: u32 = 100_000_000 / 8; // 100 Mbps in bytes/sec
+        let rate: libc::c_ulong =
+            libc::c_ulong::try_from(100_000_000u64 / 8).unwrap_or(libc::c_ulong::MAX); // 100 Mbps in bytes/sec
         let ret = unsafe {
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,
                 libc::SO_MAX_PACING_RATE,
                 &rate as *const _ as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
+                std::mem::size_of::<libc::c_ulong>() as libc::socklen_t,
             )
         };
         assert_eq!(
@@ -744,8 +827,8 @@ mod tests {
             std::io::Error::last_os_error()
         );
 
-        let mut actual: u32 = 0;
-        let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+        let mut actual: libc::c_ulong = 0;
+        let mut len = std::mem::size_of::<libc::c_ulong>() as libc::socklen_t;
         let ret = unsafe {
             libc::getsockopt(
                 fd,
@@ -761,7 +844,7 @@ mod tests {
             "SO_MAX_PACING_RATE getsockopt failed: {}",
             std::io::Error::last_os_error()
         );
-        assert_eq!(len as usize, std::mem::size_of::<u32>());
+        assert_eq!(len as usize, std::mem::size_of::<libc::c_ulong>());
         assert!(actual > 0, "SO_MAX_PACING_RATE should be non-zero");
     }
 

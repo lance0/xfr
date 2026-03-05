@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **JoinHandle panic with many parallel streams** (issue #24) — removed second `join_all` after aborting timed-out stream tasks, which polled already-completed handles
 - **Final summary showing 0 retransmits/RTT/cwnd** (issue #26) — each stream task now captures a final sender-side TCP_INFO snapshot before the socket closes; the Result handler overlays these saved snapshots deterministically instead of racing live fd polls
-- **Broken pipe / connection reset at teardown** (issue #25) — client now joins stream task handles with a 2s timeout before returning, preventing writes to already-closed sockets
+- **Broken pipe / connection reset at teardown under high stream counts** (issue #25) — client now stops local data streams as soon as local test duration expires (instead of waiting for `Result`) and scales stream join timeout with stream count (`max(2s, streams*50ms)`) before aborting leftovers. TCP receivers also perform a short cancel-time drain before close to reduce reset-on-close bursts when many streams are active. Together these changes narrow server/client teardown races that produced post-test error cascades at high `-P`.
+- **Kernel pacing rate width on Linux** — `SO_MAX_PACING_RATE` now uses native `c_ulong` width instead of `u32`, removing an unintended ~34 Gbps ceiling on 64-bit systems while keeping low-rate ceil behavior (`1 bps` -> `1 B/s`).
 - **MPTCP label in server log** — server now displays "MPTCP" instead of "TCP" in the test info log when client uses `--mptcp`; adds backward-compatible `mptcp` field to TestStart control message
 
 ## [0.8.0] - 2026-02-12

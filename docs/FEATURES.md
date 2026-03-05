@@ -21,6 +21,7 @@ TCP provides:
 - Bitrate pacing (`-b`) — on Linux, uses kernel `SO_MAX_PACING_RATE` with the FQ scheduler for precise per-packet timing; falls back to userspace byte-budget sleep pacing on other platforms or MPTCP sockets. Note: `-b` sets a global bitrate shared across all parallel streams (unlike iperf3 where `-b` is per-stream)
 - Selectable congestion control (`--congestion cubic`, `--congestion bbr`, `--congestion reno`)
 - TCP_INFO statistics (RTT, retransmits, cwnd) — polled live per interval, not just at test end
+- High stream-count teardown resilience — client now stops local data loops at local test end, scales teardown wait time with stream count, and TCP receivers do a short cancel-time drain before close to reduce post-test BrokenPipe/ConnectionReset cascades
 
 #### Single-Port TCP (Default)
 
