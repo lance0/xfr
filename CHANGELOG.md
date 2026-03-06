@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Random payloads by default** (issue #34) — TCP/UDP client-sent payloads now use random bytes by default to avoid silently inflated results on WAN-optimized or compressing paths. `--random` remains as an explicit no-op for clarity, and new `--zeros` forces zero-filled payloads for compression/dedup testing. Reverse mode sender remains server-side zeros until protocol negotiation is added.
 
 ### Fixed
+- **Windows build regression** (issue #37) — `pacing_rate_bytes_per_sec()` used `libc::c_ulong` without a `#[cfg(target_os = "linux")]` guard, breaking compilation on Windows. The function is only called from the linux-gated `SO_MAX_PACING_RATE` path.
 - **MPTCP namespace test realism** (issue #32) — `test-mptcp-ns.sh` now combines `netem` shaping with `fq_codel` on the shaped transit links, matching common Linux defaults more closely and reducing false-positive high-stream failures caused by shallow unfair queues in the test harness.
 
 ## [0.9.1] - 2026-03-05
