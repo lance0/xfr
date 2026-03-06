@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.2] - 2026-03-06
 
 ### Changed
 - **Random payloads by default** (issue #34) — TCP/UDP client-sent payloads now use random bytes by default to avoid silently inflated results on WAN-optimized or compressing paths. `--random` remains as an explicit no-op for clarity, and new `--zeros` forces zero-filled payloads for compression/dedup testing. Reverse mode sender remains server-side zeros until protocol negotiation is added.
@@ -393,6 +393,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TCP_INFO stats on Linux and macOS
 - Configurable TCP window size and nodelay
 
+[0.9.2]: https://github.com/lance0/xfr/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/lance0/xfr/compare/v0.8.0...v0.9.1
 [0.8.0]: https://github.com/lance0/xfr/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/lance0/xfr/compare/v0.7.0...v0.7.1
