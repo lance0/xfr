@@ -38,14 +38,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::{
-    ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
-    VarInt,
+    ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
+    TransportConfig, VarInt,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use socket2::{Protocol, Socket, Type};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
+use crate::net::AddressFamily;
 use crate::stats::StreamStats;
 
 /// Default buffer size for QUIC send/receive operations (128 KB)
@@ -65,8 +67,13 @@ pub fn generate_self_signed_cert()
 }
 
 /// Create a QUIC server endpoint
+///
+/// Uses socket2 to create the UDP socket with proper dual-stack handling.
+/// On Windows, `std::net::UdpSocket::bind("[::]:port")` does NOT accept IPv4
+/// connections by default — we must explicitly set `IPV6_V6ONLY=false`.
 pub fn create_server_endpoint(
     addr: SocketAddr,
+    family: AddressFamily,
     cert: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> anyhow::Result<Endpoint> {
@@ -84,8 +91,28 @@ pub fn create_server_endpoint(
     let mut server_config = ServerConfig::with_crypto(Arc::new(quic_crypto));
     server_config.transport_config(Arc::new(transport));
 
-    let endpoint = Endpoint::server(server_config, addr)?;
-    info!("QUIC server listening on {}", addr);
+    // Create the UDP socket ourselves so we can set IPV6_V6ONLY properly.
+    // Quinn's Endpoint::server() uses std::net::UdpSocket::bind() which
+    // doesn't configure dual-stack, breaking IPv4 on Windows (#39).
+    let socket = Socket::new(family.domain(), Type::DGRAM, Some(Protocol::UDP))?;
+    if family != AddressFamily::V4Only {
+        let v6only = family == AddressFamily::V6Only;
+        socket.set_only_v6(v6only)?;
+        debug!("QUIC socket IPV6_V6ONLY={} for {} mode", v6only, family);
+    }
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.set_nonblocking(true)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("no async runtime found"))?;
+    let endpoint = Endpoint::new(
+        EndpointConfig::default(),
+        Some(server_config),
+        std_socket,
+        runtime,
+    )?;
+    info!("QUIC server listening on {} ({})", addr, family);
 
     Ok(endpoint)
 }

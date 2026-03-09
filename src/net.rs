@@ -163,6 +163,59 @@ pub async fn create_tcp_listener(
     Ok(listener)
 }
 
+/// Create a TCP listener bound to a specific address
+///
+/// Used when `--bind` is specified to bind to a concrete IP address.
+/// Tries MPTCP first on Linux, falling back to regular TCP.
+pub async fn create_tcp_listener_on_addr(addr: SocketAddr) -> io::Result<TcpListener> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    // Concrete IPv6 addresses are single-family; set V6ONLY explicitly
+    // rather than relying on platform defaults (Linux=false, Windows/macOS=true)
+    let set_v6only = addr.is_ipv6();
+
+    // Try MPTCP first on Linux
+    #[cfg(target_os = "linux")]
+    {
+        match Socket::new(domain, Type::STREAM, Some(Protocol::MPTCP)) {
+            Ok(socket) => {
+                socket.set_reuse_address(true)?;
+                if set_v6only {
+                    socket.set_only_v6(true)?;
+                }
+                socket.bind(&SockAddr::from(addr))?;
+                socket.listen(128)?;
+                socket.set_nonblocking(true)?;
+                let std_listener: std::net::TcpListener = socket.into();
+                let listener = TcpListener::from_std(std_listener)?;
+                info!("MPTCP listening on {}", addr);
+                return Ok(listener);
+            }
+            Err(e) if is_mptcp_unavailable_error(&e) => {
+                debug!("MPTCP not available, falling back to TCP: {}", e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    if set_v6only {
+        socket.set_only_v6(true)?;
+    }
+    socket.bind(&SockAddr::from(addr))?;
+    socket.listen(128)?;
+    socket.set_nonblocking(true)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    let listener = TcpListener::from_std(std_listener)?;
+    info!("TCP listening on {}", addr);
+    Ok(listener)
+}
+
 /// Create a TCP listener that tries MPTCP first, falling back to regular TCP silently.
 ///
 /// On Linux, MPTCP listeners accept both MPTCP and regular TCP connections transparently

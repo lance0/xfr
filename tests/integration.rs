@@ -1866,3 +1866,276 @@ fn test_cli_cport_overflow_error_message() {
         stderr
     );
 }
+
+// --- Server --bind tests ---
+
+/// Server bound to 127.0.0.1 should accept TCP connections on that address
+#[tokio::test]
+async fn test_serve_bind_ipv4_loopback() {
+    let port = get_test_port();
+    let config = ServerConfig {
+        port,
+        bind_addr: Some("127.0.0.1".parse().unwrap()),
+        address_family: xfr::net::AddressFamily::V4Only,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+    let _server = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_cfg = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        address_family: xfr::net::AddressFamily::V4Only,
+        random_payload: false,
+        ..Default::default()
+    };
+    let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
+    assert!(result.is_ok(), "Test should complete");
+    assert!(
+        result.unwrap().is_ok(),
+        "TCP to bound 127.0.0.1 should succeed"
+    );
+}
+
+/// Server bound to ::1 should accept TCP connections on that address
+#[tokio::test]
+async fn test_serve_bind_ipv6_loopback() {
+    // Skip if IPv6 is not available
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+
+    let port = get_test_port();
+    let config = ServerConfig {
+        port,
+        bind_addr: Some("::1".parse().unwrap()),
+        address_family: xfr::net::AddressFamily::V6Only,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+    let _server = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_cfg = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        address_family: xfr::net::AddressFamily::V6Only,
+        random_payload: false,
+        ..Default::default()
+    };
+    let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
+    assert!(result.is_ok(), "Test should complete");
+    assert!(result.unwrap().is_ok(), "TCP to bound [::1] should succeed");
+}
+
+/// Server bound to 127.0.0.1 with QUIC should accept QUIC connections
+#[tokio::test]
+async fn test_serve_bind_ipv4_quic() {
+    let port = get_test_port();
+    let config = ServerConfig {
+        port,
+        bind_addr: Some("127.0.0.1".parse().unwrap()),
+        address_family: xfr::net::AddressFamily::V4Only,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+    let _server = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_cfg = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        address_family: xfr::net::AddressFamily::V4Only,
+        random_payload: false,
+        ..Default::default()
+    };
+    let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
+    assert!(result.is_ok(), "Test should complete");
+    assert!(
+        result.unwrap().is_ok(),
+        "QUIC to bound 127.0.0.1 should succeed"
+    );
+}
+
+/// Server bound to ::1 with QUIC should accept QUIC connections
+#[tokio::test]
+async fn test_serve_bind_ipv6_quic() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+
+    let port = get_test_port();
+    let config = ServerConfig {
+        port,
+        bind_addr: Some("::1".parse().unwrap()),
+        address_family: xfr::net::AddressFamily::V6Only,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+    let _server = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_cfg = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        address_family: xfr::net::AddressFamily::V6Only,
+        random_payload: false,
+        ..Default::default()
+    };
+    let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
+    assert!(result.is_ok(), "Test should complete");
+    assert!(
+        result.unwrap().is_ok(),
+        "QUIC to bound [::1] should succeed"
+    );
+}
+
+/// --bind with mismatched -4/-6 should error at the CLI level
+#[test]
+fn test_serve_bind_family_mismatch_ipv4_with_ipv6_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "--bind", "127.0.0.1", "-6"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "should fail: --bind 127.0.0.1 contradicts -6"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IPv4") && stderr.contains("IPv6"),
+        "error should mention the family mismatch: {}",
+        stderr
+    );
+}
+
+/// --bind with mismatched -4/-6 should error at the CLI level (reverse case)
+#[test]
+fn test_serve_bind_family_mismatch_ipv6_with_ipv4_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "--bind", "::1", "-4"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "should fail: --bind ::1 contradicts -4"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IPv6") && stderr.contains("IPv4"),
+        "error should mention the family mismatch: {}",
+        stderr
+    );
+}
+
+/// --bind :: (unspecified) should be rejected
+#[test]
+fn test_serve_bind_rejects_unspecified_ipv6() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "--bind", "::"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "should fail: --bind :: is unspecified"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unspecified"),
+        "error should mention unspecified address: {}",
+        stderr
+    );
+}
+
+/// --bind 0.0.0.0 (unspecified) should be rejected
+#[test]
+fn test_serve_bind_rejects_unspecified_ipv4() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "--bind", "0.0.0.0"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "should fail: --bind 0.0.0.0 is unspecified"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unspecified"),
+        "error should mention unspecified address: {}",
+        stderr
+    );
+}
+
+/// Server bound to 127.0.0.1 should accept UDP connections on that address
+#[tokio::test]
+async fn test_serve_bind_ipv4_udp() {
+    let port = get_test_port();
+    let config = ServerConfig {
+        port,
+        bind_addr: Some("127.0.0.1".parse().unwrap()),
+        address_family: xfr::net::AddressFamily::V4Only,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        ..Default::default()
+    };
+    let _server = tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_cfg = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        address_family: xfr::net::AddressFamily::V4Only,
+        random_payload: false,
+        ..Default::default()
+    };
+    let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
+    assert!(result.is_ok(), "Test should complete");
+    assert!(
+        result.unwrap().is_ok(),
+        "UDP to bound 127.0.0.1 should succeed"
+    );
+}

@@ -3,7 +3,7 @@
 //! Listens for incoming connections and handles bandwidth tests.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -71,6 +71,8 @@ pub struct ServerConfig {
     pub rate_limit: RateLimitConfig,
     /// Address family (IPv4, IPv6, dual-stack)
     pub address_family: AddressFamily,
+    /// Bind to specific address (overrides address_family bind address)
+    pub bind_addr: Option<IpAddr>,
     /// Channel to send events to TUI
     pub tui_tx: Option<mpsc::Sender<ServerEvent>>,
     /// Enable QUIC protocol support (binds additional UDP port)
@@ -92,6 +94,7 @@ impl Default for ServerConfig {
             acl: AclConfig::default(),
             rate_limit: RateLimitConfig::default(),
             address_family: AddressFamily::default(),
+            bind_addr: None,
             tui_tx: None,
             enable_quic: true,
             max_concurrent: 100,
@@ -105,6 +108,7 @@ struct SecurityContext {
     acl: Acl,
     rate_limiter: Option<Arc<RateLimiter>>,
     address_family: AddressFamily,
+    bind_addr: Option<IpAddr>,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: Option<String>,
 }
@@ -162,20 +166,25 @@ impl Server {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        let listener =
+        let listener = if let Some(ip) = self.config.bind_addr {
+            let addr = SocketAddr::new(ip, self.config.port);
+            info!("Binding to {}", addr);
+            net::create_tcp_listener_on_addr(addr).await?
+        } else {
             net::create_tcp_listener_auto_mptcp(self.config.port, self.config.address_family)
-                .await?;
+                .await?
+        };
 
         // Create QUIC endpoint on the same port (UDP) - only if enabled
         let quic_endpoint = if self.config.enable_quic {
             let (cert, key) = quic::generate_self_signed_cert()?;
-            let bind_addr: SocketAddr = match self.config.address_family {
-                AddressFamily::V4Only => format!("0.0.0.0:{}", self.config.port).parse()?,
-                AddressFamily::V6Only | AddressFamily::DualStack => {
-                    format!("[::]:{}", self.config.port).parse()?
-                }
+            let bind_addr = if let Some(ip) = self.config.bind_addr {
+                SocketAddr::new(ip, self.config.port)
+            } else {
+                self.config.address_family.bind_addr(self.config.port)
             };
-            let endpoint = quic::create_server_endpoint(bind_addr, cert, key)?;
+            let endpoint =
+                quic::create_server_endpoint(bind_addr, self.config.address_family, cert, key)?;
             info!("QUIC endpoint ready on port {}", self.config.port);
             Some(endpoint)
         } else {
@@ -204,6 +213,7 @@ impl Server {
             acl,
             rate_limiter: rate_limiter.clone(),
             address_family: self.config.address_family,
+            bind_addr: self.config.bind_addr,
             tui_tx: self.config.tui_tx.clone(),
             push_gateway_url: self.config.push_gateway_url.clone(),
         });
@@ -1300,6 +1310,7 @@ async fn handle_test_request(
                 congestion,
                 active_tests.clone(),
                 security.address_family,
+                security.bind_addr,
                 peer_addr,
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
@@ -1632,6 +1643,7 @@ async fn run_test(
     congestion: Option<String>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     address_family: AddressFamily,
+    bind_addr: Option<IpAddr>,
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
@@ -1659,7 +1671,11 @@ async fn run_test(
             let (tx, rx) = mpsc::channel::<(TcpStream, u16)>(streams as usize);
             let expected_ip = net::normalize_ip(peer_addr.ip());
             for i in 0..streams {
-                let listener = net::create_tcp_listener_auto_mptcp(0, address_family).await?;
+                let listener = if let Some(ip) = bind_addr {
+                    net::create_tcp_listener_on_addr(SocketAddr::new(ip, 0)).await?
+                } else {
+                    net::create_tcp_listener_auto_mptcp(0, address_family).await?
+                };
                 data_ports.push(listener.local_addr()?.port());
                 debug!(
                     "TCP data port {} allocated for stream {}",
@@ -1700,7 +1716,11 @@ async fn run_test(
         }
         Protocol::Udp => {
             for _ in 0..streams {
-                let socket = net::create_udp_socket(0, address_family).await?;
+                let socket = if let Some(ip) = bind_addr {
+                    net::create_udp_socket_bound(SocketAddr::new(ip, 0)).await?
+                } else {
+                    net::create_udp_socket(0, address_family).await?
+                };
                 data_ports.push(socket.local_addr()?.port());
                 debug!("UDP port {} allocated", data_ports.last().unwrap());
                 udp_sockets.push(Arc::new(socket));
@@ -2072,6 +2092,7 @@ async fn spawn_tcp_handlers(
             // Use high-speed config for server - we want maximum throughput
             let mut config = TcpConfig::high_speed();
             config.congestion = congestion.clone();
+            config.random_payload = true;
 
             // Store fd for TCP_INFO interval polling
             #[cfg(unix)]
@@ -2135,7 +2156,7 @@ async fn spawn_tcp_handlers(
                         nodelay: config.nodelay,
                         window_size: config.window_size,
                         congestion: config.congestion.clone(),
-                        random_payload: false,
+                        random_payload: true,
                     };
                     let recv_config = config;
 
@@ -2419,7 +2440,7 @@ async fn spawn_udp_handlers(
                                 stream_stats,
                                 cancel,
                                 pause,
-                                false,
+                                true,
                             )
                             .await;
                         }
@@ -2452,7 +2473,7 @@ async fn spawn_udp_handlers(
                                     send_stats,
                                     send_cancel,
                                     send_pause,
-                                    false,
+                                    true,
                                 )
                                 .await;
                             });

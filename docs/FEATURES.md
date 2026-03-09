@@ -51,15 +51,13 @@ UDP provides:
 
 **Note**: UDP is not congestion-controlled. High bitrates can cause network congestion.
 
-### Payload Pattern (`--random`)
+### Payload Pattern
 
-By default, payload buffers are zero-filled. With `--random`, xfr fills send buffers with random bytes once at allocation time (not per write), which helps avoid inflated results from WAN optimizers, compression offload, and dedup hardware.
+Both client and server use random payloads by default for TCP and UDP, avoiding inflated results from WAN optimizers, compression offload, and dedup hardware. Buffers are filled with random bytes once at allocation time (not per write), so the CPU cost is negligible.
 
-Current scope:
-- Applies to client-sent TCP/UDP payloads (Upload mode).
-- In `--bidir`, applies to client->server direction only.
-- In `-R/--reverse`, sender is server, so `--random` is currently not applied.
-- Ignored for QUIC (payload is already encrypted).
+- `--zeros` forces zero-filled client-sent payloads for compression/dedup testing.
+- `--zeros` only affects client-sent traffic; the server always sends random. Payload mode is not negotiated over the wire (future enhancement).
+- QUIC payloads are ignored since QUIC encrypts all traffic via TLS 1.3.
 
 ### QUIC
 

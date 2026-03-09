@@ -5,10 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Server `--bind` flag** (issue #38) — `xfr serve --bind <IP>` binds TCP, QUIC, and UDP data listeners to a specific address. Validates against `-4`/`-6` flags and rejects unspecified addresses (`::`, `0.0.0.0`). Requested by Windows users needing interface-specific binding.
+
+### Changed
+- **Server sends random payloads** (issue #34) — server-side TCP and UDP send paths now use random bytes by default in reverse and bidirectional modes, matching the client's default-on behavior. `--zeros` only affects client-sent traffic; server payload mode is not negotiated over the wire (future enhancement).
+
+### Fixed
+- **QUIC dual-stack on Windows** (issue #39) — QUIC server endpoint now creates its UDP socket via socket2 with explicit `IPV6_V6ONLY` handling instead of relying on Quinn's `Endpoint::server()`, which uses `std::net::UdpSocket::bind()` without dual-stack configuration. On Windows/macOS where `IPV6_V6ONLY` defaults to `true`, binding to `[::]` would only accept IPv6 connections.
+
 ## [0.9.2] - 2026-03-06
 
 ### Changed
-- **Random payloads by default** (issue #34) — TCP/UDP client-sent payloads now use random bytes by default to avoid silently inflated results on WAN-optimized or compressing paths. `--random` remains as an explicit no-op for clarity, and new `--zeros` forces zero-filled payloads for compression/dedup testing. Reverse mode sender remains server-side zeros until protocol negotiation is added.
+- **Random payloads by default** (issue #34) — TCP/UDP payloads now use random bytes by default to avoid silently inflated results on WAN-optimized or compressing paths. `--random` remains as an explicit no-op for clarity, and new `--zeros` forces zero-filled payloads for compression/dedup testing.
 
 ### Fixed
 - **Windows build regression** (issue #37) — `pacing_rate_bytes_per_sec()` used `libc::c_ulong` without a `#[cfg(target_os = "linux")]` guard, breaking compilation on Windows. The function is only called from the linux-gated `SO_MAX_PACING_RATE` path.

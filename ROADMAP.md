@@ -170,7 +170,7 @@
 - [x] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
 - [x] **TCP bitrate pacing** (`-b` for TCP) - byte-budget sleep pacing with interruptible sleeps and buffer auto-capping; `-b` flag now applies to TCP and UDP (issue #14). On Linux, uses kernel `SO_MAX_PACING_RATE` for precise per-packet pacing via the FQ scheduler (issue #30)
 - [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP uses sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
-- [x] **Random payload data** (`--random`) - fill send buffers with random bytes to defeat WAN optimizer/compression/dedup bias (issue #34). Client-side TCP/UDP; QUIC skipped (already encrypted). Fill-once per buffer, no per-write overhead
+- [x] **Random payload data** (`--random`) - fill send buffers with random bytes to defeat WAN optimizer/compression/dedup bias (issue #34). Both client and server TCP/UDP; QUIC skipped (already encrypted). Fill-once per buffer, no per-write overhead. `--zeros` only affects client-sent traffic; server payload mode not yet negotiated over wire
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [ ] **DSCP/TOS marking** (`--dscp`) - set IP_TOS on sockets for QoS policy testing; single `setsockopt` call, same pattern as `--congestion`. iperf3 has `-S`
@@ -216,6 +216,7 @@ Client behind strict firewall → which protocol?
 - [x] **Pause/resume** (`p` key) - real traffic pause via `Pause`/`Resume` protocol messages and a second `watch` channel to data loops (v0.7.0, issue #19)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring
 - [ ] **Bufferbloat / latency-under-load** (`--latency-probe`) - run throughput flood + concurrent latency probe (ICMP/UDP) and grade the connection. Scope: single flag, simple A-F grade output, not a full latency monitoring suite
+- [ ] **Server UDP port range** (`--data-port-range`) - configurable ephemeral port range for server-side UDP data sockets (requested in issue #38 for strict firewall environments on Windows)
 - [ ] **UDP single-port mode** - multiplex all UDP streams through a single port, eliminating per-stream port allocation. Analogous to TCP's DataHello approach. Would make UDP fully firewall-friendly without `--cport`
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
 
@@ -226,7 +227,7 @@ Client behind strict firewall → which protocol?
 
 ### Nice to Have
 - [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
-- [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts
+- [x] **Bind to interface** (`--bind`) - bind to specific IP/interface for multi-homed hosts; supported in both client and server mode (issue #38)
 - [ ] **SO_BUSY_POLL for UDP** - reduce jitter via busy polling (Linux)
 - [ ] **Batch atomic counter updates** - reduce per-packet atomic operations at high PPS (flush once per interval)
 - [ ] **Test profiles** - save/load named test configurations
@@ -238,6 +239,7 @@ Client behind strict firewall → which protocol?
 ## Low Priority
 
 ### Windows Native
+- [x] **QUIC dual-stack fix** (issue #39) — QUIC server endpoint now handles `IPV6_V6ONLY` explicitly via socket2, fixing IPv4 QUIC on Windows/macOS where the default is `true`
 - [ ] Basic TCP/UDP testing (no TCP_INFO)
 - [ ] TUI compatibility with Windows Terminal
 - [ ] Pre-built binaries

@@ -162,6 +162,10 @@ Deny IP or subnet (can be repeated)
 .BI \-\-acl\-file " FILE"
 Load ACL rules from file
 .TP
+.TP
+.BI \-B ", " \-\-bind " IP"
+Bind to specific address (e.g., 192.168.1.1, ::1). Rejects unspecified addresses; use \fB\-4\fR/\fB\-6\fR instead to control address family. Validates against \fB\-4\fR/\fB\-6\fR flags.
+.TP
 .B \-4 ", " \-\-ipv4
 Force IPv4 only
 .TP

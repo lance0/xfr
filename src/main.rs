@@ -1,6 +1,7 @@
 //! xfr - Modern network bandwidth testing with TUI
 
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -350,6 +351,10 @@ enum Commands {
         #[arg(long)]
         acl_file: Option<PathBuf>,
 
+        /// Bind to specific address (e.g., 192.168.1.1, ::1)
+        #[arg(short = 'B', long)]
+        bind: Option<IpAddr>,
+
         /// Force IPv4 only
         #[arg(short = '4', long = "ipv4")]
         ipv4_only: bool,
@@ -512,21 +517,21 @@ fn random_payload_notice(
     direction: Direction,
     random_enabled: bool,
 ) -> Option<&'static str> {
-    if !random_enabled {
+    if protocol == Protocol::Quic {
+        if random_enabled {
+            return Some("random payloads are ignored with QUIC (payload is already encrypted)");
+        }
+        // QUIC encrypts payload regardless, so --zeros is irrelevant
         return None;
     }
-    if protocol == Protocol::Quic {
-        return Some("random payloads are ignored with QUIC (payload is already encrypted)");
+    // When --zeros is used with reverse/bidir, warn that the server's payload mode
+    // is not negotiated — the client cannot control what the server sends.
+    if !random_enabled && matches!(direction, Direction::Download | Direction::Bidir) {
+        return Some(
+            "--zeros only affects client-sent traffic; server payload mode is not negotiated",
+        );
     }
-    match direction {
-        Direction::Upload => None,
-        Direction::Download => Some(
-            "random payloads currently apply only to client-sent payloads; reverse mode sender is server",
-        ),
-        Direction::Bidir => Some(
-            "random payloads currently apply only to client->server direction in bidirectional mode",
-        ),
-    }
+    None
 }
 
 fn generate_completions(shell: &str) {
@@ -632,6 +637,7 @@ async fn main() -> Result<()> {
             allow,
             deny,
             acl_file,
+            bind,
             ipv4_only,
             ipv6_only,
         }) => {
@@ -686,7 +692,28 @@ async fn main() -> Result<()> {
             };
 
             // Determine address family
-            let address_family = if ipv4_only {
+            // When --bind is specified, derive family from the IP and validate
+            // against -4/-6 to prevent contradictions (e.g., --bind 127.0.0.1 -6)
+            let address_family = if let Some(ip) = bind {
+                if ip.is_unspecified() {
+                    anyhow::bail!(
+                        "--bind {} is an unspecified address; use -4/-6 instead to control address family",
+                        ip
+                    );
+                }
+                let derived = if ip.is_ipv4() {
+                    xfr::net::AddressFamily::V4Only
+                } else {
+                    xfr::net::AddressFamily::V6Only
+                };
+                if ipv4_only && ip.is_ipv6() {
+                    anyhow::bail!("--bind {} is IPv6 but -4/--ipv4 forces IPv4", ip);
+                }
+                if ipv6_only && ip.is_ipv4() {
+                    anyhow::bail!("--bind {} is IPv4 but -6/--ipv6 forces IPv6", ip);
+                }
+                derived
+            } else if ipv4_only {
                 xfr::net::AddressFamily::V4Only
             } else if ipv6_only {
                 xfr::net::AddressFamily::V6Only
@@ -707,6 +734,7 @@ async fn main() -> Result<()> {
                 acl: acl_config,
                 rate_limit: rate_limit_config,
                 address_family,
+                bind_addr: bind,
                 tui_tx: None,
                 enable_quic: true, // Enable QUIC by default
                 ..Default::default()
@@ -1772,43 +1800,59 @@ mod tests {
 
     #[test]
     fn test_random_payload_notice() {
-        // Disabled: no notice
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Upload, false),
-            None
-        );
-
-        // QUIC: always ignored
-        assert_eq!(
-            random_payload_notice(Protocol::Quic, Direction::Upload, true),
-            Some("random payloads are ignored with QUIC (payload is already encrypted)")
-        );
-        assert!(random_payload_notice(Protocol::Quic, Direction::Download, true).is_some());
-
-        // TCP/UDP upload: fully supported client-side
+        // Default (random enabled): no warnings for TCP/UDP in any direction
         assert_eq!(
             random_payload_notice(Protocol::Tcp, Direction::Upload, true),
+            None
+        );
+        assert_eq!(
+            random_payload_notice(Protocol::Tcp, Direction::Download, true),
+            None
+        );
+        assert_eq!(
+            random_payload_notice(Protocol::Tcp, Direction::Bidir, true),
             None
         );
         assert_eq!(
             random_payload_notice(Protocol::Udp, Direction::Upload, true),
             None
         );
+        assert_eq!(
+            random_payload_notice(Protocol::Udp, Direction::Download, true),
+            None
+        );
+        assert_eq!(
+            random_payload_notice(Protocol::Udp, Direction::Bidir, true),
+            None
+        );
 
-        // Reverse/bidir: partial support today
+        // QUIC + random: payload is already encrypted
         assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Download, true),
-            Some(
-                "random payloads currently apply only to client-sent payloads; reverse mode sender is server",
-            )
+            random_payload_notice(Protocol::Quic, Direction::Upload, true),
+            Some("random payloads are ignored with QUIC (payload is already encrypted)")
+        );
+        assert!(random_payload_notice(Protocol::Quic, Direction::Download, true).is_some());
+
+        // --zeros + upload: no warning (client controls its own sends)
+        assert_eq!(
+            random_payload_notice(Protocol::Tcp, Direction::Upload, false),
+            None
         );
         assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Bidir, true),
-            Some(
-                "random payloads currently apply only to client->server direction in bidirectional mode",
-            )
+            random_payload_notice(Protocol::Udp, Direction::Upload, false),
+            None
         );
-        assert!(random_payload_notice(Protocol::Udp, Direction::Download, true).is_some());
-        assert!(random_payload_notice(Protocol::Udp, Direction::Bidir, true).is_some());
+
+        // --zeros + reverse/bidir: warn that server still sends random
+        assert!(random_payload_notice(Protocol::Tcp, Direction::Download, false).is_some());
+        assert!(random_payload_notice(Protocol::Tcp, Direction::Bidir, false).is_some());
+        assert!(random_payload_notice(Protocol::Udp, Direction::Download, false).is_some());
+        assert!(random_payload_notice(Protocol::Udp, Direction::Bidir, false).is_some());
+
+        // --zeros + QUIC reverse: no warning (QUIC encrypts regardless)
+        assert_eq!(
+            random_payload_notice(Protocol::Quic, Direction::Download, false),
+            None
+        );
     }
 }
