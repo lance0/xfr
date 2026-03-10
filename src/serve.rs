@@ -2279,6 +2279,7 @@ async fn spawn_tcp_stream_handlers(
                 let handle = tokio::spawn(async move {
                     let mut config = TcpConfig::high_speed();
                     config.congestion = congestion;
+                    config.random_payload = true;
 
                     // Store fd for TCP_INFO interval polling
                     #[cfg(unix)]
