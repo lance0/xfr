@@ -1022,6 +1022,7 @@ async fn run_client_plain(
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
         let mut last_printed_interval: i64 = -1;
+        let mut last_retransmits: u64 = 0;
 
         while let Some(progress) = rx.recv().await {
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
@@ -1043,15 +1044,21 @@ async fn run_client_plain(
             }
             last_printed_interval = current_interval;
 
-            let retransmits = progress.total_retransmits.or_else(|| {
-                // Return sum if any stream reports retransmits (even zero)
+            // Show per-interval delta retransmits, not cumulative.
+            // total_retransmits (from local TCP_INFO) is cumulative; compute delta.
+            // StreamInterval.retransmits (from server) are already per-interval deltas.
+            let retransmits = if let Some(cumulative) = progress.total_retransmits {
+                let delta = cumulative.saturating_sub(last_retransmits);
+                last_retransmits = cumulative;
+                Some(delta)
+            } else {
                 let has_any = progress.streams.iter().any(|s| s.retransmits.is_some());
                 if has_any {
                     Some(progress.streams.iter().filter_map(|s| s.retransmits).sum())
                 } else {
                     None
                 }
-            });
+            };
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
             let lost = progress.streams.first().and_then(|s| s.lost);
             let rtt_us = progress.rtt_us;
