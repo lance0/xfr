@@ -362,6 +362,10 @@ enum Commands {
         /// Force IPv6 only
         #[arg(short = '6', long = "ipv6")]
         ipv6_only: bool,
+
+        /// Disable mDNS service registration
+        #[arg(long)]
+        no_mdns: bool,
     },
 
     /// Compare two test results
@@ -640,6 +644,7 @@ async fn main() -> Result<()> {
             bind,
             ipv4_only,
             ipv6_only,
+            no_mdns,
         }) => {
             // Use CLI values, falling back to config file, then defaults
             let server_port = if port != DEFAULT_PORT {
@@ -736,7 +741,8 @@ async fn main() -> Result<()> {
                 address_family,
                 bind_addr: bind,
                 tui_tx: None,
-                enable_quic: true, // Enable QUIC by default
+                enable_quic: true,
+                no_mdns,
                 ..Default::default()
             };
 

@@ -79,6 +79,8 @@ pub struct ServerConfig {
     pub enable_quic: bool,
     /// Maximum concurrent client handlers (defense against connection floods)
     pub max_concurrent: u32,
+    /// Disable mDNS service registration
+    pub no_mdns: bool,
 }
 
 impl Default for ServerConfig {
@@ -98,6 +100,7 @@ impl Default for ServerConfig {
             tui_tx: None,
             enable_quic: true,
             max_concurrent: 100,
+            no_mdns: false,
         }
     }
 }
@@ -344,9 +347,13 @@ impl Server {
             });
         }
 
-        // Register mDNS service for discovery
+        // Register mDNS service for discovery (unless --no-mdns)
         #[cfg(feature = "discovery")]
-        let _mdns = register_mdns_service(self.config.port);
+        let _mdns = if self.config.no_mdns {
+            None
+        } else {
+            register_mdns_service(self.config.port)
+        };
 
         // Spawn Prometheus metrics server if enabled
         #[cfg(feature = "prometheus")]

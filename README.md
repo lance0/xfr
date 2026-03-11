@@ -443,6 +443,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--max-duration` | | none | Maximum test duration, server-side limit (server) |
 | `--tui` | | false | Enable live dashboard (server) |
 | `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
+| `--no-mdns` | | false | Disable mDNS service registration (server) |
 
 TCP and UDP tests use random payloads by default (both client and server) to avoid inflated results on WAN-optimized or compressing paths. `--zeros` forces zero-filled client-sent traffic; server payload mode is not negotiated and defaults to random.
 

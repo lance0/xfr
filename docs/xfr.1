@@ -166,6 +166,9 @@ Load ACL rules from file
 .BI \-B ", " \-\-bind " IP"
 Bind to specific address (e.g., 192.168.1.1, ::1). Rejects unspecified addresses; use \fB\-4\fR/\fB\-6\fR instead to control address family. Validates against \fB\-4\fR/\fB\-6\fR flags.
 .TP
+.B \-\-no\-mdns
+Disable mDNS service registration. By default the server registers itself via mDNS for automatic discovery by \fBxfr discover\fR. Use this flag when another service already uses mDNS or when running in environments where multicast is unwanted.
+.TP
 .B \-4 ", " \-\-ipv4
 Force IPv4 only
 .TP
