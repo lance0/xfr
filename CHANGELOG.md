@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **`--no-mdns` flag** (issue #41) — `xfr serve --no-mdns` disables mDNS service registration for environments where multicast is unwanted or another service already uses mDNS.
+- **`server.no_mdns` config support** — mDNS registration can now also be disabled from `~/.config/xfr/config.toml` via `[server] no_mdns = true`.
 
 ### Changed
-- **Delta retransmits in interval reports** (issue #36) — plain text interval lines now show per-interval retransmit deltas instead of cumulative totals, making it easier to spot when retransmits actually occur. Final summary still shows cumulative totals.
+- **Delta retransmits in interval reports** (issue #36) — plain text interval lines now show per-interval retransmit deltas instead of cumulative totals, making it easier to spot when retransmits actually occur. Hidden intervals from `--omit`, `--quiet`, or larger `--interval` settings no longer get folded into the next visible `rtx:` value. Final summary still shows cumulative totals.
 
 ## [0.9.3] - 2026-03-10
 

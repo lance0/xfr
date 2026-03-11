@@ -102,7 +102,7 @@ Force IPv4 only
 Force IPv6 only
 .TP
 .BI \-\-bind " ADDR"
-Local address to bind to (e.g., 192.168.1.100 or 192.168.1.100:0)
+Local address to bind to (e.g., 192.168.1.100 or ::1)
 .TP
 .BI \-\-cport " PORT"
 Client source port for firewall traversal (UDP/QUIC only)
@@ -199,6 +199,7 @@ theme = "dracula"
 port = 5201
 psk = "secret"
 rate_limit = 5
+no_mdns = false
 allow = ["192.168.0.0/16"]
 .fi
 .RE

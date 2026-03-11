@@ -516,6 +516,21 @@ fn effective_random_payload(cli: &Cli) -> bool {
     !cli.zeros
 }
 
+fn interval_retransmits(progress: &TestProgress, last_retransmits: &mut u64) -> Option<u64> {
+    if let Some(cumulative) = progress.total_retransmits {
+        let delta = cumulative.saturating_sub(*last_retransmits);
+        *last_retransmits = cumulative;
+        Some(delta)
+    } else {
+        let has_any = progress.streams.iter().any(|s| s.retransmits.is_some());
+        if has_any {
+            Some(progress.streams.iter().filter_map(|s| s.retransmits).sum())
+        } else {
+            None
+        }
+    }
+}
+
 fn random_payload_notice(
     protocol: Protocol,
     direction: Direction,
@@ -728,6 +743,8 @@ async fn main() -> Result<()> {
                 xfr::net::AddressFamily::default()
             };
 
+            let server_no_mdns = no_mdns || file_config.server.no_mdns.unwrap_or(false);
+
             let config = ServerConfig {
                 port: server_port,
                 one_off: server_one_off,
@@ -742,7 +759,7 @@ async fn main() -> Result<()> {
                 bind_addr: bind,
                 tui_tx: None,
                 enable_quic: true,
-                no_mdns,
+                no_mdns: server_no_mdns,
                 ..Default::default()
             };
 
@@ -1026,6 +1043,7 @@ async fn run_client_plain(
 
         while let Some(progress) = rx.recv().await {
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
+            let retransmits = interval_retransmits(&progress, &mut last_retransmits);
 
             // Skip omitted seconds
             if elapsed_secs <= omit_secs as f64 {
@@ -1043,22 +1061,6 @@ async fn run_client_plain(
                 continue;
             }
             last_printed_interval = current_interval;
-
-            // Show per-interval delta retransmits, not cumulative.
-            // total_retransmits (from local TCP_INFO) is cumulative; compute delta.
-            // StreamInterval.retransmits (from server) are already per-interval deltas.
-            let retransmits = if let Some(cumulative) = progress.total_retransmits {
-                let delta = cumulative.saturating_sub(last_retransmits);
-                last_retransmits = cumulative;
-                Some(delta)
-            } else {
-                let has_any = progress.streams.iter().any(|s| s.retransmits.is_some());
-                if has_any {
-                    Some(progress.streams.iter().filter_map(|s| s.retransmits).sum())
-                } else {
-                    None
-                }
-            };
             let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
             let lost = progress.streams.first().and_then(|s| s.lost);
             let rtt_us = progress.rtt_us;
@@ -1867,5 +1869,64 @@ mod tests {
             random_payload_notice(Protocol::Quic, Direction::Download, false),
             None
         );
+    }
+
+    fn make_progress(
+        total_retransmits: Option<u64>,
+        stream_retransmits: &[Option<u64>],
+    ) -> TestProgress {
+        TestProgress {
+            elapsed_ms: 1000,
+            total_bytes: 0,
+            throughput_mbps: 0.0,
+            streams: stream_retransmits
+                .iter()
+                .enumerate()
+                .map(|(i, retransmits)| xfr::protocol::StreamInterval {
+                    id: i as u8,
+                    bytes: 0,
+                    retransmits: *retransmits,
+                    jitter_ms: None,
+                    lost: None,
+                    error: None,
+                    rtt_us: None,
+                    cwnd: None,
+                })
+                .collect(),
+            rtt_us: None,
+            cwnd: None,
+            total_retransmits,
+        }
+    }
+
+    #[test]
+    fn test_interval_retransmits_uses_sender_side_deltas() {
+        let mut last = 0;
+        let first = make_progress(Some(5), &[]);
+        let second = make_progress(Some(9), &[]);
+
+        assert_eq!(interval_retransmits(&first, &mut last), Some(5));
+        assert_eq!(last, 5);
+        assert_eq!(interval_retransmits(&second, &mut last), Some(4));
+        assert_eq!(last, 9);
+    }
+
+    #[test]
+    fn test_interval_retransmits_uses_server_stream_deltas() {
+        let mut last = 99;
+        let progress = make_progress(None, &[Some(2), None, Some(3)]);
+
+        assert_eq!(interval_retransmits(&progress, &mut last), Some(5));
+        // Receiver-side mode does not use last_retransmits at all.
+        assert_eq!(last, 99);
+    }
+
+    #[test]
+    fn test_interval_retransmits_none_when_unavailable() {
+        let mut last = 7;
+        let progress = make_progress(None, &[None, None]);
+
+        assert_eq!(interval_retransmits(&progress, &mut last), None);
+        assert_eq!(last, 7);
     }
 }

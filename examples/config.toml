@@ -27,6 +27,9 @@ port = 5201
 # Exit after one test
 one_off = false
 
+# Disable mDNS service registration
+no_mdns = false
+
 # Prometheus metrics port (requires --features prometheus)
 # prometheus = 9090
 

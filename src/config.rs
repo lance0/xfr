@@ -102,6 +102,9 @@ pub struct ServerDefaults {
 
     /// Address family preference (ipv4, ipv6, dual)
     pub address_family: Option<String>,
+
+    /// Disable mDNS service registration
+    pub no_mdns: Option<bool>,
 }
 
 /// Server preset for quick configuration
@@ -184,9 +187,21 @@ allowed_clients = ["192.168.1.0/24"]
         assert_eq!(config.client.duration_secs, Some(30));
         assert_eq!(config.client.parallel_streams, Some(4));
         assert_eq!(config.server.port, Some(9000));
+        assert_eq!(config.server.no_mdns, None);
         assert_eq!(config.presets.len(), 2);
         assert_eq!(config.presets[0].name, "limited");
         assert_eq!(config.presets[0].bandwidth_limit, Some("100M".to_string()));
+    }
+
+    #[test]
+    fn test_parse_server_no_mdns() {
+        let toml = r#"
+[server]
+no_mdns = true
+"#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.server.no_mdns, Some(true));
     }
 
     #[test]

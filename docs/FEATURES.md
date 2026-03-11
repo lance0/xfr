@@ -294,6 +294,7 @@ log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 psk = "my-secret-key"
 rate_limit = 5
+no_mdns = false
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
 ```
 

@@ -128,7 +128,7 @@
 - [x] **Suppress TCP send errors on graceful shutdown** - TCP `Connection reset by peer` / `Broken pipe` / `Connection aborted` at teardown now suppressed via targeted grace window (issue #25)
 - [ ] **Suppress UDP/QUIC send errors on graceful shutdown** - UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy
 - [ ] **Summary on early exit** (issue #35) - catch SIGINT/SIGTERM, trigger cancel path, and display test summary with accumulated stats instead of silently exiting. Server-side disconnect errors on client kill are a separate cleanup
-- [ ] **Delta retransmits per interval** (issue #36) - show retransmit count since last interval instead of cumulative in plain text and TUI output. Keep cumulative in final summary. Per-stream interval breakdown in JSON/CSV tracked separately
+- [x] **Delta retransmits in plain-text interval output** (issue #36) - plain-text interval reports now show retransmit deltas instead of cumulative totals while the final summary remains cumulative. TUI stats remain cumulative by design, and server-reported per-stream interval deltas continue in JSON/CSV output
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency

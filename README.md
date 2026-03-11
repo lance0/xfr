@@ -369,6 +369,7 @@ log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 psk = "my-secret-key"
 rate_limit = 5
+no_mdns = false
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
 ```
 
@@ -413,7 +414,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
 | `--cport` | | none | Client source port for firewall traversal (UDP/QUIC) |
 | `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
-| `--random` | | true | Use random payload data (default; both client and server) |
+| `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
@@ -445,7 +446,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
 | `--no-mdns` | | false | Disable mDNS service registration (server) |
 
-TCP and UDP tests use random payloads by default (both client and server) to avoid inflated results on WAN-optimized or compressing paths. `--zeros` forces zero-filled client-sent traffic; server payload mode is not negotiated and defaults to random.
+TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
 
 ## Security Considerations
 
