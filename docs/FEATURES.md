@@ -273,29 +273,39 @@ xfr <host> --timestamp-format unix       # "1705316400"
 
 ### Config File
 
-xfr reads defaults from `~/.config/xfr/config.toml`:
+xfr reads defaults from:
+- **Linux/macOS:** `~/.config/xfr/config.toml`
+- **Windows:** `%APPDATA%\xfr\config.toml`
 
 ```toml
 [client]
 duration_secs = 10
 parallel_streams = 1
 tcp_nodelay = false
+window_size = "1M"
 json_output = false
 no_tui = false
 theme = "default"
-timestamp_format = "relative"
+timestamp_format = "relative"  # relative, iso8601, unix
+address_family = "dual"        # ipv4, ipv6, dual
+psk = "my-secret-key"
 log_file = "~/.config/xfr/xfr.log"
 log_level = "info"
 
 [server]
 port = 5201
+one_off = false
+no_mdns = false
+address_family = "dual"
+psk = "my-secret-key"
+rate_limit = 5
+rate_limit_window = 60
+allow = ["192.168.0.0/16", "10.0.0.0/8"]
+deny = []
+acl_file = "/path/to/acl.txt"
 push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
-psk = "my-secret-key"
-rate_limit = 5
-no_mdns = false
-allow = ["192.168.0.0/16", "10.0.0.0/8"]
 ```
 
 ### Environment Variables
