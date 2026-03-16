@@ -178,6 +178,21 @@ pkg install rust
 cargo install xfr
 ```
 
+### Nix
+
+```bash
+nix run github:lance0/xfr          # Run without installing
+nix profile install github:lance0/xfr  # Install to profile
+```
+
+Or add to your flake inputs:
+
+```nix
+inputs.xfr.url = "github:lance0/xfr";
+```
+
+A dev shell is also available via `nix develop`.
+
 ### NetBSD
 
 Available via [pkgsrc](https://pkgsrc.se/net/xfr):
