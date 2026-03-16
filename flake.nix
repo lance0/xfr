@@ -27,7 +27,7 @@
 
         xfr = pkgs.rustPlatform.buildRustPackage {
           pname = "xfr";
-          version = "0.9.4";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
