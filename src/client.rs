@@ -81,9 +81,10 @@ pub struct ClientConfig {
     pub psk: Option<String>,
     /// Address family preference
     pub address_family: AddressFamily,
-    /// Local address to bind to
+    /// Local address to bind to for data sockets. For TCP with `--cport`,
+    /// control still uses the same IP but an ephemeral port.
     pub bind_addr: Option<SocketAddr>,
-    /// Use sequential ports for multi-stream (--cport with -P)
+    /// Use sequential ports for multi-stream (--cport with -P) on TCP/UDP
     pub sequential_ports: bool,
     /// Use MPTCP (Multi-Path TCP) instead of regular TCP
     pub mptcp: bool,
@@ -172,14 +173,19 @@ impl Client {
             return self.run_quic(progress_tx).await;
         }
 
+        let control_bind_addr = control_bind_addr(&self.config);
         let (stream, peer_addr) = net::connect_tcp(
             &self.config.host,
             self.config.port,
             self.config.address_family,
-            self.config.bind_addr,
+            control_bind_addr,
             self.config.mptcp,
         )
         .await?;
+
+        if self.config.protocol == Protocol::Tcp {
+            validate_tcp_control_port(stream.local_addr()?, &self.config)?;
+        }
 
         self.run_test(stream, peer_addr, progress_tx).await
     }
@@ -622,6 +628,12 @@ impl Client {
             }
         });
 
+        let base_bind_addr = sequential_bind_base(
+            self.config.bind_addr,
+            self.config.sequential_ports,
+            self.config.streams as usize,
+        )?;
+
         let mut handles = Vec::new();
         let handshake_limiter = if single_port_mode {
             Some(Arc::new(Semaphore::new(single_port_handshake_parallelism(
@@ -644,7 +656,7 @@ impl Client {
             let pause = pause.clone();
             let direction = self.config.direction;
             let duration = self.config.duration;
-            let bind_addr = self.config.bind_addr;
+            let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
             let mptcp = self.config.mptcp;
             let test_id = test_id.clone();
             let stream_index = i as u16;
@@ -673,7 +685,8 @@ impl Client {
                     None
                 };
 
-                match net::connect_tcp_with_bind(addr, bind_addr, mptcp).await {
+                let local_bind = bind_addr.map(|local| net::match_bind_family(local, addr));
+                match net::connect_tcp_with_bind(addr, local_bind, mptcp).await {
                     Ok(mut stream) => {
                         debug!("Connected to data port {}", port);
 
@@ -817,30 +830,11 @@ impl Client {
         cancel: watch::Receiver<bool>,
         pause: watch::Receiver<bool>,
     ) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
-        let base_bind_addr = if self.config.sequential_ports {
-            let addr = self.config.bind_addr.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Invalid client config: sequential_ports requires bind_addr with a fixed port"
-                )
-            })?;
-            if addr.port() == 0 {
-                return Err(anyhow::anyhow!(
-                    "Invalid client config: sequential_ports requires a non-zero bind port"
-                ));
-            }
-            let max_port = u32::from(addr.port()) + data_ports.len().saturating_sub(1) as u32;
-            if max_port > u16::MAX as u32 {
-                return Err(anyhow::anyhow!(
-                    "Invalid client config: sequential_ports requires ports {}-{}, which exceeds {}",
-                    addr.port(),
-                    max_port,
-                    u16::MAX
-                ));
-            }
-            Some(addr)
-        } else {
-            self.config.bind_addr
-        };
+        let base_bind_addr = sequential_bind_base(
+            self.config.bind_addr,
+            self.config.sequential_ports,
+            data_ports.len(),
+        )?;
 
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
 
@@ -871,16 +865,7 @@ impl Client {
             let direction = self.config.direction;
             let duration = self.config.duration;
             let random_payload = self.config.random_payload;
-            let bind_addr = if self.config.sequential_ports {
-                // --cport with multi-stream: assign sequential ports (cport, cport+1, ...)
-                base_bind_addr.map(|mut addr| {
-                    let stream_offset = i as u16;
-                    addr.set_port(addr.port() + stream_offset);
-                    addr
-                })
-            } else {
-                base_bind_addr
-            };
+            let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
 
             handles.push(tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
@@ -1402,6 +1387,105 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+fn control_bind_addr(config: &ClientConfig) -> Option<SocketAddr> {
+    if config.protocol != Protocol::Tcp {
+        return config.bind_addr;
+    }
+
+    config.bind_addr.map(|mut addr| {
+        if addr.port() != 0 {
+            addr.set_port(0);
+        }
+        addr
+    })
+}
+
+fn sequential_bind_base(
+    bind_addr: Option<SocketAddr>,
+    sequential_ports: bool,
+    stream_count: usize,
+) -> anyhow::Result<Option<SocketAddr>> {
+    if sequential_ports {
+        let addr = bind_addr.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid client config: sequential_ports requires bind_addr with a fixed port"
+            )
+        })?;
+        if addr.port() == 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid client config: sequential_ports requires a non-zero bind port"
+            ));
+        }
+        let max_port = u32::from(addr.port()) + stream_count.saturating_sub(1) as u32;
+        if max_port > u16::MAX as u32 {
+            return Err(anyhow::anyhow!(
+                "Invalid client config: sequential_ports requires ports {}-{}, which exceeds {}",
+                addr.port(),
+                max_port,
+                u16::MAX
+            ));
+        }
+        Ok(Some(addr))
+    } else {
+        Ok(bind_addr)
+    }
+}
+
+fn stream_bind_addr(
+    base_bind_addr: Option<SocketAddr>,
+    sequential_ports: bool,
+    stream_index: usize,
+) -> Option<SocketAddr> {
+    if sequential_ports {
+        base_bind_addr.map(|mut addr| {
+            let stream_offset = stream_index as u16;
+            addr.set_port(addr.port() + stream_offset);
+            addr
+        })
+    } else {
+        base_bind_addr
+    }
+}
+
+fn tcp_data_port_range(config: &ClientConfig) -> Option<(u16, u16)> {
+    if config.protocol != Protocol::Tcp {
+        return None;
+    }
+
+    let bind_addr = config.bind_addr?;
+    if bind_addr.port() == 0 {
+        return None;
+    }
+
+    let start = bind_addr.port();
+    let end = if config.sequential_ports {
+        start.saturating_add(u16::from(config.streams).saturating_sub(1))
+    } else {
+        start
+    };
+    Some((start, end))
+}
+
+fn validate_tcp_control_port(
+    control_local_addr: SocketAddr,
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
+    if let Some((start, end)) = tcp_data_port_range(config) {
+        let port = control_local_addr.port();
+        if (start..=end).contains(&port) {
+            anyhow::bail!(
+                "TCP control connection used local port {}, which overlaps requested data source ports {}-{}. \
+                 Choose a different --cport range (preferably outside the OS ephemeral range) and retry.",
+                port,
+                start,
+                end
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1433,5 +1517,46 @@ mod tests {
         let start = tokio::time::Instant::now();
         let duration = Duration::from_secs(10);
         assert_eq!(local_stop_deadline(start, duration), Some(start + duration));
+    }
+
+    #[test]
+    fn test_control_bind_addr_uses_ephemeral_port_for_tcp_cport() {
+        let config = ClientConfig {
+            protocol: Protocol::Tcp,
+            bind_addr: Some("0.0.0.0:5300".parse().unwrap()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            control_bind_addr(&config),
+            Some("0.0.0.0:0".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_stream_bind_addr_assigns_sequential_ports() {
+        let base = Some("0.0.0.0:5300".parse().unwrap());
+
+        assert_eq!(
+            stream_bind_addr(base, true, 2),
+            Some("0.0.0.0:5302".parse().unwrap())
+        );
+        assert_eq!(stream_bind_addr(base, false, 2), base);
+    }
+
+    #[test]
+    fn test_validate_tcp_control_port_detects_overlap() {
+        let config = ClientConfig {
+            protocol: Protocol::Tcp,
+            streams: 4,
+            bind_addr: Some("0.0.0.0:5300".parse().unwrap()),
+            sequential_ports: true,
+            ..Default::default()
+        };
+
+        let err = validate_tcp_control_port("127.0.0.1:5302".parse().unwrap(), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overlaps requested data source ports 5300-5303"));
     }
 }

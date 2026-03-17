@@ -268,7 +268,7 @@ struct Cli {
     #[arg(long, value_name = "ADDR")]
     bind: Option<String>,
 
-    /// Client source port for firewall traversal (UDP/QUIC only)
+    /// Client source port for firewall traversal (UDP/QUIC/TCP data streams)
     #[arg(long, value_name = "PORT")]
     cport: Option<u16>,
 
@@ -485,14 +485,17 @@ fn validate_bind_address(
     if let Some(addr) = bind_addr
         && addr.port() != 0
     {
-        // TCP: explicit port causes EADDRINUSE (control + data both try to bind same port)
-        // (--cport + TCP is caught earlier with a better error message)
-        if protocol == xfr::protocol::Protocol::Tcp {
+        // TCP: explicit bind port conflicts with control/data unless it came from --cport,
+        // which uses the port only for data streams.
+        if protocol == xfr::protocol::Protocol::Tcp && !has_cport {
             anyhow::bail!(
                 "Cannot use explicit bind port {} with TCP (control and data connections conflict). \
-                 Use just the IP address (e.g., --bind {}) to let the OS assign ports.",
+                 Use just the IP address (e.g., --bind {}) to let the OS assign ports, \
+                 or use --bind {} --cport {} to pin TCP data source ports.",
                 addr.port(),
-                addr.ip()
+                addr.ip(),
+                addr.ip(),
+                addr.port()
             );
         }
         // UDP/QUIC with multiple streams: --cport uses sequential ports, --bind does not
@@ -909,15 +912,9 @@ async fn main() -> Result<()> {
                 if port == 0 {
                     anyhow::bail!("--cport must be a non-zero port number");
                 }
-                if protocol == xfr::protocol::Protocol::Tcp {
-                    anyhow::bail!(
-                        "--cport is not supported with TCP. TCP already uses single-port mode \
-                         (all connections go through port {}).",
-                        cli.port
-                    );
-                }
-                // Validate port range for sequential multi-stream UDP
-                if protocol == xfr::protocol::Protocol::Udp && streams > 1 {
+                // Validate port range for sequential multi-stream TCP/UDP.
+                // QUIC multiplexes on a single socket, so only one local port is used.
+                if protocol != xfr::protocol::Protocol::Quic && streams > 1 {
                     let max_port = port as u32 + streams as u32 - 1;
                     if max_port > 65535 {
                         anyhow::bail!(
@@ -970,7 +967,7 @@ async fn main() -> Result<()> {
                 psk: client_psk,
                 address_family: client_address_family,
                 bind_addr,
-                sequential_ports: protocol == Protocol::Udp && cport.is_some() && streams > 1,
+                sequential_ports: protocol != Protocol::Quic && cport.is_some() && streams > 1,
                 mptcp: cli.mptcp,
                 random_payload,
             };
@@ -1760,9 +1757,13 @@ mod tests {
 
         let addr = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 5300));
 
-        // --cport + TCP → error
+        // --cport + TCP single stream → ok
         let result = validate_bind_address(addr, Protocol::Tcp, 1, true);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+
+        // --cport + TCP multi-stream → ok (sequential ports)
+        let result = validate_bind_address(addr, Protocol::Tcp, 4, true);
+        assert!(result.is_ok());
 
         // --cport + UDP single stream → ok
         let result = validate_bind_address(addr, Protocol::Udp, 1, true);

@@ -171,7 +171,7 @@
 - [x] **Congestion control** (`--congestion`) - select TCP CC algorithm (cubic, bbr, reno); just a `setsockopt` call. High demand for BBR vs CUBIC comparison on WAN/cloud links
 - [x] **Live TCP_INFO polling** - periodically sample RTT, retransmits, cwnd during test (issue #13); extends existing TCP_INFO code. Essential for `-t 0` where results are never finalized
 - [x] **TCP bitrate pacing** (`-b` for TCP) - byte-budget sleep pacing with interruptible sleeps and buffer auto-capping; `-b` flag now applies to TCP and UDP (issue #14). On Linux, uses kernel `SO_MAX_PACING_RATE` for precise per-packet pacing via the FQ scheduler (issue #30)
-- [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP uses sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
+- [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP and TCP data streams use sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
 - [x] **Random payload data** (`--random`) - fill send buffers with random bytes to defeat WAN optimizer/compression/dedup bias (issue #34). Both client and server TCP/UDP; QUIC skipped (already encrypted). Fill-once per buffer, no per-write overhead. `--zeros` only affects client-sent traffic; server payload mode not yet negotiated over wire
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
@@ -189,7 +189,9 @@ Client behind strict firewall → which protocol?
 │  └─ Already works ✓ (single-port mode since v0.5.0)
 │     All connections use destination port 5201.
 │     Stateful firewalls track ephemeral source ports automatically.
-│     --cport is rejected (not needed).
+│     --cport can pin TCP data-stream source ports when egress
+│     rules or ECMP testing need predictable client ports.
+│     Control connection remains ephemeral.
 │
 ├─ QUIC
 │  └─ Already works ✓ through stateful firewalls (one UDP socket, multiplexed)
@@ -210,7 +212,7 @@ Client behind strict firewall → which protocol?
            streams through one port (like TCP's DataHello).
 ```
 
-**Why not TCP `--cport`?** TCP already uses single-port mode — all connections go through the server port. The OS assigns ephemeral source ports, which any stateful firewall handles. Pinning TCP source ports would require `SO_REUSEADDR` tricks and could cause port conflicts with the server port.
+**TCP `--cport` scope:** only TCP data-stream source ports are pinned. The control connection still uses an ephemeral source port, and xfr fails fast if that ephemeral control port overlaps the requested data-port range.
 
 **Future work:** UDP single-port mode (multiplex all streams through one socket) would be the full solution for environments where even sequential ports aren't acceptable. This is a larger protocol change tracked separately.
 

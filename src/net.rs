@@ -424,6 +424,9 @@ pub async fn connect_tcp_with_bind(
         socket.set_nonblocking(true)?;
 
         if let Some(local) = bind_addr {
+            if local.port() != 0 {
+                socket.set_reuse_address(true)?;
+            }
             socket.bind(&SockAddr::from(local))?;
         }
 

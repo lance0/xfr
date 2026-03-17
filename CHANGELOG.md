@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **TCP `--cport` support** (issue #44) — `--cport` now pins client-side TCP data-stream source ports. Multi-stream TCP uses sequential ports (`cport`, `cport+1`, ...), matching UDP behavior.
+
+### Changed
+- **TCP `--cport` semantics** — TCP control remains on an ephemeral source port while data streams use the requested source port or range. TCP data binds now match the remote address family the same way UDP/QUIC already do, so dual-stack clients can use `--cport` against IPv6 targets.
+
 ## [0.9.4] - 2026-03-11
 
 ### Added

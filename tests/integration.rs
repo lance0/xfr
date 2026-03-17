@@ -1300,6 +1300,145 @@ async fn test_udp_cport_dualstack_ipv6_target() {
 }
 
 #[tokio::test]
+async fn test_tcp_cport_single_stream() {
+    let port = get_test_port();
+    let cport = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(
+        result.is_ok(),
+        "TCP --cport single-stream test should complete"
+    );
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "TCP --cport single-stream should succeed: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_tcp_cport_multi_stream() {
+    let port = get_test_port();
+    let cport = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
+        sequential_ports: true,
+        mptcp: false,
+        random_payload: false,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(
+        result.is_ok(),
+        "TCP --cport multi-stream test should complete"
+    );
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "TCP --cport multi-stream should succeed: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_tcp_cport_dualstack_ipv6_target() {
+    // Regression test: TCP with --cport in dual-stack mode should work with IPv6 targets.
+    // Control and data binds start as 0.0.0.0:PORT and must be re-familied to [::]:PORT.
+    let port = get_test_port();
+    let cport = get_test_port();
+
+    let server_cfg = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        address_family: xfr::net::AddressFamily::V6Only,
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(server_cfg);
+        let _ = server.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "::1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::DualStack,
+        bind_addr: Some(format!("0.0.0.0:{cport}").parse().unwrap()),
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "TCP --cport IPv6 test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "TCP dual-stack --cport should succeed with IPv6 target: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
 async fn test_quic_cport_dualstack_ipv6_target() {
     // Regression test: QUIC with --cport in dual-stack mode should work with IPv6 targets.
     let port = get_test_port();
@@ -1857,6 +1996,26 @@ fn test_cli_cport_overflow_error_message() {
     assert!(
         !output.status.success(),
         "command should fail when --cport range overflows"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires ports 65535-65536, which exceeds 65535"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_cli_tcp_cport_overflow_error_message() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "--cport", "65535", "-P", "2", "--no-tui"])
+        .output()
+        .expect("failed to run xfr binary");
+
+    assert!(
+        !output.status.success(),
+        "command should fail when TCP --cport range overflows"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);

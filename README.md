@@ -38,7 +38,7 @@ See [Installation](#installation) below for setup instructions.
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP, UDP, QUIC, and MPTCP** with configurable bitrate pacing and parallel streams
-- **Firewall-friendly** - single-port TCP, QUIC multiplexing, and `--cport` for pinning UDP/QUIC source ports
+- **Firewall-friendly** - single-port TCP, QUIC multiplexing, and `--cport` for pinning UDP/QUIC/TCP data source ports
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
 - **Result comparison** - `xfr diff` to detect performance regressions
@@ -54,7 +54,7 @@ See [Installation](#installation) below for setup instructions.
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
 | MPTCP | No | Yes (auto on server, `--mptcp` on client, Linux 5.6+) |
-| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP + `--cport` (UDP/QUIC) |
+| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP + `--cport` (UDP/QUIC/TCP data) |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
 | Compare runs | No | `xfr diff` |
@@ -437,7 +437,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
-| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC) |
+| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
 | `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
 | `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
@@ -547,7 +547,7 @@ xfr serve -p 9000
 
 ### Connection refused
 
-Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open -- no additional ephemeral data ports are needed. For UDP behind strict firewalls, use `--cport` to pin client source ports, or use QUIC which multiplexes on a single port.
+Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open on the server -- no additional server-side data ports are needed. For strict egress policies or ECMP testing, use `--cport` to pin client source ports for TCP or UDP, or use QUIC which multiplexes on a single port.
 
 ### Low throughput
 
