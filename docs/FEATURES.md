@@ -198,22 +198,40 @@ xfr <host> --bind 10.0.0.1:0            # IP with auto-assigned port
 xfr <host> --bind [::1]                 # IPv6 address
 ```
 
-**Note:** TCP mode does not support explicit port binding (use IP only).
+**Note:** Plain `--bind IP:PORT` is still not supported for TCP control sockets. Use `--bind IP` for source-IP selection, or combine `--bind IP --cport PORT` to pin TCP data-stream source ports.
 
 ## Client Source Port (`--cport`)
 
-Pin the client's local source port for firewall traversal (UDP and QUIC only):
+Pin the client's local source port for firewall traversal:
 
 ```bash
+xfr <host> --cport 5300                 # TCP data stream with source port 5300
+xfr <host> --cport 5300 -P 4            # 4 TCP data streams on ports 5300-5303
 xfr <host> -u --cport 5300              # UDP with source port 5300
 xfr <host> -u --cport 5300 -P 4         # 4 UDP streams on ports 5300-5303
 xfr <host> --quic --cport 5300          # QUIC with source port 5300
 xfr <host> --bind 10.0.0.1 --cport 5300 # Combine with --bind for IP + port
 ```
 
-Multi-stream UDP assigns sequential ports starting from the specified port. QUIC multiplexes all streams on a single port, so only one port is needed regardless of `-P`.
+Multi-stream TCP and UDP assign sequential ports starting from the specified port. QUIC multiplexes all streams on a single port, so only one port is needed regardless of `-P`.
 
-**Not supported with TCP** — TCP already uses single-port mode (all connections go through port 5201), so source port pinning is unnecessary. Stateful firewalls handle TCP ephemeral source ports automatically.
+For TCP, `--cport` only applies to data streams. The control connection still uses an ephemeral source port, and xfr fails fast if that ephemeral port overlaps the requested TCP data-port range.
+
+## DSCP / TOS Marking (`--dscp`)
+
+Mark client TCP or UDP sockets for QoS / DSCP testing:
+
+```bash
+xfr <host> --dscp EF                    # Expedited Forwarding (46 << 2)
+xfr <host> -u --dscp AF31               # Assured Forwarding class 3 drop precedence 1
+xfr <host> --dscp 184                   # Raw TOS byte value
+```
+
+`--dscp` accepts either a raw TOS byte (`0-255`) or DSCP names such as `EF`, `AF11-AF43`, `CS0-CS7`, and `VA`.
+
+- TCP and UDP apply the marking on client sockets after connect.
+- QUIC ignores `--dscp` because the underlying UDP socket is owned by Quinn.
+- On non-Unix platforms, xfr currently warns instead of applying socket marking.
 
 ## Dual-Stack and IPv6 Support
 
@@ -308,6 +326,8 @@ push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 ```
+
+`[client] omit_secs` sets the default for `--omit`. An explicit CLI `--omit` value, including `--omit 0`, overrides the config file.
 
 ### Environment Variables
 
@@ -525,9 +545,11 @@ See `xfr --help` for complete CLI documentation.
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (IP or IP:port) |
-| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC only) |
+| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
+| `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
 | `--mptcp` | | false | MPTCP mode (Multi-Path TCP, Linux 5.6+) |
-| `--random` | | false | Use random client payload bytes (TCP/UDP upload; ignored for QUIC, partial in reverse/bidir) |
+| `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
+| `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
 
 ### Server-Specific Flags
 

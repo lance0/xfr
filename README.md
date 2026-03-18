@@ -399,6 +399,8 @@ log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 ```
 
+`[client] omit_secs` sets the default for `--omit`. An explicit CLI `--omit` value, including `--omit 0`, takes precedence over the config file.
+
 Environment variables override config file:
 
 ```bash
@@ -439,7 +441,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--ipv6` | `-6` | false | Force IPv6 only |
 | `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
 | `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
-| `--dscp` | | none | DSCP/TOS marking for QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
+| `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
 | `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
 | `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
@@ -474,6 +476,8 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--no-mdns` | | false | Disable mDNS service registration (server) |
 
 TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
+
+`--dscp` applies to TCP and UDP client sockets. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
 
 ## Security Considerations
 

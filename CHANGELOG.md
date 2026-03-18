@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`--dscp` flag** — set DSCP/TOS marking on TCP and UDP sockets for QoS policy testing. Accepts numeric values (0-255) or standard DSCP names (EF, AF11-AF43, CS0-CS7).
+- **`--dscp` flag** — set DSCP/TOS marking on TCP and UDP client sockets for QoS policy testing. Accepts numeric values (0-255) or standard DSCP names (EF, AF11-AF43, CS0-CS7). QUIC warns and ignores the flag; non-Unix platforms warn instead of applying socket marking.
 - **`omit_secs` config support** (issue #43) — `[client] omit_secs = N` in config file sets default `--omit` value.
 
 ## [0.9.5] - 2026-03-17
