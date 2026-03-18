@@ -90,6 +90,8 @@ pub struct ClientConfig {
     pub mptcp: bool,
     /// Use random payload data for client-sent traffic
     pub random_payload: bool,
+    /// DSCP/TOS value for IP_TOS socket option
+    pub dscp: Option<u8>,
 }
 
 impl Default for ClientConfig {
@@ -111,6 +113,7 @@ impl Default for ClientConfig {
             sequential_ports: false,
             mptcp: false,
             random_payload: true,
+            dscp: None,
         }
     }
 }
@@ -658,6 +661,7 @@ impl Client {
             let duration = self.config.duration;
             let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
             let mptcp = self.config.mptcp;
+            let dscp = self.config.dscp;
             let test_id = test_id.clone();
             let stream_index = i as u16;
             let handshake_limiter = handshake_limiter.clone();
@@ -689,6 +693,13 @@ impl Client {
                 match net::connect_tcp_with_bind(addr, local_bind, mptcp).await {
                     Ok(mut stream) => {
                         debug!("Connected to data port {}", port);
+
+                        // Set DSCP/TOS marking if requested
+                        if let Some(tos) = dscp
+                            && let Err(e) = net::set_tos_on_tcp(&stream, tos)
+                        {
+                            warn!("Failed to set IP_TOS: {}", e);
+                        }
 
                         // Single-port mode: send DataHello to identify stream
                         if single_port_mode {
@@ -866,6 +877,7 @@ impl Client {
             let duration = self.config.duration;
             let random_payload = self.config.random_payload;
             let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
+            let dscp = self.config.dscp;
 
             handles.push(tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
@@ -895,6 +907,13 @@ impl Client {
                 }
 
                 debug!("UDP connected to {}", server_port);
+
+                // Set DSCP/TOS marking if requested
+                if let Some(tos) = dscp
+                    && let Err(e) = net::set_tos_on_udp(&socket, tos)
+                {
+                    warn!("Failed to set IP_TOS on UDP socket: {}", e);
+                }
 
                 match direction {
                     Direction::Upload => {

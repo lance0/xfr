@@ -59,6 +59,9 @@ pub struct ClientDefaults {
 
     /// Address family preference (ipv4, ipv6, dual)
     pub address_family: Option<String>,
+
+    /// Omit first N seconds from interval output (TCP ramp-up)
+    pub omit_secs: Option<u64>,
 }
 
 /// Default settings for server mode
@@ -191,6 +194,17 @@ allowed_clients = ["192.168.1.0/24"]
         assert_eq!(config.presets.len(), 2);
         assert_eq!(config.presets[0].name, "limited");
         assert_eq!(config.presets[0].bandwidth_limit, Some("100M".to_string()));
+    }
+
+    #[test]
+    fn test_parse_client_omit_secs() {
+        let toml = r#"
+[client]
+omit_secs = 3
+"#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.client.omit_secs, Some(3));
     }
 
     #[test]

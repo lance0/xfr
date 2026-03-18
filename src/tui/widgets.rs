@@ -127,12 +127,13 @@ impl Widget for ProgressBar {
     }
 }
 
-/// A bar showing per-stream throughput with retransmit count
+/// A bar showing per-stream throughput with retransmit count or jitter
 pub struct StreamBar {
     pub stream_id: u8,
     pub throughput_mbps: f64,
     pub max_throughput: f64,
     pub retransmits: u64,
+    pub jitter_ms: Option<f64>,
     pub bar_color: Color,
     pub text_color: Color,
 }
@@ -144,9 +145,15 @@ impl StreamBar {
             throughput_mbps,
             max_throughput,
             retransmits,
+            jitter_ms: None,
             bar_color: Color::Green,
             text_color: Color::White,
         }
+    }
+
+    pub fn jitter(mut self, jitter_ms: Option<f64>) -> Self {
+        self.jitter_ms = jitter_ms;
+        self
     }
 
     pub fn bar_color(mut self, color: Color) -> Self {
@@ -166,10 +173,13 @@ impl Widget for StreamBar {
             return;
         }
 
-        // Format: [0] ████████████────  35.2 Gbps  rtx: 0
+        // Format: [0] ████████████────  35.2 Gbps  rtx: 0  (TCP)
+        //         [0] ████████████────  1.2 Gbps  jitter: 0.42ms  (UDP)
         let label = format!("[{}] ", self.stream_id);
         let throughput_str = mbps_to_human(self.throughput_mbps);
-        let stats = if self.retransmits > 0 {
+        let stats = if let Some(jitter) = self.jitter_ms {
+            format!(" {}  jitter: {:.2}ms", throughput_str, jitter)
+        } else if self.retransmits > 0 {
             format!(" {}  rtx: {}", throughput_str, self.retransmits)
         } else {
             format!(" {}", throughput_str)

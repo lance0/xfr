@@ -221,8 +221,8 @@ struct Cli {
     interval: f64,
 
     /// Omit first N seconds from interval output (TCP ramp-up)
-    #[arg(long, default_value = "0")]
-    omit: u64,
+    #[arg(long)]
+    omit: Option<u64>,
 
     /// Disable Nagle algorithm
     #[arg(long)]
@@ -231,6 +231,10 @@ struct Cli {
     /// TCP congestion control algorithm (e.g. cubic, bbr, reno)
     #[arg(long = "congestion", value_name = "ALGO")]
     congestion: Option<String>,
+
+    /// DSCP/TOS marking: raw TOS byte (0-255) or DSCP name (EF, AF11, CS1, etc.)
+    #[arg(long, value_name = "VALUE")]
+    dscp: Option<String>,
 
     /// TCP window size (e.g., 512K, 1M)
     #[arg(long, value_parser = parse_size)]
@@ -445,6 +449,45 @@ fn parse_size(s: &str) -> Result<usize, String> {
 
 fn parse_timestamp_format(s: &str) -> Result<TimestampFormat, String> {
     s.parse::<TimestampFormat>()
+}
+
+fn parse_dscp(s: &str) -> Result<u8, String> {
+    // Try numeric first (0-255)
+    if let Ok(n) = s.parse::<u32>() {
+        if n > 255 {
+            return Err(format!("TOS value {} exceeds 255", n));
+        }
+        return Ok(n as u8);
+    }
+    // DSCP name → TOS byte (DSCP value << 2)
+    match s.to_uppercase().as_str() {
+        "CS0" => Ok(0),
+        "CS1" => Ok(32),
+        "CS2" => Ok(64),
+        "CS3" => Ok(96),
+        "CS4" => Ok(128),
+        "CS5" => Ok(160),
+        "CS6" => Ok(192),
+        "CS7" => Ok(224),
+        "AF11" => Ok(40),
+        "AF12" => Ok(48),
+        "AF13" => Ok(56),
+        "AF21" => Ok(72),
+        "AF22" => Ok(80),
+        "AF23" => Ok(88),
+        "AF31" => Ok(104),
+        "AF32" => Ok(112),
+        "AF33" => Ok(120),
+        "AF41" => Ok(136),
+        "AF42" => Ok(144),
+        "AF43" => Ok(152),
+        "EF" => Ok(184),
+        "VA" => Ok(172),
+        _ => Err(format!(
+            "Unknown DSCP name '{}'. Use a number (0-255) or a name: EF, AF11-AF43, CS0-CS7",
+            s
+        )),
+    }
 }
 
 /// Parse a bind address string (can be "IP" or "IP:port")
@@ -836,6 +879,10 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: {msg}");
             }
 
+            if cli.dscp.is_some() && protocol == xfr::protocol::Protocol::Quic {
+                eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
+            }
+
             if cli.mptcp {
                 xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
             }
@@ -970,6 +1017,11 @@ async fn main() -> Result<()> {
                 sequential_ports: protocol != Protocol::Quic && cport.is_some() && streams > 1,
                 mptcp: cli.mptcp,
                 random_payload,
+                dscp: cli
+                    .dscp
+                    .as_ref()
+                    .map(|s| parse_dscp(s).map_err(|e| anyhow::anyhow!(e)))
+                    .transpose()?,
             };
 
             // Determine output format
@@ -978,7 +1030,9 @@ async fn main() -> Result<()> {
                 json_stream: cli.json_stream,
                 csv: cli.csv,
                 quiet: cli.quiet,
-                omit_secs: cli.omit,
+                omit_secs: cli
+                    .omit
+                    .unwrap_or_else(|| file_config.client.omit_secs.unwrap_or(0)),
                 interval_secs: cli.interval,
                 timestamp_format,
             };
@@ -1058,8 +1112,27 @@ async fn run_client_plain(
                 continue;
             }
             last_printed_interval = current_interval;
-            let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
-            let lost = progress.streams.first().and_then(|s| s.lost);
+            // Aggregate jitter (average) and lost (sum) across all streams
+            let jitter_ms = {
+                let jitters: Vec<f64> = progress
+                    .streams
+                    .iter()
+                    .filter_map(|s| s.jitter_ms)
+                    .collect();
+                if jitters.is_empty() {
+                    None
+                } else {
+                    Some(jitters.iter().sum::<f64>() / jitters.len() as f64)
+                }
+            };
+            let lost = {
+                let has_any = progress.streams.iter().any(|s| s.lost.is_some());
+                if has_any {
+                    Some(progress.streams.iter().filter_map(|s| s.lost).sum())
+                } else {
+                    None
+                }
+            };
             let rtt_us = progress.rtt_us;
             let cwnd = progress.cwnd;
 
@@ -1100,6 +1173,8 @@ async fn run_client_plain(
                     progress.throughput_mbps,
                     progress.total_bytes,
                     retransmits,
+                    jitter_ms,
+                    lost,
                     rtt_us,
                 )
             };
@@ -1929,5 +2004,33 @@ mod tests {
 
         assert_eq!(interval_retransmits(&progress, &mut last), None);
         assert_eq!(last, 7);
+    }
+
+    #[test]
+    fn test_parse_dscp_numeric() {
+        assert_eq!(parse_dscp("0").unwrap(), 0);
+        assert_eq!(parse_dscp("46").unwrap(), 46);
+        assert_eq!(parse_dscp("255").unwrap(), 255);
+        assert!(parse_dscp("256").is_err());
+    }
+
+    #[test]
+    fn test_parse_dscp_names() {
+        // CS values: DSCP << 2
+        assert_eq!(parse_dscp("CS0").unwrap(), 0);
+        assert_eq!(parse_dscp("CS1").unwrap(), 32);
+        assert_eq!(parse_dscp("CS7").unwrap(), 224);
+        // AF values
+        assert_eq!(parse_dscp("AF11").unwrap(), 40); // DSCP 10 << 2
+        assert_eq!(parse_dscp("AF43").unwrap(), 152); // DSCP 38 << 2
+        // EF
+        assert_eq!(parse_dscp("EF").unwrap(), 184); // DSCP 46 << 2
+        // VA (VOICE-ADMIT)
+        assert_eq!(parse_dscp("VA").unwrap(), 172); // DSCP 44 << 2
+        // Case insensitive
+        assert_eq!(parse_dscp("ef").unwrap(), 184);
+        assert_eq!(parse_dscp("af21").unwrap(), 72);
+        // Unknown name
+        assert!(parse_dscp("BOGUS").is_err());
     }
 }

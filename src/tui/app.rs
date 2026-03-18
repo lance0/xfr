@@ -26,6 +26,7 @@ pub struct StreamData {
     pub bytes: u64,
     pub throughput_mbps: f64,
     pub retransmits: u64,
+    pub jitter_ms: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -121,6 +122,7 @@ impl App {
                     bytes: 0,
                     throughput_mbps: 0.0,
                     retransmits: 0,
+                    jitter_ms: None,
                 })
                 .collect(),
 
@@ -270,6 +272,7 @@ impl App {
                 // Use 1-second interval for throughput calculation (intervals are 1s apart)
                 stream.throughput_mbps = (interval.bytes as f64 * 8.0) / 1_000_000.0;
                 stream.retransmits = interval.retransmits.unwrap_or(0);
+                stream.jitter_ms = interval.jitter_ms;
             }
 
             // Accumulate UDP stats from intervals

@@ -107,6 +107,9 @@ Local address to bind to (e.g., 192.168.1.100 or ::1)
 .BI \-\-cport " PORT"
 Client source port for firewall traversal (UDP/QUIC/TCP data streams)
 .TP
+.BI \-\-dscp " VALUE"
+Set DSCP/TOS marking on sockets for QoS policy testing. Accepts numeric values (0\-255) or standard DSCP names: EF, AF11\-AF43, CS0\-CS7, VA.
+.TP
 .B \-\-mptcp
 Use MPTCP (Multi\-Path TCP, Linux 5.6+)
 .TP

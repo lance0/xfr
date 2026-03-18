@@ -20,6 +20,9 @@ json_output = false
 # Disable TUI by default
 no_tui = false
 
+# Omit first N seconds from interval output (TCP ramp-up)
+# omit_secs = 3
+
 [server]
 # Default port
 port = 5201

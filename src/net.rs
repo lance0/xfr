@@ -467,6 +467,59 @@ pub async fn connect_tcp_with_bind(
     }
 }
 
+/// Set DSCP/TOS marking on a raw fd. Uses IP_TOS for IPv4, IPV6_TCLASS for IPv6.
+#[cfg(unix)]
+fn set_tos_on_fd(fd: std::os::unix::io::RawFd, tos: u8, ipv6: bool) -> io::Result<()> {
+    let tos_val = tos as libc::c_int;
+    let (level, optname) = if ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TOS)
+    };
+    // SAFETY: fd is a valid file descriptor, tos_val is a valid c_int on the stack.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            optname,
+            &tos_val as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set IP_TOS / IPV6_TCLASS on a TCP stream for DSCP/QoS marking.
+#[cfg(unix)]
+pub fn set_tos_on_tcp(stream: &TcpStream, tos: u8) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let ipv6 = stream.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+    set_tos_on_fd(stream.as_raw_fd(), tos, ipv6)
+}
+
+#[cfg(not(unix))]
+pub fn set_tos_on_tcp(_stream: &TcpStream, _tos: u8) -> io::Result<()> {
+    tracing::warn!("--dscp is not supported on this platform");
+    Ok(())
+}
+
+/// Set IP_TOS / IPV6_TCLASS on a UDP socket for DSCP/QoS marking.
+#[cfg(unix)]
+pub fn set_tos_on_udp(socket: &UdpSocket, tos: u8) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let ipv6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+    set_tos_on_fd(socket.as_raw_fd(), tos, ipv6)
+}
+
+#[cfg(not(unix))]
+pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
+    tracing::warn!("--dscp is not supported on this platform");
+    Ok(())
+}
+
 /// Set IPv6 flow label on a socket (Linux only)
 #[cfg(target_os = "linux")]
 pub fn set_flow_label(socket: &Socket, flow_label: u32) -> io::Result<()> {

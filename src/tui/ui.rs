@@ -446,6 +446,7 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             max_throughput,
             stream.retransmits,
         )
+        .jitter(stream.jitter_ms)
         .bar_color(theme.graph_primary)
         .text_color(theme.text);
 

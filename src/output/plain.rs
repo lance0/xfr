@@ -94,12 +94,15 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn output_interval_plain(
     timestamp: &str,
     _elapsed_secs: f64,
     throughput_mbps: f64,
     bytes: u64,
     retransmits: Option<u64>,
+    jitter_ms: Option<f64>,
+    lost: Option<u64>,
     rtt_us: Option<u32>,
 ) -> String {
     let mut output = format!(
@@ -109,12 +112,19 @@ pub fn output_interval_plain(
         bytes_to_human(bytes)
     );
 
-    if let Some(rtx) = retransmits {
-        output.push_str(&format!("  rtx: {}", rtx));
-    }
-
-    if let Some(rtt) = rtt_us {
-        output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
+    // UDP shows jitter/lost; TCP shows rtx/rtt. Use jitter presence to distinguish.
+    if let Some(jitter) = jitter_ms {
+        output.push_str(&format!("  jitter: {:.2}ms", jitter));
+        if let Some(l) = lost {
+            output.push_str(&format!("  lost: {}", l));
+        }
+    } else {
+        if let Some(rtx) = retransmits {
+            output.push_str(&format!("  rtx: {}", rtx));
+        }
+        if let Some(rtt) = rtt_us {
+            output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
+        }
     }
 
     output.push('\n');
@@ -161,5 +171,41 @@ mod tests {
     fn test_output_plain_sender_tcp_label_mptcp() {
         let output = output_plain(&make_result_with_tcp_info(), true);
         assert!(output.contains("Sender TCP Info (initial subflow):\n"));
+    }
+
+    #[test]
+    fn test_interval_plain_tcp_shows_rtx_rtt() {
+        let output = output_interval_plain(
+            "1.001",
+            1.0,
+            48000.0,
+            6_000_000_000,
+            Some(5),
+            None,
+            None,
+            Some(50),
+        );
+        assert!(output.contains("rtx: 5"));
+        assert!(output.contains("rtt: 0.05ms"));
+        assert!(!output.contains("jitter:"));
+        assert!(!output.contains("lost:"));
+    }
+
+    #[test]
+    fn test_interval_plain_udp_shows_jitter_lost() {
+        let output = output_interval_plain(
+            "1.001",
+            1.0,
+            1000.0,
+            125_000_000,
+            Some(0),
+            Some(1.42),
+            Some(3),
+            None,
+        );
+        assert!(output.contains("jitter: 1.42ms"));
+        assert!(output.contains("lost: 3"));
+        assert!(!output.contains("rtx:"));
+        assert!(!output.contains("rtt:"));
     }
 }
