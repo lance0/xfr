@@ -1112,8 +1112,27 @@ async fn run_client_plain(
                 continue;
             }
             last_printed_interval = current_interval;
-            let jitter_ms = progress.streams.first().and_then(|s| s.jitter_ms);
-            let lost = progress.streams.first().and_then(|s| s.lost);
+            // Aggregate jitter (average) and lost (sum) across all streams
+            let jitter_ms = {
+                let jitters: Vec<f64> = progress
+                    .streams
+                    .iter()
+                    .filter_map(|s| s.jitter_ms)
+                    .collect();
+                if jitters.is_empty() {
+                    None
+                } else {
+                    Some(jitters.iter().sum::<f64>() / jitters.len() as f64)
+                }
+            };
+            let lost = {
+                let has_any = progress.streams.iter().any(|s| s.lost.is_some());
+                if has_any {
+                    Some(progress.streams.iter().filter_map(|s| s.lost).sum())
+                } else {
+                    None
+                }
+            };
             let rtt_us = progress.rtt_us;
             let cwnd = progress.cwnd;
 

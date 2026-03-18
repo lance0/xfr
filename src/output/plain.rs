@@ -112,20 +112,19 @@ pub fn output_interval_plain(
         bytes_to_human(bytes)
     );
 
-    if let Some(rtx) = retransmits {
-        output.push_str(&format!("  rtx: {}", rtx));
-    }
-
+    // UDP shows jitter/lost; TCP shows rtx/rtt. Use jitter presence to distinguish.
     if let Some(jitter) = jitter_ms {
         output.push_str(&format!("  jitter: {:.2}ms", jitter));
-    }
-
-    if let Some(l) = lost {
-        output.push_str(&format!("  lost: {}", l));
-    }
-
-    if let Some(rtt) = rtt_us {
-        output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
+        if let Some(l) = lost {
+            output.push_str(&format!("  lost: {}", l));
+        }
+    } else {
+        if let Some(rtx) = retransmits {
+            output.push_str(&format!("  rtx: {}", rtx));
+        }
+        if let Some(rtt) = rtt_us {
+            output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
+        }
     }
 
     output.push('\n');
