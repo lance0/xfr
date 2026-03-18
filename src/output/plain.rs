@@ -172,4 +172,40 @@ mod tests {
         let output = output_plain(&make_result_with_tcp_info(), true);
         assert!(output.contains("Sender TCP Info (initial subflow):\n"));
     }
+
+    #[test]
+    fn test_interval_plain_tcp_shows_rtx_rtt() {
+        let output = output_interval_plain(
+            "1.001",
+            1.0,
+            48000.0,
+            6_000_000_000,
+            Some(5),
+            None,
+            None,
+            Some(50),
+        );
+        assert!(output.contains("rtx: 5"));
+        assert!(output.contains("rtt: 0.05ms"));
+        assert!(!output.contains("jitter:"));
+        assert!(!output.contains("lost:"));
+    }
+
+    #[test]
+    fn test_interval_plain_udp_shows_jitter_lost() {
+        let output = output_interval_plain(
+            "1.001",
+            1.0,
+            1000.0,
+            125_000_000,
+            Some(0),
+            Some(1.42),
+            Some(3),
+            None,
+        );
+        assert!(output.contains("jitter: 1.42ms"));
+        assert!(output.contains("lost: 3"));
+        assert!(!output.contains("rtx:"));
+        assert!(!output.contains("rtt:"));
+    }
 }

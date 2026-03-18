@@ -232,7 +232,7 @@ struct Cli {
     #[arg(long = "congestion", value_name = "ALGO")]
     congestion: Option<String>,
 
-    /// DSCP/TOS value for QoS marking (0-255 or DSCP name: EF, AF11, CS1, etc.)
+    /// DSCP/TOS marking: raw TOS byte (0-255) or DSCP name (EF, AF11, CS1, etc.)
     #[arg(long, value_name = "VALUE")]
     dscp: Option<String>,
 
