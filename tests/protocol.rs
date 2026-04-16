@@ -38,6 +38,7 @@ fn test_test_start_roundtrip() {
         bitrate: None,
         congestion: Some("bbr".to_string()),
         mptcp: false,
+        dscp: None,
     };
 
     let json = msg.serialize().unwrap();
@@ -97,6 +98,7 @@ fn test_udp_test_start() {
         bitrate: Some(1_000_000_000),
         congestion: None,
         mptcp: false,
+        dscp: None,
     };
 
     let json = msg.serialize().unwrap();

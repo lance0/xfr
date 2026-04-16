@@ -118,6 +118,7 @@ impl Default for ClientConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct TestProgress {
     pub elapsed_ms: u64,
     pub total_bytes: u64,
@@ -304,6 +305,7 @@ impl Client {
             bitrate: self.config.bitrate,
             congestion: self.config.tcp_congestion.clone(),
             mptcp: self.config.mptcp,
+            dscp: self.config.dscp,
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -394,7 +396,7 @@ impl Client {
         } else {
             self.config.duration + Duration::from_secs(30)
         };
-        let deadline = tokio::time::Instant::now() + timeout_duration;
+        let mut deadline = tokio::time::Instant::now() + timeout_duration;
         let local_end_deadline =
             local_stop_deadline(tokio::time::Instant::now(), self.config.duration);
         let mut local_stop_sent = false;
@@ -559,8 +561,11 @@ impl Client {
                     break;
                 }
                 ControlMessage::Cancelled { .. } => {
-                    test_result = Err(anyhow::anyhow!("Test was cancelled"));
-                    break;
+                    // Server acknowledged cancel — it will send Result next.
+                    // Tighten deadline to wait briefly for the final result.
+                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    line.clear();
+                    continue;
                 }
                 _ => {
                     debug!("Unexpected message: {:?}", msg);
@@ -1119,6 +1124,7 @@ impl Client {
             bitrate: self.config.bitrate,
             congestion: None,
             mptcp: false,
+            dscp: None, // QUIC manages its own TOS via the transport layer
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -1245,7 +1251,7 @@ impl Client {
         } else {
             self.config.duration + Duration::from_secs(30)
         };
-        let deadline = tokio::time::Instant::now() + timeout_duration;
+        let mut deadline = tokio::time::Instant::now() + timeout_duration;
 
         loop {
             tokio::select! {
@@ -1326,8 +1332,12 @@ impl Client {
                     return Err(anyhow::anyhow!("Server error: {}", message));
                 }
                 ControlMessage::Cancelled { .. } => {
+                    // Server acknowledged cancel — it will send Result next.
+                    // Tighten deadline to wait briefly for the final result.
                     let _ = cancel_tx.send(true);
-                    return Err(anyhow::anyhow!("Test was cancelled"));
+                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    line.clear();
+                    continue;
                 }
                 _ => {
                     debug!("Unexpected message: {:?}", msg);

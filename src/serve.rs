@@ -1224,6 +1224,7 @@ async fn handle_test_request(
             bitrate,
             congestion,
             mptcp,
+            dscp,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1322,6 +1323,7 @@ async fn handle_test_request(
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
                 client_supports_single_port,
+                dscp,
             )
             .await;
 
@@ -1655,6 +1657,7 @@ async fn run_test(
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
     client_supports_single_port: bool,
+    dscp: Option<u8>,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -1813,6 +1816,7 @@ async fn run_test(
                         congestion.clone(),
                         bitrate,
                         pause_clone,
+                        dscp,
                     )
                     .await
                 });
@@ -1830,6 +1834,7 @@ async fn run_test(
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
                 cancel_rx.clone(),
                 pause_rx.clone(),
+                dscp,
             )
             .await;
             (None, handles)
@@ -1989,29 +1994,26 @@ async fn run_test(
         udp_stats: stats.aggregate_udp_stats(),
     });
 
-    // Cleanup active test entry BEFORE sending result
-    // This ensures cleanup happens even if the write fails
+    // Send result FIRST so the client isn't blocked by slow post-processing
+    // (push gateway retries, metrics hooks, etc.)
+    writer
+        .write_all(format!("{}\n", result.serialize()?).as_bytes())
+        .await?;
+
+    // Cleanup and post-processing after client has the result
     active_tests.lock().await.remove(id);
 
-    // Notify metrics that test completed
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_complete(&stats);
 
-    // Push metrics to gateway if configured
     crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
 
-    // Notify TUI that test completed
     if let Some(tx) = &tui_tx {
         let _ = tx.try_send(ServerEvent::TestCompleted {
             id: id.to_string(),
             bytes: bytes_total,
         });
     }
-
-    // Send result (after cleanup so stale entries don't persist on failure)
-    writer
-        .write_all(format!("{}\n", result.serialize()?).as_bytes())
-        .await?;
 
     info!(
         "Test {} complete: {:.2} Mbps, {} bytes",
@@ -2218,6 +2220,7 @@ async fn spawn_tcp_stream_handlers(
     congestion: Option<String>,
     bitrate: Option<u64>,
     pause: watch::Receiver<bool>,
+    dscp: Option<u8>,
 ) -> Vec<JoinHandle<()>> {
     let per_stream_bitrate = bitrate.map(|b| {
         if b == 0 {
@@ -2298,6 +2301,13 @@ async fn spawn_tcp_stream_handlers(
                     // Capture TCP_INFO before transfer starts
                     if let Some(info) = tcp::get_stream_tcp_info(&stream) {
                         test_stats.add_tcp_info(info);
+                    }
+
+                    // Apply DSCP/TOS marking if requested by client
+                    if let Some(tos) = dscp
+                        && let Err(e) = crate::net::set_tos_on_tcp(&stream, tos)
+                    {
+                        tracing::warn!("Failed to set DSCP on server TCP socket: {}", e);
                     }
 
                     match direction {
@@ -2398,6 +2408,7 @@ async fn spawn_tcp_stream_handlers(
     handles
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_udp_handlers(
     sockets: Vec<Arc<UdpSocket>>,
     stats: Arc<TestStats>,
@@ -2406,6 +2417,7 @@ async fn spawn_udp_handlers(
     bitrate: u64,
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
+    dscp: Option<u8>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -2420,6 +2432,13 @@ async fn spawn_udp_handlers(
     };
 
     for (i, socket) in sockets.into_iter().enumerate() {
+        // Apply DSCP/TOS marking if requested by client
+        if let Some(tos) = dscp
+            && let Err(e) = crate::net::set_tos_on_udp(&socket, tos)
+        {
+            tracing::warn!("Failed to set DSCP on server UDP socket {}: {}", i, e);
+        }
+
         let stream_stats = stats.streams[i].clone();
         let test_stats = stats.clone();
         let cancel = cancel.clone();

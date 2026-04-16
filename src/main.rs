@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -883,6 +883,11 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
             }
 
+            #[cfg(not(unix))]
+            if cli.dscp.is_some() && protocol != xfr::protocol::Protocol::Quic {
+                eprintln!("Warning: --dscp is not supported on this platform");
+            }
+
             if cli.mptcp {
                 xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
             }
@@ -1065,7 +1070,7 @@ async fn run_client_plain(
     opts: OutputOptions,
     output: Option<PathBuf>,
 ) -> Result<()> {
-    let client = Client::new(config.clone());
+    let client = Arc::new(Client::new(config.clone()));
 
     let (tx, mut rx) = mpsc::channel::<TestProgress>(100);
 
@@ -1087,12 +1092,26 @@ async fn run_client_plain(
     let test_start = std::time::Instant::now();
     let test_start_system = std::time::SystemTime::now();
 
+    // Cumulative stats for fallback summary on signal interrupt.
+    // TestProgress fields (total_bytes, streams[*].bytes) are per-interval deltas,
+    // so we must accumulate totals across intervals ourselves.
+    let cumulative_bytes: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let cumulative_elapsed_ms: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let cumulative_bytes_writer = cumulative_bytes.clone();
+    let cumulative_elapsed_writer = cumulative_elapsed_ms.clone();
+
     // Print intervals in a separate task
     let print_handle = tokio::spawn(async move {
         let mut last_printed_interval: i64 = -1;
         let mut last_retransmits: u64 = 0;
 
         while let Some(progress) = rx.recv().await {
+            // Accumulate cumulative totals for fallback summary
+            cumulative_bytes_writer.fetch_add(progress.total_bytes, std::sync::atomic::Ordering::Relaxed);
+            cumulative_elapsed_writer.store(progress.elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
             let retransmits = interval_retransmits(&progress, &mut last_retransmits);
 
@@ -1183,12 +1202,54 @@ async fn run_client_plain(
         }
     });
 
-    let result = client.run(Some(tx)).await?;
+    // Spawn the test as a task so we can select between it and Ctrl+C
+    let client_run = client.clone();
+    let mut test_handle = tokio::spawn(async move { client_run.run(Some(tx)).await });
 
-    // Wait for print task to finish
+    // Signal handler: first Ctrl+C = graceful cancel, second = force exit
+    let sigint = Arc::new(tokio::sync::Notify::new());
+    let sigint_bg = sigint.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        sigint_bg.notify_one();
+        // Second Ctrl+C = force exit
+        let _ = tokio::signal::ctrl_c().await;
+        std::process::exit(130);
+    });
+
+    // Wait for either test completion or Ctrl+C
+    let (result, interrupted) = tokio::select! {
+        r = &mut test_handle => {
+            (r??, false)
+        }
+        _ = sigint.notified() => {
+            eprintln!("\nInterrupted, waiting for summary...");
+            let _ = client.cancel();
+            // Wait for the test task to finish (client now waits for server Result after cancel)
+            match tokio::time::timeout(Duration::from_secs(5), &mut test_handle).await {
+                Ok(Ok(Ok(result))) => (result, false), // Got real server result after cancel
+                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                    // Server didn't respond or task failed — abort and build fallback
+                    test_handle.abort();
+                    let bytes = cumulative_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    let elapsed_ms = cumulative_elapsed_ms.load(std::sync::atomic::Ordering::Relaxed);
+                    if bytes == 0 {
+                        eprintln!("Test interrupted before any data was collected.");
+                        std::process::exit(130);
+                    }
+                    (build_fallback_result(bytes, elapsed_ms), true)
+                }
+            }
+        }
+    };
+
+    // Wait for print task to finish (test task is done or aborted, so tx is dropped)
     let _ = print_handle.await;
 
     // Output result
+    if interrupted {
+        eprintln!("Warning: partial results (server did not respond to cancel)");
+    }
     let output_str = if opts.json || opts.json_stream {
         output_json(&result)
     } else if opts.csv {
@@ -1199,12 +1260,42 @@ async fn run_client_plain(
 
     println!("{}", output_str);
 
-    if let Some(path) = output {
+    // Don't save incomplete fallback results to file — only save real server results
+    if !interrupted
+        && let Some(path) = output
+    {
         xfr::output::json::save_json(&result, &path)?;
         info!("Results saved to {}", path.display());
     }
 
+    if interrupted {
+        std::process::exit(130);
+    }
+
     Ok(())
+}
+
+/// Build a fallback TestResult from cumulative counters.
+/// Used when the server doesn't respond after cancel.
+/// Only provides aggregate totals — no per-stream breakdown is available.
+fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protocol::TestResult {
+    use xfr::protocol::TestResult;
+
+    let throughput_mbps = if elapsed_ms > 0 {
+        (cumulative_bytes as f64 * 8.0) / (elapsed_ms as f64 / 1000.0) / 1_000_000.0
+    } else {
+        0.0
+    };
+
+    TestResult {
+        id: String::new(),
+        bytes_total: cumulative_bytes,
+        duration_ms: elapsed_ms,
+        throughput_mbps,
+        streams: vec![],
+        tcp_info: None,
+        udp_stats: None,
+    }
 }
 
 async fn run_client_tui(
@@ -1290,7 +1381,18 @@ async fn run_tui_loop(
 
     app.on_connected();
 
+    // Track cancel state: when user presses 'q' or Ctrl+C during a running test,
+    // we cancel and wait briefly for the server Result before exiting.
+    let mut cancel_deadline: Option<std::time::Instant> = None;
+
     loop {
+        // If we're waiting for cancel result and deadline expired, exit now
+        if let Some(deadline) = cancel_deadline
+            && deadline.elapsed() > Duration::ZERO
+        {
+            return Ok((app.result, prefs, print_json_on_exit));
+        }
+
         // Check for update result if not already received
         if !update_check_done {
             match update_rx.try_recv() {
@@ -1365,13 +1467,23 @@ async fn run_tui_loop(
                 continue;
             }
 
-            match key.code {
-                KeyCode::Char('q') => {
-                    // Cancel the test on server before exiting
-                    let _ = client.cancel();
+            // Ctrl+C or 'q': cancel and wait for server Result
+            let is_quit = key.code == KeyCode::Char('q')
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if is_quit {
+                if app.state == AppState::Completed || cancel_deadline.is_some() {
+                    // Already completed or already cancelling — exit immediately
                     prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit));
                 }
+                let _ = client.cancel();
+                cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
+                app.log("Cancelling, waiting for summary...");
+                continue;
+            }
+
+            match key.code {
                 KeyCode::Char('p') => {
                     match client.pause() {
                         PauseResult::Applied => {
@@ -1444,6 +1556,13 @@ async fn run_tui_loop(
             match test_handle.await? {
                 Ok(result) => {
                     app.on_result(result);
+
+                    // If we were waiting for cancel to complete, exit now with result
+                    if cancel_deadline.is_some() {
+                        prefs.theme = Some(app.theme_name().to_string());
+                        return Ok((app.result, prefs, print_json_on_exit));
+                    }
+
                     // Show final result for a moment
                     terminal.draw(|f| draw(f, &app))?;
 
@@ -1501,6 +1620,14 @@ async fn run_tui_loop(
                                 continue;
                             }
 
+                            // Ctrl+C in completed state: exit
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                prefs.theme = Some(app.theme_name().to_string());
+                                return Ok((app.result, prefs, print_json_on_exit));
+                            }
+
                             match key.code {
                                 KeyCode::Char('q') => {
                                     prefs.theme = Some(app.theme_name().to_string());
@@ -1541,6 +1668,12 @@ async fn run_tui_loop(
                     }
                 }
                 Err(e) => {
+                    // If we were waiting for cancel to complete, just exit
+                    if cancel_deadline.is_some() {
+                        prefs.theme = Some(app.theme_name().to_string());
+                        return Ok((app.result, prefs, print_json_on_exit));
+                    }
+
                     app.on_error(e.to_string());
                     terminal.draw(|f| draw(f, &app))?;
 
@@ -1549,7 +1682,9 @@ async fn run_tui_loop(
                         if event::poll(Duration::from_millis(100))?
                             && let Event::Key(key) = event::read()?
                             && key.kind == KeyEventKind::Press
-                            && key.code == KeyCode::Char('q')
+                            && (key.code == KeyCode::Char('q')
+                                || (key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)))
                         {
                             prefs.theme = Some(app.theme_name().to_string());
                             return Err(anyhow::anyhow!(app.error.unwrap_or_default()));

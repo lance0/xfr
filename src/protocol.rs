@@ -102,6 +102,9 @@ pub enum ControlMessage {
         congestion: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mptcp: bool,
+        /// DSCP/TOS byte for QoS marking on server-side sockets (download/bidir)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dscp: Option<u8>,
     },
     TestAck {
         id: String,
@@ -436,6 +439,7 @@ mod tests {
             bitrate: None,
             congestion: None,
             mptcp: false,
+            dscp: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
