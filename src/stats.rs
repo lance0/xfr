@@ -401,11 +401,7 @@ impl TestStats {
                 count += 1;
             }
         }
-        if count > 0 {
-            Some(((rtt_sum / count) as u32, retransmits, cwnd))
-        } else {
-            None
-        }
+        (rtt_sum.checked_div(count)).map(|avg_rtt| (avg_rtt as u32, retransmits, cwnd))
     }
 
     /// Get final TCP_INFO across all streams, using saved snapshots from completed tasks.
@@ -425,16 +421,15 @@ impl TestStats {
                 count += 1;
             }
         }
-        if count > 0 {
-            Some(TcpInfoSnapshot {
+        rtt_sum.checked_div(count).map(|avg_rtt| {
+            let avg_rtt_var = rtt_var_sum / count; // safe: checked_div confirmed count > 0
+            TcpInfoSnapshot {
                 retransmits,
-                rtt_us: (rtt_sum / count) as u32,
-                rtt_var_us: (rtt_var_sum / count) as u32,
+                rtt_us: avg_rtt as u32,
+                rtt_var_us: avg_rtt_var as u32,
                 cwnd,
-            })
-        } else {
-            None
-        }
+            }
+        })
     }
 }
 
