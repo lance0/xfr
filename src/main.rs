@@ -1524,23 +1524,17 @@ async fn run_tui_loop(
                 KeyCode::Char('d') => {
                     app.toggle_streams();
                 }
-                KeyCode::Esc => {
-                    if app.show_help {
-                        app.show_help = false;
-                    }
+                KeyCode::Esc if app.show_help => {
+                    app.show_help = false;
                 }
-                KeyCode::Char('j') => {
-                    if app.result.is_some() {
-                        // Set flag to print JSON after TUI closes
-                        print_json_on_exit = true;
-                        app.log("JSON output queued for display on exit.");
-                    }
+                KeyCode::Char('j') if app.result.is_some() => {
+                    // Set flag to print JSON after TUI closes
+                    print_json_on_exit = true;
+                    app.log("JSON output queued for display on exit.");
                 }
-                KeyCode::Char('u') => {
+                KeyCode::Char('u') if app.update_available.is_some() => {
                     // Dismiss update notification
-                    if app.update_available.is_some() {
-                        app.update_available = None;
-                    }
+                    app.update_available = None;
                 }
                 _ => {}
             }
@@ -1657,10 +1651,8 @@ async fn run_tui_loop(
                                     print_json_on_exit = true;
                                     app.log("JSON output queued for display on exit.");
                                 }
-                                KeyCode::Char('u') => {
-                                    if app.update_available.is_some() {
-                                        app.update_available = None;
-                                    }
+                                KeyCode::Char('u') if app.update_available.is_some() => {
+                                    app.update_available = None;
                                 }
                                 _ => {}
                             }
@@ -1729,10 +1721,8 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
                 KeyCode::Char('?') | KeyCode::F(1) => {
                     app.toggle_help();
                 }
-                KeyCode::Esc => {
-                    if app.show_help {
-                        app.show_help = false;
-                    }
+                KeyCode::Esc if app.show_help => {
+                    app.show_help = false;
                 }
                 _ => {}
             }
