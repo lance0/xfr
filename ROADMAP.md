@@ -50,6 +50,7 @@
 - [x] **CSV output format** (`--csv`) - frequently requested iperf2 feature never added to iperf3
 - [x] **JSON streaming output** (`--json-stream`) - iperf3 3.18 added this, one JSON object per line
 - [x] **Quiet mode** (`-q`) - suppress interval output, show only summary
+- [ ] **Separate send/recv in bidir summary** (issue #56) — currently `--bidir` reports combined `bytes_total` and `throughput_mbps`. For asymmetric links this collapses two different numbers into one; users have to re-run with and without `-R`. Expose split `bytes_sent`/`bytes_received` + per-direction throughput in plain/JSON/CSV/TUI outputs while keeping the combined total for backward compat
 
 ### Usability
 - [x] **Server max duration** (`--max-duration`) - limit test length server-side
