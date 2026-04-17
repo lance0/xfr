@@ -6,7 +6,7 @@
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
@@ -18,7 +18,6 @@ use crate::tcp_info::get_tcp_info;
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
-const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
@@ -28,36 +27,6 @@ fn is_peer_closed_error(err: &io::Error) -> bool {
             | io::ErrorKind::BrokenPipe
             | io::ErrorKind::ConnectionAborted
     )
-}
-
-/// Drain readable bytes briefly after cancel to reduce RST-on-close risk.
-/// Closing a socket with unread data can trigger a reset on the peer under load.
-async fn drain_after_cancel<R: AsyncRead + Unpin>(reader: &mut R, stream_id: u8) {
-    let mut buffer = [0u8; 16 * 1024];
-    let deadline = tokio::time::Instant::now() + RECEIVE_CANCEL_DRAIN_GRACE;
-    let mut drained = 0u64;
-
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match tokio::time::timeout(remaining, reader.read(&mut buffer)).await {
-            Ok(Ok(0)) => break, // EOF
-            Ok(Ok(n)) => drained += n as u64,
-            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Ok(Err(e)) if is_peer_closed_error(&e) => break,
-            Ok(Err(_)) => break,
-            Err(_) => break, // grace window elapsed while waiting
-        }
-    }
-
-    if drained > 0 {
-        debug!(
-            "Stream {} drained {} bytes after cancel before close",
-            stream_id, drained
-        );
-    }
 }
 
 #[derive(Clone)]
@@ -487,7 +456,6 @@ pub async fn receive_data(
 
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
-    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -507,7 +475,6 @@ pub async fn receive_data(
                         // Receive-side reset/pipe before cancel is unexpected and should
                         // still be surfaced as an error.
                         if *cancel.borrow() {
-                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -520,16 +487,11 @@ pub async fn receive_data(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
-                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
-    }
-
-    if cancelled {
-        drain_after_cancel(&mut stream, stats.stream_id).await;
     }
 
     // Capture final TCP_INFO
@@ -706,7 +668,6 @@ pub async fn receive_data_half(
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
-    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -724,7 +685,6 @@ pub async fn receive_data_half(
                             continue;
                         }
                         if *cancel.borrow() {
-                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -737,16 +697,11 @@ pub async fn receive_data_half(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
-                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
-    }
-
-    if cancelled {
-        drain_after_cancel(&mut read_half, stats.stream_id).await;
     }
 
     debug!(
