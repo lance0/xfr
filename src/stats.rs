@@ -18,6 +18,11 @@ pub struct StreamStats {
     pub retransmits: AtomicU64,
     pub interval_retransmits_total: AtomicU64,
     pub last_bytes: AtomicU64,
+    // Per-direction `last_bytes` mirrors for bidir interval deltas. When the
+    // test is unidirectional, one of these stays at 0 and `last_bytes` is
+    // sufficient on its own.
+    pub last_bytes_sent: AtomicU64,
+    pub last_bytes_received: AtomicU64,
     pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
@@ -40,6 +45,10 @@ pub struct IntervalStats {
     pub lost: u64,
     pub rtt_us: Option<u32>,
     pub cwnd: Option<u32>,
+    /// Per-direction interval deltas. Zero for unidirectional tests (the
+    /// single-direction count is already in `bytes`).
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
 }
 
 impl StreamStats {
@@ -53,6 +62,8 @@ impl StreamStats {
             retransmits: AtomicU64::new(0),
             interval_retransmits_total: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
+            last_bytes_sent: AtomicU64::new(0),
+            last_bytes_received: AtomicU64::new(0),
             last_tcp_retransmits: AtomicU64::new(0),
             udp_jitter_us: AtomicU64::new(0),
             udp_lost: AtomicU64::new(0),
@@ -148,6 +159,14 @@ impl StreamStats {
         let last_bytes = self.last_bytes.swap(total_bytes, Ordering::Relaxed);
         let interval_bytes = total_bytes.saturating_sub(last_bytes);
 
+        // Per-direction deltas for bidir interval reporting.
+        let total_sent = self.bytes_sent.load(Ordering::Relaxed);
+        let total_recv = self.bytes_received.load(Ordering::Relaxed);
+        let last_sent = self.last_bytes_sent.swap(total_sent, Ordering::Relaxed);
+        let last_recv = self.last_bytes_received.swap(total_recv, Ordering::Relaxed);
+        let interval_bytes_sent = total_sent.saturating_sub(last_sent);
+        let interval_bytes_received = total_recv.saturating_sub(last_recv);
+
         let elapsed = now.duration_since(self.start_time);
         let intervals = self.intervals.lock();
         let interval_duration = if let Some(last) = intervals.back() {
@@ -194,6 +213,8 @@ impl StreamStats {
             lost: interval_lost,
             rtt_us: tcp_info.as_ref().map(|t| t.rtt_us),
             cwnd: tcp_info.as_ref().map(|t| t.cwnd),
+            bytes_sent: interval_bytes_sent,
+            bytes_received: interval_bytes_received,
         };
 
         let mut intervals = self.intervals.lock();
@@ -321,10 +342,48 @@ impl TestStats {
     }
 
     pub fn to_aggregate(&self, intervals: &[IntervalStats]) -> AggregateInterval {
+        self.to_aggregate_with_direction(intervals, false)
+    }
+
+    /// Build an `AggregateInterval` for the given per-stream interval snapshots.
+    /// When `is_bidir` is true, also populates the per-direction split fields
+    /// (swapped from the server's view so the client reads its own direction:
+    /// `bytes_sent` = bytes the client sent = what the server received, etc.).
+    pub fn to_aggregate_with_direction(
+        &self,
+        intervals: &[IntervalStats],
+        is_bidir: bool,
+    ) -> AggregateInterval {
         let total_bytes: u64 = intervals.iter().map(|i| i.bytes).sum();
         let total_throughput: f64 = intervals.iter().map(|i| i.throughput_mbps).sum();
         let total_retransmits: u64 = intervals.iter().map(|i| i.retransmits).sum();
         let total_lost: u64 = intervals.iter().map(|i| i.lost).sum();
+
+        // Per-direction interval deltas from the reporting side, swapped for
+        // the client's perspective when this is bidirectional.
+        let (split_bytes_sent, split_bytes_received, split_ts_send, split_ts_recv) = if is_bidir {
+            // Server-local `bytes_sent` is what the server sent — from the
+            // client's perspective that's `bytes_received`. Swap.
+            let server_sent: u64 = intervals.iter().map(|i| i.bytes_sent).sum();
+            let server_recv: u64 = intervals.iter().map(|i| i.bytes_received).sum();
+            let client_sent = server_recv;
+            let client_recv = server_sent;
+            // Per-direction throughput, using the same interval window the
+            // aggregate `throughput_mbps` was computed against. If total_bytes
+            // is nonzero, distribute total_throughput proportionally; otherwise
+            // both are zero.
+            let (ts, tr) = if total_bytes > 0 {
+                (
+                    total_throughput * (client_sent as f64) / (total_bytes as f64),
+                    total_throughput * (client_recv as f64) / (total_bytes as f64),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            (Some(client_sent), Some(client_recv), Some(ts), Some(tr))
+        } else {
+            (None, None, None, None)
+        };
 
         // Average jitter across streams that have jitter data
         let jitter_values: Vec<f64> = intervals
@@ -369,12 +428,10 @@ impl TestStats {
             },
             rtt_us: avg_rtt,
             cwnd: total_cwnd,
-            // Directional split filled in by the caller (src/serve.rs) when the
-            // test is bidir; left None for unidirectional tests.
-            bytes_sent: None,
-            bytes_received: None,
-            throughput_send_mbps: None,
-            throughput_recv_mbps: None,
+            bytes_sent: split_bytes_sent,
+            bytes_received: split_bytes_received,
+            throughput_send_mbps: split_ts_send,
+            throughput_recv_mbps: split_ts_recv,
         }
     }
 

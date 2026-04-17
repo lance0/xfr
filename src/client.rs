@@ -128,6 +128,12 @@ pub struct TestProgress {
     pub cwnd: Option<u32>,
     /// Cumulative retransmits from local TCP_INFO (sender-side, for upload/bidir)
     pub total_retransmits: Option<u64>,
+    /// Per-direction interval bytes (bidirectional tests only, from client's
+    /// perspective). `bytes_sent` is what the client sent this interval.
+    pub bytes_sent: Option<u64>,
+    pub bytes_received: Option<u64>,
+    pub throughput_send_mbps: Option<f64>,
+    pub throughput_recv_mbps: Option<f64>,
 }
 
 pub struct Client {
@@ -531,6 +537,10 @@ impl Client {
                                 cwnd,
                                 total_retransmits,
                                 streams,
+                                bytes_sent: aggregate.bytes_sent,
+                                bytes_received: aggregate.bytes_received,
+                                throughput_send_mbps: aggregate.throughput_send_mbps,
+                                throughput_recv_mbps: aggregate.throughput_recv_mbps,
                             })
                             .await;
                     }
@@ -1324,6 +1334,10 @@ impl Client {
                                 cwnd: aggregate.cwnd,
                                 total_retransmits: None,
                                 streams,
+                                bytes_sent: aggregate.bytes_sent,
+                                bytes_received: aggregate.bytes_received,
+                                throughput_send_mbps: aggregate.throughput_send_mbps,
+                                throughput_recv_mbps: aggregate.throughput_recv_mbps,
                             })
                             .await;
                     }

@@ -1339,9 +1339,16 @@ async fn handle_test_request(
     }
 }
 
-/// Compute per-direction byte/throughput totals when the test is bidirectional.
-/// For unidirectional tests returns all None — the existing `bytes_total` and
-/// `throughput_mbps` fields already carry the single-direction number.
+/// Compute per-direction byte/throughput totals (from the CLIENT's perspective)
+/// when the test is bidirectional. For unidirectional tests returns all None —
+/// the existing `bytes_total` and `throughput_mbps` fields already carry the
+/// single-direction number.
+///
+/// Direction convention: `TestResult.bytes_sent` means "bytes the *client* sent"
+/// (its upload direction). Server-local counters are reversed from that view
+/// — what the server sent went to the client (the client's downloads), and
+/// what the server received came from the client (the client's uploads). So
+/// we flip when emitting.
 fn directional_totals(
     direction: Direction,
     stats: &TestStats,
@@ -1350,8 +1357,9 @@ fn directional_totals(
     if direction != Direction::Bidir {
         return (None, None, None, None);
     }
-    let bytes_sent = stats.total_bytes_sent();
-    let bytes_received = stats.total_bytes_received();
+    // Swap: server-sent == client-received, server-received == client-sent.
+    let client_bytes_sent = stats.total_bytes_received();
+    let client_bytes_received = stats.total_bytes_sent();
     let mbps = |bytes: u64| {
         if duration_ms == 0 {
             0.0
@@ -1360,10 +1368,10 @@ fn directional_totals(
         }
     };
     (
-        Some(bytes_sent),
-        Some(bytes_received),
-        Some(mbps(bytes_sent)),
-        Some(mbps(bytes_received)),
+        Some(client_bytes_sent),
+        Some(client_bytes_received),
+        Some(mbps(client_bytes_sent)),
+        Some(mbps(client_bytes_received)),
     )
 }
 
@@ -1528,7 +1536,7 @@ async fn run_quic_test(
                     .zip(intervals.iter())
                     .map(|(s, i)| s.to_interval(i))
                     .collect();
-                let aggregate = stats.to_aggregate(&intervals);
+                let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
 
                 let interval_msg = ControlMessage::Interval {
                     id: id.to_string(),
@@ -1898,7 +1906,7 @@ async fn run_test(
                     .zip(intervals.iter())
                     .map(|(s, i)| s.to_interval(i))
                     .collect();
-                let aggregate = stats.to_aggregate(&intervals);
+                let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
 
                 let interval_msg = ControlMessage::Interval {
                     id: id.to_string(),

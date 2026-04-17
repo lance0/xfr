@@ -265,6 +265,21 @@ impl App {
         self.total_bytes = progress.total_bytes;
         self.current_throughput_mbps = progress.throughput_mbps;
 
+        // Bidirectional split: when the server reports per-direction counts
+        // (all four Some), surface them to the UI so the live ↑/↓ panel works
+        // during the test rather than only after it finishes.
+        if let (Some(sent), Some(recv), Some(ts), Some(tr)) = (
+            progress.bytes_sent,
+            progress.bytes_received,
+            progress.throughput_send_mbps,
+            progress.throughput_recv_mbps,
+        ) {
+            self.bidir_bytes_sent += sent;
+            self.bidir_bytes_received += recv;
+            self.throughput_send_mbps = ts;
+            self.throughput_recv_mbps = tr;
+        }
+
         // Update sparkline history
         self.throughput_history.push_back(progress.throughput_mbps);
         if self.throughput_history.len() > SPARKLINE_HISTORY {

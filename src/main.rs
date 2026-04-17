@@ -2101,6 +2101,10 @@ mod tests {
             rtt_us: None,
             cwnd: None,
             total_retransmits,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }
     }
 
