@@ -18,12 +18,12 @@ use crate::tcp_info::get_tcp_info;
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
-// Brief post-cancel read window to cover the race where our receive side
-// signals cancel and drops the socket before the peer's own cancel_tx has
-// fired (i.e., the Cancel control message hasn't yet been processed by the
-// peer's data loop). 50ms is comfortably longer than same-host cancel
-// latency; doesn't pollute stats since drained bytes aren't counted.
-const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(50);
+// Post-cancel read window: covers the race where our receive side signals
+// cancel and drops the socket before the peer's own cancel_tx has fired
+// (i.e., the Cancel control message hasn't yet been processed by the peer's
+// data loop). 200ms handles moderate WAN RTTs; same-host is sub-ms. Drained
+// bytes aren't counted in stats, so no accuracy impact on throughput.
+const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
@@ -332,9 +332,11 @@ pub async fn send_data(
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
-    // Force abortive close: for a bandwidth test, unfinished send-buffer data past the
-    // test duration is noise. Don't block close() waiting for it to ACK through a
-    // (potentially rate-limited, lossy) link. See issue #54.
+    // Force abortive close on Linux only, where `tcpi_bytes_acked` lets us clamp
+    // the overcount of discarded send-buffer bytes. On platforms without that
+    // counter (macOS, fallback), graceful shutdown is used at end of loop to
+    // preserve accuracy. See issue #54.
+    #[cfg(target_os = "linux")]
     let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
 
     let kernel_pacing = match bitrate {
@@ -468,8 +470,24 @@ pub async fn send_data(
         }
     }
 
-    // SO_LINGER=0 causes close() to send RST and skip the drain wait.
-    // Stream will be dropped when the function returns.
+    // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST (skipping drain).
+    // On other platforms, call shutdown() for graceful FIN — slower but preserves
+    // accounting accuracy since we don't have bytes_acked to clamp overcount.
+    #[cfg(not(target_os = "linux"))]
+    if let Err(e) = stream.shutdown().await {
+        if *cancel.borrow() || is_peer_closed_error(&e) {
+            debug!(
+                "Stream {} shutdown ended during teardown: {}",
+                stats.stream_id, e
+            );
+        } else {
+            warn!(
+                "Stream {} shutdown error after send loop: {}",
+                stats.stream_id, e
+            );
+        }
+    }
+
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,
@@ -581,8 +599,8 @@ pub async fn send_data_half(
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<OwnedWriteHalf> {
-    // Force abortive close: don't block at end-of-test waiting for bufferbloated send
-    // buffer to drain. See issue #54.
+    // Linux only: force abortive close. See send_data() for rationale.
+    #[cfg(target_os = "linux")]
     let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
 
     let kernel_pacing = match bitrate {
@@ -706,8 +724,11 @@ pub async fn send_data_half(
         }
     }
 
-    // SO_LINGER=0 set at function start causes close() to send RST and skip drain wait.
-    // write_half will be dropped by the caller after reuniting with read_half.
+    // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST.
+    // On other platforms, do graceful shutdown to preserve accounting accuracy.
+    #[cfg(not(target_os = "linux"))]
+    let _ = write_half.shutdown().await;
+
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,

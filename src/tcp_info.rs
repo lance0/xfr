@@ -83,16 +83,22 @@ mod linux {
         };
 
         if ret == 0 {
+            // tcpi_bytes_acked was added in Linux 4.2 (2015); report it whenever
+            // getsockopt returned a struct large enough to include it. Zero is a
+            // valid value (e.g., aborted before first ACK), so don't treat it as
+            // "missing" — that would skip the overcount clamp in that exact case.
+            let acked_end = mem::offset_of!(TcpInfo, tcpi_bytes_acked) + mem::size_of::<u64>();
+            let bytes_acked = if (len as usize) >= acked_end {
+                Some(info.tcpi_bytes_acked)
+            } else {
+                None
+            };
             Ok(TcpInfoSnapshot {
                 retransmits: info.tcpi_total_retrans as u64,
                 rtt_us: info.tcpi_rtt,
                 rtt_var_us: info.tcpi_rttvar,
                 cwnd: info.tcpi_snd_cwnd,
-                bytes_acked: if info.tcpi_bytes_acked > 0 {
-                    Some(info.tcpi_bytes_acked)
-                } else {
-                    None
-                },
+                bytes_acked,
             })
         } else {
             Err(std::io::Error::last_os_error())
