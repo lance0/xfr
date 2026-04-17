@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.8] - 2026-04-17
 
 ### Added
 - **Separate send/recv reporting in bidir tests** (issue #56) — `--bidir` now reports per-direction bytes and throughput in the summary instead of just the combined total, which was useless on asymmetric links. Plain text shows `Send: X  Recv: Y  (Total: Z)`; JSON adds `bytes_sent`, `bytes_received`, `throughput_send_mbps`, `throughput_recv_mbps`; CSV gets four new columns; TUI shows `↑ X / ↓ Y` in the throughput panel. Unidirectional tests are unchanged (the existing `bytes_total`/`throughput_mbps` is already the single-direction number).
