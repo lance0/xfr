@@ -161,7 +161,19 @@ xfr <host> --bidir             # Bidirectional
 xfr <host> --bidir -P 2        # Bidir with 2 streams each direction
 ```
 
-Reports separate statistics for upload and download.
+Plain text summary shows per-direction bytes and throughput plus the
+combined total:
+
+```
+  Transfer:    Send: 5.00 GB    Recv: 7.00 GB    (Total: 12.00 GB)
+  Throughput:  Send: 40.0 Gbps  Recv: 56.0 Gbps  (Total: 96.0 Gbps)
+```
+
+JSON adds `bytes_sent`, `bytes_received`, `throughput_send_mbps`, and
+`throughput_recv_mbps` fields; CSV gets four matching columns; the TUI
+shows `↑` / `↓` throughput in the stats panel. Unidirectional tests
+continue to report only the combined number (which equals the
+single-direction throughput).
 
 ## Direction Control
 

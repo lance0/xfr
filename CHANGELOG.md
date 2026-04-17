@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Separate send/recv reporting in bidir tests** (issue #56) — `--bidir` now reports per-direction bytes and throughput in the summary instead of just the combined total, which was useless on asymmetric links. Plain text shows `Send: X  Recv: Y  (Total: Z)`; JSON adds `bytes_sent`, `bytes_received`, `throughput_send_mbps`, `throughput_recv_mbps`; CSV gets four new columns; TUI shows `↑ X / ↓ Y` in the throughput panel. Unidirectional tests are unchanged (the existing `bytes_total`/`throughput_mbps` is already the single-direction number).
+
 ### Fixed
 - **Fast, accurate TCP teardown** (issue #54) — replaced the blocking `shutdown()` drain on the send path with `SO_LINGER=0` on Linux, so cancel and natural end-of-test no longer wait for bufferbloated send buffers to ACK through rate-limited paths. Fixes the "Timed out waiting 2s for N data streams to stop" warning matttbe reported with `-P 4 --mptcp -t 1sec`.
 - **Sender-side byte-count accuracy** — `stats.bytes_sent` is now clamped to `tcpi_bytes_acked` before abortive close, removing a quiet ~5-10% overcount where the send-buffer tail discarded by RST was being reported as transferred. Download and bidir tests are the primary beneficiaries.
