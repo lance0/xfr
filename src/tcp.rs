@@ -845,6 +845,66 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_bytes_sent_to_acked_reduces_overcount() {
+        // Sender had written 1000 bytes but peer only ACK'd 800.
+        // Clamp should bring bytes_sent down to 800 (what actually landed).
+        let stats = StreamStats::new(0);
+        stats.add_bytes_sent(1000);
+        let info = crate::protocol::TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 1000,
+            rtt_var_us: 100,
+            cwnd: 10,
+            bytes_acked: Some(800),
+        };
+        clamp_bytes_sent_to_acked(&stats, &info);
+        assert_eq!(
+            stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+            800
+        );
+    }
+
+    #[test]
+    fn test_clamp_bytes_sent_to_acked_no_change_when_acked_exceeds_sent() {
+        // bytes_acked > bytes_sent shouldn't happen (would be a kernel bug), but
+        // if it does, we must not inflate the counter beyond what was actually sent.
+        let stats = StreamStats::new(0);
+        stats.add_bytes_sent(500);
+        let info = crate::protocol::TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 1000,
+            rtt_var_us: 100,
+            cwnd: 10,
+            bytes_acked: Some(999),
+        };
+        clamp_bytes_sent_to_acked(&stats, &info);
+        assert_eq!(
+            stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+            500
+        );
+    }
+
+    #[test]
+    fn test_clamp_bytes_sent_to_acked_none_is_noop() {
+        // On platforms without bytes_acked support (macOS, old Linux kernels),
+        // the clamp must be a no-op — we can't clamp to an unknown value.
+        let stats = StreamStats::new(0);
+        stats.add_bytes_sent(1000);
+        let info = crate::protocol::TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 1000,
+            rtt_var_us: 100,
+            cwnd: 10,
+            bytes_acked: None,
+        };
+        clamp_bytes_sent_to_acked(&stats, &info);
+        assert_eq!(
+            stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+            1000
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn test_validate_congestion_cubic() {
         // cubic is available on all Linux kernels
