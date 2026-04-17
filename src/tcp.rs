@@ -6,7 +6,7 @@
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
@@ -18,6 +18,12 @@ use crate::tcp_info::get_tcp_info;
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+// Brief post-cancel read window to cover the race where our receive side
+// signals cancel and drops the socket before the peer's own cancel_tx has
+// fired (i.e., the Cancel control message hasn't yet been processed by the
+// peer's data loop). 50ms is comfortably longer than same-host cancel
+// latency; doesn't pollute stats since drained bytes aren't counted.
+const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
@@ -27,6 +33,37 @@ fn is_peer_closed_error(err: &io::Error) -> bool {
             | io::ErrorKind::BrokenPipe
             | io::ErrorKind::ConnectionAborted
     )
+}
+
+/// Drain readable bytes briefly after cancel to give the peer's own cancel
+/// signal time to propagate before we drop the socket (which would RST).
+/// Drained bytes are not added to stats — this is purely for teardown hygiene.
+async fn drain_after_cancel<R: AsyncRead + Unpin>(reader: &mut R, stream_id: u8) {
+    let mut buffer = [0u8; 16 * 1024];
+    let deadline = tokio::time::Instant::now() + RECEIVE_CANCEL_DRAIN_GRACE;
+    let mut drained = 0u64;
+
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, reader.read(&mut buffer)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(n)) => drained += n as u64,
+            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Ok(Err(e)) if is_peer_closed_error(&e) => break,
+            Ok(Err(_)) => break,
+            Err(_) => break, // grace window elapsed
+        }
+    }
+
+    if drained > 0 {
+        debug!(
+            "Stream {} drained {} bytes after cancel before close",
+            stream_id, drained
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -418,6 +455,17 @@ pub async fn send_data(
     let tcp_info = get_stream_tcp_info(&stream);
     if let Some(ref info) = tcp_info {
         stats.add_retransmits(info.retransmits);
+        // Clamp bytes_sent to bytes_acked: with SO_LINGER=0 close, any unACK'd data
+        // in the send buffer will be discarded rather than delivered. Reporting it
+        // as "sent" would overcount throughput on bufferbloated/rate-limited links.
+        if let Some(acked) = info.bytes_acked {
+            let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+            if acked < sent {
+                stats
+                    .bytes_sent
+                    .store(acked, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     // SO_LINGER=0 causes close() to send RST and skip the drain wait.
@@ -449,6 +497,7 @@ pub async fn receive_data(
 
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
+    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -468,6 +517,7 @@ pub async fn receive_data(
                         // Receive-side reset/pipe before cancel is unexpected and should
                         // still be surfaced as an error.
                         if *cancel.borrow() {
+                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -480,11 +530,16 @@ pub async fn receive_data(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
+                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
+    }
+
+    if cancelled {
+        drain_after_cancel(&mut stream, stats.stream_id).await;
     }
 
     // Capture final TCP_INFO
@@ -639,6 +694,18 @@ pub async fn send_data_half(
         }
     }
 
+    // Clamp bytes_sent to bytes_acked before abortive close (see send_data for rationale).
+    if let Some(info) = get_tcp_info(write_half.as_ref()).ok()
+        && let Some(acked) = info.bytes_acked
+    {
+        let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+        if acked < sent {
+            stats
+                .bytes_sent
+                .store(acked, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // SO_LINGER=0 set at function start causes close() to send RST and skip drain wait.
     // write_half will be dropped by the caller after reuniting with read_half.
     debug!(
@@ -666,6 +733,7 @@ pub async fn receive_data_half(
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
+    let mut cancelled = false;
 
     loop {
         tokio::select! {
@@ -683,6 +751,7 @@ pub async fn receive_data_half(
                             continue;
                         }
                         if *cancel.borrow() {
+                            cancelled = true;
                             if is_peer_closed_error(&e) {
                                 suppressed_teardown_errors += 1;
                             }
@@ -695,11 +764,16 @@ pub async fn receive_data_half(
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
+                    cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
                 }
             }
         }
+    }
+
+    if cancelled {
+        drain_after_cancel(&mut read_half, stats.stream_id).await;
     }
 
     debug!(
@@ -758,6 +832,9 @@ mod tests {
 
         // On 32-bit where c_ulong < u64, verify explicit clamp behavior.
         if libc::c_ulong::BITS < 64 {
+            // On 64-bit, c_ulong::MAX == u64::MAX so try_from is trivially ok;
+            // on 32-bit the cast widens. Clippy flags the 64-bit case; allow it.
+            #[allow(clippy::useless_conversion)]
             let max = u64::try_from(libc::c_ulong::MAX).unwrap_or(u64::MAX);
             let overflow_bytes = max.saturating_add(1);
             let bitrate = overflow_bytes.saturating_mul(8);
