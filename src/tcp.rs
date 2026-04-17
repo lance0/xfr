@@ -295,6 +295,10 @@ pub async fn send_data(
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
+    // Force abortive close: for a bandwidth test, unfinished send-buffer data past the
+    // test duration is noise. Don't block close() waiting for it to ACK through a
+    // (potentially rate-limited, lossy) link. See issue #54.
+    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
 
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
@@ -416,19 +420,8 @@ pub async fn send_data(
         stats.add_retransmits(info.retransmits);
     }
 
-    if let Err(e) = stream.shutdown().await {
-        if *cancel.borrow() || is_peer_closed_error(&e) {
-            debug!(
-                "Stream {} shutdown ended during teardown: {}",
-                stats.stream_id, e
-            );
-        } else {
-            warn!(
-                "Stream {} shutdown error after send loop: {}",
-                stats.stream_id, e
-            );
-        }
-    }
+    // SO_LINGER=0 causes close() to send RST and skip the drain wait.
+    // Stream will be dropped when the function returns.
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,
@@ -533,6 +526,10 @@ pub async fn send_data_half(
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<OwnedWriteHalf> {
+    // Force abortive close: don't block at end-of-test waiting for bufferbloated send
+    // buffer to drain. See issue #54.
+    let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
+
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
             let set = try_set_pacing_rate(write_half.as_ref(), bps);
@@ -642,7 +639,8 @@ pub async fn send_data_half(
         }
     }
 
-    let _ = write_half.shutdown().await;
+    // SO_LINGER=0 set at function start causes close() to send RST and skip drain wait.
+    // write_half will be dropped by the caller after reuniting with read_half.
     debug!(
         "Stream {} send complete: {} bytes",
         stats.stream_id,
