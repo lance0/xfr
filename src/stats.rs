@@ -412,12 +412,18 @@ impl TestStats {
         let mut retransmits = 0u64;
         let mut cwnd = 0u32;
         let mut count = 0u64;
+        let mut bytes_acked_sum = 0u64;
+        let mut any_bytes_acked = false;
         for stream in &self.streams {
             if let Some(info) = stream.final_tcp_info() {
                 rtt_sum += info.rtt_us as u64;
                 rtt_var_sum += info.rtt_var_us as u64;
                 retransmits += info.retransmits;
                 cwnd += info.cwnd;
+                if let Some(acked) = info.bytes_acked {
+                    bytes_acked_sum += acked;
+                    any_bytes_acked = true;
+                }
                 count += 1;
             }
         }
@@ -428,6 +434,11 @@ impl TestStats {
                 rtt_us: avg_rtt as u32,
                 rtt_var_us: avg_rtt_var as u32,
                 cwnd,
+                bytes_acked: if any_bytes_acked {
+                    Some(bytes_acked_sum)
+                } else {
+                    None
+                },
             }
         })
     }
@@ -509,6 +520,7 @@ mod tests {
             rtt_us: 1200,
             rtt_var_us: 300,
             cwnd: 64 * 1024,
+            bytes_acked: None,
         };
 
         stats.set_tcp_info_fd(123);
@@ -531,12 +543,14 @@ mod tests {
             rtt_us: 1000,
             rtt_var_us: 200,
             cwnd: 32 * 1024,
+            bytes_acked: None,
         });
         stats.streams[1].set_final_tcp_info(TcpInfoSnapshot {
             retransmits: 5,
             rtt_us: 3000,
             rtt_var_us: 600,
             cwnd: 64 * 1024,
+            bytes_acked: None,
         });
 
         let info = stats

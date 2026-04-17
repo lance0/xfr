@@ -155,6 +155,7 @@ mod tests {
                 rtt_us: 1000,
                 rtt_var_us: 100,
                 cwnd: 64 * 1024,
+                bytes_acked: None,
             }),
             udp_stats: None,
         }

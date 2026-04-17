@@ -223,6 +223,7 @@ fn test_result_message() {
             rtt_us: 1234,
             rtt_var_us: 100,
             cwnd: 65535,
+            bytes_acked: None,
         }),
         udp_stats: None,
     };
@@ -262,6 +263,7 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
             rtt_us: 1234,
             rtt_var_us: 567,
             cwnd: u32::MAX,
+            bytes_acked: None,
         }),
         udp_stats: None,
     };

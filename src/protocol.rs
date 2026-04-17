@@ -245,6 +245,10 @@ pub struct TcpInfoSnapshot {
     pub rtt_us: u32,
     pub rtt_var_us: u32,
     pub cwnd: u32,
+    /// Bytes acknowledged by the peer (from `tcpi_bytes_acked` on Linux).
+    /// Used to correct overcount on abortive close where unACK'd buffer is discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_acked: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

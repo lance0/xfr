@@ -121,7 +121,9 @@ fn bench_protocol_serialize_test_start(c: &mut Criterion) {
         protocol: Protocol::Tcp,
         direction: Direction::Upload,
         bitrate: Some(1_000_000_000),
+        congestion: None,
         mptcp: false,
+        dscp: None,
     };
 
     c.bench_function("protocol_serialize_test_start", |b| {
@@ -141,6 +143,8 @@ fn bench_protocol_serialize_interval(c: &mut Criterion) {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                rtt_us: None,
+                cwnd: None,
             },
             StreamInterval {
                 id: 1,
@@ -149,6 +153,8 @@ fn bench_protocol_serialize_interval(c: &mut Criterion) {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                rtt_us: None,
+                cwnd: None,
             },
         ],
         aggregate: AggregateInterval {
@@ -157,6 +163,8 @@ fn bench_protocol_serialize_interval(c: &mut Criterion) {
             retransmits: Some(8),
             jitter_ms: None,
             lost: None,
+            rtt_us: None,
+            cwnd: None,
         },
     };
 
@@ -176,6 +184,8 @@ fn bench_protocol_deserialize_interval(c: &mut Criterion) {
             jitter_ms: None,
             lost: None,
             error: None,
+            rtt_us: None,
+            cwnd: None,
         }],
         aggregate: AggregateInterval {
             bytes: 125_000_000,
@@ -183,6 +193,8 @@ fn bench_protocol_deserialize_interval(c: &mut Criterion) {
             retransmits: Some(5),
             jitter_ms: None,
             lost: None,
+            rtt_us: None,
+            cwnd: None,
         },
     };
     let json = msg.serialize().unwrap();
