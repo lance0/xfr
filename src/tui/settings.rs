@@ -363,6 +363,7 @@ pub enum SettingsAction {
 
 /// Result of TUI loop - either exit or restart with new params
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // Exit carries the full TestResult; Restart is rare.
 pub enum TuiLoopResult {
     Exit {
         result: Option<crate::protocol::TestResult>,

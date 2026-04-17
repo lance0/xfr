@@ -211,6 +211,19 @@ pub struct AggregateInterval {
     pub rtt_us: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwnd: Option<u32>,
+    /// Bidirectional test: bytes sent by the reporting side during this interval.
+    /// Populated only for bidir tests; None for unidirectional (where `bytes` is authoritative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_sent: Option<u64>,
+    /// Bidirectional test: bytes received by the reporting side during this interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_received: Option<u64>,
+    /// Bidirectional test: per-direction throughput (upload) in Mbps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_send_mbps: Option<f64>,
+    /// Bidirectional test: per-direction throughput (download) in Mbps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_recv_mbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +237,19 @@ pub struct TestResult {
     pub tcp_info: Option<TcpInfoSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub udp_stats: Option<UdpStats>,
+    /// Bidirectional test: total bytes sent by the reporting side.
+    /// Populated only for bidir tests; None for unidirectional (where `bytes_total` is authoritative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_sent: Option<u64>,
+    /// Bidirectional test: total bytes received by the reporting side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_received: Option<u64>,
+    /// Bidirectional test: per-direction throughput (upload) in Mbps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_send_mbps: Option<f64>,
+    /// Bidirectional test: per-direction throughput (download) in Mbps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_recv_mbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

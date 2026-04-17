@@ -6,12 +6,19 @@ use crate::protocol::{TestResult, TimestampFormat};
 pub fn output_csv(result: &TestResult) -> String {
     let mut output = String::new();
 
-    // Header
-    output.push_str("test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent\n");
+    // Header. bytes_sent / bytes_received / throughput_send_mbps /
+    // throughput_recv_mbps are populated only for bidirectional tests;
+    // unidirectional tests leave those columns empty.
+    output.push_str(
+        "test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps\n",
+    );
+
+    let fmt_u64 = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
+    let fmt_f64 = |v: Option<f64>| v.map(|n| format!("{:.2}", n)).unwrap_or_default();
 
     // Summary row
     output.push_str(&format!(
-        "{},{:.2},{},{:.2},{},{:.2},{},{:.2}\n",
+        "{},{:.2},{},{:.2},{},{:.2},{},{:.2},{},{},{},{}\n",
         result.id,
         result.duration_ms as f64 / 1000.0,
         result.bytes_total,
@@ -28,6 +35,10 @@ pub fn output_csv(result: &TestResult) -> String {
             .as_ref()
             .map(|u| u.lost_percent)
             .unwrap_or(0.0),
+        fmt_u64(result.bytes_sent),
+        fmt_u64(result.bytes_received),
+        fmt_f64(result.throughput_send_mbps),
+        fmt_f64(result.throughput_recv_mbps),
     ));
 
     output

@@ -369,11 +369,34 @@ impl TestStats {
             },
             rtt_us: avg_rtt,
             cwnd: total_cwnd,
+            // Directional split filled in by the caller (src/serve.rs) when the
+            // test is bidir; left None for unidirectional tests.
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }
     }
 
     pub fn total_bytes(&self) -> u64 {
         self.streams.iter().map(|s| s.total_bytes()).sum()
+    }
+
+    /// Bytes this side has sent, summed across all streams. Used to separate
+    /// upload vs download accounting in bidirectional tests.
+    pub fn total_bytes_sent(&self) -> u64 {
+        self.streams
+            .iter()
+            .map(|s| s.bytes_sent.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Bytes this side has received, summed across all streams.
+    pub fn total_bytes_received(&self) -> u64 {
+        self.streams
+            .iter()
+            .map(|s| s.bytes_received.load(Ordering::Relaxed))
+            .sum()
     }
 
     pub fn add_tcp_info(&self, info: TcpInfoSnapshot) {

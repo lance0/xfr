@@ -142,6 +142,10 @@ fn test_interval_message() {
             lost: None,
             rtt_us: Some(1217),
             cwnd: Some(98303),
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         },
     };
 
@@ -226,6 +230,10 @@ fn test_result_message() {
             bytes_acked: None,
         }),
         udp_stats: None,
+        bytes_sent: None,
+        bytes_received: None,
+        throughput_send_mbps: None,
+        throughput_recv_mbps: None,
     };
 
     let msg = ControlMessage::Result(result);
@@ -266,6 +274,10 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
             bytes_acked: None,
         }),
         udp_stats: None,
+        bytes_sent: None,
+        bytes_received: None,
+        throughput_send_mbps: None,
+        throughput_recv_mbps: None,
     };
 
     let msg = ControlMessage::Result(result);

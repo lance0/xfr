@@ -17,14 +17,38 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         "  Duration:    {:.2}s\n",
         result.duration_ms as f64 / 1000.0
     ));
-    output.push_str(&format!(
-        "  Transfer:    {}\n",
-        bytes_to_human(result.bytes_total)
-    ));
-    output.push_str(&format!(
-        "  Throughput:  {}\n",
-        mbps_to_human(result.throughput_mbps)
-    ));
+
+    // Bidirectional tests: show per-direction bytes/throughput alongside the total.
+    // Unidirectional tests report only the combined number (which equals the
+    // single-direction throughput anyway).
+    if let (Some(sent), Some(recv), Some(ts_send), Some(ts_recv)) = (
+        result.bytes_sent,
+        result.bytes_received,
+        result.throughput_send_mbps,
+        result.throughput_recv_mbps,
+    ) {
+        output.push_str(&format!(
+            "  Transfer:    Send: {}    Recv: {}    (Total: {})\n",
+            bytes_to_human(sent),
+            bytes_to_human(recv),
+            bytes_to_human(result.bytes_total)
+        ));
+        output.push_str(&format!(
+            "  Throughput:  Send: {}  Recv: {}  (Total: {})\n",
+            mbps_to_human(ts_send),
+            mbps_to_human(ts_recv),
+            mbps_to_human(result.throughput_mbps)
+        ));
+    } else {
+        output.push_str(&format!(
+            "  Transfer:    {}\n",
+            bytes_to_human(result.bytes_total)
+        ));
+        output.push_str(&format!(
+            "  Throughput:  {}\n",
+            mbps_to_human(result.throughput_mbps)
+        ));
+    }
     output.push('\n');
 
     if let Some(ref tcp_info) = result.tcp_info {
@@ -158,6 +182,10 @@ mod tests {
                 bytes_acked: None,
             }),
             udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }
     }
 

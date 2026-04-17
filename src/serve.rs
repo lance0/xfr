@@ -1339,6 +1339,34 @@ async fn handle_test_request(
     }
 }
 
+/// Compute per-direction byte/throughput totals when the test is bidirectional.
+/// For unidirectional tests returns all None — the existing `bytes_total` and
+/// `throughput_mbps` fields already carry the single-direction number.
+fn directional_totals(
+    direction: Direction,
+    stats: &TestStats,
+    duration_ms: u64,
+) -> (Option<u64>, Option<u64>, Option<f64>, Option<f64>) {
+    if direction != Direction::Bidir {
+        return (None, None, None, None);
+    }
+    let bytes_sent = stats.total_bytes_sent();
+    let bytes_received = stats.total_bytes_received();
+    let mbps = |bytes: u64| {
+        if duration_ms == 0 {
+            0.0
+        } else {
+            (bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
+        }
+    };
+    (
+        Some(bytes_sent),
+        Some(bytes_received),
+        Some(mbps(bytes_sent)),
+        Some(mbps(bytes_received)),
+    )
+}
+
 /// Run a QUIC bandwidth test
 #[allow(clippy::too_many_arguments)]
 async fn run_quic_test(
@@ -1596,6 +1624,10 @@ async fn run_quic_test(
         .map(|s| s.to_result(duration_ms))
         .collect();
 
+    // Bidir: split up/down reporting for asymmetric links (issue #56).
+    let (bytes_sent, bytes_received, throughput_send_mbps, throughput_recv_mbps) =
+        directional_totals(direction, &stats, duration_ms);
+
     let result = ControlMessage::Result(TestResult {
         id: id.to_string(),
         bytes_total,
@@ -1604,6 +1636,10 @@ async fn run_quic_test(
         streams: stream_results,
         tcp_info: None,
         udp_stats: None,
+        bytes_sent,
+        bytes_received,
+        throughput_send_mbps,
+        throughput_recv_mbps,
     });
 
     ctrl_send
@@ -1984,6 +2020,11 @@ async fn run_test(
         .map(|s| s.to_result(duration_ms))
         .collect();
 
+    // For bidir tests, expose per-direction totals so clients can distinguish
+    // upload from download throughput on asymmetric links (issue #56).
+    let (bytes_sent, bytes_received, throughput_send_mbps, throughput_recv_mbps) =
+        directional_totals(direction, &stats, duration_ms);
+
     let result = ControlMessage::Result(TestResult {
         id: id.to_string(),
         bytes_total,
@@ -1992,6 +2033,10 @@ async fn run_test(
         streams: stream_results,
         tcp_info: stats.get_tcp_info(),
         udp_stats: stats.aggregate_udp_stats(),
+        bytes_sent,
+        bytes_received,
+        throughput_send_mbps,
+        throughput_recv_mbps,
     });
 
     // Send result FIRST so the client isn't blocked by slow post-processing

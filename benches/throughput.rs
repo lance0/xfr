@@ -165,6 +165,10 @@ fn bench_protocol_serialize_interval(c: &mut Criterion) {
             lost: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         },
     };
 
@@ -195,6 +199,10 @@ fn bench_protocol_deserialize_interval(c: &mut Criterion) {
             lost: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         },
     };
     let json = msg.serialize().unwrap();
@@ -213,6 +221,10 @@ fn bench_protocol_serialize_result(c: &mut Criterion) {
         streams: vec![],
         tcp_info: None,
         udp_stats: None,
+        bytes_sent: None,
+        bytes_received: None,
+        throughput_send_mbps: None,
+        throughput_recv_mbps: None,
     };
     let msg = ControlMessage::Result(result);
 

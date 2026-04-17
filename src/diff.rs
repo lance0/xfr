@@ -157,6 +157,10 @@ mod tests {
                 bytes_acked: None,
             }),
             udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }
     }
 
