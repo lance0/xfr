@@ -51,6 +51,13 @@ pub struct App {
     pub throughput_history: VecDeque<f64>,
     pub streams: Vec<StreamData>,
 
+    // Bidirectional split stats (populated from AggregateInterval/TestResult
+    // when the server reports per-direction totals). Zero for unidirectional tests.
+    pub bidir_bytes_sent: u64,
+    pub bidir_bytes_received: u64,
+    pub throughput_send_mbps: f64,
+    pub throughput_recv_mbps: f64,
+
     pub total_retransmits: u64,
     pub rtt_us: u32,
     pub cwnd: u32,
@@ -116,6 +123,10 @@ impl App {
             total_bytes: 0,
             current_throughput_mbps: 0.0,
             throughput_history: VecDeque::with_capacity(SPARKLINE_HISTORY),
+            bidir_bytes_sent: 0,
+            bidir_bytes_received: 0,
+            throughput_send_mbps: 0.0,
+            throughput_recv_mbps: 0.0,
             streams: (0..streams)
                 .map(|id| StreamData {
                     id,
@@ -363,6 +374,20 @@ impl App {
             self.udp_lost_percent = udp_stats.lost_percent;
             self.udp_packets_sent = udp_stats.packets_sent;
             self.udp_packets_lost = udp_stats.lost;
+        }
+        // Bidirectional split stats: populated only by servers that know to
+        // report them. Older servers leave these None, in which case we keep
+        // the zero defaults and the UI falls back to the combined throughput.
+        if let (Some(sent), Some(recv), Some(ts), Some(tr)) = (
+            result.bytes_sent,
+            result.bytes_received,
+            result.throughput_send_mbps,
+            result.throughput_recv_mbps,
+        ) {
+            self.bidir_bytes_sent = sent;
+            self.bidir_bytes_received = recv;
+            self.throughput_send_mbps = ts;
+            self.throughput_recv_mbps = tr;
         }
         self.result = Some(result);
         self.log(format!(

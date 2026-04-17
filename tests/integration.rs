@@ -71,6 +71,17 @@ async fn test_tcp_single_stream() {
     // Server reports bytes based on what it tracked, which may be 0 if stats aren't linked
     // The test passes if we got a valid result structure back
     assert!(result.duration_ms > 0, "Should have duration");
+
+    // Unidirectional tests should NOT populate the per-direction split — those
+    // fields are reserved for bidir where the combined total would be misleading.
+    assert!(
+        result.bytes_sent.is_none(),
+        "unidir result should not populate bytes_sent"
+    );
+    assert!(
+        result.bytes_received.is_none(),
+        "unidir result should not populate bytes_received"
+    );
 }
 
 #[tokio::test]
@@ -213,6 +224,24 @@ async fn test_tcp_bidir() {
 
     let result = result.unwrap();
     assert!(result.duration_ms > 0, "Should have duration");
+
+    // Bidir tests should populate the per-direction fields (issue #56).
+    assert!(
+        result.bytes_sent.is_some(),
+        "bidir result should have bytes_sent populated"
+    );
+    assert!(
+        result.bytes_received.is_some(),
+        "bidir result should have bytes_received populated"
+    );
+    assert!(
+        result.throughput_send_mbps.is_some(),
+        "bidir result should have throughput_send_mbps populated"
+    );
+    assert!(
+        result.throughput_recv_mbps.is_some(),
+        "bidir result should have throughput_recv_mbps populated"
+    );
 }
 
 #[tokio::test]

@@ -222,17 +222,36 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         ])
         .split(chunks[0]);
 
-    // Current throughput value (big number)
-    let throughput_str = mbps_to_human(app.current_throughput_mbps);
-    let throughput_display = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            throughput_str,
-            Style::default()
-                .fg(theme.graph_primary)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ]);
+    // Current throughput value. For bidir tests with per-direction numbers
+    // available, show "↑ X / ↓ Y" split; otherwise show the combined value.
+    let throughput_display = if app.direction == crate::protocol::Direction::Bidir
+        && (app.throughput_send_mbps > 0.0 || app.throughput_recv_mbps > 0.0)
+    {
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("↑ {}", mbps_to_human(app.throughput_send_mbps)),
+                Style::default()
+                    .fg(theme.graph_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("↓ {}", mbps_to_human(app.throughput_recv_mbps)),
+                Style::default()
+                    .fg(theme.graph_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ])
+    } else {
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                mbps_to_human(app.current_throughput_mbps),
+                Style::default()
+                    .fg(theme.graph_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ])
+    };
     frame.render_widget(throughput_display, sparkline_chunks[0]);
 
     // Sparkline showing throughput history

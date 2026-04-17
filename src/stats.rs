@@ -594,6 +594,20 @@ mod tests {
     }
 
     #[test]
+    fn test_total_bytes_sent_and_received_split() {
+        let stats = TestStats::new("test".to_string(), 2);
+        stats.streams[0].add_bytes_sent(100);
+        stats.streams[0].add_bytes_received(50);
+        stats.streams[1].add_bytes_sent(200);
+        stats.streams[1].add_bytes_received(75);
+
+        assert_eq!(stats.total_bytes_sent(), 300);
+        assert_eq!(stats.total_bytes_received(), 125);
+        // Existing total_bytes() still includes both.
+        assert_eq!(stats.total_bytes(), 425);
+    }
+
+    #[test]
     fn test_mbps_to_human() {
         assert_eq!(mbps_to_human(500.0), "500.0 Mbps");
         assert_eq!(mbps_to_human(1500.0), "1.50 Gbps");

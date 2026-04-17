@@ -203,6 +203,34 @@ mod tests {
     }
 
     #[test]
+    fn test_output_plain_bidir_shows_split() {
+        // Bidirectional result populates the split fields — output should render
+        // Send/Recv/Total lines so asymmetric throughput is visible.
+        let mut result = make_result_with_tcp_info();
+        result.bytes_sent = Some(5_000_000_000);
+        result.bytes_received = Some(7_000_000_000);
+        result.throughput_send_mbps = Some(40_000.0);
+        result.throughput_recv_mbps = Some(56_000.0);
+        result.bytes_total = 12_000_000_000;
+        result.throughput_mbps = 96_000.0;
+
+        let output = output_plain(&result, false);
+        assert!(output.contains("Send:"), "expected split 'Send:' line");
+        assert!(output.contains("Recv:"), "expected split 'Recv:' line");
+        assert!(output.contains("(Total:"), "expected combined total");
+    }
+
+    #[test]
+    fn test_output_plain_unidir_no_split() {
+        // Unidirectional result leaves Options None — output stays single-line.
+        let output = output_plain(&make_result_with_tcp_info(), false);
+        assert!(
+            !output.contains("Send:") && !output.contains("Recv:"),
+            "unidir output must not show split lines"
+        );
+    }
+
+    #[test]
     fn test_interval_plain_tcp_shows_rtx_rtt() {
         let output = output_interval_plain(
             "1.001",
