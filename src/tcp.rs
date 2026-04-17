@@ -66,6 +66,20 @@ async fn drain_after_cancel<R: AsyncRead + Unpin>(reader: &mut R, stream_id: u8)
     }
 }
 
+/// Clamp `stats.bytes_sent` to `bytes_acked` before an abortive close. On Linux
+/// with SO_LINGER=0, unACK'd send-buffer data is discarded by RST; reporting it
+/// as "sent" would overcount. Called at every stream-return site in send paths.
+fn clamp_bytes_sent_to_acked(stats: &StreamStats, info: &crate::protocol::TcpInfoSnapshot) {
+    if let Some(acked) = info.bytes_acked {
+        let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+        if acked < sent {
+            stats
+                .bytes_sent
+                .store(acked, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TcpConfig {
     pub buffer_size: usize,
@@ -448,6 +462,11 @@ pub async fn send_data(
                     );
                 }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
+                // Clamp bytes_sent before the RST-on-drop discards unACK'd data,
+                // preserving the accuracy invariant even on the error path.
+                if let Some(info) = get_stream_tcp_info(&stream) {
+                    clamp_bytes_sent_to_acked(&stats, &info);
+                }
                 return Err(e.into());
             }
         }
@@ -457,17 +476,7 @@ pub async fn send_data(
     let tcp_info = get_stream_tcp_info(&stream);
     if let Some(ref info) = tcp_info {
         stats.add_retransmits(info.retransmits);
-        // Clamp bytes_sent to bytes_acked: with SO_LINGER=0 close, any unACK'd data
-        // in the send buffer will be discarded rather than delivered. Reporting it
-        // as "sent" would overcount throughput on bufferbloated/rate-limited links.
-        if let Some(acked) = info.bytes_acked {
-            let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
-            if acked < sent {
-                stats
-                    .bytes_sent
-                    .store(acked, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
+        clamp_bytes_sent_to_acked(&stats, info);
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST (skipping drain).
@@ -588,8 +597,11 @@ pub fn get_stream_tcp_info(stream: &TcpStream) -> Option<crate::protocol::TcpInf
     get_tcp_info(stream).ok()
 }
 
-/// Send data on a split socket write half (for bidir mode)
-/// Returns the write half for reuniting to get TCP_INFO
+/// Send data on a split socket write half (for bidir mode).
+/// Returns the write half for reuniting, plus the sender-side TCP_INFO snapshot
+/// captured at clamp time — caller should prefer this over re-reading TCP_INFO
+/// post-reunite, since a second read would see a later (larger) `bytes_acked`
+/// that could exceed the clamped `bytes_sent`.
 pub async fn send_data_half(
     mut write_half: OwnedWriteHalf,
     stats: Arc<StreamStats>,
@@ -598,7 +610,7 @@ pub async fn send_data_half(
     mut cancel: watch::Receiver<bool>,
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
-) -> anyhow::Result<OwnedWriteHalf> {
+) -> anyhow::Result<(OwnedWriteHalf, Option<crate::protocol::TcpInfoSnapshot>)> {
     // Linux only: force abortive close. See send_data() for rationale.
     #[cfg(target_os = "linux")]
     let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
@@ -707,21 +719,21 @@ pub async fn send_data_half(
                     );
                 }
                 error!("Send error on stream {}: {}", stats.stream_id, e);
+                // Clamp before RST-on-drop discards unACK'd data.
+                if let Ok(info) = get_tcp_info(write_half.as_ref()) {
+                    clamp_bytes_sent_to_acked(&stats, &info);
+                }
                 return Err(e.into());
             }
         }
     }
 
     // Clamp bytes_sent to bytes_acked before abortive close (see send_data for rationale).
-    if let Some(info) = get_tcp_info(write_half.as_ref()).ok()
-        && let Some(acked) = info.bytes_acked
-    {
-        let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
-        if acked < sent {
-            stats
-                .bytes_sent
-                .store(acked, std::sync::atomic::Ordering::Relaxed);
-        }
+    // Capture the snapshot so the caller can store it directly — a second post-reunite
+    // read would see a later, larger bytes_acked that could exceed the clamped bytes_sent.
+    let tcp_info = get_tcp_info(write_half.as_ref()).ok();
+    if let Some(ref info) = tcp_info {
+        clamp_bytes_sent_to_acked(&stats, info);
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST.
@@ -741,7 +753,7 @@ pub async fn send_data_half(
         );
     }
 
-    Ok(write_half)
+    Ok((write_half, tcp_info))
 }
 
 /// Receive data on a split socket read half (for bidir mode)

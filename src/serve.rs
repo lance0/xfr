@@ -2187,14 +2187,17 @@ async fn spawn_tcp_handlers(
                             .await
                     });
 
-                    // Wait for both to complete and reunite halves to get TCP_INFO
+                    // Wait for both to complete. Use the clamp-time TCP_INFO snapshot
+                    // returned by send_data_half rather than re-reading post-reunite.
                     let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                    if let (Ok(Ok(write_half)), Ok(Ok(read_half))) = (send_result, recv_result)
-                        && let Ok(stream) = read_half.reunite(write_half)
-                        && let Some(info) = tcp::get_stream_tcp_info(&stream)
+                    if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
+                        (send_result, recv_result)
                     {
-                        final_stats.add_retransmits(info.retransmits);
-                        test_stats.add_tcp_info(info);
+                        if let Some(info) = send_tcp_info {
+                            final_stats.add_retransmits(info.retransmits);
+                            test_stats.add_tcp_info(info);
+                        }
+                        let _ = read_half.reunite(write_half);
                     }
                 }
             }
@@ -2378,13 +2381,14 @@ async fn spawn_tcp_stream_handlers(
                             });
 
                             let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                            if let (Ok(Ok(write_half)), Ok(Ok(read_half))) =
+                            if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
                                 (send_result, recv_result)
-                                && let Ok(stream) = read_half.reunite(write_half)
-                                && let Some(info) = tcp::get_stream_tcp_info(&stream)
                             {
-                                final_stats.add_retransmits(info.retransmits);
-                                test_stats.add_tcp_info(info);
+                                if let Some(info) = send_tcp_info {
+                                    final_stats.add_retransmits(info.retransmits);
+                                    test_stats.add_tcp_info(info);
+                                }
+                                let _ = read_half.reunite(write_half);
                             }
                         }
                     }

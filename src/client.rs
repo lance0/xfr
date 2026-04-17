@@ -816,11 +816,17 @@ impl Client {
                                     error!("Bidir receive error: {}", e);
                                 }
 
-                                if let (Ok(write_half), Ok(read_half)) = (send_result, recv_result)
-                                    && let Ok(stream) = read_half.reunite(write_half)
-                                    && let Some(info) = tcp::get_stream_tcp_info(&stream)
+                                // Use the clamp-time TCP_INFO snapshot returned by
+                                // send_data_half: re-reading after reunite would see a later,
+                                // larger bytes_acked that could exceed the clamped bytes_sent.
+                                if let (Ok((write_half, send_tcp_info)), Ok(read_half)) =
+                                    (send_result, recv_result)
                                 {
-                                    stream_stats.set_final_tcp_info(info);
+                                    if let Some(info) = send_tcp_info {
+                                        stream_stats.set_final_tcp_info(info);
+                                    }
+                                    // Reunite to keep the socket lifetime symmetric; dropped next.
+                                    let _ = read_half.reunite(write_half);
                                 }
                             }
                         }
