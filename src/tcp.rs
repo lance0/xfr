@@ -408,7 +408,30 @@ pub async fn send_data(
             break;
         }
 
-        match stream.write(&buffer).await {
+        // Race the write against cancel and the deadline so we can interrupt
+        // a blocked write() when the test ends or is cancelled. Under heavy
+        // rate limiting (e.g. tc drops with MPTCP), the kernel send buffer
+        // fills and write() can block for far longer than the configured
+        // duration — without this select the loop would never exit, the
+        // socket would never close, and SO_LINGER=0 would never take effect.
+        let write_result = tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                debug!("Send cancelled during write for stream {}", stats.stream_id);
+                break;
+            }
+            _ = async {
+                if let Some(until) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+                    tokio::time::sleep(until).await;
+                }
+            }, if !is_infinite => {
+                debug!("Deadline reached during write for stream {}", stats.stream_id);
+                break;
+            }
+            r = stream.write(&buffer) => r,
+        };
+
+        match write_result {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
                 // Pace sends to target bitrate using byte-budget approach
@@ -668,7 +691,27 @@ pub async fn send_data_half(
             break;
         }
 
-        match write_half.write(&buffer).await {
+        // Race write against cancel + deadline so a blocked write (e.g. under
+        // heavy tc rate limiting with full kernel send buffer) doesn't prevent
+        // the loop from noticing the test is over. See send_data for details.
+        let write_result = tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                debug!("Send cancelled during write for stream {}", stats.stream_id);
+                break;
+            }
+            _ = async {
+                if let Some(until) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+                    tokio::time::sleep(until).await;
+                }
+            }, if !is_infinite => {
+                debug!("Deadline reached during write for stream {}", stats.stream_id);
+                break;
+            }
+            r = write_half.write(&buffer) => r,
+        };
+
+        match write_result {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
                 // Pace sends to target bitrate using byte-budget approach
