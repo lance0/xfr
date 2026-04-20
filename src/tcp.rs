@@ -416,15 +416,23 @@ pub async fn send_data(
         // socket would never close, and SO_LINGER=0 would never take effect.
         let write_result = tokio::select! {
             biased;
-            _ = cancel.changed() => {
-                debug!("Send cancelled during write for stream {}", stats.stream_id);
+            res = cancel.changed() => {
+                match res {
+                    Ok(()) if *cancel.borrow() => {
+                        debug!("Send cancelled during write for stream {}", stats.stream_id);
+                    }
+                    Ok(()) => {
+                        // Value changed but not to true — no-op in practice since
+                        // cancel is one-shot; defensive against future reuse.
+                        debug!("Cancel signal toggled for stream {}, stopping", stats.stream_id);
+                    }
+                    Err(_) => {
+                        debug!("Cancel sender dropped for stream {}, stopping", stats.stream_id);
+                    }
+                }
                 break;
             }
-            _ = async {
-                if let Some(until) = deadline.checked_duration_since(tokio::time::Instant::now()) {
-                    tokio::time::sleep(until).await;
-                }
-            }, if !is_infinite => {
+            _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
@@ -696,15 +704,21 @@ pub async fn send_data_half(
         // the loop from noticing the test is over. See send_data for details.
         let write_result = tokio::select! {
             biased;
-            _ = cancel.changed() => {
-                debug!("Send cancelled during write for stream {}", stats.stream_id);
+            res = cancel.changed() => {
+                match res {
+                    Ok(()) if *cancel.borrow() => {
+                        debug!("Send cancelled during write for stream {}", stats.stream_id);
+                    }
+                    Ok(()) => {
+                        debug!("Cancel signal toggled for stream {}, stopping", stats.stream_id);
+                    }
+                    Err(_) => {
+                        debug!("Cancel sender dropped for stream {}, stopping", stats.stream_id);
+                    }
+                }
                 break;
             }
-            _ = async {
-                if let Some(until) = deadline.checked_duration_since(tokio::time::Instant::now()) {
-                    tokio::time::sleep(until).await;
-                }
-            }, if !is_infinite => {
+            _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
@@ -885,6 +899,113 @@ mod tests {
         let config = TcpConfig::high_speed();
         assert_eq!(config.buffer_size, HIGH_SPEED_BUFFER);
         assert!(config.nodelay);
+    }
+
+    /// Regression: when `write()` is parked in Pending because the kernel send
+    /// buffer is full (e.g. peer isn't reading, or tc is dropping packets),
+    /// the send loop must still honor the test deadline. Before the select!
+    /// race, the deadline check sat behind the blocked write and the loop
+    /// never exited until the peer side drained. See issue #54 follow-up.
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn send_data_exits_on_deadline_when_write_is_pending() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server accepts but never reads — sender's SNDBUF will fill and stay full.
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold the socket open far longer than the sender's deadline so the
+            // test only passes if the sender actually breaks out of its loop.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(stream);
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        // Tiny SNDBUF so the first couple of writes fill it and the rest pend.
+        let _ = socket2::SockRef::from(&stream).set_send_buffer_size(4096);
+
+        let stats = Arc::new(StreamStats::new(0));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let config = TcpConfig {
+            buffer_size: 64 * 1024,
+            ..TcpConfig::default()
+        };
+
+        let duration = Duration::from_millis(300);
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            send_data(stream, stats, duration, config, cancel_rx, None, pause_rx),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        // Outer timeout firing would mean the fix regressed and the loop is stuck.
+        let inner = result.expect("send_data must not hang past its deadline");
+        assert!(inner.is_ok(), "send_data returned error: {:?}", inner);
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "send_data took {elapsed:?}, expected to exit soon after the 300ms deadline"
+        );
+
+        accept.abort();
+    }
+
+    /// Regression: the same stuck-write scenario must also break promptly when
+    /// the cancel signal fires, not wait for the peer to drain.
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn send_data_exits_on_cancel_when_write_is_pending() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(stream);
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let _ = socket2::SockRef::from(&stream).set_send_buffer_size(4096);
+
+        let stats = Arc::new(StreamStats::new(0));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let config = TcpConfig {
+            buffer_size: 64 * 1024,
+            ..TcpConfig::default()
+        };
+
+        // Long test duration — success depends on the cancel signal interrupting
+        // the pending write, not on the deadline.
+        let duration = Duration::from_secs(30);
+
+        // Signal cancel after a short delay; by then the send loop should be
+        // parked on a full SNDBUF.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = cancel_tx.send(true);
+        });
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            send_data(stream, stats, duration, config, cancel_rx, None, pause_rx),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        let inner = result.expect("send_data must not hang when cancelled");
+        assert!(inner.is_ok(), "send_data returned error: {:?}", inner);
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "send_data took {elapsed:?}, expected to exit soon after cancel"
+        );
+
+        accept.abort();
     }
 
     #[test]
