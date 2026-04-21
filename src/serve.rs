@@ -134,6 +134,27 @@ struct ActiveTest {
     expected_streams: u8,
 }
 
+/// Convert a wire-format window size (u64) to a host usize for setsockopt.
+///
+/// On 64-bit targets this is lossless. On 32-bit targets, values larger than
+/// `usize::MAX` (≈4 GB) cannot be represented; we drop the request with a debug
+/// log and let the kernel autotune instead, rather than letting `as usize` wrap
+/// silently to a misleading value that would then bypass the c_int validation
+/// in `tcp::configure_socket_buffers`.
+fn client_window_to_host(window: Option<u64>) -> Option<usize> {
+    window.and_then(|w| match usize::try_from(w) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            tracing::debug!(
+                "Client requested window {} bytes which exceeds host usize::MAX; \
+                 ignoring request and falling back to kernel autotune",
+                w
+            );
+            None
+        }
+    })
+}
+
 fn initial_read_timeout_for_peer(
     active_tests: &HashMap<String, ActiveTest>,
     peer_ip: std::net::IpAddr,
@@ -2160,7 +2181,7 @@ async fn spawn_tcp_handlers(
             // kernel autotuning alone. Keep nodelay on to match historical behavior.
             let config = TcpConfig {
                 nodelay: true,
-                window_size: client_window_size.map(|w| w as usize),
+                window_size: client_window_to_host(client_window_size),
                 congestion: congestion.clone(),
                 random_payload: true,
                 ..Default::default()
@@ -2356,7 +2377,7 @@ async fn spawn_tcp_stream_handlers(
                 let handle = tokio::spawn(async move {
                     let config = TcpConfig {
                         nodelay: true,
-                        window_size: client_window_size.map(|w| w as usize),
+                        window_size: client_window_to_host(client_window_size),
                         congestion,
                         random_payload: true,
                         ..Default::default()

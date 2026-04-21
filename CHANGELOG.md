@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Bare-integer duration arguments mean seconds** (issue #61) — `-t 10`, `--max-duration 60`, `--rate-limit-window 30`, and discover `--timeout 5` now accept plain integers as seconds, matching iperf3 muscle memory. Unit-suffixed forms (`10s`, `1min`, `500ms`) continue to work unchanged.
+  - Side effect: `--rate-limit-window` now rejects zero (`0`, `0s`, `0ms`) with `Duration must be greater than 0`. Previously `0s` was accepted and would later panic in the rate-limiter's cleanup task because `tokio::time::interval` requires a non-zero duration. Other duration flags (`-t`, `--max-duration`, `discover --timeout`) still accept `0` for their existing meanings (`-t 0` is infinite duration).
 - **Smoothed TUI jitter reading** (issue #48) — the UDP stats panel now shows jitter averaged over a 10-second rolling window rather than the raw per-second sample. The data pipeline is unchanged (samples still arrive every second from the server); only the aggregate display is smoothed. Per-stream jitter in the streams view continues to show the latest interval. While the test is running, the label shows `Jitter (10s):`; once completed, it reverts to `Jitter:` with the authoritative final value from the server's result.
 
 ### Fixed
@@ -23,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Loopback / intra-host benchmark numbers may decrease by roughly 10% — this is expected; the previous numbers were inflated by the oversized app-applied buffer.
   - On high-RTT paths, very short tests (e.g. `-t 1s` at high bitrate) may now show ramp-up-limited throughput in the final summary because kernel autotune takes a handful of RTTs to grow the window. Use a longer `-t`, or pass an explicit `-w` to skip autotune. Note that `-O`/`--omit` only hides the early intervals from output — the server-side final summary is still computed over the full test duration.
   - Explicit window sizes above `c_int::MAX` (≈2.1 GB on 64-bit) are now rejected with `InvalidInput` instead of silently wrapping before `setsockopt`.
+
+### Removed
+- **Library API**: pre-1.0 break — `TcpConfig::high_speed()` and `TcpConfig::with_auto_detect()` are gone; construct `TcpConfig` directly with the fields you want set. The `HIGH_SPEED_BUFFER` and `HIGH_SPEED_WINDOW_THRESHOLD` constants (which were private) are also removed. Downstream code that constructs `ControlMessage::TestStart`, `protocol::UdpStats`, or `tui::app::App` by name now needs to supply the new fields (`window_size`, `jitter_max_ms`, `packet_size`, `jitter_history`); these are additive and have sensible None/default values.
 
 ## [0.9.8] - 2026-04-17
 
