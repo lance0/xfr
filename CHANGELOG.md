@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **MPTCP teardown now fires MP_FASTCLOSE instead of waiting for graceful drain** (issue #54) — `__mptcp_close()` only triggers fastclose when the receive queue has unread data or the linger timeout is negative; a normal upload-only test that hits its deadline meets neither condition, so the kernel did graceful FIN/drain even with `SO_LINGER=0` set on the socket. Sender teardown paths now call `connect(fd, AF_UNSPEC)` immediately before drop on detected MPTCP sockets (`getsockopt(TCP_IS_MPTCP)`), which routes through `mptcp_disconnect()` → `MPTCP_CF_FASTCLOSE` → MP_FASTCLOSE on each subflow. Plain TCP is unaffected (helper is a no-op when the socket isn't MPTCP). Receive paths additionally suppress `NotConnected`/`ConnectionReset` etc. as expected teardown rather than logging an error, so bidir tests don't surface noisy WARN lines when our own send-half fastclose disconnects the shared socket or when peer-initiated MP_FASTCLOSE arrives. Measured in matttbe's netns reproducer (`-P 4 --mptcp -t 1sec`): post-deadline wire activity drops from ~700ms of FIN drain to ~30ms of abortive close. MPTCP detection probes `TCP_IS_MPTCP` (Linux 6.10+) first and falls back to `MPTCP_INFO` (Linux 5.16+); on pre-5.16 kernels with active MPTCP the helper skips the fastclose path and teardown stays graceful (the prior behavior). Reported and root-caused by @matttbe.
-
 ## [0.9.9] - 2026-04-21
 
 ### Added
