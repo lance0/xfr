@@ -224,15 +224,16 @@ Client behind strict firewall → which protocol?
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring. Could extend to `xfr monitor` with local time-series storage (SQLite/JSON) and percentile tracking (p50/p95/p99)
 - [ ] **Responsiveness / bufferbloat scoring** (`xfr responsiveness`) - saturate the link (upload + download) while measuring latency every 200ms, report RPM (Roundtrips Per Minute) score and bufferbloat letter grade (A-F). Follows IETF `draft-ietf-ippm-responsiveness` methodology. No single-binary CLI tool does both throughput AND responsiveness scoring — Crusader, Flent, and Apple's `networkQuality` each require separate tools or are platform-specific. Highest differentiation opportunity
 - [ ] **Server UDP port range** (`--data-port-range`) - configurable ephemeral port range for server-side UDP data sockets (requested in issue #38 for strict firewall environments on Windows)
-- [ ] **UDP single-port mode** - multiplex all UDP streams through a single port, eliminating per-stream port allocation. Analogous to TCP's DataHello approach. Would make UDP fully firewall-friendly without `--cport`
+- [ ] **UDP single-port mode** (issue #63) - multiplex all UDP streams through a single port, eliminating per-stream port allocation. Analogous to TCP's DataHello approach. Would make UDP fully firewall-friendly without `--cport`
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
+- [ ] **UDP packet-size / MTU probe** (issue #64) - send UDP packets at increasing payload sizes with DF set (`IP_MTU_DISCOVER`) to discover the largest size that traverses the path. Useful for NFS-over-UDP tuning and path-MTU discovery. Requires server echo support
 
 ### Larger Projects (high effort, high impact)
 - [ ] **Real-time traffic emulation** (`--profile voip|gaming|video`) - preset packet sizes and intervals to emulate real-time traffic: VoIP (64B/20ms bidirectional), gaming (100-300B/8-16ms), video call (1200B/33ms). Reports jitter, out-of-order, and MOS (Mean Opinion Score) estimate. Replaces IRTT for most use cases in a single binary
 - [ ] **Mesh / multi-node matrix testing** (`xfr mesh`) - given a list of xfr server addresses, run all-pairs throughput/latency tests and output a matrix (table, CSV, JSON). Useful for Kubernetes cluster validation, multi-region deployments, and SD-WAN path selection. No open-source CLI tool does this
 - [ ] **sendmmsg for UDP bursts** - batch multiple packets per syscall (Linux)
 - [ ] **CPU affinity options** (`--affinity`) - pin streams to specific cores, reduces page faults and context switches (rperf has this)
-- [ ] **Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed
+- [x] ~~**Socket buffer auto-tuning** - optimal SO_SNDBUF/SO_RCVBUF for link speed~~ - Resolved in v0.9.9 (issue #60): xfr now defers to the kernel's TCP autotuning by default, applying `SO_SNDBUF`/`SO_RCVBUF` only when the user passes `-w`/`--window`. Application-side tuning was the wrong layer; the kernel already does this per-connection.
 
 ### Nice to Have
 - [x] **Infinite duration** (`-t 0`) - run test indefinitely until manually stopped
