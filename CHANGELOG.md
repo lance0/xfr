@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Max jitter and packet size in UDP summary** (issue #48 follow-up) — the final UDP summary now reports `Jitter Max` (peak of the RFC 3550 running estimate across the test) alongside the average, and `Packet Size` (UDP payload bytes). Surfaced in plain text and JSON. Requested by brettowe for NFS UDP packet-size tuning context.
 
 ### Changed
+- **Bare-integer duration arguments mean seconds** (issue #61) — `-t 10`, `--max-duration 60`, `--rate-limit-window 30`, and discover `--timeout 5` now accept plain integers as seconds, matching iperf3 muscle memory. Unit-suffixed forms (`10s`, `1min`, `500ms`) continue to work unchanged.
 - **Smoothed TUI jitter reading** (issue #48) — the UDP stats panel now shows jitter averaged over a 10-second rolling window rather than the raw per-second sample. The data pipeline is unchanged (samples still arrive every second from the server); only the aggregate display is smoothed. Per-stream jitter in the streams view continues to show the latest interval. While the test is running, the label shows `Jitter (10s):`; once completed, it reverts to `Jitter:` with the authoritative final value from the server's result.
 
 ## [0.9.8] - 2026-04-17
