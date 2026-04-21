@@ -39,6 +39,7 @@ fn test_test_start_roundtrip() {
         congestion: Some("bbr".to_string()),
         mptcp: false,
         dscp: None,
+        window_size: None,
     };
 
     let json = msg.serialize().unwrap();
@@ -99,6 +100,7 @@ fn test_udp_test_start() {
         congestion: None,
         mptcp: false,
         dscp: None,
+        window_size: None,
     };
 
     let json = msg.serialize().unwrap();

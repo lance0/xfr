@@ -16,7 +16,6 @@ use crate::stats::StreamStats;
 use crate::tcp_info::get_tcp_info;
 
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
-const HIGH_SPEED_BUFFER: usize = 4 * 1024 * 1024; // 4 MB for 10G+
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 // Post-cancel read window: covers the race where our receive side signals
 // cancel and drops the socket before the peer's own cancel_tx has fired
@@ -101,60 +100,33 @@ impl Default for TcpConfig {
     }
 }
 
-/// Threshold for auto-selecting high-speed configuration (1 MB)
-const HIGH_SPEED_WINDOW_THRESHOLD: usize = 1_000_000;
-
-impl TcpConfig {
-    pub fn high_speed() -> Self {
-        Self {
-            buffer_size: HIGH_SPEED_BUFFER,
-            nodelay: true,
-            window_size: Some(HIGH_SPEED_BUFFER),
-            congestion: None,
-            random_payload: false,
-        }
-    }
-
-    /// Create a config with auto-detection for high-speed mode.
-    /// Selects high_speed() when window_size > 1MB or when there's no bitrate limit.
-    pub fn with_auto_detect(
-        nodelay: bool,
-        window_size: Option<usize>,
-        bitrate_limit: Option<u64>,
-    ) -> Self {
-        // Auto-select high-speed mode when:
-        // 1. Window size is explicitly set to > 1MB, or
-        // 2. No bitrate limit is set (unlimited speed, including explicit -b 0)
-        let use_high_speed = window_size
-            .map(|w| w > HIGH_SPEED_WINDOW_THRESHOLD)
-            .unwrap_or(false)
-            || !matches!(bitrate_limit, Some(bps) if bps > 0);
-
-        if use_high_speed && window_size.is_none() {
-            // Use full high-speed config with large buffers
-            let mut config = Self::high_speed();
-            config.nodelay = nodelay;
-            config
-        } else {
-            // Use user-specified or default settings
-            Self {
-                buffer_size: window_size.unwrap_or(DEFAULT_BUFFER_SIZE),
-                nodelay,
-                window_size,
-                congestion: None,
-                random_payload: false,
-            }
-        }
-    }
-}
-
 #[cfg(unix)]
 fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     use tracing::debug;
 
+    // setsockopt SO_SNDBUF/SO_RCVBUF takes a `c_int`. On 64-bit Unix that's i32,
+    // so reject out-of-range requests up front — otherwise `as c_int` would wrap
+    // to garbage (or worse, a negative value) and the kernel would reject or
+    // misapply the request with only a debug-level log of the fallout.
+    let size = libc::c_int::try_from(buffer_size).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "window size {} exceeds platform maximum ({} bytes)",
+                buffer_size,
+                libc::c_int::MAX
+            ),
+        )
+    })?;
+    if size <= 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "window size must be greater than zero",
+        ));
+    }
+
     let fd = stream.as_raw_fd();
-    let size = buffer_size as libc::c_int;
 
     // SAFETY: fd is a valid file descriptor from stream.as_raw_fd(),
     // size is a valid c_int pointer, and size_of::<c_int>() is correct.
@@ -831,17 +803,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn test_default_config_leaves_kernel_autotune_alone() {
         let config = TcpConfig::default();
         assert_eq!(config.buffer_size, DEFAULT_BUFFER_SIZE);
         assert!(!config.nodelay);
+        assert!(
+            config.window_size.is_none(),
+            "default must not force SO_SNDBUF/SO_RCVBUF — leave it to the kernel"
+        );
     }
 
-    #[test]
-    fn test_high_speed_config() {
-        let config = TcpConfig::high_speed();
-        assert_eq!(config.buffer_size, HIGH_SPEED_BUFFER);
-        assert!(config.nodelay);
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_configure_socket_buffers_rejects_values_above_c_int_max() {
+        // The wire protocol allows window_size up to u64::MAX. If a caller
+        // lets that value reach setsockopt, `as c_int` would wrap silently.
+        // Any value above c_int::MAX must surface as an InvalidInput error
+        // rather than being quietly misapplied.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, _server) = tokio::join!(connect, accept);
+        let client = client.unwrap();
+
+        let huge = libc::c_int::MAX as usize + 1;
+        let err = configure_socket_buffers(&client, huge).expect_err("expected error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds platform maximum"),
+            "unexpected error message: {msg}"
+        );
+
+        // Zero is not a sensible window either.
+        let err = configure_socket_buffers(&client, 0).expect_err("expected error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

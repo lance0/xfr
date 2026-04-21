@@ -105,6 +105,11 @@ pub enum ControlMessage {
         /// DSCP/TOS byte for QoS marking on server-side sockets (download/bidir)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dscp: Option<u8>,
+        /// SO_SNDBUF/SO_RCVBUF size requested by the client (iperf-style `-w`).
+        /// When absent, the server leaves kernel autotuning enabled. `u64` so
+        /// that large values like `-w 4G` round-trip without silent truncation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_size: Option<u64>,
     },
     TestAck {
         id: String,
@@ -474,6 +479,7 @@ mod tests {
             congestion: None,
             mptcp: false,
             dscp: None,
+            window_size: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -485,6 +491,103 @@ mod tests {
             }
             _ => panic!("wrong message type"),
         }
+    }
+
+    #[test]
+    fn test_test_start_backward_compat_without_window_size() {
+        // Simulate an older client that doesn't know about window_size: the JSON
+        // omits the field entirely. The new server must deserialize it as None
+        // and fall back to kernel autotuning.
+        let json = r#"{"type":"test_start","id":"x","protocol":"tcp","streams":1,"duration_secs":5,"direction":"upload"}"#;
+        let decoded = ControlMessage::deserialize(json).unwrap();
+        match decoded {
+            ControlMessage::TestStart {
+                window_size, dscp, ..
+            } => {
+                assert!(
+                    window_size.is_none(),
+                    "absent field must deserialize to None"
+                );
+                assert!(dscp.is_none(), "sanity: dscp also absent");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_test_start_roundtrip_with_window_size() {
+        let msg = ControlMessage::TestStart {
+            id: "x".to_string(),
+            protocol: Protocol::Tcp,
+            streams: 1,
+            duration_secs: 5,
+            direction: Direction::Upload,
+            bitrate: None,
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: Some(262_144),
+        };
+        let json = msg.serialize().unwrap();
+        assert!(json.contains("\"window_size\":262144"));
+        let decoded = ControlMessage::deserialize(&json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { window_size, .. } => {
+                assert_eq!(window_size, Some(262_144));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_test_start_window_size_above_u32_max_roundtrips() {
+        // u64 wire type must round-trip values that would silently truncate in
+        // u32 (e.g. `-w 4G` on a 64-bit client becomes 4_294_967_296 = u32::MAX+1).
+        let big = u32::MAX as u64 + 1;
+        let msg = ControlMessage::TestStart {
+            id: "x".to_string(),
+            protocol: Protocol::Tcp,
+            streams: 1,
+            duration_secs: 5,
+            direction: Direction::Upload,
+            bitrate: None,
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: Some(big),
+        };
+        let json = msg.serialize().unwrap();
+        let decoded = ControlMessage::deserialize(&json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { window_size, .. } => {
+                assert_eq!(window_size, Some(big));
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_test_start_serialize_omits_none_window_size() {
+        // skip_serializing_if = Option::is_none must keep the field out of the
+        // JSON entirely when None, so older deserializers don't fail on it.
+        let msg = ControlMessage::TestStart {
+            id: "x".to_string(),
+            protocol: Protocol::Tcp,
+            streams: 1,
+            duration_secs: 5,
+            direction: Direction::Upload,
+            bitrate: None,
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: None,
+        };
+        let json = msg.serialize().unwrap();
+        assert!(
+            !json.contains("window_size"),
+            "None must be skipped in serialization, got: {}",
+            json
+        );
     }
 
     #[test]

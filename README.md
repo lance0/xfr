@@ -520,15 +520,15 @@ xfr <host> -Q --psk "secretkey"
 
 ### Server Resource Usage
 
-Each stream allocates 128KB-4MB for buffers depending on speed mode. Memory usage scales with concurrent clients:
+Each TCP stream allocates a 128 KB application read/write buffer. Kernel socket buffers are managed by TCP autotuning unless the client passes `-w`/`--window`, in which case the requested size is applied via `SO_SNDBUF`/`SO_RCVBUF` on both ends. Memory usage scales with concurrent clients:
 
-| Streams per client | Memory per client | 10 clients |
-|-------------------|-------------------|------------|
-| 1 (`-P 1`) | 128KB - 4MB | 1.3MB - 40MB |
-| 8 (`-P 8`) | 1MB - 32MB | 10MB - 320MB |
-| 128 (`-P 128`) | 16MB - 512MB | 160MB - 5GB |
+| Streams per client | App buffer per client | 10 clients (app buffers) |
+|-------------------|-----------------------|--------------------------|
+| 1 (`-P 1`) | 128 KB | 1.3 MB |
+| 8 (`-P 8`) | 1 MB | 10 MB |
+| 128 (`-P 128`) | 16 MB | 160 MB |
 
-The server limits concurrent handlers (default 100) to prevent resource exhaustion. Use `--rate-limit` to restrict tests per IP.
+On top of that, the kernel holds autotuned socket buffers (typically a few hundred KB per stream, capped by `net.ipv4.tcp_rmem[2]`/`tcp_wmem[2]`). When a client passes `-w N`, add roughly `N` bytes per stream on each side. The server limits concurrent handlers (default 100) to prevent resource exhaustion. Use `--rate-limit` to restrict tests per IP.
 
 ## Platform Support
 

@@ -1225,6 +1225,7 @@ async fn handle_test_request(
             congestion,
             mptcp,
             dscp,
+            window_size,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1324,6 +1325,7 @@ async fn handle_test_request(
                 &security.push_gateway_url,
                 client_supports_single_port,
                 dscp,
+                window_size,
             )
             .await;
 
@@ -1702,6 +1704,7 @@ async fn run_test(
     push_gateway_url: &Option<String>,
     client_supports_single_port: bool,
     dscp: Option<u8>,
+    client_window_size: Option<u64>,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -1861,6 +1864,7 @@ async fn run_test(
                         bitrate,
                         pause_clone,
                         dscp,
+                        client_window_size,
                     )
                     .await
                 });
@@ -2122,6 +2126,7 @@ async fn spawn_tcp_handlers(
     congestion: Option<String>,
     bitrate: Option<u64>,
     pause: watch::Receiver<bool>,
+    client_window_size: Option<u64>,
 ) -> Vec<JoinHandle<()>> {
     let num_streams = listeners.len().max(1) as u64;
     let per_stream_bitrate = bitrate.map(|b| if b == 0 { 0 } else { (b / num_streams).max(1) });
@@ -2151,10 +2156,15 @@ async fn spawn_tcp_handlers(
                 }
             };
 
-            // Use high-speed config for server - we want maximum throughput
-            let mut config = TcpConfig::high_speed();
-            config.congestion = congestion.clone();
-            config.random_payload = true;
+            // Respect the client's window_size if they passed -w; otherwise leave
+            // kernel autotuning alone. Keep nodelay on to match historical behavior.
+            let config = TcpConfig {
+                nodelay: true,
+                window_size: client_window_size.map(|w| w as usize),
+                congestion: congestion.clone(),
+                random_payload: true,
+                ..Default::default()
+            };
 
             // Store fd for TCP_INFO interval polling
             #[cfg(unix)]
@@ -2277,6 +2287,7 @@ async fn spawn_tcp_stream_handlers(
     bitrate: Option<u64>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
+    client_window_size: Option<u64>,
 ) -> Vec<JoinHandle<()>> {
     let per_stream_bitrate = bitrate.map(|b| {
         if b == 0 {
@@ -2343,9 +2354,13 @@ async fn spawn_tcp_stream_handlers(
 
                 let congestion = congestion.clone();
                 let handle = tokio::spawn(async move {
-                    let mut config = TcpConfig::high_speed();
-                    config.congestion = congestion;
-                    config.random_payload = true;
+                    let config = TcpConfig {
+                        nodelay: true,
+                        window_size: client_window_size.map(|w| w as usize),
+                        congestion,
+                        random_payload: true,
+                        ..Default::default()
+                    };
 
                     // Store fd for TCP_INFO interval polling
                     #[cfg(unix)]

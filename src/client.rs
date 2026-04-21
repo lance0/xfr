@@ -312,6 +312,7 @@ impl Client {
             congestion: self.config.tcp_congestion.clone(),
             mptcp: self.config.mptcp,
             dscp: self.config.dscp,
+            window_size: self.config.window_size.map(|w| w as u64),
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -681,13 +682,13 @@ impl Client {
             let stream_index = i as u16;
             let handshake_limiter = handshake_limiter.clone();
 
-            let mut config = TcpConfig::with_auto_detect(
-                self.config.tcp_nodelay,
-                self.config.window_size,
-                self.config.bitrate,
-            );
-            config.congestion = self.config.tcp_congestion.clone();
-            config.random_payload = self.config.random_payload;
+            let config = TcpConfig {
+                nodelay: self.config.tcp_nodelay,
+                window_size: self.config.window_size,
+                congestion: self.config.tcp_congestion.clone(),
+                random_payload: self.config.random_payload,
+                ..Default::default()
+            };
 
             handles.push(tokio::spawn(async move {
                 // In single-port mode, limit concurrent connect+DataHello handshakes
@@ -1140,7 +1141,8 @@ impl Client {
             bitrate: self.config.bitrate,
             congestion: None,
             mptcp: false,
-            dscp: None, // QUIC manages its own TOS via the transport layer
+            dscp: None,        // QUIC manages its own TOS via the transport layer
+            window_size: None, // QUIC flow control is handled at the transport layer
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())

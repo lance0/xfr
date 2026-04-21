@@ -236,8 +236,8 @@ struct Cli {
     #[arg(long, value_name = "VALUE")]
     dscp: Option<String>,
 
-    /// TCP window size (e.g., 512K, 1M)
-    #[arg(long, value_parser = parse_size)]
+    /// TCP window size (e.g., 512K, 1M). When unset, the kernel autotunes.
+    #[arg(short = 'w', long, value_parser = parse_size)]
     window: Option<usize>,
 
     /// Timestamp format for interval output (relative, iso8601, unix)

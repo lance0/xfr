@@ -134,7 +134,7 @@ routing is needed since the port uniquely identifies the stream.
 
 ### Data Transfer
 
-**TCP**: Bulk send/receive with large buffers (128KB default, 4MB for high-speed mode). Supports optional bitrate pacing via `-b` using a byte-budget sleep approach with interruptible sleeps.
+**TCP**: Bulk send/receive with a 128 KB application read/write buffer. Kernel socket buffers (`SO_SNDBUF`/`SO_RCVBUF`) are left at kernel autotuning defaults unless the user passes `-w`/`--window`, in which case the value propagates to the server over the control protocol and both ends apply it symmetrically. Supports optional bitrate pacing via `-b` using a byte-budget sleep approach with interruptible sleeps.
 
 **UDP**: Paced sending with sequence numbers for loss detection:
 ```
@@ -335,19 +335,21 @@ The `--congestion` algorithm is validated early, before any streams are spawned:
 
 ### Socket Buffers
 
-Large buffers are used for high throughput:
+By default, xfr leaves kernel TCP autotuning in charge of `SO_SNDBUF`/`SO_RCVBUF`. The only buffer xfr allocates itself is a 128 KB application-level `Vec<u8>` used for each `read()`/`write()` syscall.
+
+If the user passes `-w`/`--window`, the value propagates over the control protocol and both client and server apply it via `setsockopt(SO_SNDBUF/SO_RCVBUF)`:
 
 ```rust
-// TCP (default, auto-bumps to 4MB when no bitrate limit set)
-socket.set_send_buffer_size(131072)?;   // 128KB
-socket.set_recv_buffer_size(131072)?;
+// Without -w: nothing applied; kernel autotune handles SNDBUF/RCVBUF.
 
-// UDP (larger for burst tolerance)
-socket.set_send_buffer_size(4194304)?;  // 4MB
-socket.set_recv_buffer_size(4194304)?;
+// With -w 256K: applied on both sides after connect/accept.
+setsockopt(fd, SOL_SOCKET, SO_SNDBUF, 262144)?;
+setsockopt(fd, SOL_SOCKET, SO_RCVBUF, 262144)?;
 ```
 
-**Memory footprint:** Each stream allocates 128KB-4MB for buffers. A test with `-P 8` uses ~1-32MB; 10 concurrent clients with 8 streams each could use 80-320MB.
+UDP does not apply any `SO_SNDBUF`/`SO_RCVBUF` override.
+
+**Memory footprint:** Each TCP stream allocates the 128 KB application buffer plus whatever the kernel decides for the socket buffer (typically a few hundred KB autotuned, more if the user set `-w`). A test with `-P 8` at default settings is on the order of ~2-8 MB; high-BDP paths where the user passes `-w 16M` will use proportionally more.
 
 ## Error Handling
 
