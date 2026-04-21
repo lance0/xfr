@@ -340,7 +340,7 @@ enum Commands {
         rate_limit: Option<u32>,
 
         /// Rate limit time window
-        #[arg(long, default_value = "60s", value_parser = parse_duration)]
+        #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
         rate_limit_window: Duration,
 
         /// Allow IP/subnet (can be repeated)
@@ -394,11 +394,27 @@ enum Commands {
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
+    // Accept bare integers as seconds (iperf-style muscle memory: `-t 10`).
+    // Fall back to humantime for unit-suffixed strings like "10s", "1min".
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(Duration::from_secs(secs));
+    }
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
+/// Duration parser that rejects zero. For flags where zero is not a valid
+/// sentinel (e.g. `--rate-limit-window`, which would divide-by-zero the
+/// cleanup-task interval in `tokio::time::interval`).
+fn parse_nonzero_duration(s: &str) -> Result<Duration, String> {
+    let d = parse_duration(s)?;
+    if d.is_zero() {
+        return Err("Duration must be greater than 0".to_string());
+    }
+    Ok(d)
+}
+
 fn parse_test_duration(s: &str) -> Result<Duration, String> {
-    let duration = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+    let duration = parse_duration(s)?;
     // Allow 0 for infinite duration, otherwise require at least 1 second
     if duration == Duration::ZERO {
         return Ok(Duration::ZERO);
@@ -1824,6 +1840,59 @@ mod tests {
 
         // Sub-second (but not zero) should fail
         assert!(parse_test_duration("500ms").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_bare_integer_is_seconds() {
+        // iperf3 muscle memory: `-t 10` should mean 10 seconds.
+        assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
+        assert_eq!(parse_duration("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
+        assert_eq!(parse_duration("3600").unwrap(), Duration::from_secs(3600));
+
+        // Unit-suffixed forms continue to work unchanged.
+        assert_eq!(parse_duration("10s").unwrap(), Duration::from_secs(10));
+        assert_eq!(parse_duration("1min").unwrap(), Duration::from_secs(60));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_parse_test_duration_bare_integer_is_seconds() {
+        // Bare-int path must also apply the >= 1s minimum rule.
+        assert_eq!(parse_test_duration("10").unwrap(), Duration::from_secs(10));
+        assert_eq!(parse_test_duration("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(parse_test_duration("0").unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_parse_duration_rejects_garbage() {
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("10q").is_err()); // unknown unit
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_parse_nonzero_duration_rejects_zero_variants() {
+        // Bare-integer 0 and any unit-suffixed zero must fail — the rate-limit
+        // cleanup task uses `window / 2` as a tokio::time::interval which
+        // panics on Duration::ZERO.
+        assert!(parse_nonzero_duration("0").is_err());
+        assert!(parse_nonzero_duration("0s").is_err());
+        assert!(parse_nonzero_duration("0ms").is_err());
+
+        // Non-zero values still parse the same as parse_duration.
+        assert_eq!(parse_nonzero_duration("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_nonzero_duration("60s").unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            parse_nonzero_duration("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+
+        // Garbage still fails.
+        assert!(parse_nonzero_duration("abc").is_err());
     }
 
     #[test]
