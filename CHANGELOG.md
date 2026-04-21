@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-04-21
+
 ### Added
 - **Max jitter and packet size in UDP summary** (issue #48 follow-up) — the final UDP summary now reports `Jitter Max` (peak of the RFC 3550 running estimate across the test) alongside the average, and `Packet Size` (UDP payload bytes). Surfaced in plain text and JSON. Requested by brettowe for NFS UDP packet-size tuning context.
 - **`-w` short alias for `--window`** (issue #60) — matches iperf3 muscle memory.
