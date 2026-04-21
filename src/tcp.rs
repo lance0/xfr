@@ -24,6 +24,84 @@ const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 // bytes aren't counted in stats, so no accuracy impact on throughput.
 const RECEIVE_CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+// Linux UAPI `TCP_IS_MPTCP` (include/uapi/linux/tcp.h). Not exposed by the
+// `libc` crate as of this writing; `linux-raw-sys` defines it as 43 across
+// every Linux arch, so it's safe to hard-code.
+#[cfg(target_os = "linux")]
+const TCP_IS_MPTCP: libc::c_int = 43;
+
+/// Returns true if the socket was created with `IPPROTO_MPTCP` and the kernel
+/// considers it an active MPTCP connection (not a fallback to plain TCP).
+#[cfg(target_os = "linux")]
+fn is_mptcp_socket(fd: std::os::unix::io::RawFd) -> bool {
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `v` is a valid c_int pointer for `len` bytes; getsockopt may
+    // fail (e.g. on a non-MPTCP socket or older kernel without TCP_IS_MPTCP),
+    // we treat any failure as "not MPTCP" and skip the fastclose path.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_IS_MPTCP,
+            &mut v as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    ret == 0 && v == 1
+}
+
+/// Force MP_FASTCLOSE on an MPTCP socket via `connect(AF_UNSPEC)`.
+///
+/// `__mptcp_close()` only triggers `mptcp_do_fastclose()` when the receive
+/// queue still has unread MPTCP data or the linger timeout is negative —
+/// neither of which is true for a normal upload-only test that hits its
+/// deadline. `connect(fd, AF_UNSPEC)` calls `mptcp_disconnect()` which sets
+/// `MPTCP_CF_FASTCLOSE` and emits MP_FASTCLOSE on each subflow; the
+/// subsequent `close()` then RSTs without waiting for the rate-limited send
+/// queue to drain.
+///
+/// Plain `SO_LINGER=0` + `close()` is sufficient for non-MPTCP TCP sockets,
+/// so this helper is a no-op there.
+#[cfg(target_os = "linux")]
+fn mptcp_force_fastclose(fd: std::os::unix::io::RawFd, stream_id: u8) {
+    let mut sa: libc::sockaddr = unsafe { std::mem::zeroed() };
+    sa.sa_family = libc::AF_UNSPEC as libc::sa_family_t;
+    // SAFETY: `sa` is a valid sockaddr; failure (EINVAL on non-connected
+    // socket, EALREADY in transient kernel state, etc.) is informational.
+    let ret = unsafe {
+        libc::connect(
+            fd,
+            &sa,
+            std::mem::size_of::<libc::sockaddr>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        debug!(
+            "Stream {} MPTCP fastclose connect(AF_UNSPEC) failed: {}",
+            stream_id,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// Trigger MPTCP MP_FASTCLOSE before drop, but only on actual MPTCP sockets.
+/// Called from every sender teardown path (normal exit, error exit, both
+/// `send_data` and `send_data_half`). For plain TCP this is a fast no-op.
+///
+/// Order matters: must run AFTER the final TCP_INFO capture and bytes_sent
+/// clamp. `connect(AF_UNSPEC)` resets connection state, which would make
+/// post-call `tcpi_bytes_acked` reads unreliable.
+#[cfg(target_os = "linux")]
+fn force_abortive_close_if_mptcp(fd: std::os::unix::io::RawFd, stream_id: u8) {
+    if is_mptcp_socket(fd) {
+        mptcp_force_fastclose(fd, stream_id);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn force_abortive_close_if_mptcp(_fd: i32, _stream_id: u8) {}
+
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
     matches!(
@@ -322,8 +400,18 @@ pub async fn send_data(
     // the overcount of discarded send-buffer bytes. On platforms without that
     // counter (macOS, fallback), graceful shutdown is used at end of loop to
     // preserve accuracy. See issue #54.
+    //
+    // SO_LINGER=0 is sufficient for plain TCP (drop → close → RST). For MPTCP
+    // sockets the kernel's `__mptcp_close()` does not honor SO_LINGER alone;
+    // we additionally call `connect(AF_UNSPEC)` at teardown to force
+    // MP_FASTCLOSE. See `force_abortive_close_if_mptcp`.
     #[cfg(target_os = "linux")]
-    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+    if let Err(e) = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO)) {
+        debug!(
+            "Stream {} set_linger(0) failed (test will still complete; teardown may be graceful): {}",
+            stats.stream_id, e
+        );
+    }
 
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
@@ -470,6 +558,11 @@ pub async fn send_data(
                 if let Some(info) = get_stream_tcp_info(&stream) {
                     clamp_bytes_sent_to_acked(&stats, &info);
                 }
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    force_abortive_close_if_mptcp(stream.as_raw_fd(), stats.stream_id);
+                }
                 return Err(e.into());
             }
         }
@@ -480,6 +573,15 @@ pub async fn send_data(
     if let Some(ref info) = tcp_info {
         stats.add_retransmits(info.retransmits);
         clamp_bytes_sent_to_acked(&stats, info);
+    }
+
+    // MPTCP teardown: force MP_FASTCLOSE before drop. No-op for plain TCP.
+    // Must run AFTER the clamp above — connect(AF_UNSPEC) resets connection
+    // state which would skew any subsequent tcpi_bytes_acked read.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        force_abortive_close_if_mptcp(stream.as_raw_fd(), stats.stream_id);
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST (skipping drain).
@@ -617,7 +719,12 @@ pub async fn send_data_half(
 ) -> anyhow::Result<(OwnedWriteHalf, Option<crate::protocol::TcpInfoSnapshot>)> {
     // Linux only: force abortive close. See send_data() for rationale.
     #[cfg(target_os = "linux")]
-    let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
+    if let Err(e) = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO)) {
+        debug!(
+            "Stream {} set_linger(0) failed (test will still complete; teardown may be graceful): {}",
+            stats.stream_id, e
+        );
+    }
 
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
@@ -753,6 +860,11 @@ pub async fn send_data_half(
                 if let Ok(info) = get_tcp_info(write_half.as_ref()) {
                     clamp_bytes_sent_to_acked(&stats, &info);
                 }
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    force_abortive_close_if_mptcp(write_half.as_ref().as_raw_fd(), stats.stream_id);
+                }
                 return Err(e.into());
             }
         }
@@ -764,6 +876,14 @@ pub async fn send_data_half(
     let tcp_info = get_tcp_info(write_half.as_ref()).ok();
     if let Some(ref info) = tcp_info {
         clamp_bytes_sent_to_acked(&stats, info);
+    }
+
+    // MPTCP teardown: force MP_FASTCLOSE before the OwnedWriteHalf is returned
+    // to the caller (and eventually reunited + dropped). No-op for plain TCP.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        force_abortive_close_if_mptcp(write_half.as_ref().as_raw_fd(), stats.stream_id);
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST.
@@ -898,6 +1018,38 @@ mod tests {
         // Zero is not a sensible window either.
         let err = configure_socket_buffers(&client, 0).expect_err("expected error");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// Plain TCP sockets must report `is_mptcp_socket == false` so the MPTCP
+    /// fastclose path stays a no-op for them. This protects the existing
+    /// SO_LINGER=0 + drop teardown semantics on TCP. Real MPTCP coverage is
+    /// opportunistic (depends on kernel CONFIG_MPTCP) and lives in the netns
+    /// integration script — here we just verify the helper doesn't fire on TCP.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn force_abortive_close_if_mptcp_is_noop_on_plain_tcp() {
+        use std::os::unix::io::AsRawFd;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, _server) = tokio::join!(connect, accept);
+        let client = client.unwrap();
+        let fd = client.as_raw_fd();
+
+        assert!(
+            !is_mptcp_socket(fd),
+            "plain TCP socket must not be detected as MPTCP"
+        );
+
+        // Helper must complete without panicking even on a non-MPTCP fd.
+        // (mptcp_force_fastclose would log a debug if it ran, but it should
+        // not run because is_mptcp_socket() returns false.)
+        force_abortive_close_if_mptcp(fd, 0);
+
+        // Sanity: socket is still alive after the helper (we did not call
+        // connect(AF_UNSPEC), so it should still be connected).
+        assert!(client.peer_addr().is_ok(), "client socket disconnected");
     }
 
     /// Regression: when `write()` is parked in Pending because the kernel send
