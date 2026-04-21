@@ -88,10 +88,16 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
             "    Jitter:           {:.2}ms\n",
             udp_stats.jitter_ms
         ));
+        if let Some(max) = udp_stats.jitter_max_ms {
+            output.push_str(&format!("    Jitter Max:       {:.2}ms\n", max));
+        }
         output.push_str(&format!(
             "    Out of Order:     {}\n",
             udp_stats.out_of_order
         ));
+        if let Some(size) = udp_stats.packet_size {
+            output.push_str(&format!("    Packet Size:      {} bytes\n", size));
+        }
         output.push('\n');
     }
 

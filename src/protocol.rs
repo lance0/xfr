@@ -285,6 +285,10 @@ pub struct UdpStats {
     pub lost_percent: f64,
     pub jitter_ms: f64,
     pub out_of_order: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_size: Option<u32>,
 }
 
 /// Timestamp format options for interval output

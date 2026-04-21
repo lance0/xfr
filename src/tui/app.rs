@@ -11,6 +11,10 @@ use super::theme::Theme;
 
 const SPARKLINE_HISTORY: usize = 60;
 const LOG_HISTORY: usize = 100;
+// Rolling window for aggregate jitter display. Progress events fire at 1Hz,
+// so 10 samples ≈ 10s smoothing window — long enough to damp per-second
+// noise, short enough to still track real network changes.
+const JITTER_HISTORY_SAMPLES: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
@@ -49,6 +53,9 @@ pub struct App {
     pub total_bytes: u64,
     pub current_throughput_mbps: f64,
     pub throughput_history: VecDeque<f64>,
+    // Rolling history of aggregate jitter samples so the TUI can show a
+    // smoothed reading instead of the noisy per-second snapshot.
+    pub jitter_history: VecDeque<f64>,
     pub streams: Vec<StreamData>,
 
     // Bidirectional split stats (populated from AggregateInterval/TestResult
@@ -123,6 +130,7 @@ impl App {
             total_bytes: 0,
             current_throughput_mbps: 0.0,
             throughput_history: VecDeque::with_capacity(SPARKLINE_HISTORY),
+            jitter_history: VecDeque::with_capacity(JITTER_HISTORY_SAMPLES),
             bidir_bytes_sent: 0,
             bidir_bytes_received: 0,
             throughput_send_mbps: 0.0,
@@ -326,9 +334,14 @@ impl App {
             self.cwnd = cwnd;
         }
 
-        // Update UDP stats (average jitter across streams)
+        // Update UDP stats (average jitter across streams) and push to the
+        // rolling window so the stats panel can display a smoothed value.
         if jitter_count > 0 {
             self.udp_jitter_ms = total_jitter / jitter_count as f64;
+            self.jitter_history.push_back(self.udp_jitter_ms);
+            if self.jitter_history.len() > JITTER_HISTORY_SAMPLES {
+                self.jitter_history.pop_front();
+            }
         }
         self.udp_packets_lost = total_lost;
 
@@ -469,6 +482,29 @@ impl App {
             .cloned()
             .fold(0.0f64, f64::max)
     }
+
+    /// Mean of the last ~10s of jitter samples. Returns 0.0 before any
+    /// samples have arrived (very early in the test or non-UDP runs).
+    pub fn avg_jitter_ms(&self) -> f64 {
+        if self.jitter_history.is_empty() {
+            0.0
+        } else {
+            self.jitter_history.iter().sum::<f64>() / self.jitter_history.len() as f64
+        }
+    }
+
+    /// Value and label for the UDP jitter line in the stats panel.
+    /// Rolling 10s average while the test is running so per-second noise
+    /// doesn't make the number jump around (issue #48); switches to the
+    /// authoritative run-level final value from `on_result` once the test
+    /// has completed, so the completed screen matches the server's summary.
+    pub fn jitter_display(&self) -> (f64, &'static str) {
+        if self.state == AppState::Completed {
+            (self.udp_jitter_ms, "Jitter:       ")
+        } else {
+            (self.avg_jitter_ms(), "Jitter (10s): ")
+        }
+    }
 }
 
 impl Default for App {
@@ -484,5 +520,51 @@ impl Default for App {
             TimestampFormat::default(),
             Theme::default(),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // App has too many fields to spread-construct in tests
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_display_uses_rolling_window_while_running() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        // Simulate 3 per-second jitter samples: 2, 4, 6 ms → mean 4.0.
+        app.udp_jitter_ms = 6.0; // last sample, what a non-smoothed UI would show
+        app.jitter_history.extend([2.0, 4.0, 6.0]);
+
+        let (value, label) = app.jitter_display();
+        assert_eq!(label, "Jitter (10s): ");
+        assert!(
+            (value - 4.0).abs() < f64::EPSILON,
+            "expected rolling mean 4.0, got {value}"
+        );
+    }
+
+    #[test]
+    fn jitter_display_uses_authoritative_final_on_complete() {
+        let mut app = App::default();
+        // Run-level final jitter from the server (via on_result) is different
+        // from whatever the last 10s of progress samples averaged to — the
+        // completed screen must show the authoritative final, not the tail.
+        app.state = AppState::Completed;
+        app.udp_jitter_ms = 1.23;
+        app.jitter_history.extend([9.9, 9.9, 9.9]); // stale tail samples
+
+        let (value, label) = app.jitter_display();
+        assert_eq!(label, "Jitter:       ");
+        assert!(
+            (value - 1.23).abs() < f64::EPSILON,
+            "expected authoritative 1.23, got {value}"
+        );
+    }
+
+    #[test]
+    fn avg_jitter_ms_is_zero_with_no_samples() {
+        let app = App::default();
+        assert_eq!(app.avg_jitter_ms(), 0.0);
     }
 }

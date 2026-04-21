@@ -64,6 +64,7 @@ pub struct JitterCalculator {
     last_send_time: Option<u64>,
     last_recv_time: Option<Instant>,
     jitter: f64,
+    jitter_max: f64,
 }
 
 impl JitterCalculator {
@@ -72,6 +73,7 @@ impl JitterCalculator {
             last_send_time: None,
             last_recv_time: None,
             jitter: 0.0,
+            jitter_max: 0.0,
         }
     }
 
@@ -85,6 +87,9 @@ impl JitterCalculator {
             let d = (recv_diff - send_diff).abs() as f64;
 
             self.jitter += (d - self.jitter) / 16.0;
+            if self.jitter > self.jitter_max {
+                self.jitter_max = self.jitter;
+            }
         }
 
         self.last_send_time = Some(send_time_us);
@@ -94,6 +99,10 @@ impl JitterCalculator {
 
     pub fn jitter_ms(&self) -> f64 {
         self.jitter / 1000.0
+    }
+
+    pub fn jitter_max_ms(&self) -> f64 {
+        self.jitter_max / 1000.0
     }
 }
 
@@ -472,6 +481,8 @@ pub async fn receive_udp(
             lost_percent: loss_percent,
             jitter_ms: jitter_calc.jitter_ms(),
             out_of_order,
+            jitter_max_ms: Some(jitter_calc.jitter_max_ms()),
+            packet_size: Some(UDP_PAYLOAD_SIZE as u32),
         },
         packets_sent,
     ))
@@ -529,6 +540,42 @@ mod tests {
         calc.update(1000, start + Duration::from_micros(1000));
         // Jitter should be close to 0
         assert!(calc.jitter_ms() < 1.0);
+    }
+
+    #[test]
+    fn test_jitter_max_tracks_peak_not_current() {
+        let mut calc = JitterCalculator::new();
+        let start = Instant::now();
+
+        // Prime with two in-sync samples so the running jitter starts at zero.
+        calc.update(0, start);
+        calc.update(1000, start + Duration::from_micros(1000));
+        assert_eq!(calc.jitter_max_ms(), 0.0);
+
+        // Introduce a single large timing delta (recv arrives 10ms late).
+        calc.update(2000, start + Duration::from_micros(12_000));
+        let peak = calc.jitter_max_ms();
+        assert!(peak > 0.0, "non-trivial delta should set a max");
+
+        // Continue with *in-sync* samples (send delta == recv delta) so
+        // |D| is zero and the running jitter decays by 15/16 each step.
+        // jitter_ms should drop below peak, but jitter_max_ms must stick.
+        let mut send_us: u64 = 3000;
+        let mut recv_us: u64 = 13_000;
+        for _ in 0..20 {
+            calc.update(send_us, start + Duration::from_micros(recv_us));
+            send_us += 1000;
+            recv_us += 1000;
+        }
+        assert!(
+            calc.jitter_ms() < peak,
+            "running jitter should decay below peak when timing is in sync again"
+        );
+        assert_eq!(
+            calc.jitter_max_ms(),
+            peak,
+            "jitter_max must retain the prior peak, not track the current value"
+        );
     }
 
     #[test]
