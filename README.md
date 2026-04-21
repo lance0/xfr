@@ -455,7 +455,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--no-tui` | | false | Disable TUI |
 | `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
-| `--window` | | OS default | TCP window size |
+| `--window` | `-w` | OS default | TCP window size; when unset, kernel autotunes |
 | `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |

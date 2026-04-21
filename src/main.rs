@@ -160,7 +160,7 @@ struct Cli {
     #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
     port: u16,
 
-    /// Test duration (use 0 for infinite)
+    /// Test duration. Bare integers are seconds (`-t 10`), or use unit suffixes (`10s`, `1min`, `500ms`). Use 0 for infinite.
     #[arg(short = 't', long, default_value = "10s", value_parser = parse_test_duration, env = "XFR_DURATION")]
     time: Duration,
 
@@ -306,7 +306,7 @@ enum Commands {
         #[arg(long)]
         tui: bool,
 
-        /// Maximum test duration (server-side limit)
+        /// Maximum test duration (server-side limit). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`).
         #[arg(long, value_parser = parse_duration)]
         max_duration: Option<Duration>,
 
@@ -339,7 +339,7 @@ enum Commands {
         #[arg(long)]
         rate_limit: Option<u32>,
 
-        /// Rate limit time window
+        /// Rate limit time window. Bare integers are seconds (`60`); must be greater than 0.
         #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
         rate_limit_window: Duration,
 
@@ -387,7 +387,7 @@ enum Commands {
 
     /// Discover xfr servers on LAN
     Discover {
-        /// Discovery timeout
+        /// Discovery timeout. Bare integers are seconds (`5`); unit suffixes also accepted (`5s`, `500ms`).
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         timeout: Duration,
     },

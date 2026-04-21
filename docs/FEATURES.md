@@ -551,7 +551,7 @@ See `xfr --help` for complete CLI documentation.
 | `--no-tui` | | false | Disable TUI |
 | `--theme` | | default | Color theme |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
-| `--window` | | OS default | TCP window size |
+| `--window` | `-w` | OS default | TCP window size; when unset, kernel autotunes |
 | `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
 | `--quic` | `-Q` | false | Use QUIC transport |
 | `--psk` | | none | Pre-shared key |
