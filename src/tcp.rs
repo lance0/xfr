@@ -99,16 +99,19 @@ fn force_abortive_close_if_mptcp(fd: std::os::unix::io::RawFd, stream_id: u8) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn force_abortive_close_if_mptcp(_fd: i32, _stream_id: u8) {}
-
 #[inline]
 fn is_peer_closed_error(err: &io::Error) -> bool {
+    // ConnectionReset / BrokenPipe / ConnectionAborted are the peer-side
+    // signals (RST or FIN+close from the other end). NotConnected is the
+    // local-side symptom of `connect(fd, AF_UNSPEC)` — our own MPTCP
+    // fastclose will surface here on the receive half of a bidir test, so
+    // both flavors map to "expected teardown" for receive-path suppression.
     matches!(
         err.kind(),
         io::ErrorKind::ConnectionReset
             | io::ErrorKind::BrokenPipe
             | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
     )
 }
 
@@ -646,13 +649,22 @@ pub async fn receive_data(
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
                         }
-                        // Receive-side reset/pipe before cancel is unexpected and should
-                        // still be surfaced as an error.
+                        // Treat any peer-closed-style error as expected
+                        // teardown, even before cancel fires. Two cases:
+                        //   - Peer-initiated MP_FASTCLOSE arriving as
+                        //     ECONNRESET on a healthy MPTCP connection.
+                        //   - Our own send-half fastclose disrupting the
+                        //     shared socket, surfacing here as NotConnected.
+                        // In either case the test is wrapping up; logging an
+                        // error would just be noise. Real mid-test transport
+                        // failures (other ErrorKinds) still propagate.
+                        if is_peer_closed_error(&e) {
+                            cancelled = *cancel.borrow();
+                            suppressed_teardown_errors += 1;
+                            break;
+                        }
                         if *cancel.borrow() {
                             cancelled = true;
-                            if is_peer_closed_error(&e) {
-                                suppressed_teardown_errors += 1;
-                            }
                             break;
                         }
                         // Caller logs via the spawn-level warn!("Stream X receive error: ...");
@@ -933,11 +945,18 @@ pub async fn receive_data_half(
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
                         }
+                        // See `receive_data` for the full rationale: peer-
+                        // closed errors map to expected MPTCP fastclose
+                        // teardown (peer-initiated ECONNRESET or our own
+                        // send-half-induced NotConnected) and shouldn't
+                        // surface as warnings.
+                        if is_peer_closed_error(&e) {
+                            cancelled = *cancel.borrow();
+                            suppressed_teardown_errors += 1;
+                            break;
+                        }
                         if *cancel.borrow() {
                             cancelled = true;
-                            if is_peer_closed_error(&e) {
-                                suppressed_teardown_errors += 1;
-                            }
                             break;
                         }
                         // Caller logs via the spawn-level warn!("Stream X receive error: ...");
@@ -1050,6 +1069,58 @@ mod tests {
         // Sanity: socket is still alive after the helper (we did not call
         // connect(AF_UNSPEC), so it should still be connected).
         assert!(client.peer_addr().is_ok(), "client socket disconnected");
+    }
+
+    /// Regression: peer-initiated abortive close (e.g. RST from MP_FASTCLOSE
+    /// on the wire) must not surface as Err from receive_data, even when our
+    /// local cancel signal hasn't fired yet. Before this guard, bidir tests
+    /// would see "Stream X receive error: Connection reset by peer" warnings
+    /// any time the send-side fastclose path landed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn receive_data_suppresses_peer_initiated_reset() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, server) = tokio::join!(connect, accept);
+        let client = client.unwrap();
+        let (server, _) = server.unwrap();
+
+        // Pin the client to send RST on close, then drop. Server's receive_data
+        // sees ECONNRESET — which is_peer_closed_error must classify as
+        // expected teardown so the function returns Ok rather than Err.
+        let _ = socket2::SockRef::from(&client).set_linger(Some(std::time::Duration::ZERO));
+
+        let stats = Arc::new(StreamStats::new(0));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let server_task = tokio::spawn(async move {
+            receive_data(server, stats, cancel_rx, TcpConfig::default()).await
+        });
+
+        // Give receive_data a moment to enter its read loop, then yank the client.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(client); // SO_LINGER=0 → peer sees RST
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+            .await
+            .expect("server task did not exit within 2s after peer RST")
+            .expect("server task panicked");
+
+        // The key invariant: peer RST is NOT a receive_data error. cancel_tx
+        // is intentionally never fired so we know the suppression logic — not
+        // the cancel branch — is what made us exit cleanly.
+        assert!(
+            result.is_ok(),
+            "receive_data should suppress peer RST as expected teardown, got: {:?}",
+            result.err()
+        );
+
+        // Keep cancel_tx in scope so the watch::Sender survives until here.
+        // Otherwise dropping it earlier would propagate a sender-closed signal
+        // that defeats the purpose of testing the peer-RST path on its own.
+        drop(cancel_tx);
     }
 
     /// Regression: when `write()` is parked in Pending because the kernel send
