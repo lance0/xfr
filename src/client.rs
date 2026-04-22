@@ -148,6 +148,9 @@ pub struct Client {
     pause_request_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
     /// Whether the server supports pause/resume capability
     server_supports_pause: Arc<Mutex<Option<bool>>>,
+    /// Server's advertised version string (from ServerHello), exposed via
+    /// [`Client::server_version`] for the TUI to display.
+    server_version: Arc<Mutex<Option<String>>>,
 }
 
 impl Client {
@@ -159,7 +162,14 @@ impl Client {
             pause_tx: Arc::new(Mutex::new(None)),
             pause_request_tx: Arc::new(Mutex::new(None)),
             server_supports_pause: Arc::new(Mutex::new(None)),
+            server_version: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Returns the server's advertised version string (from the `Hello`
+    /// handshake) if it has been received, otherwise `None`.
+    pub fn server_version(&self) -> Option<String> {
+        self.server_version.lock().clone()
     }
 
     pub async fn run(
@@ -233,6 +243,7 @@ impl Client {
                 version,
                 capabilities,
                 auth,
+                server,
                 ..
             } => {
                 if !versions_compatible(&version, PROTOCOL_VERSION) {
@@ -244,6 +255,9 @@ impl Client {
                 }
                 debug!("Server capabilities: {:?}", capabilities);
                 server_capabilities = capabilities;
+                if let Some(v) = server {
+                    *self.server_version.lock() = Some(v);
+                }
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {
@@ -1072,6 +1086,7 @@ impl Client {
                 version,
                 capabilities,
                 auth,
+                server,
                 ..
             } => {
                 if !versions_compatible(&version, PROTOCOL_VERSION) {
@@ -1083,6 +1098,9 @@ impl Client {
                 }
                 debug!("Server capabilities: {:?}", capabilities);
                 server_capabilities = capabilities;
+                if let Some(v) = server {
+                    *self.server_version.lock() = Some(v);
+                }
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {

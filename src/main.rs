@@ -1434,6 +1434,20 @@ async fn run_tui_loop(
             }
         }
 
+        // Refresh the wall-clock-driven parts of app state (elapsed counter) so
+        // the UI stays live even when the server's Interval progress messages
+        // are delayed by packet loss. Fixes issue #62.
+        app.tick();
+
+        // Capture the server's advertised version once it shows up. The
+        // ServerHello races the TUI loop start; we poll rather than add a new
+        // channel since this is a one-time one-line copy.
+        if app.server_version.is_none()
+            && let Some(v) = client.server_version()
+        {
+            app.server_version = Some(v);
+        }
+
         // Draw UI
         terminal.draw(|f| draw(f, &app))?;
 

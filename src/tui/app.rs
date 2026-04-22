@@ -101,6 +101,11 @@ pub struct App {
 
     // Update notification
     pub update_available: Option<String>,
+
+    /// Server-reported version (e.g. "xfr/0.9.8") captured from the `Hello`
+    /// handshake. None until the handshake completes; surfaced in the UI so
+    /// cross-version test pairings are visible at a glance.
+    pub server_version: Option<String>,
 }
 
 impl App {
@@ -176,6 +181,7 @@ impl App {
             prev_udp_lost: 0,
 
             update_available: None,
+            server_version: None,
         }
     }
 
@@ -266,6 +272,26 @@ impl App {
         self.state = AppState::Running;
         self.start_time = Some(Instant::now());
         self.log("Connected to server.");
+    }
+
+    /// Refresh `elapsed` from the local wall clock. Called from the TUI loop
+    /// once per iteration so the counter stays live even when server `Interval`
+    /// progress messages are delayed (e.g. packet-drop bursts on the control
+    /// channel). `on_progress` still overwrites `elapsed` with the server's
+    /// authoritative value when a progress message arrives; `on_result` pins
+    /// the final `self.duration` once completed.
+    pub fn tick(&mut self) {
+        if self.state == AppState::Running
+            && let Some(start) = self.start_time
+        {
+            self.elapsed = start.elapsed();
+        }
+    }
+
+    /// Record the server's advertised version (from the `Hello` handshake).
+    /// Stored for UI display only.
+    pub fn set_server_version(&mut self, version: String) {
+        self.server_version = Some(version);
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
@@ -566,5 +592,59 @@ mod tests {
     fn avg_jitter_ms_is_zero_with_no_samples() {
         let app = App::default();
         assert_eq!(app.avg_jitter_ms(), 0.0);
+    }
+
+    #[test]
+    fn tick_refreshes_elapsed_while_running() {
+        // When Running with start_time set, tick() should update elapsed from
+        // the wall clock so the UI stays live between progress messages. This
+        // is the core fix for issue #62: progress-message starvation during
+        // packet-drop bursts left `elapsed` stale.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now() - Duration::from_secs(3));
+        app.elapsed = Duration::ZERO; // stale — what a drop burst leaves behind
+
+        app.tick();
+
+        assert!(
+            app.elapsed >= Duration::from_secs(3),
+            "expected elapsed ≥ 3s from wall clock, got {:?}",
+            app.elapsed
+        );
+    }
+
+    #[test]
+    fn tick_is_noop_outside_running() {
+        // Only Running should advance elapsed from wall clock. Other states
+        // either don't have a meaningful elapsed (Connecting/Error) or pin
+        // their own value (Completed sets duration, Paused should freeze).
+        for state in [
+            AppState::Connecting,
+            AppState::Paused,
+            AppState::Completed,
+            AppState::Error,
+        ] {
+            let mut app = App::default();
+            app.state = state;
+            app.start_time = Some(Instant::now() - Duration::from_secs(5));
+            app.elapsed = Duration::from_secs(42); // sentinel
+
+            app.tick();
+
+            assert_eq!(
+                app.elapsed,
+                Duration::from_secs(42),
+                "tick() must not mutate elapsed in state {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_server_version_populates_field() {
+        let mut app = App::default();
+        assert!(app.server_version.is_none());
+        app.set_server_version("xfr/0.9.8".to_string());
+        assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.8"));
     }
 }

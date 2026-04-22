@@ -125,10 +125,12 @@ fn draw_update_banner(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // Layout: Configuration + Real-time Stats + History/Streams
+    // Configuration is 6 lines tall: 2 border rows + 4 content rows
+    // (Role, Target, Protocol, Version).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Configuration
+            Constraint::Length(6),  // Configuration
             Constraint::Length(10), // Real-time Stats
             Constraint::Min(4),     // History or Streams
         ])
@@ -165,6 +167,12 @@ fn draw_configuration(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         crate::protocol::Direction::Bidir => "Client (Bidirectional)",
     };
 
+    let server_label: &str = match app.server_version.as_deref() {
+        Some(v) => v,
+        None => "(waiting…)",
+    };
+    let version_value = format!("xfr/{} ↔ {}", env!("CARGO_PKG_VERSION"), server_label);
+
     let lines = vec![
         Line::from(vec![
             Span::styled("  Role:      ", Style::default().fg(theme.text_dim)),
@@ -183,6 +191,10 @@ fn draw_configuration(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 format!("{} ×{}", app.protocol, app.streams_count),
                 Style::default().fg(theme.accent),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Version:   ", Style::default().fg(theme.text_dim)),
+            Span::styled(version_value, Style::default().fg(theme.text_dim)),
         ]),
     ];
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **TUI elapsed time stays live during data gaps** (issue #62) — `app.elapsed` was only updated when the server's `Interval` progress message arrived. On lossy paths that starved the control channel (e.g. brettowe's WiFi test with packet-drop bursts), the elapsed counter — and by extension the progress bar position — could freeze for several seconds until the next message landed, creating the impression of a "stall" even though the TUI was still redrawing at 20 Hz. The loop now refreshes `elapsed` from the wall clock on every iteration. The server's authoritative `elapsed_ms` still wins whenever a progress message arrives; interpolation just fills the gaps. Reported by @brettowe.
+- **Infinite-duration (`-t 0`) TUI now shows a live elapsed counter** — the `{}s/∞` display was relying on the same `elapsed` field that could go stale, so an infinite test on a flaky link looked frozen. Covered by the same fix.
+
+### Added
+- **Client/server version in the Configuration panel** (issue #62) — the TUI now shows `xfr/<client-version> ↔ <server-version>` so cross-version test pairings are obvious at a glance. Server version is captured from the `Hello` handshake (already wire-supported; just wasn't surfaced). Requested by @brettowe.
+
 ## [0.9.9] - 2026-04-21
 
 ### Added
