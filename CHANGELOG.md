@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-04-22
+
 ### Fixed
-- **TUI elapsed time stays live during data gaps** (issue #62) — `app.elapsed` was only updated when the server's `Interval` progress message arrived. On lossy paths that starved the control channel (e.g. brettowe's WiFi test with packet-drop bursts), the elapsed counter — and by extension the progress bar position — could freeze for several seconds until the next message landed, creating the impression of a "stall" even though the TUI was still redrawing at 20 Hz. The loop now refreshes `elapsed` from the wall clock on every iteration. The server's authoritative `elapsed_ms` still wins whenever a progress message arrives; interpolation just fills the gaps. Pause handling shifts `start_time` forward by the pause duration on resume, so the elapsed counter excludes paused time and stays in agreement with the server's own paused-aware elapsed_ms. Reported by @brettowe.
+- **TCP teardown no longer hangs under rate-limited paths** (issue #54) — the v0.9.8 SO_LINGER=0 fix didn't take effect when the send loop was parked in `stream.write().await` under heavy backpressure (tc rate limiting, slow peers, MPTCP subflows filling). The loop would block past the configured deadline, never reaching the drop/close that would trigger the abortive close. `send_data` and `send_data_half` now race the pending `write()` against cancel and deadline in a `biased tokio::select!`, so either signal breaks the loop and lets `SO_LINGER=0` do its job. Confirmed by @matttbe against his MPTCP + tc reproducer.
+- **TUI elapsed time stays live during data gaps** (issue #62) — `app.elapsed` was only updated when the server's `Interval` progress message arrived. On lossy paths that starved the control channel (e.g. brettowe's WiFi test with packet-drop bursts), the elapsed counter — and by extension the progress bar position — could freeze for several seconds until the next message landed, creating the impression of a "stall" even though the TUI was still redrawing at 20 Hz. The loop now refreshes `elapsed` from the wall clock on every iteration; `on_progress` no longer writes `elapsed` (doing so was a visual no-op, since the next tick immediately overwrote the server's value). Pause handling shifts `start_time` forward by the pause duration on resume, so the elapsed counter excludes paused time. Reported by @brettowe.
 - **Infinite-duration (`-t 0`) TUI now shows a live elapsed counter** — the `{}s/∞` display was relying on the same `elapsed` field that could go stale, so an infinite test on a flaky link looked frozen. Covered by the same fix.
 
 ### Added
@@ -16,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **TUI jitter line shows latest + smoothed together** (issue #48 follow-up) — the running display now reads `Jitter: 0.02 ms (10s: 0.03 ms)` so the latest per-interval aggregate and the 10-second rolling mean are visible side by side. Resolves the confusion where the rolling mean could stay above any single sample's value, making the live display look inconsistent with the server's authoritative final. Completed state still shows just the final value (no smoothing companion — the final is authoritative). Reported by @brettowe.
+
+### Security
+- **Sanitize server-advertised version before rendering** — the `Hello.server` field crosses a network trust boundary and was being rendered verbatim into the Configuration panel. A hostile or compromised server could send ANSI escape sequences (clear screen, move cursor, OSC commands) or a very long string and have the user's terminal act on them. Control characters are now stripped, length capped at 32, and empty or all-control inputs fall back to `(unknown)`.
+- **Bump rustls-webpki 0.103.12 → 0.103.13** (RUSTSEC-2026-0104) — reachable panic in CRL parsing. Transitive upgrade via Cargo.lock; no manifest change.
 
 ## [0.9.9] - 2026-04-21
 
