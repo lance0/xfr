@@ -282,11 +282,12 @@ impl App {
     }
 
     /// Refresh `elapsed` from the local wall clock. Called from the TUI loop
-    /// once per iteration so the counter stays live even when server `Interval`
-    /// progress messages are delayed (e.g. packet-drop bursts on the control
-    /// channel). `on_progress` still overwrites `elapsed` with the server's
-    /// authoritative value when a progress message arrives; `on_result` pins
-    /// the final `self.duration` once completed.
+    /// once per iteration so the counter stays live even when server
+    /// `Interval` progress messages are delayed (e.g. packet-drop bursts on
+    /// the control channel). `elapsed` is wall-clock-authoritative during
+    /// Running — `on_progress` does NOT update it (doing so was a visual
+    /// no-op since the next tick immediately overwrote the server's value).
+    /// `on_result` pins `self.duration` once completed.
     pub fn tick(&mut self) {
         if self.state == AppState::Running
             && let Some(start) = self.start_time
@@ -302,7 +303,13 @@ impl App {
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
-        self.elapsed = Duration::from_millis(progress.elapsed_ms);
+        // `elapsed` is intentionally NOT written here. `tick()` owns it during
+        // Running from the local wall clock (pause-aware), so the TUI stays
+        // live between progress messages. Writing from `progress.elapsed_ms`
+        // on each message caused the next tick() to immediately overwrite it
+        // anyway, producing a one-frame flash of the server-authoritative
+        // value that users couldn't perceive. `on_result()` pins the final
+        // once the test completes.
         self.total_bytes = progress.total_bytes;
         self.current_throughput_mbps = progress.throughput_mbps;
 
@@ -702,6 +709,40 @@ mod tests {
         assert!(app.server_version.is_none());
         app.set_server_version("xfr/0.9.8".to_string());
         assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.8"));
+    }
+
+    #[test]
+    fn on_progress_does_not_overwrite_elapsed() {
+        // Regression: before this fix, on_progress wrote self.elapsed from
+        // progress.elapsed_ms, which the next tick() immediately overwrote
+        // from the wall clock — so the server's authoritative value never
+        // actually rendered. We removed the write entirely; elapsed is
+        // wall-clock authoritative during Running. This test pins that
+        // contract so we don't accidentally re-introduce the write.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now() - Duration::from_secs(5));
+        app.elapsed = Duration::from_secs(5); // wall-clock derived
+
+        app.on_progress(crate::client::TestProgress {
+            elapsed_ms: 9_999, // a server value far off from wall clock
+            total_bytes: 0,
+            throughput_mbps: 0.0,
+            streams: vec![],
+            rtt_us: None,
+            cwnd: None,
+            total_retransmits: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+        });
+
+        assert_eq!(
+            app.elapsed,
+            Duration::from_secs(5),
+            "on_progress must not mutate elapsed; tick() owns it"
+        );
     }
 
     #[test]
