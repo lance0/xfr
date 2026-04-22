@@ -1445,7 +1445,9 @@ async fn run_tui_loop(
         if app.server_version.is_none()
             && let Some(v) = client.server_version()
         {
-            app.server_version = Some(v);
+            // Route through `set_server_version` so the string is sanitized —
+            // it comes from the peer and lands in the terminal.
+            app.set_server_version(v);
         }
 
         // Draw UI

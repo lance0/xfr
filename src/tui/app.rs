@@ -297,9 +297,13 @@ impl App {
     }
 
     /// Record the server's advertised version (from the `Hello` handshake).
-    /// Stored for UI display only.
+    /// Stored for UI display only. The string is sanitized before storage —
+    /// see [`sanitize_server_version`] — since it crosses a network trust
+    /// boundary and lands in a terminal. A hostile or compromised server
+    /// could otherwise smuggle terminal escape sequences or an oversized
+    /// payload into our display.
     pub fn set_server_version(&mut self, version: String) {
-        self.server_version = Some(version);
+        self.server_version = Some(sanitize_server_version(&version));
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
@@ -571,6 +575,31 @@ impl App {
     }
 }
 
+/// Display-safe normalization of a server-advertised version string.
+///
+/// The input comes from a remote `Hello` message and is rendered verbatim
+/// into the user's terminal, so it needs to be treated as untrusted:
+/// - non-printable / control bytes are stripped (prevents ANSI escape
+///   injection that could clear the screen, move the cursor, spoof
+///   content, or run the terminal's exotic OSC commands)
+/// - the result is clamped to a short length (prevents a malicious peer
+///   from monopolizing the Configuration panel row or blowing up render
+///   cost)
+/// - an empty result falls back to `(unknown)` so the UI still makes sense
+pub fn sanitize_server_version(raw: &str) -> String {
+    const MAX_LEN: usize = 32;
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_LEN)
+        .collect();
+    if cleaned.is_empty() {
+        "(unknown)".to_string()
+    } else {
+        cleaned
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JitterDisplay {
     /// The value to color-code and show first. Latest per-interval aggregate
@@ -709,6 +738,41 @@ mod tests {
         assert!(app.server_version.is_none());
         app.set_server_version("xfr/0.9.8".to_string());
         assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.8"));
+    }
+
+    #[test]
+    fn sanitize_server_version_strips_control_bytes() {
+        // ANSI escape sequences a hostile server could send to e.g. clear the
+        // screen or move the cursor. All control bytes (ESC, CR, LF, NUL,
+        // etc.) must be stripped before the string lands in the terminal.
+        let dirty = "xfr/\x1b[2J\x1b[Hmalicious\r\n\x00";
+        assert_eq!(sanitize_server_version(dirty), "xfr/[2J[Hmalicious");
+    }
+
+    #[test]
+    fn sanitize_server_version_caps_length() {
+        // A peer advertising a 10 KB version string must not monopolize the
+        // Configuration panel row or blow up render cost.
+        let long = "x".repeat(10_000);
+        let cleaned = sanitize_server_version(&long);
+        assert!(cleaned.chars().count() <= 32);
+        assert!(cleaned.starts_with("xxxxx"));
+    }
+
+    #[test]
+    fn sanitize_server_version_falls_back_for_empty_or_all_control() {
+        assert_eq!(sanitize_server_version(""), "(unknown)");
+        // All control characters → empty after filter → fallback.
+        assert_eq!(sanitize_server_version("\x1b\x00\r\n"), "(unknown)");
+    }
+
+    #[test]
+    fn set_server_version_sanitizes_input() {
+        // set_server_version routes through sanitize_server_version, so a
+        // hostile Hello.server value never reaches the renderer as-is.
+        let mut app = App::default();
+        app.set_server_version("xfr/0.9.9\x1b[31m".to_string());
+        assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.9[31m"));
     }
 
     #[test]
