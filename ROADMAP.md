@@ -157,6 +157,7 @@
 - [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 - [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
+- [ ] **TUI render fuzzing** - existing TUI tests assert against `App` state and ratatui `Buffer` cells, but never put the rendered escape-sequence stream through a real terminal emulator. Drive randomized `App` state through the renderer and parse the output with the [`vt100`](https://crates.io/crates/vt100) crate to assert no panics, no overflow past widget bounds, and no escape-sequence injection escaping the server-version sanitizer or other future text fields. Eventual target: [libghostty](https://github.com/ghostty-org/ghostty) (C-ABI library from Mitchell Hashimoto's terminal, embeddable from Rust via `bindgen`) for highest-fidelity emulation and Antithesis-style deterministic fuzzing — but its API is explicitly pre-1.0 ("signatures still in flux") so wait for a tagged release before depending on it. Bugs this catches that nothing else does: extreme values overflowing layout (PB-scale transfers, jitter that won't fit format width), rapid state transitions during paint, theme switching mid-redraw, resize storms.
 
 ### Documentation
 - [ ] **API documentation** - add examples to public functions in net module
