@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-04-30
+
+### Fixed
+- **Live UDP packet-loss counter during the run** (issue #70) — the Packet Loss line in the TUI was stuck at 0.0% for the entire test and only updated to the real value at completion. With `-t 0` (infinite mode) the real value was never visible. Server now ships a cumulative packet-counts snapshot (`UdpIntervalProgress { packets_received, packets_lost }`) on every periodic Interval message; client derives the loss percent locally and the TUI updates it live. Cumulative counts are snapshotted into `IntervalStats` at interval emission time so deltas between consecutive samples correspond to the same window. Reported by @brettowe.
+- **Final UDP loss accounting only counts valid xfr packets** — `UdpStats.packets_received` and `packets_sent` now exclude short, malformed, or foreign datagrams that can't be header-decoded. Previously such datagrams inflated `packets_received` and silently understated the final loss percent. `bytes_received` continues to count every byte the wire delivered.
+
+### Added
+- **Throughput sparkline tints by per-interval loss severity** (issue #70) — lossy intervals are visually distinct from clean intervals at the same height: clean stays the graph color, light loss (<1% per-interval rate) tints warning, heavy loss (≥1%) tints error. Per-interval rate computed from `udp_progress` deltas, so a single-packet hiccup and a heavy drop burst no longer collapse to the same flat tint. Magnitude unknown (TCP run, pre-0.9.11 server, or first UDP sample) stays the graph color — honest "no signal" rather than a misleading tint. Sparkline widget gains a `.styles(&[Style])` per-sample override.
+- **Freshness signal for the Packet Loss line** — the line renders dimmed `--%` when paired against a pre-0.9.11 server, or before any UDP traffic has been observed. Without this, an old server would render a stale `0.0%` next to actual loss bursts in the sparkline. `App.udp_lost_percent` is now `Option<f64>` end-to-end.
+
+### Changed
+- **Jitter rolling-window label** (issue #72) — the running display now reads `Jitter: 0.86 ms (10s avg: 0.03 ms)`. The previous `(10s: …)` form read like a stuck timer; @pythonwood opened an issue thinking the display was broken on a v0.9.10-client → v0.9.6-server pairing.
+
 ## [0.9.10] - 2026-04-22
 
 ### Fixed
