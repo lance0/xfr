@@ -456,7 +456,7 @@ impl App {
 
         // Live UDP loss percent. Derived locally from the server's cumulative
         // packet counts so absence-of-progress (None) is distinguishable from
-        // a real 0.0% reading; the renderer turns None into "—%" instead of
+        // a real 0.0% reading; the renderer turns None into "--%" instead of
         // pretending zero. Once `udp_progress` arrives at least once, we keep
         // the last derived value when subsequent intervals omit it (e.g. a
         // TCP path momentarily not reporting UDP), but a session that never

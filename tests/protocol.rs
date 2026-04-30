@@ -246,7 +246,7 @@ fn test_aggregate_interval_udp_progress_roundtrip() {
     assert_eq!(progress.lost_percent(), Some(2.5));
 
     // Old-server payload (no udp_progress) deserializes to None — the TUI
-    // uses this absence to render "—%" instead of a fake 0%.
+    // uses this absence to render "--%" instead of a fake 0%.
     let legacy = r#"{"bytes":1000,"throughput_mbps":8.0,"lost":5}"#;
     let decoded: AggregateInterval = serde_json::from_str(legacy).unwrap();
     assert!(decoded.udp_progress.is_none());
@@ -255,7 +255,7 @@ fn test_aggregate_interval_udp_progress_roundtrip() {
 #[test]
 fn test_udp_interval_progress_lost_percent_zero_traffic() {
     // Denominator-zero guard: before any packets are observed, lost_percent
-    // must return None so the TUI can render "—%" rather than report 0%
+    // must return None so the TUI can render "--%" rather than report 0%
     // as if it were a fresh observation.
     let p = UdpIntervalProgress {
         packets_received: 0,
