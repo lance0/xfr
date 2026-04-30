@@ -55,6 +55,16 @@ pub struct IntervalStats {
     /// single-direction count is already in `bytes`).
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    /// Cumulative UDP packets received on this stream as of this interval's
+    /// snapshot moment. Captured in `record_interval` so the aggregator can
+    /// compute `udp_progress` from a consistent point in time rather than
+    /// re-reading live atomics later (which would attribute packets that
+    /// arrived after the snapshot to the wrong interval).
+    pub cumulative_packets_received: u64,
+    /// Cumulative UDP packets lost on this stream as of this interval's
+    /// snapshot. See `cumulative_packets_received` for why this is captured
+    /// at snapshot time rather than re-loaded from `udp_lost`.
+    pub cumulative_packets_lost: u64,
 }
 
 impl StreamStats {
@@ -195,11 +205,18 @@ impl StreamStats {
             0.0
         };
 
-        // UDP stats for this interval
+        // UDP stats for this interval. Snapshot the live atomics here, at
+        // the same moment we capture per-interval deltas, and stash them in
+        // `IntervalStats` so the aggregator pulls cumulative counts from a
+        // consistent point in time. Re-reading the atomics later in
+        // `to_aggregate_with_direction` would attribute packets that arrived
+        // between the two reads to the wrong sparkline sample.
         let jitter_ms = self.udp_jitter_ms();
         let total_lost = self.udp_lost.load(Ordering::Relaxed);
         let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
         let interval_lost = total_lost.saturating_sub(last_lost);
+        let cumulative_packets_received = self.udp_packets_received.load(Ordering::Relaxed);
+        let cumulative_packets_lost = total_lost;
 
         // TCP_INFO: live RTT, cwnd, and retransmit deltas
         let tcp_info = self.poll_tcp_info();
@@ -228,6 +245,8 @@ impl StreamStats {
             cwnd: tcp_info.as_ref().map(|t| t.cwnd),
             bytes_sent: interval_bytes_sent,
             bytes_received: interval_bytes_received,
+            cumulative_packets_received,
+            cumulative_packets_lost,
         };
 
         let mut intervals = self.intervals.lock();
@@ -424,22 +443,18 @@ impl TestStats {
             Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
         };
 
-        // Cumulative UDP packet counts across all streams. Sent as raw counts
-        // (not a derived percent) so the client can compute its own percent
-        // and treat absence-of-field as "unknown" — that distinction lets the
-        // TUI render a freshness signal instead of an authoritative 0.0%
-        // when paired with a pre-0.9.11 server. None for TCP runs and for
-        // very early UDP runs before any traffic.
-        let cumulative_lost: u64 = self
-            .streams
+        // Cumulative UDP packet counts across all streams. Read from the
+        // per-stream `IntervalStats` snapshot the caller passed in — same
+        // point in time as the per-interval `lost` count — so the deltas
+        // the client computes between two consecutive `udp_progress`
+        // samples actually correspond to the same window. Sent as raw
+        // counts (not a derived percent) so the client can compute its own
+        // percent and treat absence-of-field as "unknown".
+        let cumulative_received: u64 = intervals
             .iter()
-            .map(|s| s.udp_lost.load(Ordering::Relaxed))
+            .map(|i| i.cumulative_packets_received)
             .sum();
-        let cumulative_received: u64 = self
-            .streams
-            .iter()
-            .map(|s| s.udp_packets_received.load(Ordering::Relaxed))
-            .sum();
+        let cumulative_lost: u64 = intervals.iter().map(|i| i.cumulative_packets_lost).sum();
         let udp_progress = if cumulative_received > 0 || cumulative_lost > 0 {
             Some(UdpIntervalProgress {
                 packets_received: cumulative_received,

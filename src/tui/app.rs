@@ -408,15 +408,12 @@ impl App {
                     let received = curr.packets_received.saturating_sub(prev.packets_received);
                     (received.saturating_add(lost), lost)
                 }
-                (Some(curr), None) => {
-                    // First UDP progress sample — treat the cumulative counts as
-                    // this interval's delta. Loss percent is still meaningful;
-                    // the magnitude scale will recalibrate from the next sample.
-                    (
-                        curr.packets_received.saturating_add(curr.packets_lost),
-                        curr.packets_lost,
-                    )
-                }
+                // First udp_progress sample (or no progress at all). Don't
+                // treat cumulative-since-test-start as a single interval's
+                // delta — a delayed first progress (control-channel stall,
+                // or a server that batched several intervals) would
+                // otherwise paint one bar with multi-interval loss.
+                // Baseline silently; real deltas start from sample 2.
                 _ => (0, 0),
             };
         self.throughput_history.push_back(ThroughputSample {
@@ -1004,7 +1001,10 @@ mod tests {
         app.state = AppState::Running;
         app.start_time = Some(Instant::now());
 
-        // First interval: 1000 received, 0 lost — clean.
+        // First interval baselines silently — magnitude unknown, renderer
+        // stays primary-colored. Without this, a delayed first progress
+        // (control-channel stall, batched intervals) would paint one bar
+        // with multi-interval loss as if it were a single 1s burst.
         app.on_progress(make_progress(
             100.0,
             Some(crate::protocol::UdpIntervalProgress {
@@ -1012,16 +1012,28 @@ mod tests {
                 packets_lost: 0,
             }),
         ));
+        let baseline = app.throughput_history.back().copied().unwrap();
+        assert_eq!(baseline.mbps, 100.0);
+        assert_eq!(baseline.interval_packets, 0);
+        assert_eq!(baseline.loss_rate_percent(), None);
+
+        // Second interval: +500 received, 0 lost — clean.
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1500,
+                packets_lost: 0,
+            }),
+        ));
         let clean = app.throughput_history.back().copied().unwrap();
-        assert_eq!(clean.mbps, 100.0);
         assert_eq!(clean.lost_packets, 0);
         assert_eq!(clean.loss_rate_percent(), Some(0.0));
 
-        // Second interval: +800 received, +200 lost — heavy loss (20%).
+        // Third interval: +800 received, +200 lost — heavy loss (20%).
         app.on_progress(make_progress(
             80.0,
             Some(crate::protocol::UdpIntervalProgress {
-                packets_received: 1800,
+                packets_received: 2300,
                 packets_lost: 200,
             }),
         ));

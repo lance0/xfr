@@ -26,8 +26,13 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
 /// Color a throughput sparkline cell by the per-interval loss rate. Unknown
 /// rate stays primary so we don't fake a signal we don't have; clean
 /// intervals stay primary; light loss (<1%) goes warning, heavy loss
-/// (>=1%) goes error. Same thresholds as `loss_color` for the cumulative
-/// percent so both panels speak the same severity language.
+/// (>=1%) goes error. Thresholds intentionally differ from `loss_color`'s
+/// (cumulative): a per-interval rate of 0.05% in a single second is a
+/// real burst worth tinting, while the same number averaged across an
+/// entire run is healthy. We don't share the green/yellow/red palette
+/// either — the sparkline's "clean" state is the graph color so the
+/// background blends with the chart, not the success-green used in the
+/// stats panel.
 fn loss_severity_color(rate: Option<f64>, theme: &Theme) -> Color {
     match rate {
         None => theme.graph_primary,
