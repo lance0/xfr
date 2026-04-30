@@ -436,15 +436,16 @@ pub async fn receive_udp(
                         let recv_time = Instant::now();
                         last_recv = recv_time;
                         stats.add_bytes_received(n as u64);
-                        packets_received += 1;
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
-                            // Only count valid xfr packets toward live loss
-                            // accounting. A short or foreign datagram still
-                            // adds to `bytes_received` (it consumed wire),
-                            // but counting it here would dilute the live
-                            // loss percent — the denominator should match
+                            // Only count valid xfr packets toward UDP loss
+                            // accounting (both live and final). A short or
+                            // foreign datagram still adds to `bytes_received`
+                            // because it consumed wire, but counting it
+                            // toward the loss denominator would understate
+                            // the loss percent — the denominator must match
                             // what the sequence tracker actually saw.
+                            packets_received += 1;
                             stats.add_udp_received(1);
 
                             let old_lost = packet_tracker.lost.load(Ordering::Relaxed);

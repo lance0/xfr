@@ -30,9 +30,12 @@ pub struct StreamStats {
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
     pub udp_lost: AtomicU64,      // Total lost packets
     pub last_udp_lost: AtomicU64, // For interval calculation
-    /// Cumulative UDP packets received on this stream. Counted alongside
-    /// `bytes_received` in the receive loop. Used by the aggregator to compute
-    /// a running loss percentage so the TUI can display a live counter mid-run.
+    /// Cumulative UDP packets received on this stream — counted only on
+    /// successful header decode (valid xfr packets). Junk/foreign datagrams
+    /// still bump `bytes_received` because they consumed wire bandwidth, but
+    /// must not dilute the loss denominator. Used by the aggregator to
+    /// compute a running loss percentage that matches what the sequence
+    /// tracker actually saw.
     pub udp_packets_received: AtomicU64,
     /// Raw file descriptor for TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
