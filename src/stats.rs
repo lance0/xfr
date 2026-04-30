@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpStats};
+use crate::protocol::{
+    AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpIntervalProgress, UdpStats,
+};
 
 /// Maximum number of intervals to keep in history (1 minute at 1-second intervals)
 const MAX_INTERVAL_HISTORY: usize = 60;
@@ -28,6 +30,10 @@ pub struct StreamStats {
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
     pub udp_lost: AtomicU64,      // Total lost packets
     pub last_udp_lost: AtomicU64, // For interval calculation
+    /// Cumulative UDP packets received on this stream. Counted alongside
+    /// `bytes_received` in the receive loop. Used by the aggregator to compute
+    /// a running loss percentage so the TUI can display a live counter mid-run.
+    pub udp_packets_received: AtomicU64,
     /// Raw file descriptor for TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
     /// Final TCP_INFO snapshot captured when the stream task exits.
@@ -68,6 +74,7 @@ impl StreamStats {
             udp_jitter_us: AtomicU64::new(0),
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
+            udp_packets_received: AtomicU64::new(0),
             tcp_info_fd: AtomicI32::new(-1),
             final_tcp_info: Mutex::new(None),
         }
@@ -129,6 +136,12 @@ impl StreamStats {
     /// Add lost packets to cumulative count
     pub fn add_udp_lost(&self, count: u64) {
         self.udp_lost.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Add to cumulative UDP packets-received count.
+    pub fn add_udp_received(&self, count: u64) {
+        self.udp_packets_received
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Get current jitter in milliseconds
@@ -411,6 +424,31 @@ impl TestStats {
             Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
         };
 
+        // Cumulative UDP packet counts across all streams. Sent as raw counts
+        // (not a derived percent) so the client can compute its own percent
+        // and treat absence-of-field as "unknown" — that distinction lets the
+        // TUI render a freshness signal instead of an authoritative 0.0%
+        // when paired with a pre-0.9.11 server. None for TCP runs and for
+        // very early UDP runs before any traffic.
+        let cumulative_lost: u64 = self
+            .streams
+            .iter()
+            .map(|s| s.udp_lost.load(Ordering::Relaxed))
+            .sum();
+        let cumulative_received: u64 = self
+            .streams
+            .iter()
+            .map(|s| s.udp_packets_received.load(Ordering::Relaxed))
+            .sum();
+        let udp_progress = if cumulative_received > 0 || cumulative_lost > 0 {
+            Some(UdpIntervalProgress {
+                packets_received: cumulative_received,
+                packets_lost: cumulative_lost,
+            })
+        } else {
+            None
+        };
+
         // Average RTT across streams that have TCP_INFO
         let rtt_values: Vec<u32> = intervals.iter().filter_map(|i| i.rtt_us).collect();
         let avg_rtt = if rtt_values.is_empty() {
@@ -440,6 +478,7 @@ impl TestStats {
             } else {
                 None
             },
+            udp_progress,
             rtt_us: avg_rtt,
             cwnd: total_cwnd,
             bytes_sent: split_bytes_sent,

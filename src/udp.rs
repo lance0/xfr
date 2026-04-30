@@ -436,6 +436,7 @@ pub async fn receive_udp(
                         let recv_time = Instant::now();
                         last_recv = recv_time;
                         stats.add_bytes_received(n as u64);
+                        stats.add_udp_received(1);
                         packets_received += 1;
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
