@@ -10,9 +10,13 @@ use crate::stats::mbps_to_human;
 // Use 8-level block characters for sparklines
 const SPARKLINE_CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// A sparkline widget that can render multiple rows for taller graphs
+/// A sparkline widget that can render multiple rows for taller graphs.
+/// Optionally supports per-sample styles: when `styles` is set, each sample
+/// is drawn in its corresponding style, falling back to the widget-wide
+/// `style` for any out-of-range index.
 pub struct Sparkline<'a> {
     data: &'a [f64],
+    styles: Option<&'a [Style]>,
     max: Option<f64>,
     style: Style,
 }
@@ -21,6 +25,7 @@ impl<'a> Sparkline<'a> {
     pub fn new(data: &'a [f64]) -> Self {
         Self {
             data,
+            styles: None,
             max: None,
             style: Style::default().fg(Color::Green),
         }
@@ -33,6 +38,22 @@ impl<'a> Sparkline<'a> {
 
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Tag each sample with its own style. The length must match `data`. We
+    /// `debug_assert!` rather than relying on the per-cell fallback to mask a
+    /// mismatch silently — a length skew is always a caller bug, not a
+    /// recoverable runtime condition. In release builds we still fall back
+    /// to the widget-wide style for any out-of-range index so a release
+    /// regression doesn't crash the TUI.
+    pub fn styles(mut self, styles: &'a [Style]) -> Self {
+        debug_assert_eq!(
+            styles.len(),
+            self.data.len(),
+            "Sparkline::styles length must match data length",
+        );
+        self.styles = Some(styles);
         self
     }
 }
@@ -51,7 +72,7 @@ impl Widget for Sparkline<'_> {
         let width = area.width as usize;
         let height = area.height as usize;
 
-        // Take the last `width` values
+        // Take the last `width` values, keeping per-sample styles in lockstep.
         let start = data_len.saturating_sub(width);
         let visible_data = &self.data[start..];
 
@@ -65,6 +86,11 @@ impl Widget for Sparkline<'_> {
 
             let x = area.x + i as u16;
 
+            let cell_style = self
+                .styles
+                .and_then(|s| s.get(start + i).copied())
+                .unwrap_or(self.style);
+
             // Render from bottom to top
             for row in 0..height {
                 let y = area.y + (height - 1 - row) as u16;
@@ -72,7 +98,7 @@ impl Widget for Sparkline<'_> {
 
                 if eighths_for_row > 0 {
                     let ch = SPARKLINE_CHARS[eighths_for_row - 1];
-                    buf[(x, y)].set_char(ch).set_style(self.style);
+                    buf[(x, y)].set_char(ch).set_style(cell_style);
                 }
             }
         }
@@ -238,5 +264,47 @@ mod tests {
 
         let bar = ProgressBar::new(-0.5);
         assert_eq!(bar.progress, 0.0);
+    }
+
+    #[test]
+    fn sparkline_per_sample_styles_take_precedence() {
+        // Render four samples into a 4x1 buffer with the third sample tagged
+        // warning-yellow; the other three keep the default green. We assert
+        // foreground color per cell to confirm `styles()` overrides the
+        // widget-wide `style()` for that sample.
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buf = Buffer::empty(area);
+
+        let data = [10.0_f64, 10.0, 10.0, 10.0];
+        let styles = [
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::Yellow),
+            Style::default().fg(Color::Green),
+        ];
+
+        Sparkline::new(&data)
+            .max(10.0)
+            .style(Style::default().fg(Color::Green))
+            .styles(&styles)
+            .render(area, &mut buf);
+
+        assert_eq!(buf[(0, 0)].fg, Color::Green);
+        assert_eq!(buf[(1, 0)].fg, Color::Green);
+        assert_eq!(buf[(2, 0)].fg, Color::Yellow);
+        assert_eq!(buf[(3, 0)].fg, Color::Green);
+    }
+
+    #[test]
+    fn sparkline_falls_back_to_widget_style_when_no_per_sample() {
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        let data = [5.0_f64, 5.0];
+        Sparkline::new(&data)
+            .max(5.0)
+            .style(Style::default().fg(Color::Magenta))
+            .render(area, &mut buf);
+        assert_eq!(buf[(0, 0)].fg, Color::Magenta);
+        assert_eq!(buf[(1, 0)].fg, Color::Magenta);
     }
 }

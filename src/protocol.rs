@@ -184,6 +184,30 @@ impl std::fmt::Display for Direction {
     }
 }
 
+/// Cumulative UDP packet counts, sent on every periodic Interval message so
+/// the client can both derive a live loss percentage and detect that the
+/// server is reporting fresh data (vs. paired with an old server that omits
+/// the field). Counts grow monotonically across the run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct UdpIntervalProgress {
+    pub packets_received: u64,
+    pub packets_lost: u64,
+}
+
+impl UdpIntervalProgress {
+    /// Cumulative loss percent. Returns `None` when no packets have been seen
+    /// yet (denominator zero) so callers can distinguish "no traffic" from a
+    /// real 0.0% reading.
+    pub fn lost_percent(&self) -> Option<f64> {
+        let denom = self.packets_received.saturating_add(self.packets_lost);
+        if denom == 0 {
+            None
+        } else {
+            Some((self.packets_lost as f64 / denom as f64) * 100.0)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamInterval {
     pub id: u8,
@@ -212,6 +236,13 @@ pub struct AggregateInterval {
     pub jitter_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<u64>,
+    /// Cumulative UDP packet-progress snapshot as of this interval (raw
+    /// counts, not a derived percent). Lets the client compute percent itself
+    /// and treat absence as "unknown" for a freshness signal in the TUI; also
+    /// keeps the schema composable for future per-direction loss reporting.
+    /// Pre-0.9.11 servers do not emit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_progress: Option<UdpIntervalProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_us: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

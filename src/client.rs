@@ -134,6 +134,11 @@ pub struct TestProgress {
     pub bytes_received: Option<u64>,
     pub throughput_send_mbps: Option<f64>,
     pub throughput_recv_mbps: Option<f64>,
+    /// Cumulative UDP packet counts as of this interval. `None` means the
+    /// server didn't ship the field (TCP run, no traffic yet, or paired with
+    /// a pre-0.9.11 server). The TUI distinguishes None from a real zero so
+    /// stale/unknown data renders as a freshness signal, not as "no loss".
+    pub udp_progress: Option<crate::protocol::UdpIntervalProgress>,
 }
 
 pub struct Client {
@@ -561,6 +566,7 @@ impl Client {
                                 bytes_received: aggregate.bytes_received,
                                 throughput_send_mbps: aggregate.throughput_send_mbps,
                                 throughput_recv_mbps: aggregate.throughput_recv_mbps,
+                                udp_progress: aggregate.udp_progress,
                             })
                             .await;
                     }
@@ -1368,6 +1374,7 @@ impl Client {
                                 bytes_received: aggregate.bytes_received,
                                 throughput_send_mbps: aggregate.throughput_send_mbps,
                                 throughput_recv_mbps: aggregate.throughput_recv_mbps,
+                                udp_progress: aggregate.udp_progress,
                             })
                             .await;
                     }

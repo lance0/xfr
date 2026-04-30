@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::protocol::{AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpStats};
+use crate::protocol::{
+    AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpIntervalProgress, UdpStats,
+};
 
 /// Maximum number of intervals to keep in history (1 minute at 1-second intervals)
 const MAX_INTERVAL_HISTORY: usize = 60;
@@ -28,6 +30,13 @@ pub struct StreamStats {
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
     pub udp_lost: AtomicU64,      // Total lost packets
     pub last_udp_lost: AtomicU64, // For interval calculation
+    /// Cumulative UDP packets received on this stream — counted only on
+    /// successful header decode (valid xfr packets). Junk/foreign datagrams
+    /// still bump `bytes_received` because they consumed wire bandwidth, but
+    /// must not dilute the loss denominator. Used by the aggregator to
+    /// compute a running loss percentage that matches what the sequence
+    /// tracker actually saw.
+    pub udp_packets_received: AtomicU64,
     /// Raw file descriptor for TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
     /// Final TCP_INFO snapshot captured when the stream task exits.
@@ -49,6 +58,16 @@ pub struct IntervalStats {
     /// single-direction count is already in `bytes`).
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    /// Cumulative UDP packets received on this stream as of this interval's
+    /// snapshot moment. Captured in `record_interval` so the aggregator can
+    /// compute `udp_progress` from a consistent point in time rather than
+    /// re-reading live atomics later (which would attribute packets that
+    /// arrived after the snapshot to the wrong interval).
+    pub cumulative_packets_received: u64,
+    /// Cumulative UDP packets lost on this stream as of this interval's
+    /// snapshot. See `cumulative_packets_received` for why this is captured
+    /// at snapshot time rather than re-loaded from `udp_lost`.
+    pub cumulative_packets_lost: u64,
 }
 
 impl StreamStats {
@@ -68,6 +87,7 @@ impl StreamStats {
             udp_jitter_us: AtomicU64::new(0),
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
+            udp_packets_received: AtomicU64::new(0),
             tcp_info_fd: AtomicI32::new(-1),
             final_tcp_info: Mutex::new(None),
         }
@@ -131,6 +151,12 @@ impl StreamStats {
         self.udp_lost.fetch_add(count, Ordering::Relaxed);
     }
 
+    /// Add to cumulative UDP packets-received count.
+    pub fn add_udp_received(&self, count: u64) {
+        self.udp_packets_received
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
     /// Get current jitter in milliseconds
     pub fn udp_jitter_ms(&self) -> f64 {
         self.udp_jitter_us.load(Ordering::Relaxed) as f64 / 1000.0
@@ -182,11 +208,18 @@ impl StreamStats {
             0.0
         };
 
-        // UDP stats for this interval
+        // UDP stats for this interval. Snapshot the live atomics here, at
+        // the same moment we capture per-interval deltas, and stash them in
+        // `IntervalStats` so the aggregator pulls cumulative counts from a
+        // consistent point in time. Re-reading the atomics later in
+        // `to_aggregate_with_direction` would attribute packets that arrived
+        // between the two reads to the wrong sparkline sample.
         let jitter_ms = self.udp_jitter_ms();
         let total_lost = self.udp_lost.load(Ordering::Relaxed);
         let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
         let interval_lost = total_lost.saturating_sub(last_lost);
+        let cumulative_packets_received = self.udp_packets_received.load(Ordering::Relaxed);
+        let cumulative_packets_lost = total_lost;
 
         // TCP_INFO: live RTT, cwnd, and retransmit deltas
         let tcp_info = self.poll_tcp_info();
@@ -215,6 +248,8 @@ impl StreamStats {
             cwnd: tcp_info.as_ref().map(|t| t.cwnd),
             bytes_sent: interval_bytes_sent,
             bytes_received: interval_bytes_received,
+            cumulative_packets_received,
+            cumulative_packets_lost,
         };
 
         let mut intervals = self.intervals.lock();
@@ -411,6 +446,27 @@ impl TestStats {
             Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
         };
 
+        // Cumulative UDP packet counts across all streams. Read from the
+        // per-stream `IntervalStats` snapshot the caller passed in — same
+        // point in time as the per-interval `lost` count — so the deltas
+        // the client computes between two consecutive `udp_progress`
+        // samples actually correspond to the same window. Sent as raw
+        // counts (not a derived percent) so the client can compute its own
+        // percent and treat absence-of-field as "unknown".
+        let cumulative_received: u64 = intervals
+            .iter()
+            .map(|i| i.cumulative_packets_received)
+            .sum();
+        let cumulative_lost: u64 = intervals.iter().map(|i| i.cumulative_packets_lost).sum();
+        let udp_progress = if cumulative_received > 0 || cumulative_lost > 0 {
+            Some(UdpIntervalProgress {
+                packets_received: cumulative_received,
+                packets_lost: cumulative_lost,
+            })
+        } else {
+            None
+        };
+
         // Average RTT across streams that have TCP_INFO
         let rtt_values: Vec<u32> = intervals.iter().filter_map(|i| i.rtt_us).collect();
         let avg_rtt = if rtt_values.is_empty() {
@@ -440,6 +496,7 @@ impl TestStats {
             } else {
                 None
             },
+            udp_progress,
             rtt_us: avg_rtt,
             cwnd: total_cwnd,
             bytes_sent: split_bytes_sent,

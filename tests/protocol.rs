@@ -2,7 +2,7 @@
 
 use xfr::protocol::{
     AggregateInterval, ControlMessage, Direction, Protocol, StreamInterval, StreamResult,
-    TcpInfoSnapshot, TestResult,
+    TcpInfoSnapshot, TestResult, UdpIntervalProgress,
 };
 
 #[test]
@@ -142,6 +142,7 @@ fn test_interval_message() {
             retransmits: Some(3),
             jitter_ms: None,
             lost: None,
+            udp_progress: None,
             rtt_us: Some(1217),
             cwnd: Some(98303),
             bytes_sent: None,
@@ -204,9 +205,63 @@ fn test_interval_backward_compat() {
             assert!(streams[0].cwnd.is_none());
             assert!(aggregate.rtt_us.is_none());
             assert!(aggregate.cwnd.is_none());
+            assert!(aggregate.udp_progress.is_none());
         }
         _ => panic!("Expected Interval"),
     }
+}
+
+#[test]
+fn test_aggregate_interval_udp_progress_roundtrip() {
+    // Wire-protocol smoke for the v0.9.11 addition. Serializing with
+    // `udp_progress: Some(_)` must include the cumulative counts; the
+    // derived percent is computed by the receiver, not shipped over the
+    // wire. Deserializing a payload without the field yields None so the
+    // client can render an explicit "unknown" state instead of a stale 0%.
+    let agg = AggregateInterval {
+        bytes: 1_000,
+        throughput_mbps: 8.0,
+        retransmits: None,
+        jitter_ms: Some(0.4),
+        lost: Some(5),
+        udp_progress: Some(UdpIntervalProgress {
+            packets_received: 195,
+            packets_lost: 5,
+        }),
+        rtt_us: None,
+        cwnd: None,
+        bytes_sent: None,
+        bytes_received: None,
+        throughput_send_mbps: None,
+        throughput_recv_mbps: None,
+    };
+    let json = serde_json::to_string(&agg).unwrap();
+    assert!(json.contains("\"udp_progress\""));
+    assert!(json.contains("\"packets_received\":195"));
+    assert!(json.contains("\"packets_lost\":5"));
+    let decoded: AggregateInterval = serde_json::from_str(&json).unwrap();
+    let progress = decoded.udp_progress.unwrap();
+    assert_eq!(progress.packets_received, 195);
+    assert_eq!(progress.packets_lost, 5);
+    assert_eq!(progress.lost_percent(), Some(2.5));
+
+    // Old-server payload (no udp_progress) deserializes to None — the TUI
+    // uses this absence to render "--%" instead of a fake 0%.
+    let legacy = r#"{"bytes":1000,"throughput_mbps":8.0,"lost":5}"#;
+    let decoded: AggregateInterval = serde_json::from_str(legacy).unwrap();
+    assert!(decoded.udp_progress.is_none());
+}
+
+#[test]
+fn test_udp_interval_progress_lost_percent_zero_traffic() {
+    // Denominator-zero guard: before any packets are observed, lost_percent
+    // must return None so the TUI can render "--%" rather than report 0%
+    // as if it were a fresh observation.
+    let p = UdpIntervalProgress {
+        packets_received: 0,
+        packets_lost: 0,
+    };
+    assert!(p.lost_percent().is_none());
 }
 
 #[test]

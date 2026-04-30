@@ -23,6 +23,25 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
     }
 }
 
+/// Color a throughput sparkline cell by the per-interval loss rate. Unknown
+/// rate stays primary so we don't fake a signal we don't have; clean
+/// intervals stay primary; light loss (<1%) goes warning, heavy loss
+/// (>=1%) goes error. Thresholds intentionally differ from `loss_color`'s
+/// (cumulative): a per-interval rate of 0.05% in a single second is a
+/// real burst worth tinting, while the same number averaged across an
+/// entire run is healthy. We don't share the green/yellow/red palette
+/// either — the sparkline's "clean" state is the graph color so the
+/// background blends with the chart, not the success-green used in the
+/// stats panel.
+fn loss_severity_color(rate: Option<f64>, theme: &Theme) -> Color {
+    match rate {
+        None => theme.graph_primary,
+        Some(r) if r <= 0.0 => theme.graph_primary,
+        Some(r) if r < 1.0 => theme.warning,
+        Some(_) => theme.error,
+    }
+}
+
 /// Get color for jitter: green (<1ms), yellow (1-10ms), red (>10ms)
 fn jitter_color(jitter_ms: f64, theme: &Theme) -> Color {
     if jitter_ms < 1.0 {
@@ -266,12 +285,23 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     };
     frame.render_widget(throughput_display, sparkline_chunks[0]);
 
-    // Sparkline showing throughput history
+    // Sparkline showing throughput history. Intervals are graded by their
+    // per-interval loss rate so a single-packet hiccup and a heavy drop
+    // burst render distinctly: clean → primary, light loss → warning,
+    // heavy loss → error. When loss magnitude is unknown (TCP run,
+    // pre-0.9.11 server, or first UDP sample) the bar stays primary —
+    // honest "no signal" rather than a misleading tint.
     if !app.throughput_history.is_empty() {
-        let data: Vec<f64> = app.throughput_history.iter().cloned().collect();
+        let data: Vec<f64> = app.throughput_history.iter().map(|s| s.mbps).collect();
+        let styles: Vec<Style> = app
+            .throughput_history
+            .iter()
+            .map(|s| Style::default().fg(loss_severity_color(s.loss_rate_percent(), theme)))
+            .collect();
         let sparkline = Sparkline::new(&data)
             .max(app.max_throughput().max(100.0))
-            .style(Style::default().fg(theme.graph_primary));
+            .style(Style::default().fg(theme.graph_primary))
+            .styles(&styles);
         let sparkline_area = Rect {
             x: sparkline_chunks[1].x,
             y: sparkline_chunks[1].y,
@@ -360,10 +390,21 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         let jd = app.jitter_display();
         let jitter_col = jitter_color(jd.primary, theme);
         let jitter_value = match jd.smoothed {
-            Some(avg) => format!("{:.2} ms (10s: {:.2} ms)", jd.primary, avg),
+            Some(avg) => format!("{:.2} ms (10s avg: {:.2} ms)", jd.primary, avg),
             None => format!("{:.2} ms", jd.primary),
         };
-        let loss_col = loss_color(app.udp_lost_percent, theme);
+        // Loss render distinguishes "fresh 0%" from "no data yet" — None
+        // displays as a dimmed `--%` so users on a pre-0.9.11 server don't
+        // mistake stale silence for clean traffic. The color also drops to
+        // text_dim in that case rather than reusing the success/warning/
+        // error palette, which is reserved for actual measurements.
+        let (loss_text, loss_style) = match app.udp_lost_percent {
+            Some(p) => (
+                format!("{:.1}%", p),
+                Style::default().fg(loss_color(p, theme)),
+            ),
+            None => ("--%".to_string(), Style::default().fg(theme.text_dim)),
+        };
         vec![
             Line::from(vec![
                 Span::styled("Jitter:       ", Style::default().fg(theme.text_dim)),
@@ -371,10 +412,7 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
             ]),
             Line::from(vec![
                 Span::styled("Packet Loss:  ", Style::default().fg(theme.text_dim)),
-                Span::styled(
-                    format!("{:.1}%", app.udp_lost_percent),
-                    Style::default().fg(loss_col),
-                ),
+                Span::styled(loss_text, loss_style),
             ]),
         ]
     } else {

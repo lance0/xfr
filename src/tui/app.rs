@@ -33,6 +33,30 @@ pub struct StreamData {
     pub jitter_ms: Option<f64>,
 }
 
+/// One throughput sparkline sample. The renderer uses `lost_packets`
+/// against `interval_packets` to pick a tint, so a single-packet hiccup
+/// renders distinct from a heavy drop burst instead of collapsing both to
+/// "loss=true". `interval_packets = 0` means we couldn't measure loss
+/// magnitude (no UDP progress yet, or pre-0.9.11 server) and the renderer
+/// falls back to the primary color regardless of `lost_packets`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThroughputSample {
+    pub mbps: f64,
+    pub lost_packets: u64,
+    pub interval_packets: u64,
+}
+
+impl ThroughputSample {
+    /// Per-interval loss rate in percent, or `None` when we can't measure.
+    pub fn loss_rate_percent(&self) -> Option<f64> {
+        if self.interval_packets == 0 {
+            None
+        } else {
+            Some((self.lost_packets as f64 / self.interval_packets as f64) * 100.0)
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -52,7 +76,7 @@ pub struct App {
     pub elapsed: Duration,
     pub total_bytes: u64,
     pub current_throughput_mbps: f64,
-    pub throughput_history: VecDeque<f64>,
+    pub throughput_history: VecDeque<ThroughputSample>,
     // Rolling history of aggregate jitter samples so the TUI can show a
     // smoothed reading instead of the noisy per-second snapshot.
     pub jitter_history: VecDeque<f64>,
@@ -71,7 +95,14 @@ pub struct App {
 
     // UDP stats
     pub udp_jitter_ms: f64,
-    pub udp_lost_percent: f64,
+    /// Cumulative UDP loss percent. `None` when the server hasn't shipped a
+    /// `udp_progress` snapshot yet (TCP run, very early UDP run before any
+    /// packets, or paired with a pre-0.9.11 server). The TUI renders `--%`
+    /// in that case so unknown is visually distinct from a real 0.0%
+    /// observation — preserving "last known value" silently would let a
+    /// pre-0.9.11 server display a misleading 0% reading next to actual
+    /// loss bursts in the sparkline.
+    pub udp_lost_percent: Option<f64>,
     pub udp_packets_sent: u64,
     pub udp_packets_lost: u64,
 
@@ -98,6 +129,11 @@ pub struct App {
     peak_throughput_mbps: f64,
     prev_retransmits: u64,
     prev_udp_lost: u64,
+    /// Last cumulative `udp_progress` snapshot, kept so each new Interval
+    /// can compute the per-interval delta (lost_packets / total_packets) for
+    /// the throughput sparkline severity tint. None before the first UDP
+    /// progress arrives.
+    prev_udp_progress: Option<crate::protocol::UdpIntervalProgress>,
 
     // Update notification
     pub update_available: Option<String>,
@@ -161,7 +197,7 @@ impl App {
             cwnd: 0,
 
             udp_jitter_ms: 0.0,
-            udp_lost_percent: 0.0,
+            udp_lost_percent: None,
             udp_packets_sent: 0,
             udp_packets_lost: 0,
 
@@ -185,6 +221,7 @@ impl App {
             peak_throughput_mbps: 0.0,
             prev_retransmits: 0,
             prev_udp_lost: 0,
+            prev_udp_progress: None,
 
             update_available: None,
             server_version: None,
@@ -332,12 +369,6 @@ impl App {
             self.throughput_recv_mbps = tr;
         }
 
-        // Update sparkline history
-        self.throughput_history.push_back(progress.throughput_mbps);
-        if self.throughput_history.len() > SPARKLINE_HISTORY {
-            self.throughput_history.pop_front();
-        }
-
         // Update stream data
         // Intervals are sent every second, so throughput = bytes * 8 / 1_000_000
         let mut total_jitter = 0.0;
@@ -361,6 +392,40 @@ impl App {
             if let Some(lost) = interval.lost {
                 total_lost += lost;
             }
+        }
+
+        // Update sparkline history. Tag the sample with the per-interval
+        // packet/loss delta so the renderer can grade severity (clean,
+        // light loss, heavy loss) instead of collapsing all loss to a flat
+        // yellow bar. Deltas come from the cumulative `udp_progress` we
+        // track between intervals; if the server didn't send progress yet
+        // we publish zeros and the renderer treats that as "magnitude
+        // unknown" and stays primary-colored.
+        let (interval_packets, interval_lost) =
+            match (progress.udp_progress, self.prev_udp_progress) {
+                (Some(curr), Some(prev)) => {
+                    let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
+                    let received = curr.packets_received.saturating_sub(prev.packets_received);
+                    (received.saturating_add(lost), lost)
+                }
+                // First udp_progress sample (or no progress at all). Don't
+                // treat cumulative-since-test-start as a single interval's
+                // delta — a delayed first progress (control-channel stall,
+                // or a server that batched several intervals) would
+                // otherwise paint one bar with multi-interval loss.
+                // Baseline silently; real deltas start from sample 2.
+                _ => (0, 0),
+            };
+        self.throughput_history.push_back(ThroughputSample {
+            mbps: progress.throughput_mbps,
+            lost_packets: interval_lost,
+            interval_packets,
+        });
+        if self.throughput_history.len() > SPARKLINE_HISTORY {
+            self.throughput_history.pop_front();
+        }
+        if let Some(curr) = progress.udp_progress {
+            self.prev_udp_progress = Some(curr);
         }
 
         // Use local TCP_INFO retransmits when available (sender-side), otherwise sum from server
@@ -388,6 +453,20 @@ impl App {
             }
         }
         self.udp_packets_lost = total_lost;
+
+        // Live UDP loss percent. Derived locally from the server's cumulative
+        // packet counts so absence-of-progress (None) is distinguishable from
+        // a real 0.0% reading; the renderer turns None into "--%" instead of
+        // pretending zero. Once `udp_progress` arrives at least once, we keep
+        // the last derived value when subsequent intervals omit it (e.g. a
+        // TCP path momentarily not reporting UDP), but a session that never
+        // sees a `udp_progress` (pre-0.9.11 server) stays None for the whole
+        // run — the unknown state we want users to see.
+        if let Some(progress) = progress.udp_progress
+            && let Some(p) = progress.lost_percent()
+        {
+            self.udp_lost_percent = Some(p);
+        }
 
         // Track average throughput
         if progress.throughput_mbps > 0.0 {
@@ -443,7 +522,7 @@ impl App {
         }
         if let Some(udp_stats) = &result.udp_stats {
             self.udp_jitter_ms = udp_stats.jitter_ms;
-            self.udp_lost_percent = udp_stats.lost_percent;
+            self.udp_lost_percent = Some(udp_stats.lost_percent);
             self.udp_packets_sent = udp_stats.packets_sent;
             self.udp_packets_lost = udp_stats.lost;
         }
@@ -534,7 +613,7 @@ impl App {
     pub fn max_throughput(&self) -> f64 {
         self.throughput_history
             .iter()
-            .cloned()
+            .map(|s| s.mbps)
             .fold(0.0f64, f64::max)
     }
 
@@ -800,6 +879,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            udp_progress: None,
         });
 
         assert_eq!(
@@ -837,5 +917,143 @@ mod tests {
             "elapsed should be ~2s (wall-clock 5s minus 3s pause), got {:?}",
             elapsed
         );
+    }
+
+    fn make_progress(
+        throughput_mbps: f64,
+        udp_progress: Option<crate::protocol::UdpIntervalProgress>,
+    ) -> crate::client::TestProgress {
+        crate::client::TestProgress {
+            elapsed_ms: 1000,
+            total_bytes: 0,
+            throughput_mbps,
+            streams: vec![],
+            rtt_us: None,
+            cwnd: None,
+            total_retransmits: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            udp_progress,
+        }
+    }
+
+    #[test]
+    fn on_progress_derives_lost_percent_from_udp_progress() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        app.on_progress(make_progress(
+            50.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 197,
+                packets_lost: 3,
+            }),
+        ));
+        // 3 / (197 + 3) = 1.5%
+        assert_eq!(app.udp_lost_percent, Some(1.5));
+    }
+
+    #[test]
+    fn on_progress_with_no_udp_progress_keeps_unknown() {
+        // Cross-version compat: a pre-0.9.11 server never ships
+        // `udp_progress`, so the TUI must stay at "unknown" for the run
+        // rather than silently displaying a stale 0.0% next to actual
+        // loss bursts in the sparkline.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        app.on_progress(make_progress(50.0, None));
+        app.on_progress(make_progress(50.0, None));
+        assert_eq!(app.udp_lost_percent, None);
+    }
+
+    #[test]
+    fn on_progress_preserves_last_percent_when_progress_drops_out() {
+        // Once a real reading lands, an interval that omits `udp_progress`
+        // (rare but possible mid-test) must not clobber the last-known
+        // percent — that would produce a flicker between a real value and
+        // unknown that mid-run users would find more confusing than
+        // helpful. Initial unknown still stays unknown until the first
+        // real sample.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        app.on_progress(make_progress(
+            50.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 195,
+                packets_lost: 5,
+            }),
+        ));
+        assert_eq!(app.udp_lost_percent, Some(2.5));
+        app.on_progress(make_progress(50.0, None));
+        assert_eq!(app.udp_lost_percent, Some(2.5));
+    }
+
+    #[test]
+    fn throughput_sample_records_per_interval_loss() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        // First interval baselines silently — magnitude unknown, renderer
+        // stays primary-colored. Without this, a delayed first progress
+        // (control-channel stall, batched intervals) would paint one bar
+        // with multi-interval loss as if it were a single 1s burst.
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1000,
+                packets_lost: 0,
+            }),
+        ));
+        let baseline = app.throughput_history.back().copied().unwrap();
+        assert_eq!(baseline.mbps, 100.0);
+        assert_eq!(baseline.interval_packets, 0);
+        assert_eq!(baseline.loss_rate_percent(), None);
+
+        // Second interval: +500 received, 0 lost — clean.
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1500,
+                packets_lost: 0,
+            }),
+        ));
+        let clean = app.throughput_history.back().copied().unwrap();
+        assert_eq!(clean.lost_packets, 0);
+        assert_eq!(clean.loss_rate_percent(), Some(0.0));
+
+        // Third interval: +800 received, +200 lost — heavy loss (20%).
+        app.on_progress(make_progress(
+            80.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 2300,
+                packets_lost: 200,
+            }),
+        ));
+        let lossy = app.throughput_history.back().copied().unwrap();
+        assert_eq!(lossy.mbps, 80.0);
+        assert_eq!(lossy.lost_packets, 200);
+        assert_eq!(lossy.loss_rate_percent(), Some(20.0));
+    }
+
+    #[test]
+    fn throughput_sample_loss_rate_unknown_without_progress() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        // No udp_progress on this Interval — magnitude unknown, renderer
+        // must fall back to primary (graph) color rather than fake a tint.
+        app.on_progress(make_progress(50.0, None));
+        let s = app.throughput_history.back().copied().unwrap();
+        assert_eq!(s.interval_packets, 0);
+        assert_eq!(s.loss_rate_percent(), None);
     }
 }
