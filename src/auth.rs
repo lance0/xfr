@@ -2,8 +2,8 @@
 //!
 //! Implements challenge-response authentication using HMAC-SHA256.
 
-use hmac::{Hmac, Mac};
-use rand::Rng;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::RngExt;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;

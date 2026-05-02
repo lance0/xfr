@@ -233,7 +233,7 @@ pub async fn send_udp_paced(
 
     let mut packet = vec![0u8; packet_size];
     if random_payload {
-        rand::Rng::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
+        rand::RngExt::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
     }
 
     loop {
@@ -323,7 +323,7 @@ async fn send_udp_unlimited(
     let is_infinite = duration == Duration::ZERO;
     let mut packet = vec![0u8; packet_size];
     if random_payload {
-        rand::Rng::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
+        rand::RngExt::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
     }
 
     debug!("UDP unlimited mode: sending as fast as possible");
