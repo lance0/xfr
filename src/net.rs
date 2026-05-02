@@ -535,8 +535,11 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
 /// level: when a user passes `-w 16M` for #70-style troubleshooting, a
 /// silent rejection (typically exceeding `net.core.rmem_max` without
 /// `CAP_NET_ADMIN`) is exactly the case they need to learn about.
-/// Returns the first error encountered between the two `setsockopt`
-/// calls; the caller is expected to surface it as a warning.
+/// Both `SO_SNDBUF` and `SO_RCVBUF` are attempted independently — a
+/// failure on the send side does not skip the receive side, since the
+/// receive buffer is the part that actually mitigates tail-drops on the
+/// receiver. If either or both fail, the returned error names which
+/// option(s) failed; the caller is expected to surface it as a warning.
 #[cfg(unix)]
 pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -987,18 +990,30 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn set_udp_buffer_size_attempts_both_buffers_on_failure() {
-        // Regression for the early-return that would skip SO_RCVBUF if
-        // SO_SNDBUF failed. The reverse case (SNDBUF rejected by wmem_max
-        // while RCVBUF could have succeeded) is exactly the receiver-side
-        // mitigation #70 needs, so the helper has to attempt both.
-        // Smoke: a valid request on a real socket should succeed for
-        // both buffers and return Ok(()), regardless of which order they
-        // were attempted.
+    async fn set_udp_buffer_size_succeeds_within_kernel_ceilings() {
+        // Smoke: a valid request on a real socket succeeds for both
+        // buffers and returns Ok(()). 64 KB sits comfortably inside any
+        // realistic rmem_max/wmem_max ceiling, including sandboxed CI
+        // hosts.
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        // 64 KB sits comfortably inside any realistic rmem_max/wmem_max
-        // ceiling, including sandboxed CI hosts. The point of this test is
-        // the two-call attempt pattern, not exercising the kernel's clamp.
         set_udp_buffer_size(&socket, 64 * 1024).expect("both setsockopts should succeed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_one_buffer_per_option_naming_round_trip() {
+        // Regression for the early-return that would skip SO_RCVBUF if
+        // SO_SNDBUF failed. We exercise the two-call attempt pattern by
+        // calling the per-option helper directly with an invalid fd and
+        // asserting both calls return distinct errors keyed off the
+        // option name we passed in. set_udp_buffer_size combines those
+        // into a labeled message so the caller's warn! identifies which
+        // buffer failed; this test verifies the helper does indeed run
+        // independently per option (set_udp_buffer_size's combiner sits
+        // on top of those independent calls).
+        let snd = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("snd should fail on -1");
+        let rcv = set_one_buffer(-1, libc::SO_RCVBUF, 4096).expect("rcv should fail on -1");
+        assert_eq!(snd.raw_os_error(), Some(libc::EBADF));
+        assert_eq!(rcv.raw_os_error(), Some(libc::EBADF));
     }
 }

@@ -372,7 +372,7 @@ xfr reads defaults from:
 duration_secs = 10
 parallel_streams = 1
 tcp_nodelay = false
-window_size = "1M"           # TCP window size (e.g., "512K", "2M")
+window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
 json_output = false
 no_tui = false
 theme = "default"            # or dracula, catppuccin, nord, matrix, etc.
@@ -455,7 +455,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--no-tui` | | false | Disable TUI |
 | `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
-| `--window` | `-w` | OS default | TCP window size; when unset, kernel autotunes |
+| `--window` | `-w` | OS default | Socket buffer size for TCP and UDP (SO_SNDBUF/SO_RCVBUF on both ends); when unset, TCP autotunes and UDP uses the kernel default |
 | `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
@@ -559,12 +559,13 @@ Ensure the server is running and the port is not blocked by a firewall. TCP only
 
 - Try multiple parallel streams: `-P 4`
 - Disable Nagle's algorithm: `--tcp-nodelay`
-- Increase TCP window size: `--window 4M`
+- Increase TCP socket buffer: `--window 4M`
 
 ### UDP packet loss
 
 - Reduce bitrate: `-b 500M`
 - Check for network congestion or firewall issues
+- If the receiver may be CPU-bound or its kernel UDP buffer is small, increase `--window` (e.g. `-w 16M`) — `-w` applies to UDP `SO_SNDBUF`/`SO_RCVBUF` and propagates to the server, helping high-rate flows avoid kernel tail-drops that hide as live `0.0%` loss
 
 ## Documentation
 
