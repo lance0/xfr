@@ -29,6 +29,27 @@
 - Run `cargo clippy --all-features` and fix any warnings
 - Keep lines under 100 characters when possible
 
+### Pre-commit hooks
+
+We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and `cargo clippy`
+on every commit and `cargo test --lib` on every push. Set it up once:
+
+```bash
+# Recommended: prek (fast Rust port, drop-in compatible)
+cargo install --locked prek
+prek install
+
+# Or via standalone installer (no Rust toolchain needed)
+curl -LsSf https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+
+# Or with the original Python pre-commit
+pipx install pre-commit
+pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+After install, hooks run automatically. To run them manually against staged
+files: `prek run` (or `pre-commit run`).
+
 ## Testing
 
 ```bash
