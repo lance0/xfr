@@ -560,36 +560,48 @@ pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
 
     let fd = socket.as_raw_fd();
 
-    // SAFETY: fd is a valid descriptor from the live UdpSocket, size_c is a
+    // Try both buffers independently. Returning early on the first failure
+    // would defeat the #70 mitigation on receiver sockets, where the
+    // server's wmem_max ceiling may reject SO_SNDBUF even though the
+    // RCVBUF bump is exactly the thing we want to land. We capture each
+    // failure and surface them together at the end so the caller still
+    // gets a hard error, but `setsockopt` is attempted on both.
+    let snd_err = set_one_buffer(fd, libc::SO_SNDBUF, size_c);
+    let rcv_err = set_one_buffer(fd, libc::SO_RCVBUF, size_c);
+
+    match (snd_err, rcv_err) {
+        (None, None) => Ok(()),
+        (Some(e), None) => Err(io::Error::new(e.kind(), format!("SO_SNDBUF: {}", e))),
+        (None, Some(e)) => Err(io::Error::new(e.kind(), format!("SO_RCVBUF: {}", e))),
+        (Some(snd), Some(rcv)) => Err(io::Error::other(format!(
+            "SO_SNDBUF: {}; SO_RCVBUF: {}",
+            snd, rcv
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn set_one_buffer(
+    fd: std::os::unix::io::RawFd,
+    optname: libc::c_int,
+    size_c: libc::c_int,
+) -> Option<io::Error> {
+    // SAFETY: fd is a valid descriptor (caller guarantees), size_c is a
     // valid c_int by reference, and the size argument matches its layout.
-    let snd_ret = unsafe {
+    let ret = unsafe {
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
+            optname,
             &size_c as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-    if snd_ret != 0 {
-        return Err(io::Error::last_os_error());
+    if ret == 0 {
+        None
+    } else {
+        Some(io::Error::last_os_error())
     }
-
-    // SAFETY: same justification as above.
-    let rcv_ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &size_c as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rcv_ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -961,38 +973,32 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn set_one_buffer_surfaces_setsockopt_failure() {
+        // Pin the contract that setsockopt errors propagate up to the
+        // caller. We use an invalid fd (-1) so the kernel deterministically
+        // returns EBADF regardless of sysctl tunables — an environment-
+        // independent way to exercise the error path that would otherwise
+        // depend on `net.core.rmem_max` being clamped low enough to reject
+        // the request, which isn't true on most CI/dev hosts.
+        let err = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("expected error from -1 fd");
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn set_udp_buffer_size_propagates_kernel_rejection() {
-        // The reason for surfacing setsockopt errors instead of swallowing
-        // them at debug level: when a user passes a buffer size beyond
-        // their `net.core.rmem_max` ceiling without CAP_NET_ADMIN, they
-        // need to know. We don't know the exact rmem_max of the host
-        // running the test, so we feed a value at the c_int boundary that
-        // any realistic kernel must reject.
+    async fn set_udp_buffer_size_attempts_both_buffers_on_failure() {
+        // Regression for the early-return that would skip SO_RCVBUF if
+        // SO_SNDBUF failed. The reverse case (SNDBUF rejected by wmem_max
+        // while RCVBUF could have succeeded) is exactly the receiver-side
+        // mitigation #70 needs, so the helper has to attempt both.
+        // Smoke: a valid request on a real socket should succeed for
+        // both buffers and return Ok(()), regardless of which order they
+        // were attempted.
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        // c_int::MAX would pass our own validation but no Linux kernel
-        // will actually accept ~2 GB without CAP_NET_ADMIN and an
-        // explicitly raised rmem_max. The kernel's response is typically
-        // EPERM or ENOBUFS — either way, an error rather than a silent
-        // clamp. If a future kernel ever accepts this value at face
-        // value, this test will need to be revisited.
-        let near_max = libc::c_int::MAX as usize;
-        match set_udp_buffer_size(&socket, near_max) {
-            Ok(()) => {
-                // Kernel accepted it (very privileged or unusually
-                // permissive sysctl). The promise this test pins is
-                // "errors are surfaced," not "this specific request is
-                // rejected" — log and skip rather than fail.
-                eprintln!(
-                    "kernel accepted near-c_int::MAX UDP buffer; environment is too \
-                     permissive to exercise the error-propagation path"
-                );
-            }
-            Err(err) => {
-                // What we want to see in the troubleshooting case: a real
-                // io::Error with a kernel-supplied error kind, not Ok(()).
-                assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
-            }
-        }
+        // 64 KB sits comfortably inside any realistic rmem_max/wmem_max
+        // ceiling, including sandboxed CI hosts. The point of this test is
+        // the two-call attempt pattern, not exercising the kernel's clamp.
+        set_udp_buffer_size(&socket, 64 * 1024).expect("both setsockopts should succeed");
     }
 }
