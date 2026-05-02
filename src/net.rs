@@ -543,7 +543,33 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
 #[cfg(unix)]
 pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    set_udp_buffer_size_with(size, |opt, size_c| set_one_buffer(fd, opt, size_c))
+}
 
+/// Validate-and-orchestrate core for [`set_udp_buffer_size`], with the
+/// per-option `setsockopt` call factored out as a closure. Production
+/// callers go through [`set_udp_buffer_size`] which plugs in the real
+/// `set_one_buffer`. Tests pass a fake closure to exercise partial-
+/// failure paths (one option succeeds, the other fails) without
+/// depending on kernel sysctls.
+#[cfg(unix)]
+fn set_udp_buffer_size_with<F>(size: usize, mut set: F) -> io::Result<()>
+where
+    F: FnMut(libc::c_int, libc::c_int) -> Option<io::Error>,
+{
+    let size_c = validate_udp_buffer_size(size)?;
+    // Try both buffers independently. Returning early on the first failure
+    // would defeat the #70 mitigation on receiver sockets, where the
+    // server's wmem_max ceiling may reject SO_SNDBUF even though the
+    // RCVBUF bump is exactly the thing we want to land.
+    let snd_err = set(libc::SO_SNDBUF, size_c);
+    let rcv_err = set(libc::SO_RCVBUF, size_c);
+    combine_udp_buffer_errors(snd_err, rcv_err)
+}
+
+#[cfg(unix)]
+fn validate_udp_buffer_size(size: usize) -> io::Result<libc::c_int> {
     let size_c = libc::c_int::try_from(size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -560,19 +586,12 @@ pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
             "window size must be greater than zero",
         ));
     }
+    Ok(size_c)
+}
 
-    let fd = socket.as_raw_fd();
-
-    // Try both buffers independently. Returning early on the first failure
-    // would defeat the #70 mitigation on receiver sockets, where the
-    // server's wmem_max ceiling may reject SO_SNDBUF even though the
-    // RCVBUF bump is exactly the thing we want to land. We capture each
-    // failure and surface them together at the end so the caller still
-    // gets a hard error, but `setsockopt` is attempted on both.
-    let snd_err = set_one_buffer(fd, libc::SO_SNDBUF, size_c);
-    let rcv_err = set_one_buffer(fd, libc::SO_RCVBUF, size_c);
-
-    match (snd_err, rcv_err) {
+#[cfg(unix)]
+fn combine_udp_buffer_errors(snd: Option<io::Error>, rcv: Option<io::Error>) -> io::Result<()> {
+    match (snd, rcv) {
         (None, None) => Ok(()),
         (Some(e), None) => Err(io::Error::new(e.kind(), format!("SO_SNDBUF: {}", e))),
         (None, Some(e)) => Err(io::Error::new(e.kind(), format!("SO_RCVBUF: {}", e))),
@@ -1006,11 +1025,120 @@ mod tests {
         // surfaces whatever error the kernel returned, regardless of
         // which option (`SO_SNDBUF` or `SO_RCVBUF`) was passed in.
         // Independence between the two calls in the public API is
-        // visible at the call site in `set_udp_buffer_size` and isn't
-        // what this unit test is pinning.
+        // verified separately via `set_udp_buffer_size_with` and the
+        // fake-setter tests below.
         let snd = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("snd should fail on -1");
         let rcv = set_one_buffer(-1, libc::SO_RCVBUF, 4096).expect("rcv should fail on -1");
         assert_eq!(snd.raw_os_error(), Some(libc::EBADF));
         assert_eq!(rcv.raw_os_error(), Some(libc::EBADF));
+    }
+
+    // The four tests below exercise the public-API contract via the
+    // injectable `set_udp_buffer_size_with` core. The fake setter records
+    // every (option, size) tuple it was invoked with and returns whatever
+    // error pattern the test selected, so we can assert the actual
+    // behavior that matters for #70: SNDBUF failing must not skip RCVBUF,
+    // and the returned error has to identify which option(s) failed so
+    // the caller's `warn!` is actionable.
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_sndbuf_failure_still_attempts_rcvbuf() {
+        // The exact regression #70 cared about: the helper must keep
+        // going even after SO_SNDBUF returns an error, so the receive-
+        // buffer bump (which is what actually mitigates kernel
+        // tail-drops on the receiver) lands.
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<libc::c_int>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_for_closure = calls.clone();
+        let setter = move |opt: libc::c_int, _sz: libc::c_int| -> Option<io::Error> {
+            calls_for_closure.borrow_mut().push(opt);
+            if opt == libc::SO_SNDBUF {
+                Some(io::Error::from_raw_os_error(libc::ENOBUFS))
+            } else {
+                None
+            }
+        };
+
+        let result = set_udp_buffer_size_with(64 * 1024, setter);
+        let err = result.expect_err("SNDBUF failure must surface as Err");
+        let recorded = calls.borrow();
+        assert_eq!(
+            *recorded,
+            vec![libc::SO_SNDBUF, libc::SO_RCVBUF],
+            "RCVBUF must still be attempted after SNDBUF failure",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_SNDBUF"),
+            "error must name SO_SNDBUF: {msg}"
+        );
+        assert!(
+            !msg.contains("SO_RCVBUF"),
+            "error must NOT name SO_RCVBUF when only SNDBUF failed: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_rcvbuf_failure_reports_rcvbuf_only() {
+        let setter = move |opt: libc::c_int, _sz: libc::c_int| -> Option<io::Error> {
+            if opt == libc::SO_RCVBUF {
+                Some(io::Error::from_raw_os_error(libc::ENOBUFS))
+            } else {
+                None
+            }
+        };
+
+        let err = set_udp_buffer_size_with(64 * 1024, setter)
+            .expect_err("RCVBUF failure must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_RCVBUF"),
+            "error must name SO_RCVBUF: {msg}"
+        );
+        assert!(
+            !msg.contains("SO_SNDBUF"),
+            "error must NOT name SO_SNDBUF when only RCVBUF failed: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_both_failures_combine_into_one_error() {
+        let setter =
+            |_opt: libc::c_int, _sz: libc::c_int| Some(io::Error::from_raw_os_error(libc::EPERM));
+
+        let err = set_udp_buffer_size_with(64 * 1024, setter)
+            .expect_err("dual failure must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_SNDBUF") && msg.contains("SO_RCVBUF"),
+            "combined error must name both options: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_both_success_returns_ok_and_attempts_both() {
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_for_closure = calls.clone();
+        let setter = move |opt: libc::c_int, sz: libc::c_int| -> Option<io::Error> {
+            calls_for_closure.borrow_mut().push((opt, sz));
+            None
+        };
+
+        let result = set_udp_buffer_size_with(64 * 1024, setter);
+        assert!(result.is_ok(), "no failure must produce Ok");
+        let recorded = calls.borrow();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "exactly two setsockopt calls expected, got {}",
+            recorded.len()
+        );
+        assert_eq!(recorded[0].0, libc::SO_SNDBUF);
+        assert_eq!(recorded[1].0, libc::SO_RCVBUF);
+        assert_eq!(recorded[0].1, 64 * 1024);
+        assert_eq!(recorded[1].1, 64 * 1024);
     }
 }
