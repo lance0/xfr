@@ -520,6 +520,118 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
     Ok(())
 }
 
+/// Apply `-w`/`--window` to a UDP socket via `SO_SNDBUF`/`SO_RCVBUF`.
+///
+/// Sets both buffers to the same size for symmetry with the existing TCP
+/// path (`tcp::configure_socket_buffers`). On UDP this is more impactful
+/// than on TCP — bumping the receiver's buffer is the primary way to
+/// avoid kernel tail-drops on high-rate flows where the recv loop can't
+/// drain fast enough (issue #70 follow-up).
+///
+/// `size` is validated up front: it must fit in `c_int` and be positive,
+/// otherwise the kernel would reject or wrap the request silently.
+///
+/// `setsockopt` failures bubble up rather than getting swallowed at debug
+/// level: when a user passes `-w 16M` for #70-style troubleshooting, a
+/// silent rejection (typically exceeding `net.core.rmem_max` without
+/// `CAP_NET_ADMIN`) is exactly the case they need to learn about.
+/// Both `SO_SNDBUF` and `SO_RCVBUF` are attempted independently — a
+/// failure on the send side does not skip the receive side, since the
+/// receive buffer is the part that actually mitigates tail-drops on the
+/// receiver. If either or both fail, the returned error names which
+/// option(s) failed; the caller is expected to surface it as a warning.
+#[cfg(unix)]
+pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    set_udp_buffer_size_with(size, |opt, size_c| set_one_buffer(fd, opt, size_c))
+}
+
+/// Validate-and-orchestrate core for [`set_udp_buffer_size`], with the
+/// per-option `setsockopt` call factored out as a closure. Production
+/// callers go through [`set_udp_buffer_size`] which plugs in the real
+/// `set_one_buffer`. Tests pass a fake closure to exercise partial-
+/// failure paths (one option succeeds, the other fails) without
+/// depending on kernel sysctls.
+#[cfg(unix)]
+fn set_udp_buffer_size_with<F>(size: usize, mut set: F) -> io::Result<()>
+where
+    F: FnMut(libc::c_int, libc::c_int) -> Option<io::Error>,
+{
+    let size_c = validate_udp_buffer_size(size)?;
+    // Try both buffers independently. Returning early on the first failure
+    // would defeat the #70 mitigation on receiver sockets, where the
+    // server's wmem_max ceiling may reject SO_SNDBUF even though the
+    // RCVBUF bump is exactly the thing we want to land.
+    let snd_err = set(libc::SO_SNDBUF, size_c);
+    let rcv_err = set(libc::SO_RCVBUF, size_c);
+    combine_udp_buffer_errors(snd_err, rcv_err)
+}
+
+#[cfg(unix)]
+fn validate_udp_buffer_size(size: usize) -> io::Result<libc::c_int> {
+    let size_c = libc::c_int::try_from(size).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "window size {} exceeds platform maximum ({} bytes)",
+                size,
+                libc::c_int::MAX
+            ),
+        )
+    })?;
+    if size_c <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "window size must be greater than zero",
+        ));
+    }
+    Ok(size_c)
+}
+
+#[cfg(unix)]
+fn combine_udp_buffer_errors(snd: Option<io::Error>, rcv: Option<io::Error>) -> io::Result<()> {
+    match (snd, rcv) {
+        (None, None) => Ok(()),
+        (Some(e), None) => Err(io::Error::new(e.kind(), format!("SO_SNDBUF: {}", e))),
+        (None, Some(e)) => Err(io::Error::new(e.kind(), format!("SO_RCVBUF: {}", e))),
+        (Some(snd), Some(rcv)) => Err(io::Error::other(format!(
+            "SO_SNDBUF: {}; SO_RCVBUF: {}",
+            snd, rcv
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn set_one_buffer(
+    fd: std::os::unix::io::RawFd,
+    optname: libc::c_int,
+    size_c: libc::c_int,
+) -> Option<io::Error> {
+    // SAFETY: fd is a valid descriptor (caller guarantees), size_c is a
+    // valid c_int by reference, and the size argument matches its layout.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            optname,
+            &size_c as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret == 0 {
+        None
+    } else {
+        Some(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+pub fn set_udp_buffer_size(_socket: &UdpSocket, _size: usize) -> io::Result<()> {
+    tracing::warn!("UDP --window is not supported on this platform");
+    Ok(())
+}
+
 /// Set IPv6 flow label on a socket (Linux only)
 #[cfg(target_os = "linux")]
 pub fn set_flow_label(socket: &Socket, flow_label: u32) -> io::Result<()> {
@@ -801,5 +913,232 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_udp_buffer_size_rejects_zero_and_overflow() {
+        // Validation must reject zero and `usize` values that don't fit in
+        // c_int up front, so the kernel never sees a wrapped or negative
+        // size. Otherwise setsockopt could silently misapply a huge request
+        // as a tiny one (or vice versa) and leave only a debug-level trace
+        // of the fallout.
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let err = set_udp_buffer_size(&socket, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        let oversized = (libc::c_int::MAX as usize).saturating_add(1);
+        let err = set_udp_buffer_size(&socket, oversized).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn set_udp_buffer_size_actually_grows_socket_buffers() {
+        // Verify that a reasonable buffer-size request lands on the kernel,
+        // not just succeeds in our own validation. Linux doubles the
+        // requested value when reporting back via getsockopt (per
+        // socket(7)) and clamps to `net.core.rmem_max`/`wmem_max`, so we
+        // assert the readback exceeds the default rather than equals our
+        // request — the request must have *increased* the buffer.
+        use std::os::unix::io::AsRawFd;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fd = socket.as_raw_fd();
+
+        let read_buf = |which: libc::c_int| -> libc::c_int {
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: fd is valid for the lifetime of socket; value/len
+            // outlive the call; size matches c_int layout.
+            let ret = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    which,
+                    &mut value as *mut _ as *mut libc::c_void,
+                    &mut len,
+                )
+            };
+            assert_eq!(ret, 0, "getsockopt failed");
+            value
+        };
+
+        let baseline_rcv = read_buf(libc::SO_RCVBUF);
+        let baseline_snd = read_buf(libc::SO_SNDBUF);
+
+        // Request roughly twice the default. Some sandboxed CI hosts ship
+        // very low `rmem_max` ceilings (e.g. 256 KB), so an unconditional
+        // 4 MB request would be rejected by the kernel and our error-
+        // bubbling helper would surface that as a hard failure. Doubling
+        // the existing default is well within any reasonable ceiling and
+        // still proves the helper actually moves the kernel-side value.
+        let target = (baseline_rcv.max(baseline_snd) as usize).saturating_mul(2);
+        set_udp_buffer_size(&socket, target).unwrap();
+
+        let new_rcv = read_buf(libc::SO_RCVBUF);
+        let new_snd = read_buf(libc::SO_SNDBUF);
+
+        assert!(
+            new_rcv > baseline_rcv,
+            "SO_RCVBUF didn't grow: {} → {}",
+            baseline_rcv,
+            new_rcv
+        );
+        assert!(
+            new_snd > baseline_snd,
+            "SO_SNDBUF didn't grow: {} → {}",
+            baseline_snd,
+            new_snd
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_one_buffer_surfaces_setsockopt_failure() {
+        // Pin the contract that setsockopt errors propagate up to the
+        // caller. We use an invalid fd (-1) so the kernel deterministically
+        // returns EBADF regardless of sysctl tunables — an environment-
+        // independent way to exercise the error path that would otherwise
+        // depend on `net.core.rmem_max` being clamped low enough to reject
+        // the request, which isn't true on most CI/dev hosts.
+        let err = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("expected error from -1 fd");
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_udp_buffer_size_succeeds_within_kernel_ceilings() {
+        // Smoke: a valid request on a real socket succeeds for both
+        // buffers and returns Ok(()). 64 KB sits comfortably inside any
+        // realistic rmem_max/wmem_max ceiling, including sandboxed CI
+        // hosts.
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        set_udp_buffer_size(&socket, 64 * 1024).expect("both setsockopts should succeed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_one_buffer_returns_kernel_error_for_each_option() {
+        // Confirms the helper runs `setsockopt` once per call and
+        // surfaces whatever error the kernel returned, regardless of
+        // which option (`SO_SNDBUF` or `SO_RCVBUF`) was passed in.
+        // Independence between the two calls in the public API is
+        // verified separately via `set_udp_buffer_size_with` and the
+        // fake-setter tests below.
+        let snd = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("snd should fail on -1");
+        let rcv = set_one_buffer(-1, libc::SO_RCVBUF, 4096).expect("rcv should fail on -1");
+        assert_eq!(snd.raw_os_error(), Some(libc::EBADF));
+        assert_eq!(rcv.raw_os_error(), Some(libc::EBADF));
+    }
+
+    // The four tests below exercise the public-API contract via the
+    // injectable `set_udp_buffer_size_with` core. The fake setter records
+    // every (option, size) tuple it was invoked with and returns whatever
+    // error pattern the test selected, so we can assert the actual
+    // behavior that matters for #70: SNDBUF failing must not skip RCVBUF,
+    // and the returned error has to identify which option(s) failed so
+    // the caller's `warn!` is actionable.
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_sndbuf_failure_still_attempts_rcvbuf() {
+        // The exact regression #70 cared about: the helper must keep
+        // going even after SO_SNDBUF returns an error, so the receive-
+        // buffer bump (which is what actually mitigates kernel
+        // tail-drops on the receiver) lands.
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<libc::c_int>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_for_closure = calls.clone();
+        let setter = move |opt: libc::c_int, _sz: libc::c_int| -> Option<io::Error> {
+            calls_for_closure.borrow_mut().push(opt);
+            if opt == libc::SO_SNDBUF {
+                Some(io::Error::from_raw_os_error(libc::ENOBUFS))
+            } else {
+                None
+            }
+        };
+
+        let result = set_udp_buffer_size_with(64 * 1024, setter);
+        let err = result.expect_err("SNDBUF failure must surface as Err");
+        let recorded = calls.borrow();
+        assert_eq!(
+            *recorded,
+            vec![libc::SO_SNDBUF, libc::SO_RCVBUF],
+            "RCVBUF must still be attempted after SNDBUF failure",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_SNDBUF"),
+            "error must name SO_SNDBUF: {msg}"
+        );
+        assert!(
+            !msg.contains("SO_RCVBUF"),
+            "error must NOT name SO_RCVBUF when only SNDBUF failed: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_rcvbuf_failure_reports_rcvbuf_only() {
+        let setter = move |opt: libc::c_int, _sz: libc::c_int| -> Option<io::Error> {
+            if opt == libc::SO_RCVBUF {
+                Some(io::Error::from_raw_os_error(libc::ENOBUFS))
+            } else {
+                None
+            }
+        };
+
+        let err = set_udp_buffer_size_with(64 * 1024, setter)
+            .expect_err("RCVBUF failure must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_RCVBUF"),
+            "error must name SO_RCVBUF: {msg}"
+        );
+        assert!(
+            !msg.contains("SO_SNDBUF"),
+            "error must NOT name SO_SNDBUF when only RCVBUF failed: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_both_failures_combine_into_one_error() {
+        let setter =
+            |_opt: libc::c_int, _sz: libc::c_int| Some(io::Error::from_raw_os_error(libc::EPERM));
+
+        let err = set_udp_buffer_size_with(64 * 1024, setter)
+            .expect_err("dual failure must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SO_SNDBUF") && msg.contains("SO_RCVBUF"),
+            "combined error must name both options: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setter_both_success_returns_ok_and_attempts_both() {
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_for_closure = calls.clone();
+        let setter = move |opt: libc::c_int, sz: libc::c_int| -> Option<io::Error> {
+            calls_for_closure.borrow_mut().push((opt, sz));
+            None
+        };
+
+        let result = set_udp_buffer_size_with(64 * 1024, setter);
+        assert!(result.is_ok(), "no failure must produce Ok");
+        let recorded = calls.borrow();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "exactly two setsockopt calls expected, got {}",
+            recorded.len()
+        );
+        assert_eq!(recorded[0].0, libc::SO_SNDBUF);
+        assert_eq!(recorded[1].0, libc::SO_RCVBUF);
+        assert_eq!(recorded[0].1, 64 * 1024);
+        assert_eq!(recorded[1].1, 64 * 1024);
     }
 }
