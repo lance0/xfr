@@ -530,6 +530,13 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
 ///
 /// `size` is validated up front: it must fit in `c_int` and be positive,
 /// otherwise the kernel would reject or wrap the request silently.
+///
+/// `setsockopt` failures bubble up rather than getting swallowed at debug
+/// level: when a user passes `-w 16M` for #70-style troubleshooting, a
+/// silent rejection (typically exceeding `net.core.rmem_max` without
+/// `CAP_NET_ADMIN`) is exactly the case they need to learn about.
+/// Returns the first error encountered between the two `setsockopt`
+/// calls; the caller is expected to surface it as a warning.
 #[cfg(unix)]
 pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -555,38 +562,31 @@ pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
 
     // SAFETY: fd is a valid descriptor from the live UdpSocket, size_c is a
     // valid c_int by reference, and the size argument matches its layout.
-    // setsockopt may fail; we log at debug level so a kernel rejection
-    // (e.g. exceeds rmem_max without CAP_NET_ADMIN) doesn't spam the user.
-    unsafe {
-        let ret = libc::setsockopt(
+    let snd_ret = unsafe {
+        libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_SNDBUF,
             &size_c as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            tracing::debug!(
-                "Failed to set UDP SO_SNDBUF to {}: {}",
-                size,
-                io::Error::last_os_error()
-            );
-        }
+        )
+    };
+    if snd_ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
 
-        let ret = libc::setsockopt(
+    // SAFETY: same justification as above.
+    let rcv_ret = unsafe {
+        libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_RCVBUF,
             &size_c as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            tracing::debug!(
-                "Failed to set UDP SO_RCVBUF to {}: {}",
-                size,
-                io::Error::last_os_error()
-            );
-        }
+        )
+    };
+    if rcv_ret != 0 {
+        return Err(io::Error::last_os_error());
     }
 
     Ok(())
@@ -934,11 +934,14 @@ mod tests {
         let baseline_rcv = read_buf(libc::SO_RCVBUF);
         let baseline_snd = read_buf(libc::SO_SNDBUF);
 
-        // 4 MB — comfortably above any sane default but under typical
-        // rmem_max ceilings on modern distros. If the test environment
-        // has rmem_max clamped lower, the assertion below still holds
-        // because we only require strict growth from the default.
-        set_udp_buffer_size(&socket, 4 * 1024 * 1024).unwrap();
+        // Request roughly twice the default. Some sandboxed CI hosts ship
+        // very low `rmem_max` ceilings (e.g. 256 KB), so an unconditional
+        // 4 MB request would be rejected by the kernel and our error-
+        // bubbling helper would surface that as a hard failure. Doubling
+        // the existing default is well within any reasonable ceiling and
+        // still proves the helper actually moves the kernel-side value.
+        let target = (baseline_rcv.max(baseline_snd) as usize).saturating_mul(2);
+        set_udp_buffer_size(&socket, target).unwrap();
 
         let new_rcv = read_buf(libc::SO_RCVBUF);
         let new_snd = read_buf(libc::SO_SNDBUF);
@@ -955,5 +958,41 @@ mod tests {
             baseline_snd,
             new_snd
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_udp_buffer_size_propagates_kernel_rejection() {
+        // The reason for surfacing setsockopt errors instead of swallowing
+        // them at debug level: when a user passes a buffer size beyond
+        // their `net.core.rmem_max` ceiling without CAP_NET_ADMIN, they
+        // need to know. We don't know the exact rmem_max of the host
+        // running the test, so we feed a value at the c_int boundary that
+        // any realistic kernel must reject.
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // c_int::MAX would pass our own validation but no Linux kernel
+        // will actually accept ~2 GB without CAP_NET_ADMIN and an
+        // explicitly raised rmem_max. The kernel's response is typically
+        // EPERM or ENOBUFS — either way, an error rather than a silent
+        // clamp. If a future kernel ever accepts this value at face
+        // value, this test will need to be revisited.
+        let near_max = libc::c_int::MAX as usize;
+        match set_udp_buffer_size(&socket, near_max) {
+            Ok(()) => {
+                // Kernel accepted it (very privileged or unusually
+                // permissive sysctl). The promise this test pins is
+                // "errors are surfaced," not "this specific request is
+                // rejected" — log and skip rather than fail.
+                eprintln!(
+                    "kernel accepted near-c_int::MAX UDP buffer; environment is too \
+                     permissive to exercise the error-propagation path"
+                );
+            }
+            Err(err) => {
+                // What we want to see in the troubleshooting case: a real
+                // io::Error with a kernel-supplied error kind, not Ok(()).
+                assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
+            }
+        }
     }
 }

@@ -236,7 +236,9 @@ struct Cli {
     #[arg(long, value_name = "VALUE")]
     dscp: Option<String>,
 
-    /// TCP window size (e.g., 512K, 1M). When unset, the kernel autotunes.
+    /// Socket buffer size for TCP (SO_SNDBUF/SO_RCVBUF) and UDP
+    /// (SO_SNDBUF/SO_RCVBUF on both ends), e.g., 512K, 1M, 16M. When
+    /// unset, TCP uses kernel autotuning and UDP uses the kernel default.
     #[arg(short = 'w', long, value_parser = parse_size)]
     window: Option<usize>,
 
