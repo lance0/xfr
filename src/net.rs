@@ -1001,16 +1001,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn set_one_buffer_per_option_naming_round_trip() {
-        // Regression for the early-return that would skip SO_RCVBUF if
-        // SO_SNDBUF failed. We exercise the two-call attempt pattern by
-        // calling the per-option helper directly with an invalid fd and
-        // asserting both calls return distinct errors keyed off the
-        // option name we passed in. set_udp_buffer_size combines those
-        // into a labeled message so the caller's warn! identifies which
-        // buffer failed; this test verifies the helper does indeed run
-        // independently per option (set_udp_buffer_size's combiner sits
-        // on top of those independent calls).
+    fn set_one_buffer_returns_kernel_error_for_each_option() {
+        // Confirms the helper runs `setsockopt` once per call and
+        // surfaces whatever error the kernel returned, regardless of
+        // which option (`SO_SNDBUF` or `SO_RCVBUF`) was passed in.
+        // Independence between the two calls in the public API is
+        // visible at the call site in `set_udp_buffer_size` and isn't
+        // what this unit test is pinning.
         let snd = set_one_buffer(-1, libc::SO_SNDBUF, 4096).expect("snd should fail on -1");
         let rcv = set_one_buffer(-1, libc::SO_RCVBUF, 4096).expect("rcv should fail on -1");
         assert_eq!(snd.raw_os_error(), Some(libc::EBADF));
