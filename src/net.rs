@@ -520,6 +520,84 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
     Ok(())
 }
 
+/// Apply `-w`/`--window` to a UDP socket via `SO_SNDBUF`/`SO_RCVBUF`.
+///
+/// Sets both buffers to the same size for symmetry with the existing TCP
+/// path (`tcp::configure_socket_buffers`). On UDP this is more impactful
+/// than on TCP — bumping the receiver's buffer is the primary way to
+/// avoid kernel tail-drops on high-rate flows where the recv loop can't
+/// drain fast enough (issue #70 follow-up).
+///
+/// `size` is validated up front: it must fit in `c_int` and be positive,
+/// otherwise the kernel would reject or wrap the request silently.
+#[cfg(unix)]
+pub fn set_udp_buffer_size(socket: &UdpSocket, size: usize) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let size_c = libc::c_int::try_from(size).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "window size {} exceeds platform maximum ({} bytes)",
+                size,
+                libc::c_int::MAX
+            ),
+        )
+    })?;
+    if size_c <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "window size must be greater than zero",
+        ));
+    }
+
+    let fd = socket.as_raw_fd();
+
+    // SAFETY: fd is a valid descriptor from the live UdpSocket, size_c is a
+    // valid c_int by reference, and the size argument matches its layout.
+    // setsockopt may fail; we log at debug level so a kernel rejection
+    // (e.g. exceeds rmem_max without CAP_NET_ADMIN) doesn't spam the user.
+    unsafe {
+        let ret = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &size_c as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            tracing::debug!(
+                "Failed to set UDP SO_SNDBUF to {}: {}",
+                size,
+                io::Error::last_os_error()
+            );
+        }
+
+        let ret = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &size_c as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            tracing::debug!(
+                "Failed to set UDP SO_RCVBUF to {}: {}",
+                size,
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn set_udp_buffer_size(_socket: &UdpSocket, _size: usize) -> io::Result<()> {
+    tracing::warn!("UDP --window is not supported on this platform");
+    Ok(())
+}
+
 /// Set IPv6 flow label on a socket (Linux only)
 #[cfg(target_os = "linux")]
 pub fn set_flow_label(socket: &Socket, flow_label: u32) -> io::Result<()> {
@@ -801,5 +879,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_udp_buffer_size_rejects_zero_and_overflow() {
+        // Validation must reject zero and `usize` values that don't fit in
+        // c_int up front, so the kernel never sees a wrapped or negative
+        // size. Otherwise setsockopt could silently misapply a huge request
+        // as a tiny one (or vice versa) and leave only a debug-level trace
+        // of the fallout.
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let err = set_udp_buffer_size(&socket, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        let oversized = (libc::c_int::MAX as usize).saturating_add(1);
+        let err = set_udp_buffer_size(&socket, oversized).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn set_udp_buffer_size_actually_grows_socket_buffers() {
+        // Verify that a reasonable buffer-size request lands on the kernel,
+        // not just succeeds in our own validation. Linux doubles the
+        // requested value when reporting back via getsockopt (per
+        // socket(7)) and clamps to `net.core.rmem_max`/`wmem_max`, so we
+        // assert the readback exceeds the default rather than equals our
+        // request — the request must have *increased* the buffer.
+        use std::os::unix::io::AsRawFd;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fd = socket.as_raw_fd();
+
+        let read_buf = |which: libc::c_int| -> libc::c_int {
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: fd is valid for the lifetime of socket; value/len
+            // outlive the call; size matches c_int layout.
+            let ret = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    which,
+                    &mut value as *mut _ as *mut libc::c_void,
+                    &mut len,
+                )
+            };
+            assert_eq!(ret, 0, "getsockopt failed");
+            value
+        };
+
+        let baseline_rcv = read_buf(libc::SO_RCVBUF);
+        let baseline_snd = read_buf(libc::SO_SNDBUF);
+
+        // 4 MB — comfortably above any sane default but under typical
+        // rmem_max ceilings on modern distros. If the test environment
+        // has rmem_max clamped lower, the assertion below still holds
+        // because we only require strict growth from the default.
+        set_udp_buffer_size(&socket, 4 * 1024 * 1024).unwrap();
+
+        let new_rcv = read_buf(libc::SO_RCVBUF);
+        let new_snd = read_buf(libc::SO_SNDBUF);
+
+        assert!(
+            new_rcv > baseline_rcv,
+            "SO_RCVBUF didn't grow: {} → {}",
+            baseline_rcv,
+            new_rcv
+        );
+        assert!(
+            new_snd > baseline_snd,
+            "SO_SNDBUF didn't grow: {} → {}",
+            baseline_snd,
+            new_snd
+        );
     }
 }

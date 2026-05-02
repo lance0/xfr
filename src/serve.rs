@@ -1793,12 +1793,22 @@ async fn run_test(
             (None, Some(rx))
         }
         Protocol::Udp => {
+            // Apply the client's `-w` to each receive socket. Without this,
+            // high-rate UDP runs against weak/loaded receivers can saturate
+            // the kernel UDP buffer and cause silent tail drops that don't
+            // surface as sequence-gap loss until traffic stops (issue #70).
+            let udp_buffer = client_window_to_host(client_window_size);
             for _ in 0..streams {
                 let socket = if let Some(ip) = bind_addr {
                     net::create_udp_socket_bound(SocketAddr::new(ip, 0)).await?
                 } else {
                     net::create_udp_socket(0, address_family).await?
                 };
+                if let Some(size) = udp_buffer
+                    && let Err(e) = net::set_udp_buffer_size(&socket, size)
+                {
+                    warn!("Failed to set UDP buffer size to {}: {}", size, e);
+                }
                 data_ports.push(socket.local_addr()?.port());
                 debug!("UDP port {} allocated", data_ports.last().unwrap());
                 udp_sockets.push(Arc::new(socket));

@@ -925,6 +925,7 @@ impl Client {
             let random_payload = self.config.random_payload;
             let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
             let dscp = self.config.dscp;
+            let window_size = self.config.window_size;
 
             handles.push(tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
@@ -960,6 +961,17 @@ impl Client {
                     && let Err(e) = net::set_tos_on_udp(&socket, tos)
                 {
                     warn!("Failed to set IP_TOS on UDP socket: {}", e);
+                }
+
+                // Apply -w / --window to the UDP socket. Symmetric with the
+                // server side; primarily affects SO_SNDBUF on the sender so
+                // a fast client doesn't block on a small kernel send queue
+                // when the network can absorb the traffic. Set both buffers
+                // to keep the bidir path consistent.
+                if let Some(size) = window_size
+                    && let Err(e) = net::set_udp_buffer_size(&socket, size)
+                {
+                    warn!("Failed to set UDP buffer size to {}: {}", size, e);
                 }
 
                 match direction {
