@@ -350,7 +350,7 @@ pub async fn send_data(
     };
     let mut buffer = vec![0u8; buf_size];
     if config.random_payload {
-        rand::Rng::fill(&mut rand::rng(), buffer.as_mut_slice());
+        rand::RngExt::fill(&mut rand::rng(), buffer.as_mut_slice());
     }
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
@@ -643,7 +643,7 @@ pub async fn send_data_half(
     };
     let mut buffer = vec![0u8; buf_size];
     if config.random_payload {
-        rand::Rng::fill(&mut rand::rng(), buffer.as_mut_slice());
+        rand::RngExt::fill(&mut rand::rng(), buffer.as_mut_slice());
     }
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
