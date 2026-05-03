@@ -18,7 +18,7 @@
 #   1. Apply `tc netem rate 50mbit delay 50ms` to lo so loopback
 #      simulates a constrained Wi-Fi-like link with realistic ACK
 #      turnaround.
-#   2. Run a 5-second UDP test at 100 Mbps target — saturates the
+#   2. Run an 8-second UDP test at 100 Mbps target — saturates the
 #      shaper, the same way brettowe's default 1 Gbps over 100 Mbps
 #      Wi-Fi did.
 #   3. Capture --json-stream output and assert that every interval
@@ -79,10 +79,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== Applying tc netem on lo (${SHAPER_RATE}, 50ms each-way delay) ==="
+# Idempotent setup: drop any pre-existing root qdisc first so a
+# rerun (after a previously-interrupted test, or when another job
+# has shaped lo) doesn't fail with "File exists". The cleanup trap
+# at end-of-run also tears it down.
 # limit 10000 picks a queue size large enough that the test doesn't
 # itself trip rate-limit drops on the shaper — we want saturation
 # pressure on TCP control, not test failure from netem dropping our
 # test packets.
+tc qdisc del dev lo root 2>/dev/null || true
 tc qdisc add dev lo root netem rate "$SHAPER_RATE" delay 50ms limit 10000
 tc qdisc show dev lo
 
@@ -99,8 +104,12 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
 fi
 
 echo "=== Running ${DURATION}s UDP test at ${TARGET_BITRATE} target ==="
+# --timestamp-format relative pins the json-stream "timestamp" field to
+# a numeric seconds-since-test-start string, regardless of any
+# XFR_TIMESTAMP_FORMAT env var or config-file default that would
+# otherwise format as ISO 8601 / Unix epoch and break the awk parser.
 "$XFR" 127.0.0.1 -p "$PORT" -u -b "$TARGET_BITRATE" -t "${DURATION}sec" \
-    --no-tui --json-stream >"$OUT" 2>&1 || {
+    --no-tui --json-stream --timestamp-format relative >"$OUT" 2>&1 || {
     rc=$?
     echo "ERROR: xfr client exited with code $rc. Output:" >&2
     cat "$OUT" >&2
@@ -122,12 +131,22 @@ echo "=== Asserting no control-channel bunching ==="
 # the same kernel read). The actual bug shows 3+ lines sharing a single
 # timestamp, which this assertion specifically targets.
 #
-# Skip the startup line (elapsed_secs ~0.001 — emitted on connect
+# Skip the startup line (elapsed_secs near 0 — emitted on connect
 # before any data has been exchanged) since it's always isolated in
-# time regardless of Nagle behavior.
+# time regardless of Nagle behavior. Use a numeric threshold rather
+# than a string match: the startup line's elapsed_secs is
+# `elapsed_ms / 1000.0` and can render as 0.0, 0.001, 0.002 etc.
+# depending on host timing. Anything below 0.5 is the startup line;
+# real intervals start at 1.0+.
+#
+# `|| true` keeps the pipeline from short-circuiting under set -e
+# when grep finds no matches — the explicit empty-check below is
+# how we want a "no interval lines" failure surfaced.
 INTERVAL_LINES=$(
-    grep -oE '"timestamp":"[0-9.]+","elapsed_secs":[0-9.]+' "$OUT" |
-        awk -F'[":,]+' '$5 != "0.001" { print $3 }'
+    {
+        grep -oE '"timestamp":"[0-9.]+","elapsed_secs":[0-9.]+' "$OUT" |
+            awk -F'[":,]+' '($5 + 0) >= 0.5 { print $3 }'
+    } || true
 )
 
 if [[ -z "$INTERVAL_LINES" ]]; then
