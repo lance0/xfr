@@ -62,6 +62,18 @@ jobs:
       - name: Run MPTCP namespace tests
         run: sudo ./test-mptcp-ns.sh --ci
 
+  control-channel-skew:
+    name: Control-channel skew (#70 regression)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Verify TCP_NODELAY on control channel under saturated link
+        run: sudo ./test-control-channel-skew.sh
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
