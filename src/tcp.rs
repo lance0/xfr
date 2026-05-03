@@ -306,6 +306,29 @@ pub fn configure_stream(stream: &TcpStream, config: &TcpConfig) -> std::io::Resu
     Ok(())
 }
 
+/// Configure the control-channel TCP stream.
+///
+/// Control writes are tiny (~150-byte newline-delimited JSON messages) and
+/// emitted at low cadence (~1 Hz for periodic Interval updates, plus
+/// asynchronous control messages like Cancel/Pause/Hello/Result). With the
+/// kernel's default Nagle behavior, those writes get coalesced waiting for
+/// either an MSS-sized payload (which never arrives) or a delayed ACK from
+/// the peer. Under heavy parallel data load on a saturated link — Wi-Fi,
+/// any rate-limited path, even a busy LAN — the ACK turnaround climbs and
+/// Nagle holds the small writes for the duration of the test, then flushes
+/// every queued segment in a single burst at end-of-test. The resulting
+/// bunched timestamps on the receiving side made the v0.9.11 live UDP loss
+/// counter appear permanently stuck at 0.0% on real-world networks even
+/// though the data path was working correctly (#70 follow-up).
+///
+/// Setting `TCP_NODELAY` defeats this. iperf3 does the same on its control
+/// channel for the same reason. Data-stream sockets are configured
+/// separately via [`configure_stream`] using the user-facing
+/// `--tcp-nodelay` flag.
+pub fn configure_control_stream(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nodelay(true)
+}
+
 /// Send data as fast as possible for the given duration
 /// Returns the final TCP_INFO snapshot (for RTT, retransmits, cwnd)
 pub async fn send_data(
@@ -869,6 +892,32 @@ mod tests {
         assert!(
             config.window_size.is_none(),
             "default must not force SO_SNDBUF/SO_RCVBUF — leave it to the kernel"
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_control_stream_sets_tcp_nodelay() {
+        // Pin the contract that the control channel disables Nagle. Without
+        // this, ~150-byte interval messages get coalesced waiting for an
+        // ACK, and on a saturated link the ACK turnaround stretches such
+        // that the entire test's worth of progress messages flush in one
+        // burst at end-of-test (#70 follow-up). Reproducible on any link
+        // type, not just Wi-Fi.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, _server) = tokio::join!(connect, accept);
+        let client = client.unwrap();
+
+        // Default Tokio TCP streams inherit kernel default (Nagle on);
+        // configure_control_stream must flip it.
+        configure_control_stream(&client).expect("set_nodelay should succeed");
+        assert!(
+            client
+                .nodelay()
+                .expect("getsockopt(TCP_NODELAY) should succeed"),
+            "control stream must have TCP_NODELAY enabled after configure_control_stream"
         );
     }
 

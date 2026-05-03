@@ -230,6 +230,9 @@ impl Client {
         // prior peer's string forward into the TUI display.
         *self.server_version.lock() = None;
 
+        if let Err(e) = tcp::configure_control_stream(&stream) {
+            warn!("Failed to set TCP_NODELAY on control stream: {}", e);
+        }
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
