@@ -298,8 +298,14 @@ fn spawn_udp_feedback_consumer(
                             .await;
                     }
                 }
-                _ = cancel.changed() => {
-                    if *cancel.borrow() {
+                result = cancel.changed() => {
+                    // Treat sender-dropped (Err) as cancel: without this
+                    // guard, a panic in the parent task would drop the
+                    // watch sender, every subsequent cancel.changed()
+                    // call would return Err immediately, and *borrow()
+                    // would observe the last-known `false`, busy-looping
+                    // through the select! arm forever.
+                    if result.is_err() || *cancel.borrow() {
                         break;
                     }
                 }
