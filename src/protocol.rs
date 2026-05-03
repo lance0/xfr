@@ -38,6 +38,15 @@
 //!   │<─────── Result ───────────────│
 //!   │                               │
 //! ```
+//!
+//! For UDP tests, when both peers advertise the `udp_feedback_v1`
+//! capability, an out-of-band 36-byte receiver-progress packet flows
+//! server→client at 2 Hz on the data UDP socket alongside the periodic
+//! `Interval` messages on the control channel. The wire format and
+//! framing live in [`crate::udp::UdpFeedbackPacket`]; the capability
+//! check helper is [`capability_advertised`]. This sidesteps TCP
+//! control for live UDP loss visibility under upload-mode saturation
+//! (issue #70).
 
 use serde::{Deserialize, Serialize};
 
@@ -188,7 +197,7 @@ impl std::fmt::Display for Direction {
 /// the client can both derive a live loss percentage and detect that the
 /// server is reporting fresh data (vs. paired with an old server that omits
 /// the field). Counts grow monotonically across the run.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct UdpIntervalProgress {
     pub packets_received: u64,
     pub packets_lost: u64,
@@ -408,20 +417,49 @@ impl std::fmt::Display for TimestampFormat {
     }
 }
 
+/// Capability strings advertised in client and server hello messages.
+/// Both peers must list a string here for the corresponding feature to
+/// be active in the session. Adding a new capability is wire-additive:
+/// older peers simply don't see it in the other side's hello and fall
+/// back to the prior behavior.
+pub const SUPPORTED_CAPABILITIES: &[&str] = &[
+    "tcp",
+    "udp",
+    "quic",
+    "multistream",
+    "single_port_tcp",
+    "pause_resume",
+    // v0.9.14: server emits cumulative receiver loss back to client over
+    // UDP at 2 Hz when both peers advertise this. Sidesteps TCP control
+    // for live UDP-loss visibility under upload-mode saturation.
+    "udp_feedback_v1",
+];
+
+fn supported_capabilities() -> Vec<String> {
+    SUPPORTED_CAPABILITIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Returns true if the peer's hello capability vec includes
+/// `udp_feedback_v1`. Used by the server to decide whether to spawn
+/// the feedback emission task and by the client to decide whether to
+/// run the feedback receive task.
+pub fn capability_advertised(capabilities: &Option<Vec<String>>, name: &str) -> bool {
+    capabilities
+        .as_ref()
+        .map(|caps| caps.iter().any(|c| c == name))
+        .unwrap_or(false)
+}
+
 impl ControlMessage {
     pub fn client_hello() -> Self {
         ControlMessage::Hello {
             version: PROTOCOL_VERSION.to_string(),
             client: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
             server: None,
-            capabilities: Some(vec![
-                "tcp".to_string(),
-                "udp".to_string(),
-                "quic".to_string(),
-                "multistream".to_string(),
-                "single_port_tcp".to_string(),
-                "pause_resume".to_string(),
-            ]),
+            capabilities: Some(supported_capabilities()),
             auth: None,
         }
     }
@@ -431,14 +469,7 @@ impl ControlMessage {
             version: PROTOCOL_VERSION.to_string(),
             client: None,
             server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
-            capabilities: Some(vec![
-                "tcp".to_string(),
-                "udp".to_string(),
-                "quic".to_string(),
-                "multistream".to_string(),
-                "single_port_tcp".to_string(),
-                "pause_resume".to_string(),
-            ]),
+            capabilities: Some(supported_capabilities()),
             auth: None,
         }
     }
@@ -448,14 +479,7 @@ impl ControlMessage {
             version: PROTOCOL_VERSION.to_string(),
             client: None,
             server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
-            capabilities: Some(vec![
-                "tcp".to_string(),
-                "udp".to_string(),
-                "quic".to_string(),
-                "multistream".to_string(),
-                "single_port_tcp".to_string(),
-                "pause_resume".to_string(),
-            ]),
+            capabilities: Some(supported_capabilities()),
             auth: Some(AuthChallenge {
                 method: "psk".to_string(),
                 nonce,

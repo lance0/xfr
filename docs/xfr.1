@@ -1,4 +1,4 @@
-.TH XFR 1 "April 2026" "xfr 0.9.10" "User Commands"
+.TH XFR 1 "May 2026" "xfr 0.9.14" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -268,6 +268,38 @@ Compare results, fail if throughput drops more than 5%
 .TP
 .B xfr discover
 Find xfr servers on the local network via mDNS
+.SH PROTOCOL
+.PP
+.B xfr
+servers and clients using protocol v1.1 exchange capability strings during the
+.B Hello
+handshake (protocol v1.1). A feature activates only when both peers advertise its capability; older peers fall back to prior behavior, so adding a capability is wire-additive.
+.TP
+.B tcp
+Peer supports TCP tests.
+.TP
+.B udp
+Peer supports UDP tests.
+.TP
+.B quic
+Peer supports QUIC tests.
+.TP
+.B multistream
+Peer supports multiple parallel streams.
+.TP
+.B single_port_tcp
+All TCP data streams multiplex over the single control port. Servers fall back to per-stream ephemeral ports for clients that don't advertise this.
+.TP
+.B pause_resume
+The
+.B p
+key in the TUI (or a control message in scripted mode) pauses and resumes the test mid-run.
+.TP
+.B udp_feedback_v1
+Server emits 36-byte cumulative
+.I (packets_received, packets_lost)
+feedback packets back to the client at 2 Hz on the same UDP data socket, sidestepping the TCP control channel for live UDP-loss visibility under upload-mode saturation (issue #70). Available v0.9.14+. Capability negotiation gates emission so older clients never see a packet they don't understand.
+
 .SH SIGNALS
 .TP
 .B SIGINT (Ctrl+C)

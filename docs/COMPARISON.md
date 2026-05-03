@@ -23,6 +23,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **LAN discovery** | `xfr discover` (mDNS) | No | No | No | No |
 | **Config file** | Yes (TOML) | No | No | No | No |
 | **TCP/UDP bitrate pacing** | Yes (`-b`, kernel FQ pacing on Linux) | Yes (`-b`) | Yes (`-b`) | No | ? |
+| **Live UDP loss under saturation** | Yes (`udp_feedback_v1`, 2 Hz on data socket; bypasses TCP control) | No (rides TCP control; bunches under load) | No | No | ? |
 | **Congestion control selection** | Yes (`--congestion`) | Yes (`--congestion`) | Yes (`-Z`) | No | ? |
 | **PSK authentication** | Yes | Yes | No | No | ? |
 | **Capability negotiation** | Yes (protocol v1.1) | No | No | No | ? |
@@ -30,6 +31,12 @@ A comparison of xfr with other network bandwidth testing tools.
 | **Slow-loris protection** | Yes | No | No | No | ? |
 | **Language** | Rust | C | C | Rust | Rust |
 | **Active development** | Yes | Maintenance | Yes | Yes | Yes |
+
+The "Live UDP loss under saturation" row refers to xfr's TUI live Packet Loss
+counter and the freshness of UDP loss values. Non-TUI interval formats
+(`--json-stream`, `--csv`, and plain text) still emit rows on TCP control
+`Interval` arrival, so row cadence can bunch under extreme loss even when the
+printed loss value reflects fresher `udp_feedback_v1` data.
 
 ## For iperf3 Users
 

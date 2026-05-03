@@ -139,6 +139,175 @@ pub struct TestProgress {
     /// a pre-0.9.11 server). The TUI distinguishes None from a real zero so
     /// stale/unknown data renders as a freshness signal, not as "no loss".
     pub udp_progress: Option<crate::protocol::UdpIntervalProgress>,
+    /// True when this update was synthesized from a UDP-receiver-feedback
+    /// path (server emitted cumulative counts back over UDP at 2 Hz under
+    /// the `udp_feedback_v1` capability) rather than from a TCP control
+    /// `Interval` message. Consumers should update only `udp_progress` /
+    /// derived loss state and preserve all other field values from the
+    /// most recent full interval — the feedback-only update knows nothing
+    /// about throughput, byte counts, retransmits, RTT, or jitter.
+    pub udp_feedback_only: bool,
+}
+
+/// Producer-side monotonic-denominator filter. Both the TCP control
+/// `udp_progress` decode path and the UDP feedback aggregator route
+/// updates through this so a delayed TCP `Interval` message can never
+/// clobber a fresher feedback reading (or vice versa). Both paths
+/// report cumulative monotonic counts from the same `StreamStats`
+/// atomics on the server, so last-monotonic-write-wins is correct.
+///
+/// This also rejects an injected feedback packet that carries a lower
+/// count than what we've seen — a minor anti-spoofing property.
+pub struct UdpProgressFilter {
+    max_denominator: std::sync::atomic::AtomicU64,
+}
+
+impl UdpProgressFilter {
+    pub fn new() -> Self {
+        Self {
+            max_denominator: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Returns `Some(progress)` if the cumulative `(received + lost)`
+    /// denominator is at-least-as-fresh as anything we've seen before;
+    /// `None` to reject the update as stale.
+    ///
+    /// Uses `fetch_update` for an atomic compare-and-swap rather than a
+    /// load/store pair: two producers (TCP control decode site and the
+    /// UDP feedback aggregator) can race here, and a load-compare-store
+    /// can let the *lower* denominator win the store after the higher
+    /// one already committed, which would re-admit a later stale update
+    /// and weaken the freshness guarantee. `fetch_update` retries until
+    /// the CAS succeeds, so the post-condition is "no smaller value
+    /// ever overwrites a larger one."
+    pub fn apply(
+        &self,
+        progress: crate::protocol::UdpIntervalProgress,
+    ) -> Option<crate::protocol::UdpIntervalProgress> {
+        let denom = progress
+            .packets_received
+            .saturating_add(progress.packets_lost);
+        let result = self.max_denominator.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| {
+                if denom >= current { Some(denom) } else { None }
+            },
+        );
+        match result {
+            Ok(_) => Some(progress),
+            Err(_) => None,
+        }
+    }
+}
+
+impl Default for UdpProgressFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-test, per-stream UDP feedback aggregator. Each
+/// `udp::receive_udp_feedback_only` task owns one slot (indexed by
+/// stream_id) and writes its latest cumulative `(received, lost)`
+/// snapshot whenever a feedback packet decodes. A 1 Hz consumer task
+/// reads all slots, sums them into a single `UdpIntervalProgress`,
+/// applies the producer-side filter, and emits a feedback-only
+/// `TestProgress` to consumers.
+pub type UdpFeedbackAggregator = Arc<Mutex<Vec<crate::protocol::UdpIntervalProgress>>>;
+
+/// Spawn the per-test UDP-feedback consumer task. Once per second it
+/// snapshots all per-stream feedback slots, sums them into a single
+/// cumulative aggregate, runs it through the producer-side monotonic
+/// filter, and sends a feedback-only `TestProgress` to consumers (TUI,
+/// plain-text, JSON-stream). Exits when `cancel` becomes true.
+///
+/// The 1 Hz cadence matches the existing TCP-control interval cadence,
+/// so consumers don't see double the update rate. The 2 Hz wire
+/// cadence on the server emission side is the redundancy buffer for
+/// dropped feedback packets — the consumer task always reads the
+/// freshest slot and ignores the rest.
+fn spawn_udp_feedback_consumer(
+    aggregator: UdpFeedbackAggregator,
+    filter: Arc<UdpProgressFilter>,
+    progress_tx: Option<mpsc::Sender<TestProgress>>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let Some(tx) = progress_tx else {
+        // No consumer to feed — skip the task entirely.
+        return;
+    };
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        // Skip stale ticks. Cumulative counts make the next tick
+        // self-correcting; redelivering a backlog of stale snapshots
+        // helps no one.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let aggregate = {
+                        let slots = aggregator.lock();
+                        let mut total = crate::protocol::UdpIntervalProgress {
+                            packets_received: 0,
+                            packets_lost: 0,
+                        };
+                        for s in slots.iter() {
+                            total.packets_received =
+                                total.packets_received.saturating_add(s.packets_received);
+                            total.packets_lost =
+                                total.packets_lost.saturating_add(s.packets_lost);
+                        }
+                        total
+                    };
+                    // Skip empty aggregates — the consumer task starts
+                    // before any feedback packet has arrived, and an
+                    // all-zero update would mask a real prior value
+                    // already in TUI state.
+                    if aggregate.packets_received == 0 && aggregate.packets_lost == 0 {
+                        continue;
+                    }
+                    if let Some(filtered) = filter.apply(aggregate) {
+                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        // Feedback-only update: udp_progress carries the
+                        // truth, every other field is sentinel/None and
+                        // consumers preserve their last full-interval
+                        // values.
+                        let _ = tx
+                            .send(TestProgress {
+                                elapsed_ms,
+                                total_bytes: 0,
+                                throughput_mbps: 0.0,
+                                streams: Vec::new(),
+                                rtt_us: None,
+                                cwnd: None,
+                                total_retransmits: None,
+                                bytes_sent: None,
+                                bytes_received: None,
+                                throughput_send_mbps: None,
+                                throughput_recv_mbps: None,
+                                udp_progress: Some(filtered),
+                                udp_feedback_only: true,
+                            })
+                            .await;
+                    }
+                }
+                result = cancel.changed() => {
+                    // Treat sender-dropped (Err) as cancel: without this
+                    // guard, a panic in the parent task would drop the
+                    // watch sender, every subsequent cancel.changed()
+                    // call would return Err immediately, and *borrow()
+                    // would observe the last-known `false`, busy-looping
+                    // through the select! arm forever.
+                    if result.is_err() || *cancel.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub struct Client {
@@ -318,6 +487,12 @@ impl Client {
             .unwrap_or(false);
         *self.server_supports_pause.lock() = Some(supports_pause);
 
+        // Check server udp_feedback_v1 capability. We spawn the upload-mode
+        // feedback receive path only when the server has advertised this —
+        // otherwise the server isn't going to send anything for us to recv.
+        let server_supports_udp_feedback =
+            crate::protocol::capability_advertised(&server_capabilities, "udp_feedback_v1");
+
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -381,6 +556,12 @@ impl Client {
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
+        // Producer-side monotonic-denominator filter shared by the TCP
+        // control udp_progress decode path and the UDP feedback aggregator.
+        // Either source can update the consumer-visible loss reading; the
+        // filter rejects out-of-order writes from whichever path arrives
+        // late.
+        let udp_progress_filter = Arc::new(UdpProgressFilter::new());
 
         // Store cancel senders for external cancellation
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
@@ -406,12 +587,33 @@ impl Client {
                 .await?
             }
             Protocol::Udp => {
+                // Spawn the UDP feedback aggregator + 1 Hz consumer task
+                // when both peers advertise the capability AND we're in
+                // upload mode (download already has authoritative recv-side
+                // stats locally; bidir's recv half also has local stats).
+                let feedback_aggregator =
+                    if server_supports_udp_feedback && self.config.direction == Direction::Upload {
+                        let agg: UdpFeedbackAggregator = Arc::new(Mutex::new(vec![
+                            crate::protocol::UdpIntervalProgress::default();
+                            self.config.streams as usize
+                        ]));
+                        spawn_udp_feedback_consumer(
+                            agg.clone(),
+                            udp_progress_filter.clone(),
+                            progress_tx.clone(),
+                            cancel_rx.clone(),
+                        );
+                        Some(agg)
+                    } else {
+                        None
+                    };
                 self.spawn_udp_streams(
                     &data_ports,
                     server_ip,
                     stats.clone(),
                     cancel_rx.clone(),
                     pause_rx.clone(),
+                    feedback_aggregator,
                 )
                 .await?
             }
@@ -556,6 +758,15 @@ impl Client {
                         } else {
                             (aggregate.rtt_us, aggregate.cwnd, None)
                         };
+                        // Apply the producer-side monotonic-denominator
+                        // filter so a delayed TCP `Interval` cannot clobber
+                        // a fresher reading we already saw via UDP feedback.
+                        // Both paths feed the same filter; older-or-same
+                        // counts are silently rejected (None -> consumers
+                        // preserve their previous loss state).
+                        let filtered_udp_progress = aggregate
+                            .udp_progress
+                            .and_then(|p| udp_progress_filter.apply(p));
                         let _ = tx
                             .send(TestProgress {
                                 elapsed_ms,
@@ -569,7 +780,8 @@ impl Client {
                                 bytes_received: aggregate.bytes_received,
                                 throughput_send_mbps: aggregate.throughput_send_mbps,
                                 throughput_recv_mbps: aggregate.throughput_recv_mbps,
-                                udp_progress: aggregate.udp_progress,
+                                udp_progress: filtered_udp_progress,
+                                udp_feedback_only: false,
                             })
                             .await;
                     }
@@ -883,6 +1095,7 @@ impl Client {
         Ok(handles)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_udp_streams(
         &self,
         data_ports: &[u16],
@@ -890,6 +1103,7 @@ impl Client {
         stats: Arc<TestStats>,
         cancel: watch::Receiver<bool>,
         pause: watch::Receiver<bool>,
+        feedback_aggregator: Option<UdpFeedbackAggregator>,
     ) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
         let base_bind_addr = sequential_bind_base(
             self.config.bind_addr,
@@ -929,6 +1143,8 @@ impl Client {
             let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
             let dscp = self.config.dscp;
             let window_size = self.config.window_size;
+            let feedback_aggregator = feedback_aggregator.clone();
+            let stream_index = i;
 
             handles.push(tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
@@ -979,7 +1195,49 @@ impl Client {
 
                 match direction {
                     Direction::Upload => {
-                        if let Err(e) = udp::send_udp_paced(
+                        if let Some(aggregator) = feedback_aggregator {
+                            // Server advertised udp_feedback_v1: spawn the
+                            // feedback recv task alongside the sender so
+                            // live UDP loss can be reported back without
+                            // riding the TCP control channel that competes
+                            // with the saturated upload.
+                            let send_socket = socket.clone();
+                            let recv_socket = socket;
+                            let send_cancel = cancel.clone();
+                            let recv_cancel = cancel;
+                            let send_handle = tokio::spawn(async move {
+                                if let Err(e) = udp::send_udp_paced(
+                                    send_socket,
+                                    None,
+                                    stream_bitrate,
+                                    duration,
+                                    stream_stats,
+                                    send_cancel,
+                                    pause,
+                                    random_payload,
+                                )
+                                .await
+                                {
+                                    error!("UDP send error: {}", e);
+                                }
+                            });
+                            let recv_handle = tokio::spawn(async move {
+                                if let Err(e) = udp::receive_udp_feedback_only(
+                                    recv_socket,
+                                    aggregator,
+                                    stream_index,
+                                    recv_cancel,
+                                )
+                                .await
+                                {
+                                    debug!(
+                                        "UDP feedback recv error on stream {}: {}",
+                                        stream_index, e
+                                    );
+                                }
+                            });
+                            let _ = tokio::join!(send_handle, recv_handle);
+                        } else if let Err(e) = udp::send_udp_paced(
                             socket,
                             None, // Connected socket, no target needed
                             stream_bitrate,
@@ -1010,7 +1268,8 @@ impl Client {
                             }
                         });
 
-                        if let Err(e) = udp::receive_udp(socket, stream_stats, cancel, pause).await
+                        if let Err(e) =
+                            udp::receive_udp(socket, stream_stats, cancel, pause, false).await
                         {
                             error!("UDP receive error: {}", e);
                         }
@@ -1045,9 +1304,14 @@ impl Client {
                         });
 
                         let recv_handle = tokio::spawn(async move {
-                            if let Err(e) =
-                                udp::receive_udp(recv_socket, recv_stats, recv_cancel, recv_pause)
-                                    .await
+                            if let Err(e) = udp::receive_udp(
+                                recv_socket,
+                                recv_stats,
+                                recv_cancel,
+                                recv_pause,
+                                false,
+                            )
+                            .await
                             {
                                 error!("UDP bidir receive error: {}", e);
                             }
@@ -1390,6 +1654,7 @@ impl Client {
                                 throughput_send_mbps: aggregate.throughput_send_mbps,
                                 throughput_recv_mbps: aggregate.throughput_recv_mbps,
                                 udp_progress: aggregate.udp_progress,
+                                udp_feedback_only: false,
                             })
                             .await;
                     }
@@ -1590,6 +1855,100 @@ fn validate_tcp_control_port(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::UdpIntervalProgress;
+
+    #[test]
+    fn udp_progress_filter_accepts_first_update() {
+        let f = UdpProgressFilter::new();
+        let p = UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 5,
+        };
+        assert!(f.apply(p).is_some());
+    }
+
+    #[test]
+    fn udp_progress_filter_accepts_higher_denominator() {
+        let f = UdpProgressFilter::new();
+        f.apply(UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 5,
+        });
+        let p2 = UdpIntervalProgress {
+            packets_received: 200,
+            packets_lost: 10,
+        };
+        assert!(f.apply(p2).is_some());
+    }
+
+    #[test]
+    fn udp_progress_filter_rejects_lower_denominator() {
+        let f = UdpProgressFilter::new();
+        f.apply(UdpIntervalProgress {
+            packets_received: 200,
+            packets_lost: 10,
+        });
+        let stale = UdpIntervalProgress {
+            packets_received: 150,
+            packets_lost: 8,
+        };
+        assert!(f.apply(stale).is_none());
+    }
+
+    #[test]
+    fn udp_progress_filter_accepts_equal_denominator() {
+        // Cumulative monotonic counts: equal denominator means the
+        // same observation, which should pass through unchanged so
+        // duplicate updates are idempotent.
+        let f = UdpProgressFilter::new();
+        f.apply(UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 5,
+        });
+        let same = UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 5,
+        };
+        assert!(f.apply(same).is_some());
+    }
+
+    #[test]
+    fn udp_progress_filter_concurrent_max_holds() {
+        // Two threads racing through apply() with denominators
+        // straddling a current max. After both complete, the
+        // observable max must equal the larger denominator — never
+        // the smaller one. A naive load/compare/store implementation
+        // would let the lower writer win the final store under
+        // interleaving; fetch_update retries until the CAS succeeds.
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::thread;
+
+        for _ in 0..256 {
+            let f = Arc::new(UdpProgressFilter::new());
+            let f1 = f.clone();
+            let f2 = f.clone();
+            let h1 = thread::spawn(move || {
+                f1.apply(UdpIntervalProgress {
+                    packets_received: 1_000_000,
+                    packets_lost: 0,
+                });
+            });
+            let h2 = thread::spawn(move || {
+                f2.apply(UdpIntervalProgress {
+                    packets_received: 500_000,
+                    packets_lost: 0,
+                });
+            });
+            h1.join().unwrap();
+            h2.join().unwrap();
+            assert_eq!(
+                f.max_denominator.load(Ordering::Relaxed),
+                1_000_000,
+                "lower-denominator producer must not clobber higher"
+            );
+        }
+    }
 
     #[test]
     fn test_stream_join_timeout_scaling() {

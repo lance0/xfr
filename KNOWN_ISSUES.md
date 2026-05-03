@@ -84,6 +84,36 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### UDP `Connection refused` Storms at >=50% Loss with Short Tests
+
+**Issue:** Under tc netem `loss 50%` (or higher) on lo with short test durations (`-t 10sec`), the client's connected UDP socket can get stuck returning `ECONNREFUSED` on every send. The mechanism: TCP control handshake under heavy loss takes several seconds (retransmits), eating into test duration; if the server's test-end fires before the client's first UDP packet reaches the server's data port, the kernel returns ICMP port-unreachable, which sticks on the connected socket and rejects all subsequent sends.
+
+**Impact:** A run that should report ~50% loss instead emits a flood of `Connection refused (os error 111)` warnings. Sometimes the test still completes correctly via the TCP Result message; sometimes it ends with `Timeout waiting for server response`. Pre-existing behavior — reproduces on v0.9.13 at the same or higher rate than v0.9.14.
+
+**Workaround:** Use longer test durations (`-t 60sec` or more) so the handshake delay is amortized. The issue does not occur in real-world conditions where tc netem isn't applied to TCP control as well as UDP data.
+
+---
+
+### UDP Download-Mode Live Loss Still Routed Through TCP Control
+
+**Issue:** v0.9.14's `udp_feedback_v1` capability surfaces live UDP loss over UDP for upload-mode tests, sidestepping the TCP control channel. Download mode (`-R`) and the receive half of bidir still rely on TCP control `Interval` messages for live loss visibility. The client is the receiver in download mode and has authoritative receive-side stats locally, but those stats are not plumbed to consumers (TUI/plain/JSON-stream).
+
+**Impact:** Under a saturated download path with TCP control back-pressure, download-mode live loss can lag the actual receive-side state. The end-of-test summary remains correct.
+
+**Mitigation:** Use upload mode for the most responsive live-loss reporting. A follow-up will plumb client-side recv stats directly to consumers (tracked in ROADMAP.md).
+
+---
+
+### Non-TUI Interval Row Cadence Can Still Bunch Under Extreme Loss
+
+**Issue:** v0.9.14's upload-mode UDP feedback path keeps the TUI live Packet Loss counter current and refreshes the cumulative loss cache used by plain text, CSV, and JSON-stream output. Those non-TUI formats still print rows only when a TCP control `Interval` message reaches the client. Under aggressive synthetic loss, the kernel can still deliver already-sent TCP interval messages in bursts.
+
+**Impact:** The `lost` value on each printed non-TUI row reflects the freshest accepted cumulative UDP reading, but the row timestamps/cadence can still bunch under pathological loss. This is most visible with `--json-stream` diagnostics.
+
+**Mitigation:** Use the TUI for the most responsive live Packet Loss display. A follow-up will either emit explicit feedback-only stream events or decouple scripted interval output cadence from TCP control-message arrival.
+
+---
+
 ### Windows Support is Experimental
 
 **Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently.

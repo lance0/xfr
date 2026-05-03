@@ -1078,10 +1078,11 @@ async fn handle_client_with_first_message(
         }
     }
 
-    // Determine if client supports single-port TCP
-    let client_supports_single_port = client_capabilities
-        .as_ref()
-        .is_some_and(|caps| caps.iter().any(|c| c == "single_port_tcp"));
+    // Determine which optional capabilities the client supports
+    let client_supports_single_port =
+        crate::protocol::capability_advertised(&client_capabilities, "single_port_tcp");
+    let client_supports_udp_feedback =
+        crate::protocol::capability_advertised(&client_capabilities, "udp_feedback_v1");
 
     // Continue with test handling
     handle_test_request(
@@ -1092,6 +1093,7 @@ async fn handle_client_with_first_message(
         server_max_duration,
         security,
         client_supports_single_port,
+        client_supports_udp_feedback,
     )
     .await
 }
@@ -1156,7 +1158,7 @@ async fn handle_client_with_auth(
     }
 
     // Continue with normal test handling
-    // Note: dead code path - assumes single-port capable client
+    // Note: dead code path - assumes single-port capable client and UDP feedback support
     handle_test_request(
         &mut reader,
         &mut writer,
@@ -1164,6 +1166,7 @@ async fn handle_client_with_auth(
         active_tests,
         server_max_duration,
         security,
+        true,
         true,
     )
     .await
@@ -1224,6 +1227,7 @@ async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 /// Handle test request after authentication
+#[allow(clippy::too_many_arguments)]
 async fn handle_test_request(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
@@ -1232,6 +1236,7 @@ async fn handle_test_request(
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
     client_supports_single_port: bool,
+    client_supports_udp_feedback: bool,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
 
@@ -1351,6 +1356,7 @@ async fn handle_test_request(
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
                 client_supports_single_port,
+                client_supports_udp_feedback,
                 dscp,
                 window_size,
             )
@@ -1549,6 +1555,13 @@ async fn run_quic_test(
 
     // Send interval updates
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+    // Skip stale ticks rather than bursting them on unblock: if write_all stalls
+    // under back-pressure, Burst would emit several stale interval samples with
+    // fresh client-side arrival timestamps once the writer unblocks — both the
+    // timestamps and the throughput numbers attached to those samples are
+    // misleading. Skip drops them; cumulative state in StreamStats atomics still
+    // surfaces correctly on the next live tick and at end-of-test.
+    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
     let mut line = String::new();
 
@@ -1730,6 +1743,7 @@ async fn run_test(
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
     client_supports_single_port: bool,
+    client_supports_udp_feedback: bool,
     dscp: Option<u8>,
     client_window_size: Option<u64>,
 ) -> anyhow::Result<(u64, u64, f64)> {
@@ -1920,6 +1934,7 @@ async fn run_test(
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
+                client_supports_udp_feedback,
             )
             .await;
             (None, handles)
@@ -1932,6 +1947,7 @@ async fn run_test(
 
     // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
 
     loop {
@@ -2527,6 +2543,7 @@ async fn spawn_udp_handlers(
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
+    client_supports_udp_feedback: bool,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -2556,9 +2573,18 @@ async fn spawn_udp_handlers(
         let handle = tokio::spawn(async move {
             match direction {
                 Direction::Upload => {
-                    // Server receives UDP - capture stats
-                    if let Ok((udp_stats, _bytes)) =
-                        udp::receive_udp(socket, stream_stats, cancel, pause).await
+                    // Server receives UDP - capture stats. Feedback emission
+                    // is gated on negotiated capability so old clients (which
+                    // wouldn't know to listen) never see a 36-byte packet
+                    // they don't understand.
+                    if let Ok((udp_stats, _bytes)) = udp::receive_udp(
+                        socket,
+                        stream_stats,
+                        cancel,
+                        pause,
+                        client_supports_udp_feedback,
+                    )
+                    .await
                     {
                         test_stats.add_udp_stats(udp_stats);
                     }
@@ -2615,11 +2641,20 @@ async fn spawn_udp_handlers(
                             });
 
                             let recv_handle = tokio::spawn(async move {
+                                // Bidir: pass `false` even if the peer
+                                // advertised udp_feedback_v1. The client's
+                                // bidir recv half doesn't spawn a feedback
+                                // consumer (only upload mode does), so any
+                                // feedback we emitted here would be
+                                // received as bytes that don't belong to
+                                // the test data flow. Feedback is
+                                // upload-mode-only by design.
                                 if let Ok((udp_stats, _bytes)) = udp::receive_udp(
                                     recv_socket,
                                     recv_stats,
                                     recv_cancel,
                                     recv_pause,
+                                    false,
                                 )
                                 .await
                                 {

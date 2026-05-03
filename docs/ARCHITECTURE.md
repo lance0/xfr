@@ -60,7 +60,8 @@ src/
 │                                                                     │
 │  1. Connect TCP to server:5201 (control channel)                   │
 │  2. Send Hello (version 1.1, capabilities list)                     │
-│     Capabilities: tcp, udp, quic, multistream, single_port_tcp      │
+│     Capabilities: tcp, udp, quic, multistream, single_port_tcp,     │
+│                   pause_resume, udp_feedback_v1                    │
 │  3. Receive server Hello (version, auth challenge if PSK)           │
 │  4. If PSK: complete challenge-response auth                        │
 │  5. Send TestStart (protocol, streams, duration, direction)         │
@@ -100,7 +101,7 @@ Protocol version is **1.1** (major version must match for compatibility).
 Messages use a tagged enum format with a `"type"` field:
 
 ```
-{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp"]}\n
+{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp","pause_resume","udp_feedback_v1"]}\n
 {"type":"test_start","id":"...","protocol":"tcp","streams":4,...}\n
 ```
 
@@ -142,6 +143,25 @@ routing is needed since the port uniquely identifies the stream.
 │ seq (8B) │ ts (8B)  │ payload (variable)           │
 └──────────┴──────────┴──────────────────────────────┘
 ```
+
+**UDP receiver-progress feedback (`udp_feedback_v1`, v0.9.14+)**: when both
+peers advertise the capability and direction is upload, the server's UDP
+receive task emits a 36-byte cumulative-counts feedback packet back to the
+client at 2 Hz on the same data socket, sidestepping the TCP control
+channel for live UDP loss visibility:
+```
+┌──────┬──┬──┬────┬────┬────┬─────────┬──────────────┬──────────┐
+│"XFRF"│v │k │flag│sid │rsv │elapsed_ms│packets_recv  │packets_lost│
+│ 4B   │1B│1B│ 2B │ 2B │ 2B │   8B    │      8B      │     8B   │
+└──────┴──┴──┴────┴────┴────┴─────────┴──────────────┴──────────┘
+                                                       total: 36B
+```
+Length-first demux at receive sites distinguishes feedback from data
+without inspecting sequence-number bits. Cumulative counts let the client
+recover from any dropped feedback packet on the next tick. A producer-side
+monotonic-denominator filter on the client governs both this path and the
+TCP control `Interval.aggregate.udp_progress` field, so neither source can
+clobber a fresher reading from the other.
 
 **QUIC**: Stream 0 for control, streams 1-N for data:
 ```

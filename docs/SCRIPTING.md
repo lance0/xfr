@@ -111,6 +111,12 @@ xfr <host> --json-stream --no-tui
 Each line may also include optional fields: `retransmits`, `rtt_us`, `cwnd`
 (TCP), `jitter_ms` and `lost` (UDP). Fields that do not apply are omitted.
 
+For upload-mode UDP tests between v0.9.14+ peers, the `lost` value uses the
+freshest cumulative receiver counts from either TCP control intervals or
+`udp_feedback_v1` packets on the UDP data socket. The JSON-stream row cadence
+still follows TCP control `Interval` arrivals; under extreme loss those rows can
+arrive in bursts even though the loss value on each printed row is fresh.
+
 ### Parsing with jq
 
 ```bash
@@ -260,6 +266,33 @@ services:
       - "5201:5201"       # TCP control + data
       - "5201:5201/udp"   # QUIC
 ```
+
+### Issue #70 Repro Harness
+
+A multi-stage Docker harness lives at `docker/Dockerfile.repro` for A/B
+testing UDP loss visibility under saturation against the released
+v0.9.13 baseline. It applies a 100 Mbps shaper + 50 ms one-way delay
+on loopback inside the container and runs a 30-second 1 Gbps UDP
+upload test (10× oversubscription) — the same recipe brettowe used
+to surface issue #70.
+
+```bash
+docker build -t xfr-repro -f docker/Dockerfile.repro .
+docker run --rm --cap-add=NET_ADMIN xfr-repro              # current branch
+docker run --rm --cap-add=NET_ADMIN xfr-repro --baseline   # v0.9.13
+```
+
+`--cap-add=NET_ADMIN` is required so the entrypoint can manage `tc`
+qdiscs inside the container; the host is not privileged. The
+new-build invocation has hard assertions (max bunch ≤ 2,
+time-to-first-loss < 5 s); `--baseline` is diagnostic only because
+loopback Docker doesn't reproduce real Wi-Fi airtime contention
+deterministically. See `docker/README.md` for full details.
+
+The automated regression coverage in CI is the lighter-weight
+`test-control-channel-skew.sh` (2× oversubscription on `lo`) — this
+harness is for human-driven A/B at the actual reporter recipe before
+publishing a release.
 
 ## Shell Script Examples
 

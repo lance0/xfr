@@ -1124,8 +1124,36 @@ async fn run_client_plain(
     let print_handle = tokio::spawn(async move {
         let mut last_printed_interval: i64 = -1;
         let mut last_retransmits: u64 = 0;
+        // Cache the freshest cumulative UDP loss snapshot from either
+        // source (TCP control `Interval.aggregate.udp_progress` or a
+        // feedback-only update from the udp_feedback_v1 path). The
+        // producer-side filter on `Client::run_test` ensures whichever
+        // path provides this is monotonic, so we always cache the
+        // latest cumulative value the receiver has reported. On the
+        // next full-interval print we derive `lost` as a delta from
+        // the previously printed cumulative, which keeps the output
+        // line accurate even when feedback arrived between TCP
+        // intervals (or when intervals were skipped under control-
+        // channel stall, since Skip on the server interval timer can
+        // drop a tick while feedback continues to flow over UDP).
+        let mut cached_udp_progress: Option<xfr::protocol::UdpIntervalProgress> = None;
+        let mut last_printed_cumulative_lost: u64 = 0;
 
         while let Some(progress) = rx.recv().await {
+            // Update the cache from any update that carries udp_progress.
+            // The producer-side filter already gated this for monotonicity,
+            // so a non-None value is always at-least-as-fresh as the
+            // cached one.
+            if let Some(p) = progress.udp_progress {
+                cached_udp_progress = Some(p);
+            }
+            // Feedback-only updates have nothing else to print
+            // (throughput/bytes/retransmits are sentinel) and the next
+            // full interval will pick up the cached cumulative we just
+            // recorded above.
+            if progress.udp_feedback_only {
+                continue;
+            }
             // Accumulate cumulative totals for fallback summary
             cumulative_bytes_writer
                 .fetch_add(progress.total_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -1135,8 +1163,19 @@ async fn run_client_plain(
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
             let retransmits = interval_retransmits(&progress, &mut last_retransmits);
 
-            // Skip omitted seconds
+            // Skip omitted seconds. Advance the cumulative-loss baseline
+            // before continuing so loss accumulated during the omit
+            // ramp-up doesn't fold into the first printed line as a
+            // single jumbo delta — that would defeat the purpose of
+            // --omit (suppressing early-test ramp-up artifacts).
+            // Intentionally NOT applied to --interval or --quiet skips:
+            // those preserve the new "loss between printed lines"
+            // semantic so the next line, when it does print, reflects
+            // every lost packet since the prior printed line.
             if elapsed_secs <= omit_secs as f64 {
+                if let Some(cum) = cached_udp_progress {
+                    last_printed_cumulative_lost = cum.packets_lost;
+                }
                 continue;
             }
 
@@ -1164,7 +1203,19 @@ async fn run_client_plain(
                     Some(jitters.iter().sum::<f64>() / jitters.len() as f64)
                 }
             };
-            let lost = {
+            // Prefer the cumulative `udp_progress` cache when available
+            // — it folds in any feedback updates received since the last
+            // print, which keeps `lost` current under control-channel
+            // stalls. Falls back to the per-stream sum for sessions
+            // where udp_progress is never sent (paired with a pre-0.9.11
+            // server, or non-UDP tests).
+            let lost = if let Some(cum) = cached_udp_progress {
+                let delta = cum
+                    .packets_lost
+                    .saturating_sub(last_printed_cumulative_lost);
+                last_printed_cumulative_lost = cum.packets_lost;
+                Some(delta)
+            } else {
                 let has_any = progress.streams.iter().any(|s| s.lost.is_some());
                 if has_any {
                     Some(progress.streams.iter().filter_map(|s| s.lost).sum())
@@ -2193,6 +2244,7 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             udp_progress: None,
+            udp_feedback_only: false,
         }
     }
 
