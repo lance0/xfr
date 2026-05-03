@@ -1010,7 +1010,8 @@ impl Client {
                             }
                         });
 
-                        if let Err(e) = udp::receive_udp(socket, stream_stats, cancel, pause).await
+                        if let Err(e) =
+                            udp::receive_udp(socket, stream_stats, cancel, pause, false).await
                         {
                             error!("UDP receive error: {}", e);
                         }
@@ -1045,9 +1046,14 @@ impl Client {
                         });
 
                         let recv_handle = tokio::spawn(async move {
-                            if let Err(e) =
-                                udp::receive_udp(recv_socket, recv_stats, recv_cancel, recv_pause)
-                                    .await
+                            if let Err(e) = udp::receive_udp(
+                                recv_socket,
+                                recv_stats,
+                                recv_cancel,
+                                recv_pause,
+                                false,
+                            )
+                            .await
                             {
                                 error!("UDP bidir receive error: {}", e);
                             }

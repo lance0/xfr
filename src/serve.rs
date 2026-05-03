@@ -1933,6 +1933,7 @@ async fn run_test(
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
+                client_supports_udp_feedback,
             )
             .await;
             (None, handles)
@@ -2541,6 +2542,7 @@ async fn spawn_udp_handlers(
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
+    client_supports_udp_feedback: bool,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -2570,9 +2572,18 @@ async fn spawn_udp_handlers(
         let handle = tokio::spawn(async move {
             match direction {
                 Direction::Upload => {
-                    // Server receives UDP - capture stats
-                    if let Ok((udp_stats, _bytes)) =
-                        udp::receive_udp(socket, stream_stats, cancel, pause).await
+                    // Server receives UDP - capture stats. Feedback emission
+                    // is gated on negotiated capability so old clients (which
+                    // wouldn't know to listen) never see a 36-byte packet
+                    // they don't understand.
+                    if let Ok((udp_stats, _bytes)) = udp::receive_udp(
+                        socket,
+                        stream_stats,
+                        cancel,
+                        pause,
+                        client_supports_udp_feedback,
+                    )
+                    .await
                     {
                         test_stats.add_udp_stats(udp_stats);
                     }
@@ -2634,6 +2645,7 @@ async fn spawn_udp_handlers(
                                     recv_stats,
                                     recv_cancel,
                                     recv_pause,
+                                    client_supports_udp_feedback,
                                 )
                                 .await
                                 {

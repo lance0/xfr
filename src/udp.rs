@@ -499,12 +499,31 @@ pub async fn receive_udp(
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
+    feedback_enabled: bool,
 ) -> anyhow::Result<(UdpStats, u64)> {
     let mut buffer = vec![0u8; UDP_PAYLOAD_SIZE + 100];
     let mut jitter_calc = JitterCalculator::new();
     let mut packet_tracker = PacketTracker::new();
     let mut packets_received: u64 = 0;
     let mut last_recv = Instant::now();
+    // Most-recently-observed client source address. The first successful
+    // recv populates it; later recvs refresh it (handles NAT rebinding
+    // mid-test as a side benefit). Feedback emission targets this address.
+    let mut last_client_addr: Option<SocketAddr> = None;
+
+    // 2 Hz feedback emission. Skip missed ticks: every feedback packet
+    // carries cumulative counts, so the next tick is self-correcting and
+    // there's no value in sending a backlog of stale snapshots when the
+    // task wakes up after a busy period.
+    let mut feedback_timer = if feedback_enabled {
+        let mut t = tokio::time::interval(Duration::from_millis(500));
+        // First tick fires immediately; advance past it so we don't emit
+        // before any data has arrived.
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Some(t)
+    } else {
+        None
+    };
 
     loop {
         if *cancel.borrow() {
@@ -536,12 +555,26 @@ pub async fn receive_udp(
         tokio::select! {
             result = recv_future => {
                 match result {
-                    Ok((n, _addr)) => {
+                    Ok((n, addr)) => {
                         let recv_time = Instant::now();
                         last_recv = recv_time;
+                        last_client_addr = Some(addr);
                         stats.add_bytes_received(n as u64);
 
-                        if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
+                        // Length-first demux: a 36-byte packet whose first
+                        // four bytes spell "XFRF" is a feedback packet that
+                        // shouldn't be on this socket (server doesn't emit
+                        // feedback to itself; client's feedback recv lives
+                        // in a separate function). Skip it without feeding
+                        // into the data tracker — its sequence-bytes would
+                        // record as a wildly-out-of-band number and inflate
+                        // PacketTracker's lost count by ~6e18.
+                        let is_feedback = n == UDP_FEEDBACK_SIZE
+                            && buffer[0..4] == UDP_FEEDBACK_MAGIC;
+
+                        if !is_feedback
+                            && let Some(header) = UdpPacketHeader::decode(&buffer[..n])
+                        {
                             // Only count valid xfr packets toward UDP loss
                             // accounting (both live and final). A short or
                             // foreign datagram still adds to `bytes_received`
@@ -573,6 +606,37 @@ pub async fn receive_udp(
             }
             _ = timeout_future => {
                 // Check cancel and inactivity timeout again
+            }
+            _ = async { feedback_timer.as_mut().unwrap().tick().await }, if feedback_timer.is_some() => {
+                // Emit a receiver-progress feedback packet back to the
+                // sender. Gates: must have a peer address from at least
+                // one prior recv, and must have decoded at least one
+                // valid xfr packet (otherwise we're talking to phantom
+                // traffic that doesn't expect feedback).
+                if let Some(addr) = last_client_addr
+                    && packets_received > 0
+                {
+                    let snap = stats.udp_progress_snapshot();
+                    let elapsed_ms = stats.start_time.elapsed().as_millis() as u64;
+                    let pkt = UdpFeedbackPacket {
+                        stream_id: stats.stream_id as u16,
+                        elapsed_ms,
+                        packets_received: snap.packets_received,
+                        packets_lost: snap.packets_lost,
+                    };
+                    let mut buf = [0u8; UDP_FEEDBACK_SIZE];
+                    if pkt.encode(&mut buf) {
+                        if let Err(e) = socket.send_to(&buf, addr).await {
+                            // Non-fatal: ICMP port-unreachable from a
+                            // closed peer surfaces as ConnectionRefused
+                            // here. Log at debug; next tick retries.
+                            debug!(
+                                "UDP feedback send_to({}) failed: {}",
+                                addr, e
+                            );
+                        }
+                    }
+                }
             }
         }
     }
