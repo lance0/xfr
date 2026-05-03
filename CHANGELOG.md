@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-05-02
+
+### Added
+- **`-w`/`--window` now applies to UDP socket buffers** (#70 follow-up) — previously the flag only set TCP `SO_SNDBUF`/`SO_RCVBUF`. UDP sockets used the kernel default regardless. On high-rate UDP flows where the receiver's kernel UDP buffer can saturate (weak/loaded receivers, default `net.core.rmem_max` lower than line-rate × ~1s), the kernel tail-drops new arrivals and the loss only surfaces as a sequence-gap once traffic stops — rendering as live `Packet Loss: 0.0%` while the test is running and a high final loss percent on quit. `-w 16M` is the immediate workaround for that pattern; the value propagates from client to server in `TestStart` (already wired for TCP since v0.9.9) and now lands on UDP `SO_SNDBUF`/`SO_RCVBUF` on both ends.
+
+### Changed
+- **`setsockopt` failures on `-w` now surface as warnings** — previously rejections (typically `net.core.rmem_max` exceeded without `CAP_NET_ADMIN`) were swallowed at debug level. Users running `-w 16M` for #70-style troubleshooting need to see the rejection rather than have it disappear silently. Both `SO_SNDBUF` and `SO_RCVBUF` are still attempted independently, and the warning identifies which buffer failed.
+
+### Maintenance
+- Rust dependency group bump (PR #71): clap 4.5 → 4.6, clap_complete 4.5 → 4.6, hyper 1.8 → 1.9, mdns-sd 0.17 → 0.19, toml 0.9 → 1.1, rustls 0.23.37 → 0.23.39, hmac 0.12 → 0.13, sha2 0.10 → 0.11, rand 0.9 → 0.10, plus libc, uuid, once_cell, tracing-subscriber, tracing-appender, tempfile patch bumps. Adapted source to API moves in hmac (constructor moved from `Mac` to `KeyInit`) and rand (user-facing `Rng` methods moved to `RngExt`); no behavior change.
+
 ## [0.9.11] - 2026-04-30
 
 ### Fixed
