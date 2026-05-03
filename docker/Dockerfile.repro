@@ -1,0 +1,40 @@
+# Reproduction harness for issue #70 (live UDP loss visibility under
+# upload-mode saturation).
+#
+# Builds two xfr binaries side-by-side so the entrypoint can A/B them:
+#   /usr/local/bin/xfr           — current branch under test
+#   /usr/local/bin/xfr-baseline  — released v0.9.13 from crates.io
+#
+# Run:
+#   docker build -t xfr-repro -f docker/Dockerfile.repro .
+#   docker run --rm --cap-add=NET_ADMIN xfr-repro              # new build
+#   docker run --rm --cap-add=NET_ADMIN xfr-repro --baseline   # v0.9.13
+#
+# Requires --cap-add=NET_ADMIN so the entrypoint can apply tc netem on
+# loopback inside the container without privileging the host.
+
+# ---- Stage 1: build the branch under test ----
+FROM rust:1.91-bookworm AS branch-builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+RUN cargo build --release --bin xfr
+
+# ---- Stage 2: install released v0.9.13 baseline ----
+FROM rust:1.91-bookworm AS baseline-builder
+RUN cargo install --version 0.9.13 --locked xfr
+
+# ---- Stage 3: runtime ----
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=branch-builder   /build/target/release/xfr         /usr/local/bin/xfr
+COPY --from=baseline-builder /usr/local/cargo/bin/xfr          /usr/local/bin/xfr-baseline
+COPY docker/repro-issue-70.sh                                  /usr/local/bin/repro-issue-70.sh
+RUN chmod +x /usr/local/bin/repro-issue-70.sh
+
+ENTRYPOINT ["/usr/local/bin/repro-issue-70.sh"]
