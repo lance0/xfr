@@ -157,6 +157,17 @@ impl StreamStats {
             .fetch_add(count, Ordering::Relaxed);
     }
 
+    /// Snapshot the cumulative UDP `(received, lost)` pair as a single
+    /// `UdpIntervalProgress`. Reads under Relaxed ordering — packaged so
+    /// callers cannot accidentally read received and lost at independently
+    /// drifting points in time.
+    pub fn udp_progress_snapshot(&self) -> UdpIntervalProgress {
+        UdpIntervalProgress {
+            packets_received: self.udp_packets_received.load(Ordering::Relaxed),
+            packets_lost: self.udp_lost.load(Ordering::Relaxed),
+        }
+    }
+
     /// Get current jitter in milliseconds
     pub fn udp_jitter_ms(&self) -> f64 {
         self.udp_jitter_us.load(Ordering::Relaxed) as f64 / 1000.0

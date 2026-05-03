@@ -12,12 +12,116 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::{debug, warn};
 
-use crate::protocol::UdpStats;
+use crate::protocol::{UdpIntervalProgress, UdpStats};
 use crate::stats::StreamStats;
 
 pub const UDP_PAYLOAD_SIZE: usize = 1400; // Leave room for IP + UDP headers
 const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
 const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
+
+/// On-wire size of a v1 receiver-progress feedback packet
+/// (`UdpFeedbackPacket`). Length is the primary discriminator between data
+/// and feedback packets in the receive demux, and the magic byte sequence
+/// is the secondary check; together they give a robust split that does
+/// not rely on inspecting sequence-number bits in a data packet.
+pub const UDP_FEEDBACK_SIZE: usize = 36;
+/// Magic prefix on `UdpFeedbackPacket`. Distinct from any byte pattern
+/// produced by `UdpPacketHeader::encode` for realistic test runs (the
+/// first 4 bytes of every data packet are the high 32 bits of a u64
+/// sequence counter starting at zero).
+pub const UDP_FEEDBACK_MAGIC: [u8; 4] = *b"XFRF";
+/// Currently-supported feedback packet protocol version.
+pub const UDP_FEEDBACK_VERSION: u8 = 1;
+/// `kind` byte for receiver-progress packets. Future packet types use a
+/// new `kind` value so the parser stays selectable on length+kind.
+pub const UDP_FEEDBACK_KIND_RECEIVER_PROGRESS: u8 = 1;
+
+/// UDP receiver-feedback packet (`udp_feedback_v1`).
+///
+/// The server's UDP receive task emits these back to the client at 2 Hz
+/// during upload-mode tests, sidestepping the TCP control channel for
+/// live progress reporting. Cumulative counts let the client recover
+/// from dropped feedback packets — the next tick carries the latest
+/// truth without referring to anything we lost.
+///
+/// Wire layout, all multi-byte fields big-endian:
+/// ```text
+/// offset  size  field
+///   0      4    magic = b"XFRF"
+///   4      1    version = 1
+///   5      1    kind = 1 (receiver_progress)
+///   6      2    flags = 0 (reserved)
+///   8      2    stream_id (u16)
+///  10      2    reserved = 0
+///  12      8    elapsed_ms
+///  20      8    packets_received (cumulative)
+///  28      8    packets_lost (cumulative)
+/// total: 36 bytes, fixed
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpFeedbackPacket {
+    pub stream_id: u16,
+    pub elapsed_ms: u64,
+    pub packets_received: u64,
+    pub packets_lost: u64,
+}
+
+impl UdpFeedbackPacket {
+    /// Encode the packet into `buffer` in 36 bytes. Returns false if the
+    /// buffer is too small.
+    pub fn encode(&self, buffer: &mut [u8]) -> bool {
+        if buffer.len() < UDP_FEEDBACK_SIZE {
+            return false;
+        }
+        buffer[0..4].copy_from_slice(&UDP_FEEDBACK_MAGIC);
+        buffer[4] = UDP_FEEDBACK_VERSION;
+        buffer[5] = UDP_FEEDBACK_KIND_RECEIVER_PROGRESS;
+        buffer[6..8].copy_from_slice(&0u16.to_be_bytes()); // flags
+        buffer[8..10].copy_from_slice(&self.stream_id.to_be_bytes());
+        buffer[10..12].copy_from_slice(&0u16.to_be_bytes()); // reserved
+        buffer[12..20].copy_from_slice(&self.elapsed_ms.to_be_bytes());
+        buffer[20..28].copy_from_slice(&self.packets_received.to_be_bytes());
+        buffer[28..36].copy_from_slice(&self.packets_lost.to_be_bytes());
+        true
+    }
+
+    /// Decode a 36-byte feedback packet. Returns `None` if length, magic,
+    /// version, or kind don't match the v1 schema. Forward-compatible
+    /// only via new `kind` values, not via larger v1 packets.
+    pub fn decode(buffer: &[u8]) -> Option<Self> {
+        if buffer.len() != UDP_FEEDBACK_SIZE {
+            return None;
+        }
+        if buffer[0..4] != UDP_FEEDBACK_MAGIC {
+            return None;
+        }
+        if buffer[4] != UDP_FEEDBACK_VERSION {
+            return None;
+        }
+        if buffer[5] != UDP_FEEDBACK_KIND_RECEIVER_PROGRESS {
+            return None;
+        }
+        let stream_id = u16::from_be_bytes(buffer[8..10].try_into().ok()?);
+        let elapsed_ms = u64::from_be_bytes(buffer[12..20].try_into().ok()?);
+        let packets_received = u64::from_be_bytes(buffer[20..28].try_into().ok()?);
+        let packets_lost = u64::from_be_bytes(buffer[28..36].try_into().ok()?);
+        Some(Self {
+            stream_id,
+            elapsed_ms,
+            packets_received,
+            packets_lost,
+        })
+    }
+
+    /// Convert the cumulative counts into the shared
+    /// `UdpIntervalProgress` shape consumed by the progress aggregator.
+    pub fn to_progress(&self) -> UdpIntervalProgress {
+        UdpIntervalProgress {
+            packets_received: self.packets_received,
+            packets_lost: self.packets_lost,
+        }
+    }
+}
 
 /// UDP packet header
 /// [seq: u64][timestamp_us: u64][payload...]
@@ -534,6 +638,98 @@ mod tests {
         let decoded = UdpPacketHeader::decode(&buffer).unwrap();
         assert_eq!(decoded.sequence, 12345);
         assert_eq!(decoded.timestamp_us, 67890);
+    }
+
+    #[test]
+    fn feedback_packet_roundtrip() {
+        let pkt = UdpFeedbackPacket {
+            stream_id: 7,
+            elapsed_ms: 12_345,
+            packets_received: 999_999,
+            packets_lost: 4_242,
+        };
+        let mut buffer = [0u8; UDP_FEEDBACK_SIZE];
+        assert!(pkt.encode(&mut buffer));
+        let decoded = UdpFeedbackPacket::decode(&buffer).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn feedback_packet_rejects_wrong_magic() {
+        let pkt = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 0,
+            packets_received: 0,
+            packets_lost: 0,
+        };
+        let mut buffer = [0u8; UDP_FEEDBACK_SIZE];
+        assert!(pkt.encode(&mut buffer));
+        // Corrupt the magic
+        buffer[0..4].copy_from_slice(b"DATA");
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn feedback_packet_rejects_short_buffer() {
+        let buffer = [0u8; UDP_FEEDBACK_SIZE - 1];
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn feedback_packet_rejects_oversize_buffer() {
+        // A 36-byte feedback packet is fixed-size; a 37-byte buffer is
+        // either a bug or an attempt to exploit length confusion.
+        let buffer = [0u8; UDP_FEEDBACK_SIZE + 1];
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn feedback_packet_rejects_unknown_version() {
+        let pkt = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 0,
+            packets_received: 0,
+            packets_lost: 0,
+        };
+        let mut buffer = [0u8; UDP_FEEDBACK_SIZE];
+        assert!(pkt.encode(&mut buffer));
+        buffer[4] = 2; // version=2
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn feedback_packet_rejects_unknown_kind() {
+        let pkt = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 0,
+            packets_received: 0,
+            packets_lost: 0,
+        };
+        let mut buffer = [0u8; UDP_FEEDBACK_SIZE];
+        assert!(pkt.encode(&mut buffer));
+        buffer[5] = 99; // unknown kind
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn data_packet_at_collision_sequence_is_not_feedback() {
+        // Length-first demux means a hypothetical data packet whose first
+        // four bytes spell "XFRF" is still routed as data. Synthesize the
+        // worst case: a full 1416-byte data packet with sequence chosen so
+        // its big-endian top 4 bytes are b"XFRF". A naive magic-only
+        // demux would misroute it; ours selects on length first.
+        let collision_seq = u64::from_be_bytes([b'X', b'F', b'R', b'F', 0, 0, 0, 0]);
+        let header = UdpPacketHeader {
+            sequence: collision_seq,
+            timestamp_us: 1_000,
+        };
+        let mut buffer = vec![0u8; UDP_HEADER_SIZE + UDP_PAYLOAD_SIZE];
+        assert!(header.encode(&mut buffer));
+        // Length is not 36, so feedback decode must reject.
+        assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+        // Header decode still succeeds.
+        let decoded = UdpPacketHeader::decode(&buffer).unwrap();
+        assert_eq!(decoded.sequence, collision_seq);
     }
 
     #[test]
