@@ -172,6 +172,15 @@ impl UdpProgressFilter {
     /// Returns `Some(progress)` if the cumulative `(received + lost)`
     /// denominator is at-least-as-fresh as anything we've seen before;
     /// `None` to reject the update as stale.
+    ///
+    /// Uses `fetch_update` for an atomic compare-and-swap rather than a
+    /// load/store pair: two producers (TCP control decode site and the
+    /// UDP feedback aggregator) can race here, and a load-compare-store
+    /// can let the *lower* denominator win the store after the higher
+    /// one already committed, which would re-admit a later stale update
+    /// and weaken the freshness guarantee. `fetch_update` retries until
+    /// the CAS succeeds, so the post-condition is "no smaller value
+    /// ever overwrites a larger one."
     pub fn apply(
         &self,
         progress: crate::protocol::UdpIntervalProgress,
@@ -179,21 +188,21 @@ impl UdpProgressFilter {
         let denom = progress
             .packets_received
             .saturating_add(progress.packets_lost);
-        let prev = self
-            .max_denominator
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if denom < prev {
-            return None;
+        let result = self.max_denominator.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| {
+                if denom >= current {
+                    Some(denom)
+                } else {
+                    None
+                }
+            },
+        );
+        match result {
+            Ok(_) => Some(progress),
+            Err(_) => None,
         }
-        // Concurrent writes can race here: two paths both pass the
-        // check at denom==N, then one writes N+1. Worst case is a
-        // slightly-stale `prev` that the next tick will correct;
-        // updates are monotonic so we cannot regress.
-        if denom > prev {
-            self.max_denominator
-                .store(denom, std::sync::atomic::Ordering::Relaxed);
-        }
-        Some(progress)
     }
 }
 
@@ -1899,6 +1908,44 @@ mod tests {
             packets_lost: 5,
         };
         assert!(f.apply(same).is_some());
+    }
+
+    #[test]
+    fn udp_progress_filter_concurrent_max_holds() {
+        // Two threads racing through apply() with denominators
+        // straddling a current max. After both complete, the
+        // observable max must equal the larger denominator — never
+        // the smaller one. A naive load/compare/store implementation
+        // would let the lower writer win the final store under
+        // interleaving; fetch_update retries until the CAS succeeds.
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::thread;
+
+        for _ in 0..256 {
+            let f = Arc::new(UdpProgressFilter::new());
+            let f1 = f.clone();
+            let f2 = f.clone();
+            let h1 = thread::spawn(move || {
+                f1.apply(UdpIntervalProgress {
+                    packets_received: 1_000_000,
+                    packets_lost: 0,
+                });
+            });
+            let h2 = thread::spawn(move || {
+                f2.apply(UdpIntervalProgress {
+                    packets_received: 500_000,
+                    packets_lost: 0,
+                });
+            });
+            h1.join().unwrap();
+            h2.join().unwrap();
+            assert_eq!(
+                f.max_denominator.load(Ordering::Relaxed),
+                1_000_000,
+                "lower-denominator producer must not clobber higher"
+            );
+        }
     }
 
     #[test]
