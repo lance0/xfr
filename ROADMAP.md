@@ -119,6 +119,7 @@
 - [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use
 - [ ] **Data-plane authentication** - per-test tokens/cookies to prevent port hijacking on untrusted networks
 - [ ] **Rate limiting on data connections** - apply per-IP limits to data connections (currently control-only)
+- [ ] **HMAC-signed UDP feedback packets** (#70 follow-up) — the `udp_feedback_v1` packet has no auth; an on-path attacker who guesses `(client_ip, client_port, stream_id)` can inject loss values. Cosmetic-only impact (TUI display); cumulative-monotonic-filter blunts even that. Defer until someone's threat model needs it
 - [x] **Slow-loris protection** - accept loop spawns per-connection tasks with 5s initial read timeout
 - [x] **DataHello flood protection** - validate test_id exists before processing data connections
 - [x] **Client capabilities negotiation** - client advertises capabilities; server falls back to multi-port TCP for legacy clients
@@ -128,6 +129,9 @@
 ### Polish
 - [x] **Suppress TCP send errors on graceful shutdown** - TCP `Connection reset by peer` / `Broken pipe` / `Connection aborted` at teardown now suppressed via targeted grace window (issue #25)
 - [ ] **Suppress UDP/QUIC send errors on graceful shutdown** - UDP shows `Connection refused (os error 111)`, QUIC shows `sending stopped by peer: error 0` when server tears down sockets before client finishes sending; cosmetic but noisy
+- [ ] **High-loss UDP `Connection refused` storm** (#70 follow-up) — under `tc netem loss 50%` on lo with short tests, TCP control handshake delay eats into test duration; if server's test-end fires before client's first UDP packet, kernel sticks ECONNREFUSED on the connected socket and rejects every subsequent send. Pre-existing in v0.9.13. Fix candidates: extend handshake budget under observed loss, recreate connected UDP socket on first ECONNREFUSED, or surface kernel-level signal to the client retry path
+- [ ] **Surface kernel-side UDP drops via SO_RXQ_OVFL** (#70 follow-up) — Linux `SO_RXQ_OVFL` cmsg distinguishes receiver-buffer saturation from on-wire loss. Currently both surface as plain "lost" in the sequence-gap tracker. Track separately so users can tell whether to tune `-w`/`SO_RCVBUF` vs accept the link's actual loss
+- [ ] **Control-plane DSCP for UDP feedback packets** (#70 follow-up) — `udp_feedback_v1` packets share the data socket and inherit the data DSCP, which could queue feedback behind low-priority test traffic on the return path. Mark feedback packets with a control-plane DSCP (CS6 or 0)
 - [x] **Summary on early exit** (issue #35) — Ctrl+C now triggers the cancel path and displays the test summary with accumulated stats. Plain mode uses `tokio::signal::ctrl_c`; TUI treats Ctrl+C as a key event in raw mode. Double Ctrl+C force-exits (exit code 130). Fallback summary from cumulative counters when server is unreachable
 - [x] **Delta retransmits in plain-text interval output** (issue #36) - plain-text interval reports now show retransmit deltas instead of cumulative totals while the final summary remains cumulative. TUI stats remain cumulative by design, and server-reported per-stream interval deltas continue in JSON/CSV output
 - [x] **`omit_secs` in config file** (issue #43) — `[client] omit_secs` in config.toml sets default `--omit` value
@@ -135,6 +139,7 @@
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
+- [ ] **Decouple stats sampling from TCP control writes** (#70 follow-up) — server's interval loop currently couples `stats.record_intervals()` to `writer.write_all()`. v0.9.14 mitigates this with `MissedTickBehavior::Skip` (stops bunched-stale output) and `udp_feedback_v1` (sidesteps TCP control for live UDP loss), so further decoupling is no longer urgent. A bounded "latest-only" channel between sampler and writer would still be the durable correctness fix and would generalize to any future stats whose live visibility today rides the same write path
 - [x] **Fix PSK unwrap panics** - serve.rs PSK `.unwrap()` replaced with `.ok_or_else()` error propagation
 - [x] **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before indexing
 - [x] **Timestamp clock skew** - ISO8601/Unix timestamps now derive wall clock from `system_start + elapsed` instead of `SystemTime::now()`
@@ -157,6 +162,8 @@
 - [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 - [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
+- [ ] **UDP feedback aggregator stress test** (#70 follow-up) — exercise `spawn_udp_feedback_consumer` with `-P 32`, `-P 64`, `-P 128` under saturation. parking_lot::Mutex contention between writers (per-stream feedback recv tasks) and the 1 Hz consumer is unproven at high concurrency; high stream count + high feedback rate is the relevant failure mode
+- [ ] **Relax MPTCP 10-stream throughput threshold in CI** — current threshold `> 20 Mbps` flakes at ~19.5–19.8 Mbps on GHA runners. The bug it actually catches (#24 JoinHandle panic) crashes throughput to ~0, not 19.x; lower the threshold to ~17 Mbps so flakes stop without losing coverage of the real failure
 - [ ] **TUI render fuzzing** - existing TUI tests assert against `App` state and ratatui `Buffer` cells, but never put the rendered escape-sequence stream through a real terminal emulator. Drive randomized `App` state through the renderer and parse the output with the [`vt100`](https://crates.io/crates/vt100) crate to assert no panics, no overflow past widget bounds, and no escape-sequence injection escaping the server-version sanitizer or other future text fields. Eventual target: [libghostty](https://github.com/ghostty-org/ghostty) (C-ABI library from Mitchell Hashimoto's terminal, embeddable from Rust via `bindgen`) for highest-fidelity emulation and Antithesis-style deterministic fuzzing — but its API is explicitly pre-1.0 ("signatures still in flux") so wait for a tagged release before depending on it. Bugs this catches that nothing else does: extreme values overflowing layout (PB-scale transfers, jitter that won't fit format width), rapid state transitions during paint, theme switching mid-redraw, resize storms.
 
 ### Documentation
@@ -181,6 +188,8 @@
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 - [ ] **CC algorithm A/B comparison** (`xfr cca-compare <host>`) - run back-to-back tests with different congestion control algorithms (BBR, CUBIC, Reno, etc.) and produce side-by-side comparison (throughput, retransmits, RTT). Leverages existing `--congestion` and `xfr diff`. BBR vs CUBIC is one of the most common network testing questions
 - [ ] **Server-side bandwidth caps** (`--max-bandwidth`) - per-test server-enforced bandwidth limit to prevent abuse of public servers. iperf3 issue #937 is highly requested. Distinct from `--rate-limit` (which limits concurrent tests per IP)
+- [ ] **Download-mode authoritative live loss from local recv stats** (#70 follow-up) — v0.9.14's `udp_feedback_v1` sidesteps the TCP control channel for upload-mode live loss visibility, but download (`-R`) and the receive half of bidir still rely on TCP control `Interval` messages. The client is the receiver in download mode and has authoritative recv-side stats locally; plumb them directly to consumers (TUI/plain/JSON-stream) the same way upload feedback flows
+- [ ] **Investigate `-R` UDP throughput display** — brettowe observed v0.9.13 `-R` UDP showing 999.7 Mbps over a 100 Mbps Wi-Fi link. Likely sender-side-bytes display vs. wire-rate semantics. Confirm via tcpdump on a known-rate-limited link, then either fix the display or document the semantics
 
 ### Firewall Traversal Decision Tree
 
