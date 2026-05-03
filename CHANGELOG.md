@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-05-03
+
+### Fixed
+- **Live UDP loss counter no longer stuck at 0% under saturated links** (issue #70 follow-up) — `TCP_NODELAY` was not being set on the control connection. With Nagle still active, the periodic `Interval` messages (~150-byte 1 Hz writes) coalesced waiting for an MSS-sized payload (which never arrives — they're tiny) or a delayed ACK from the peer. Under heavy parallel UDP data load on a saturated path (Wi-Fi, rate-limited links, anything where ACK turnaround stretches), the kernel held every queued segment for the duration of the test and flushed the entire backlog in a single burst when data traffic stopped. The TUI live counter appeared permanently stuck at 0% during the run, then jumped to the final value at quit. iperf3 sets `TCP_NODELAY` on its control channel for exactly this reason. New `tcp::configure_control_stream` helper applies it before splitting the stream into reader/writer halves; called at three sites (server's accepted control connection, client's connecting control connection, server's auth-handshake fallback path). Reproduced and verified with a `tc netem` 50 Mbps + 50ms-delay simulation: the pre-fix binary collapses 3+ interval lines to a single end-of-test timestamp; the post-fix binary spreads them across the run with at most a 2-line tail collision.
+
+### Added
+- **CI regression test for the bunching pattern** (`test-control-channel-skew.sh`, runs as the `Control-channel skew (#70 regression)` job). Applies a 50 Mbps shaper + 50ms each-way delay to `lo`, runs an 8-second UDP test at 100 Mbps target (2× oversubscription), and asserts no 3-or-more interval lines share a client-side timestamp. Catches future regressions where the `TCP_NODELAY` plumbing is dropped from any of the three control-stream sites or a new code path forgets to call the helper.
+
+### Maintenance
+- Rust dependency group bump (PR #76): `clap_complete` 4.6.2 → 4.6.3, `rustls` 0.23.39 → 0.23.40. Patch-version updates only, no source changes required.
+
 ## [0.9.12] - 2026-05-02
 
 ### Added
