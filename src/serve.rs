@@ -1549,6 +1549,13 @@ async fn run_quic_test(
 
     // Send interval updates
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+    // Skip stale ticks rather than bursting them on unblock: if write_all stalls
+    // under back-pressure, Burst would emit several stale interval samples with
+    // fresh client-side arrival timestamps once the writer unblocks — both the
+    // timestamps and the throughput numbers attached to those samples are
+    // misleading. Skip drops them; cumulative state in StreamStats atomics still
+    // surfaces correctly on the next live tick and at end-of-test.
+    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
     let mut line = String::new();
 
@@ -1932,6 +1939,7 @@ async fn run_test(
 
     // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
 
     loop {
