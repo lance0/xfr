@@ -1124,15 +1124,33 @@ async fn run_client_plain(
     let print_handle = tokio::spawn(async move {
         let mut last_printed_interval: i64 = -1;
         let mut last_retransmits: u64 = 0;
+        // Cache the freshest cumulative UDP loss snapshot from either
+        // source (TCP control `Interval.aggregate.udp_progress` or a
+        // feedback-only update from the udp_feedback_v1 path). The
+        // producer-side filter on `Client::run_test` ensures whichever
+        // path provides this is monotonic, so we always cache the
+        // latest cumulative value the receiver has reported. On the
+        // next full-interval print we derive `lost` as a delta from
+        // the previously printed cumulative, which keeps the output
+        // line accurate even when feedback arrived between TCP
+        // intervals (or when intervals were skipped under control-
+        // channel stall, since Skip on the server interval timer can
+        // drop a tick while feedback continues to flow over UDP).
+        let mut cached_udp_progress: Option<xfr::protocol::UdpIntervalProgress> = None;
+        let mut last_printed_cumulative_lost: u64 = 0;
 
         while let Some(progress) = rx.recv().await {
-            // Feedback-only updates carry just udp_progress; everything
-            // else is sentinel/None. Plain/CSV/JSON-stream interval
-            // formatters expect a full snapshot — skip these updates so
-            // we don't accumulate zero bytes or print a zero-throughput
-            // line. The next full TCP interval delivers an authoritative
-            // throughput sample with the freshest udp_progress already
-            // applied via the shared producer-side filter.
+            // Update the cache from any update that carries udp_progress.
+            // The producer-side filter already gated this for monotonicity,
+            // so a non-None value is always at-least-as-fresh as the
+            // cached one.
+            if let Some(p) = progress.udp_progress {
+                cached_udp_progress = Some(p);
+            }
+            // Feedback-only updates have nothing else to print
+            // (throughput/bytes/retransmits are sentinel) and the next
+            // full interval will pick up the cached cumulative we just
+            // recorded above.
             if progress.udp_feedback_only {
                 continue;
             }
@@ -1174,7 +1192,19 @@ async fn run_client_plain(
                     Some(jitters.iter().sum::<f64>() / jitters.len() as f64)
                 }
             };
-            let lost = {
+            // Prefer the cumulative `udp_progress` cache when available
+            // — it folds in any feedback updates received since the last
+            // print, which keeps `lost` current under control-channel
+            // stalls. Falls back to the per-stream sum for sessions
+            // where udp_progress is never sent (paired with a pre-0.9.11
+            // server, or non-UDP tests).
+            let lost = if let Some(cum) = cached_udp_progress {
+                let delta = cum
+                    .packets_lost
+                    .saturating_sub(last_printed_cumulative_lost);
+                last_printed_cumulative_lost = cum.packets_lost;
+                Some(delta)
+            } else {
                 let has_any = progress.streams.iter().any(|s| s.lost.is_some());
                 if has_any {
                     Some(progress.streams.iter().filter_map(|s| s.lost).sum())
