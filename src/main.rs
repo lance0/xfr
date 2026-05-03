@@ -1163,8 +1163,19 @@ async fn run_client_plain(
             let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
             let retransmits = interval_retransmits(&progress, &mut last_retransmits);
 
-            // Skip omitted seconds
+            // Skip omitted seconds. Advance the cumulative-loss baseline
+            // before continuing so loss accumulated during the omit
+            // ramp-up doesn't fold into the first printed line as a
+            // single jumbo delta — that would defeat the purpose of
+            // --omit (suppressing early-test ramp-up artifacts).
+            // Intentionally NOT applied to --interval or --quiet skips:
+            // those preserve the new "loss between printed lines"
+            // semantic so the next line, when it does print, reflects
+            // every lost packet since the prior printed line.
             if elapsed_secs <= omit_secs as f64 {
+                if let Some(cum) = cached_udp_progress {
+                    last_printed_cumulative_lost = cum.packets_lost;
+                }
                 continue;
             }
 
