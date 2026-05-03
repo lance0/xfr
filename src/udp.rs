@@ -559,7 +559,6 @@ pub async fn receive_udp(
                         let recv_time = Instant::now();
                         last_recv = recv_time;
                         last_client_addr = Some(addr);
-                        stats.add_bytes_received(n as u64);
 
                         // Length-first demux: a 36-byte packet whose first
                         // four bytes spell "XFRF" is a feedback packet that
@@ -568,13 +567,20 @@ pub async fn receive_udp(
                         // in a separate function). Skip it without feeding
                         // into the data tracker — its sequence-bytes would
                         // record as a wildly-out-of-band number and inflate
-                        // PacketTracker's lost count by ~6e18.
+                        // PacketTracker's lost count by ~6e18. Also do not
+                        // count it toward bytes_received: feedback is a
+                        // control-plane sideband and bytes_received tracks
+                        // test-data wire bandwidth. Defense-in-depth for
+                        // any future change that lets feedback land on a
+                        // shared socket.
                         let is_feedback = n == UDP_FEEDBACK_SIZE
                             && buffer[0..4] == UDP_FEEDBACK_MAGIC;
+                        if is_feedback {
+                            continue;
+                        }
+                        stats.add_bytes_received(n as u64);
 
-                        if !is_feedback
-                            && let Some(header) = UdpPacketHeader::decode(&buffer[..n])
-                        {
+                        if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
                             // Only count valid xfr packets toward UDP loss
                             // accounting (both live and final). A short or
                             // foreign datagram still adds to `bytes_received`

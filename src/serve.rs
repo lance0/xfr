@@ -2641,12 +2641,20 @@ async fn spawn_udp_handlers(
                             });
 
                             let recv_handle = tokio::spawn(async move {
+                                // Bidir: pass `false` even if the peer
+                                // advertised udp_feedback_v1. The client's
+                                // bidir recv half doesn't spawn a feedback
+                                // consumer (only upload mode does), so any
+                                // feedback we emitted here would be
+                                // received as bytes that don't belong to
+                                // the test data flow. Feedback is
+                                // upload-mode-only by design.
                                 if let Ok((udp_stats, _bytes)) = udp::receive_udp(
                                     recv_socket,
                                     recv_stats,
                                     recv_cancel,
                                     recv_pause,
-                                    client_supports_udp_feedback,
+                                    false,
                                 )
                                 .await
                                 {
