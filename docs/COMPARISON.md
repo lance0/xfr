@@ -23,6 +23,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **LAN discovery** | `xfr discover` (mDNS) | No | No | No | No |
 | **Config file** | Yes (TOML) | No | No | No | No |
 | **TCP/UDP bitrate pacing** | Yes (`-b`, kernel FQ pacing on Linux) | Yes (`-b`) | Yes (`-b`) | No | ? |
+| **Live UDP loss under saturation** | Yes (`udp_feedback_v1`, 2 Hz on data socket; bypasses TCP control) | No (rides TCP control; bunches under load) | No | No | ? |
 | **Congestion control selection** | Yes (`--congestion`) | Yes (`--congestion`) | Yes (`-Z`) | No | ? |
 | **PSK authentication** | Yes | Yes | No | No | ? |
 | **Capability negotiation** | Yes (protocol v1.1) | No | No | No | ? |

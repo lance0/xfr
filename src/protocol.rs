@@ -38,6 +38,15 @@
 //!   │<─────── Result ───────────────│
 //!   │                               │
 //! ```
+//!
+//! For UDP tests, when both peers advertise the `udp_feedback_v1`
+//! capability, an out-of-band 36-byte receiver-progress packet flows
+//! server→client at 2 Hz on the data UDP socket alongside the periodic
+//! `Interval` messages on the control channel. The wire format and
+//! framing live in [`crate::udp::UdpFeedbackPacket`]; the capability
+//! check helper is [`capability_advertised`]. This sidesteps TCP
+//! control for live UDP loss visibility under upload-mode saturation
+//! (issue #70).
 
 use serde::{Deserialize, Serialize};
 

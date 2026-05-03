@@ -48,6 +48,7 @@ UDP provides:
 - Jitter calculation (RFC 3550)
 - Packet loss detection
 - Out-of-order detection
+- Live receiver-progress feedback at 2 Hz on the data socket (when both peers advertise `udp_feedback_v1`), so the live loss counter stays current under upload-mode saturation even when the TCP control channel back-pressures. Surfaces in the TUI live counter and in `--no-tui --json-stream` / `--csv` / plain interval output via a producer-side cumulative-monotonic filter that admits only the freshest reading from either source
 
 **Note**: UDP is not congestion-controlled. High bitrates can cause network congestion.
 
@@ -112,7 +113,9 @@ The control protocol version is 1.1. Client and server exchange version informat
 
 ### Capability Negotiation
 
-Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, and `single_port_tcp`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port TCP mode).
+Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, and `udp_feedback_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port TCP mode); a feature activates only when both peers advertise it. Older peers that don't list a capability fall back to the prior behavior — adding a capability is wire-additive.
+
+The `udp_feedback_v1` capability (added in v0.9.14) lets the server send 36-byte cumulative-counts packets back to the client at 2 Hz on the same UDP data socket, providing live UDP loss visibility without depending on the TCP control channel that may be competing for ACKs against a saturated UDP uplink.
 
 ### Message Flow
 

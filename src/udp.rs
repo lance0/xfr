@@ -1,7 +1,18 @@
-//! UDP data transfer with pacing
+//! UDP data transfer with pacing and receiver-progress feedback
 //!
 //! Implements paced UDP sending to avoid buffer saturation and provides
 //! jitter/loss calculation per RFC 3550.
+//!
+//! Also defines [`UdpFeedbackPacket`], the 36-byte cumulative-counts
+//! receiver-progress packet emitted by the server's [`receive_udp`] task
+//! at 2 Hz back to the client when both peers advertise the
+//! `udp_feedback_v1` capability. The feedback path lets live UDP loss
+//! visibility on the client sidestep the TCP control channel that may be
+//! competing for ACKs against a saturated UDP uplink (issue #70). Demux
+//! between data packets ([`UdpPacketHeader`], 16-byte header + payload)
+//! and feedback packets is length-first (36 bytes for feedback vs.
+//! 1416 bytes for data), so it never relies on inspecting
+//! sequence-number bits.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

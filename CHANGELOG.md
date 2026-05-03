@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-05-03
+
+### Fixed
+- **Live UDP loss counter no longer stalls under upload-mode saturation** (issue #70 final fix) — v0.9.13's `TCP_NODELAY` partially addressed the bug but brettowe's retest showed 8 subsequent intervals still bunched at one end-of-test client-side timestamp. Root cause was `tokio::time::interval` defaulting to `MissedTickBehavior::Burst` on the server's stats sampling timer: when `writer.write_all()` stalled under the back-pressure that the saturated UDP uplink induces on TCP control, missed ticks accumulated and fired as a burst when the writer unblocked, producing stale interval samples with fresh client-side arrival timestamps and misleading throughput numbers. `Skip` now drops the stale ticks; cumulative state in `StreamStats` atomics still surfaces correctly on the next live tick and at end-of-test. Applied unconditionally on both `run_test` interval-loop sites; benefits even pre-v0.9.14 clients pairing with a v0.9.14 server.
+- **`--omit` no longer folds hidden UDP loss into the first visible interval** — the new cumulative-loss tracker added below was advancing its cache on every progress arrival, but the printed-line baseline only advanced when a line printed. With `--omit 3`, the first visible interval would report all loss accumulated during seconds 0-3 as one jumbo delta, defeating the purpose of `--omit`. The baseline now advances during the omit window so visible lines reflect only loss observed during printed intervals.
+
+### Added
+- **UDP receiver feedback (`udp_feedback_v1` capability)** (issue #70 final fix) — when both peers advertise the capability, the server now emits a 36-byte cumulative `(packets_received, packets_lost)` UDP packet back to the client at 2 Hz on the same data socket, sidestepping the TCP control channel for live UDP loss reporting. Wire format: `b"XFRF"` magic + version + kind + flags + `stream_id` + reserved + `elapsed_ms` + cumulative `packets_received` + cumulative `packets_lost`, all big-endian, fixed 36 bytes. Length-first demux at receive sites distinguishes feedback from data packets without inspecting sequence-number bits. Cumulative-not-delta semantics let the client recover from any dropped feedback packet without needing the lost intermediate state. Capability negotiation gates emission so older clients (which wouldn't know to listen) never see a packet they don't understand.
+- **Producer-side monotonic-denominator filter on the client** — both the TCP control `udp_progress` decode site and the UDP feedback aggregator funnel updates through `UdpProgressFilter::apply`, which admits only readings whose `(received + lost)` denominator is at-least-as-fresh as anything we've seen before. Atomic CAS via `fetch_update` so two producers cannot race a stale store after a fresh one. Applies in addition to TUI display: plain text, CSV, and JSON-stream output use the cached cumulative as the source of truth for the per-line `lost` field, so the freshest reading from either source flows through to scripted consumers, not just the TUI live counter.
+- **Live UDP loss in non-TUI output paths** — `--no-tui --json-stream` / `--csv` / plain interval output now reflects the freshest `udp_progress` from either TCP control or UDP feedback. Previously these consumers used per-stream `streams[].lost` from the most recent TCP `Interval` only, which under control-channel stalls could be several seconds stale. Falls back to the per-stream sum for sessions where `udp_progress` is never sent (paired with a pre-0.9.11 server, or non-UDP tests).
+- **Docker repro harness for issue #70** (`docker/Dockerfile.repro`, `docker/repro-issue-70.sh`, `docker/README.md`) — multi-stage build with the current branch and the released v0.9.13 baseline side-by-side. `docker run --rm --cap-add=NET_ADMIN xfr-repro` runs hard assertions on the new build (max bunch ≤ 2, time-to-first-loss < 5s, live mid-run loss observed); `--baseline` prints diagnostics for narrative comparison without gating on a threshold. Stays out of CI — the existing 2× oversubscription `control-channel-skew` job remains the regression floor; the harness is for human-driven A/B at brettowe's 10× recipe before publishing.
+
+### Changed
+- **`TestProgress` schema (pre-1.0 break)** — adds `udp_feedback_only: bool` so consumers can distinguish a feedback-only update (only `udp_progress` carries truth; everything else is sentinel/None) from a full TCP `Interval` update. Three consumers handle the partial variant: `App::on_progress` early-returns after updating UDP loss state and preserves all other field values; `main.rs` print loop skips feedback-only entries entirely (the cumulative cache picks up the freshness for the next full interval); cross-version compat test path adopts the new field.
+- **Server bidir mode no longer emits UDP feedback** — feedback is upload-mode-only by design. Bidir's server-side recv half was passing `client_supports_udp_feedback` through to `receive_udp` even though the client's bidir recv has no consumer for those packets; emission was pure overhead on the return path. Bidir always passes `false` now.
+- **`receive_udp` skips feedback packets in `bytes_received` accounting** — the length-first demux previously rejected feedback before the data path but bumped `bytes_received` first. With server bidir gating that's a moot path post-fix, but defense-in-depth: feedback bytes never count toward `bytes_received`, which tracks test-data wire bandwidth.
+- **Capability list factored into a single `SUPPORTED_CAPABILITIES` const** — `client_hello`, `server_hello`, and `server_hello_with_auth` previously each had a duplicated `Vec<String>` literal. Future capability additions now touch one line. New `capability_advertised(&capabilities, name)` helper centralizes the matcher used at both negotiation sites.
+
+### Library API (pre-1.0 break)
+- `client::TestProgress` gains `udp_feedback_only: bool`. Constructors must supply it.
+- `client::UdpProgressFilter` and `client::UdpFeedbackAggregator` are new public types backing the producer-side filter and aggregator.
+- `udp::receive_udp` signature gains a trailing `feedback_enabled: bool` parameter.
+- `udp::receive_udp_feedback_only(socket, aggregator, stream_index, cancel)` is new; spawned per-stream on the client in upload mode.
+- `udp::UdpFeedbackPacket` and `UDP_FEEDBACK_SIZE` / `UDP_FEEDBACK_MAGIC` / `UDP_FEEDBACK_VERSION` / `UDP_FEEDBACK_KIND_RECEIVER_PROGRESS` constants exported.
+- `protocol::SUPPORTED_CAPABILITIES` and `protocol::capability_advertised` exported.
+- `stats::StreamStats::udp_progress_snapshot()` exported for callers that need a coherent `(received, lost)` pair.
+
+### Maintenance
+- Bump `Cargo.toml` to `0.9.14`.
+
 ## [0.9.13] - 2026-05-03
 
 ### Fixed
