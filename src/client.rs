@@ -192,11 +192,7 @@ impl UdpProgressFilter {
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |current| {
-                if denom >= current {
-                    Some(denom)
-                } else {
-                    None
-                }
+                if denom >= current { Some(denom) } else { None }
             },
         );
         match result {
