@@ -32,6 +32,12 @@ A comparison of xfr with other network bandwidth testing tools.
 | **Language** | Rust | C | C | Rust | Rust |
 | **Active development** | Yes | Maintenance | Yes | Yes | Yes |
 
+The "Live UDP loss under saturation" row refers to xfr's TUI live Packet Loss
+counter and the freshness of UDP loss values. Non-TUI interval formats
+(`--json-stream`, `--csv`, and plain text) still emit rows on TCP control
+`Interval` arrival, so row cadence can bunch under extreme loss even when the
+printed loss value reflects fresher `udp_feedback_v1` data.
+
 ## For iperf3 Users
 
 xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.

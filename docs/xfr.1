@@ -1,4 +1,4 @@
-.TH XFR 1 "April 2026" "xfr 0.9.10" "User Commands"
+.TH XFR 1 "May 2026" "xfr 0.9.14" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -271,9 +271,21 @@ Find xfr servers on the local network via mDNS
 .SH PROTOCOL
 .PP
 .B xfr
-v0.9.11+ servers and clients exchange capability strings during the
+servers and clients using protocol v1.1 exchange capability strings during the
 .B Hello
 handshake (protocol v1.1). A feature activates only when both peers advertise its capability; older peers fall back to prior behavior, so adding a capability is wire-additive.
+.TP
+.B tcp
+Peer supports TCP tests.
+.TP
+.B udp
+Peer supports UDP tests.
+.TP
+.B quic
+Peer supports QUIC tests.
+.TP
+.B multistream
+Peer supports multiple parallel streams.
 .TP
 .B single_port_tcp
 All TCP data streams multiplex over the single control port. Servers fall back to per-stream ephemeral ports for clients that don't advertise this.

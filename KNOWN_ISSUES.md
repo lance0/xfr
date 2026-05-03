@@ -104,6 +104,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### Non-TUI Interval Row Cadence Can Still Bunch Under Extreme Loss
+
+**Issue:** v0.9.14's upload-mode UDP feedback path keeps the TUI live Packet Loss counter current and refreshes the cumulative loss cache used by plain text, CSV, and JSON-stream output. Those non-TUI formats still print rows only when a TCP control `Interval` message reaches the client. Under aggressive synthetic loss, the kernel can still deliver already-sent TCP interval messages in bursts.
+
+**Impact:** The `lost` value on each printed non-TUI row reflects the freshest accepted cumulative UDP reading, but the row timestamps/cadence can still bunch under pathological loss. This is most visible with `--json-stream` diagnostics.
+
+**Mitigation:** Use the TUI for the most responsive live Packet Loss display. A follow-up will either emit explicit feedback-only stream events or decouple scripted interval output cadence from TCP control-message arrival.
+
+---
+
 ### Windows Support is Experimental
 
 **Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently.

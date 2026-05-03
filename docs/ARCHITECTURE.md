@@ -60,7 +60,8 @@ src/
 │                                                                     │
 │  1. Connect TCP to server:5201 (control channel)                   │
 │  2. Send Hello (version 1.1, capabilities list)                     │
-│     Capabilities: tcp, udp, quic, multistream, single_port_tcp      │
+│     Capabilities: tcp, udp, quic, multistream, single_port_tcp,     │
+│                   pause_resume, udp_feedback_v1                    │
 │  3. Receive server Hello (version, auth challenge if PSK)           │
 │  4. If PSK: complete challenge-response auth                        │
 │  5. Send TestStart (protocol, streams, duration, direction)         │
@@ -100,7 +101,7 @@ Protocol version is **1.1** (major version must match for compatibility).
 Messages use a tagged enum format with a `"type"` field:
 
 ```
-{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp"]}\n
+{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp","pause_resume","udp_feedback_v1"]}\n
 {"type":"test_start","id":"...","protocol":"tcp","streams":4,...}\n
 ```
 

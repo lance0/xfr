@@ -111,6 +111,12 @@ xfr <host> --json-stream --no-tui
 Each line may also include optional fields: `retransmits`, `rtt_us`, `cwnd`
 (TCP), `jitter_ms` and `lost` (UDP). Fields that do not apply are omitted.
 
+For upload-mode UDP tests between v0.9.14+ peers, the `lost` value uses the
+freshest cumulative receiver counts from either TCP control intervals or
+`udp_feedback_v1` packets on the UDP data socket. The JSON-stream row cadence
+still follows TCP control `Interval` arrivals; under extreme loss those rows can
+arrive in bursts even though the loss value on each printed row is fresh.
+
 ### Parsing with jq
 
 ```bash
