@@ -994,6 +994,9 @@ async fn handle_client_with_first_message(
     security: &SecurityContext,
     first_msg: ControlMessage,
 ) -> anyhow::Result<()> {
+    if let Err(e) = tcp::configure_control_stream(&stream) {
+        warn!("Failed to set TCP_NODELAY on control stream: {}", e);
+    }
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -1103,6 +1106,9 @@ async fn handle_client_with_auth(
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
 ) -> anyhow::Result<()> {
+    if let Err(e) = tcp::configure_control_stream(&stream) {
+        warn!("Failed to set TCP_NODELAY on control stream: {}", e);
+    }
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
