@@ -625,16 +625,16 @@ pub async fn receive_udp(
                         packets_lost: snap.packets_lost,
                     };
                     let mut buf = [0u8; UDP_FEEDBACK_SIZE];
-                    if pkt.encode(&mut buf) {
-                        if let Err(e) = socket.send_to(&buf, addr).await {
-                            // Non-fatal: ICMP port-unreachable from a
-                            // closed peer surfaces as ConnectionRefused
-                            // here. Log at debug; next tick retries.
-                            debug!(
-                                "UDP feedback send_to({}) failed: {}",
-                                addr, e
-                            );
-                        }
+                    if pkt.encode(&mut buf)
+                        && let Err(e) = socket.send_to(&buf, addr).await
+                    {
+                        // Non-fatal: ICMP port-unreachable from a
+                        // closed peer surfaces as ConnectionRefused
+                        // here. Log at debug; next tick retries.
+                        debug!(
+                            "UDP feedback send_to({}) failed: {}",
+                            addr, e
+                        );
                     }
                 }
             }
@@ -663,6 +663,98 @@ pub async fn receive_udp(
         },
         packets_sent,
     ))
+}
+
+/// Receive `UdpFeedbackPacket`s from the server on the client's
+/// upload-mode UDP socket.
+///
+/// Spawned alongside the client-side `send_udp_paced` task so the
+/// connected socket carries data in one direction and feedback in the
+/// other. Length-first demux: 36-byte packets that decode as feedback
+/// are written into `aggregator[stream_id]` for the per-test 1 Hz
+/// consumer task to pick up. Anything else (including unexpected data
+/// echoes or random short runts) is silently discarded — the client in
+/// upload mode owns no PacketTracker for this socket and must not
+/// pollute throughput or loss accounting from feedback noise.
+///
+/// Drains the socket for up to ~100 ms after `cancel` fires before
+/// exiting, so feedback packets that landed just before the data
+/// streams stopped are still observed in the per-test summary.
+pub async fn receive_udp_feedback_only(
+    socket: Arc<UdpSocket>,
+    aggregator: crate::client::UdpFeedbackAggregator,
+    stream_index: usize,
+    mut cancel: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut buffer = vec![0u8; UDP_PAYLOAD_SIZE + 100];
+
+    let cancel_changed = async move {
+        // Wait until cancel becomes true. `changed()` returns on any
+        // value transition, so loop until we see the actual `true`.
+        loop {
+            if *cancel.borrow() {
+                return;
+            }
+            if cancel.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(cancel_changed);
+
+    loop {
+        tokio::select! {
+            result = socket.recv(&mut buffer) => {
+                match result {
+                    Ok(n) => {
+                        // Length-first demux. Anything not exactly 36 bytes
+                        // is not a feedback packet; ignore it.
+                        if n != UDP_FEEDBACK_SIZE {
+                            continue;
+                        }
+                        if let Some(pkt) = UdpFeedbackPacket::decode(&buffer[..n]) {
+                            // Cumulative counts are monotonic per-stream,
+                            // so we can safely overwrite our per-stream
+                            // slot — older counts can never be ahead.
+                            let mut slots = aggregator.lock();
+                            if let Some(slot) = slots.get_mut(stream_index) {
+                                *slot = pkt.to_progress();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("UDP feedback recv error on stream {}: {}", stream_index, e);
+                    }
+                }
+            }
+            _ = &mut cancel_changed => {
+                // Cancel fired. Drain for ~100ms so a final in-flight
+                // feedback packet can still update our slot before the
+                // consumer task stops emitting and the test summary
+                // renders.
+                let drain_deadline = Instant::now() + Duration::from_millis(100);
+                while Instant::now() < drain_deadline {
+                    let remaining = drain_deadline.saturating_duration_since(Instant::now());
+                    tokio::select! {
+                        result = socket.recv(&mut buffer) => {
+                            if let Ok(n) = result
+                                && n == UDP_FEEDBACK_SIZE
+                                && let Some(pkt) = UdpFeedbackPacket::decode(&buffer[..n])
+                            {
+                                let mut slots = aggregator.lock();
+                                if let Some(slot) = slots.get_mut(stream_index) {
+                                    *slot = pkt.to_progress();
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(remaining) => break,
+                    }
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Wait for the first packet from a client and return their address.

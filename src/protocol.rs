@@ -188,7 +188,7 @@ impl std::fmt::Display for Direction {
 /// the client can both derive a live loss percentage and detect that the
 /// server is reporting fresh data (vs. paired with an old server that omits
 /// the field). Counts grow monotonically across the run.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct UdpIntervalProgress {
     pub packets_received: u64,
     pub packets_lost: u64,
@@ -427,7 +427,10 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
 ];
 
 fn supported_capabilities() -> Vec<String> {
-    SUPPORTED_CAPABILITIES.iter().map(|s| s.to_string()).collect()
+    SUPPORTED_CAPABILITIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Returns true if the peer's hello capability vec includes

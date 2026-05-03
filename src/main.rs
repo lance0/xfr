@@ -1126,6 +1126,16 @@ async fn run_client_plain(
         let mut last_retransmits: u64 = 0;
 
         while let Some(progress) = rx.recv().await {
+            // Feedback-only updates carry just udp_progress; everything
+            // else is sentinel/None. Plain/CSV/JSON-stream interval
+            // formatters expect a full snapshot — skip these updates so
+            // we don't accumulate zero bytes or print a zero-throughput
+            // line. The next full TCP interval delivers an authoritative
+            // throughput sample with the freshest udp_progress already
+            // applied via the shared producer-side filter.
+            if progress.udp_feedback_only {
+                continue;
+            }
             // Accumulate cumulative totals for fallback summary
             cumulative_bytes_writer
                 .fetch_add(progress.total_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -2193,6 +2203,7 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             udp_progress: None,
+            udp_feedback_only: false,
         }
     }
 

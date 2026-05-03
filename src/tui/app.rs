@@ -344,6 +344,23 @@ impl App {
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
+        // Feedback-only updates carry just `udp_progress`; everything
+        // else is sentinel/None and consumers must preserve their last
+        // full-interval values. Update only UDP loss state and return,
+        // skipping throughput history (sparkline), retransmits, jitter,
+        // RTT/cwnd, and byte-count fields the feedback path doesn't know
+        // about. Skipping prev_udp_progress here keeps the sparkline's
+        // per-bar loss-delta computation aligned to full-interval
+        // boundaries; feedback only powers the "current loss percent"
+        // numeric reading, not the bar history.
+        if progress.udp_feedback_only {
+            if let Some(p) = progress.udp_progress
+                && let Some(percent) = p.lost_percent()
+            {
+                self.udp_lost_percent = Some(percent);
+            }
+            return;
+        }
         // `elapsed` is intentionally NOT written here. `tick()` owns it during
         // Running from the local wall clock (pause-aware), so the TUI stays
         // live between progress messages. Writing from `progress.elapsed_ms`
@@ -880,6 +897,7 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             udp_progress: None,
+            udp_feedback_only: false,
         });
 
         assert_eq!(
@@ -936,6 +954,7 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             udp_progress,
+            udp_feedback_only: false,
         }
     }
 
@@ -993,6 +1012,49 @@ mod tests {
         assert_eq!(app.udp_lost_percent, Some(2.5));
         app.on_progress(make_progress(50.0, None));
         assert_eq!(app.udp_lost_percent, Some(2.5));
+    }
+
+    #[test]
+    fn feedback_only_progress_updates_udp_loss_only() {
+        // A feedback-only update carries just `udp_progress`. It must
+        // update `udp_lost_percent` but leave throughput history,
+        // bytes, retransmits, and other full-interval fields untouched —
+        // those values came from the most recent full TCP interval and
+        // the feedback path doesn't know any of them.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        // Land a full interval first to populate throughput, bytes,
+        // and the sparkline history.
+        app.on_progress(make_progress(
+            500.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 100,
+                packets_lost: 5,
+            }),
+        ));
+        assert_eq!(app.current_throughput_mbps, 500.0);
+        let initial_history_len = app.throughput_history.len();
+
+        // Now a feedback-only update with a higher cumulative loss.
+        let mut feedback = make_progress(
+            // sentinel throughput — feedback updates don't carry it.
+            0.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 200,
+                packets_lost: 50,
+            }),
+        );
+        feedback.udp_feedback_only = true;
+        app.on_progress(feedback);
+
+        // udp_lost_percent updates to the feedback's reading.
+        let expected = (50.0 / 250.0) * 100.0;
+        assert!((app.udp_lost_percent.unwrap() - expected).abs() < 0.001);
+        // Throughput, bytes, sparkline history all preserved.
+        assert_eq!(app.current_throughput_mbps, 500.0);
+        assert_eq!(app.throughput_history.len(), initial_history_len);
     }
 
     #[test]

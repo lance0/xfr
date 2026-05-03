@@ -1227,6 +1227,7 @@ async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 /// Handle test request after authentication
+#[allow(clippy::too_many_arguments)]
 async fn handle_test_request(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,

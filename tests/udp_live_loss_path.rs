@@ -137,5 +137,6 @@ fn roundtrip_via_wire(agg: &AggregateInterval) -> TestProgress {
         throughput_send_mbps: aggregate.throughput_send_mbps,
         throughput_recv_mbps: aggregate.throughput_recv_mbps,
         udp_progress: aggregate.udp_progress,
+        udp_feedback_only: false,
     }
 }
