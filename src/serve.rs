@@ -1078,10 +1078,11 @@ async fn handle_client_with_first_message(
         }
     }
 
-    // Determine if client supports single-port TCP
-    let client_supports_single_port = client_capabilities
-        .as_ref()
-        .is_some_and(|caps| caps.iter().any(|c| c == "single_port_tcp"));
+    // Determine which optional capabilities the client supports
+    let client_supports_single_port =
+        crate::protocol::capability_advertised(&client_capabilities, "single_port_tcp");
+    let client_supports_udp_feedback =
+        crate::protocol::capability_advertised(&client_capabilities, "udp_feedback_v1");
 
     // Continue with test handling
     handle_test_request(
@@ -1092,6 +1093,7 @@ async fn handle_client_with_first_message(
         server_max_duration,
         security,
         client_supports_single_port,
+        client_supports_udp_feedback,
     )
     .await
 }
@@ -1156,7 +1158,7 @@ async fn handle_client_with_auth(
     }
 
     // Continue with normal test handling
-    // Note: dead code path - assumes single-port capable client
+    // Note: dead code path - assumes single-port capable client and UDP feedback support
     handle_test_request(
         &mut reader,
         &mut writer,
@@ -1164,6 +1166,7 @@ async fn handle_client_with_auth(
         active_tests,
         server_max_duration,
         security,
+        true,
         true,
     )
     .await
@@ -1232,6 +1235,7 @@ async fn handle_test_request(
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
     client_supports_single_port: bool,
+    client_supports_udp_feedback: bool,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
 
@@ -1351,6 +1355,7 @@ async fn handle_test_request(
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
                 client_supports_single_port,
+                client_supports_udp_feedback,
                 dscp,
                 window_size,
             )
@@ -1737,6 +1742,7 @@ async fn run_test(
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
     client_supports_single_port: bool,
+    client_supports_udp_feedback: bool,
     dscp: Option<u8>,
     client_window_size: Option<u64>,
 ) -> anyhow::Result<(u64, u64, f64)> {
