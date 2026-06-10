@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Zero-copy TCP sends (`-Z`/`--zerocopy`, Linux)** (issue #33) — the send payload now lives in a `memfd_create` anonymous file and is pushed to the socket with `sendfile(2)`, skipping the userspace-to-kernel copy that `write(2)` performs on every 128 KB chunk. On CPU-bound senders (embedded routers, SBCs) the copy itself is often the throughput bottleneck — iperf3's equivalent `-Z` measured ~3x on a MIPS router. `sendfile` was chosen over `MSG_ZEROCOPY` for the first step because it works on old kernels, needs no error-queue completion reaping, and is MPTCP-compatible; `MSG_ZEROCOPY` remains on the roadmap under the same flag. Opt-in, TCP-only (conflicts with `-u`/`-Q` at parse time), and never fails a test: non-Linux platforms, kernels without `memfd_create`, and sockets that reject `sendfile` all fall back to regular writes with a warning. Payload semantics are unchanged (`--random` default / `--zeros` fill the memfd exactly as they fill the regular buffer).
+- **`zerocopy_v1` capability + `TestStart.zerocopy` field** — for `-R`/`--bidir`, the client forwards the zero-copy request in `TestStart` (wire-additive, absent = false) and the server applies it to its own send paths. Servers predating the field silently ignore it, so the client warns when the server doesn't advertise `zerocopy_v1`.
+
+### Library API (pre-1.0 break)
+- `tcp::TcpConfig` and `client::ClientConfig` gain `zerocopy: bool`. Struct-literal constructors must supply it (`Default` is `false`).
+- `protocol::ControlMessage::TestStart` gains `zerocopy: bool` (serde-default, omitted when false).
+- New module `zerocopy` with `ZerocopyPayload` (memfd construction + async sendfile chunk sends).
+
 ## [0.9.14] - 2026-05-03
 
 ### Fixed

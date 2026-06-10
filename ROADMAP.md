@@ -307,8 +307,8 @@ Client behind strict firewall → which protocol?
 *Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24). Per-subflow stats via `MPTCP_FULL_INFO` would show multi-path behavior in the TUI.*
 
 ### IO Optimization / Zero-Copy (issue #33)
-- [ ] `sendfile()` + `mmap()` on the send path — create anonymous memory region via `mmap()` and pass fd to `sendfile()`, avoiding userspace buffer copies entirely. No temp file needed (iperf3 uses this approach). Lowest effort, biggest win on embedded/constrained devices (3x improvement measured on MIPS router: 30 → 100 Mbps)
-- [ ] `MSG_ZEROCOPY` on the send path — `setsockopt(SO_ZEROCOPY)` + `send()` with `MSG_ZEROCOPY` flag. Must be optional/flag-gated: MPTCP doesn't support it yet ([mptcp_net-next#578](https://github.com/multipath-tcp/mptcp_net-next/issues/578)). Linux 4.14+
+- [x] `sendfile()` on the TCP send path — shipped as `-Z`/`--zerocopy` (v0.9.15): payload lives in a `memfd_create` anonymous file and is pushed with `sendfile(2)`, skipping the per-write userspace copy. Forwarded to the server via `TestStart.zerocopy` for `-R`/`--bidir` (`zerocopy_v1` capability); MPTCP-compatible; falls back to regular writes when unsupported
+- [ ] `MSG_ZEROCOPY` on the send path — `setsockopt(SO_ZEROCOPY)` + `send()` with `MSG_ZEROCOPY` flag, picked automatically under the existing `--zerocopy` flag when supported and beneficial. Must stay optional: MPTCP doesn't support it yet ([mptcp_net-next#578](https://github.com/multipath-tcp/mptcp_net-next/issues/578)). Linux 4.14+, needs error-queue completion reaping
 - [ ] io_uring with fixed buffers — biggest win but requires different async runtime story (tokio-uring or glommio)
 - [ ] Multi-queue NIC support
 - [ ] AF_XDP kernel bypass

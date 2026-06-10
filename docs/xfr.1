@@ -119,6 +119,9 @@ Use random payload data (default for TCP/UDP client\-sent traffic)
 .B \-\-zeros
 Use zero\-filled payload data instead of random bytes
 .TP
+.B \-Z ", " \-\-zerocopy
+Zero\-copy TCP sends via sendfile(2), like iperf3 \-Z (Linux only; lowers sender CPU overhead). Applies to client\-sent traffic, and is forwarded to servers that support it for \-R/\-\-bidir. Falls back to regular writes when unsupported
+.TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS

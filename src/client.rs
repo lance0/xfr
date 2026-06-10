@@ -90,6 +90,11 @@ pub struct ClientConfig {
     pub mptcp: bool,
     /// Use random payload data for client-sent traffic
     pub random_payload: bool,
+    /// Zero-copy TCP sends via sendfile(2) (Linux only, issue #33). Applies
+    /// to client-sent traffic and is forwarded to the server for its sends
+    /// in download/bidir modes. Falls back to regular writes when
+    /// unsupported.
+    pub zerocopy: bool,
     /// DSCP/TOS value for IP_TOS socket option
     pub dscp: Option<u8>,
 }
@@ -113,6 +118,7 @@ impl Default for ClientConfig {
             sequential_ports: false,
             mptcp: false,
             random_payload: true,
+            zerocopy: false,
             dscp: None,
         }
     }
@@ -493,6 +499,19 @@ impl Client {
         let server_supports_udp_feedback =
             crate::protocol::capability_advertised(&server_capabilities, "udp_feedback_v1");
 
+        // Zero-copy on the server's sends (download/bidir) rides on the
+        // TestStart.zerocopy field; servers predating zerocopy_v1 silently
+        // ignore it, so tell the user their request won't take effect there.
+        if self.config.zerocopy
+            && matches!(
+                self.config.direction,
+                Direction::Download | Direction::Bidir
+            )
+            && !crate::protocol::capability_advertised(&server_capabilities, "zerocopy_v1")
+        {
+            warn!("Server does not support zero-copy; server-sent traffic will use regular writes");
+        }
+
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -515,6 +534,7 @@ impl Client {
             mptcp: self.config.mptcp,
             dscp: self.config.dscp,
             window_size: self.config.window_size.map(|w| w as u64),
+            zerocopy: self.config.zerocopy,
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -927,6 +947,7 @@ impl Client {
                 window_size: self.config.window_size,
                 congestion: self.config.tcp_congestion.clone(),
                 random_payload: self.config.random_payload,
+                zerocopy: self.config.zerocopy,
                 ..Default::default()
             };
 
@@ -1039,6 +1060,7 @@ impl Client {
                                     window_size: config.window_size,
                                     congestion: config.congestion.clone(),
                                     random_payload: config.random_payload,
+                                    zerocopy: config.zerocopy,
                                 };
                                 let recv_config = config;
 
@@ -1456,6 +1478,7 @@ impl Client {
             mptcp: false,
             dscp: None,        // QUIC manages its own TOS via the transport layer
             window_size: None, // QUIC flow control is handled at the transport layer
+            zerocopy: false,   // sendfile is incompatible with QUIC's userspace encryption
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())

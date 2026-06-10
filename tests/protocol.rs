@@ -40,6 +40,7 @@ fn test_test_start_roundtrip() {
         mptcp: false,
         dscp: None,
         window_size: None,
+        zerocopy: false,
     };
 
     let json = msg.serialize().unwrap();
@@ -101,6 +102,7 @@ fn test_udp_test_start() {
         mptcp: false,
         dscp: None,
         window_size: None,
+        zerocopy: false,
     };
 
     let json = msg.serialize().unwrap();

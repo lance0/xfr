@@ -57,6 +57,7 @@ async fn test_tcp_single_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -108,6 +109,7 @@ async fn test_tcp_multi_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -141,6 +143,7 @@ async fn test_connection_refused() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -174,6 +177,7 @@ async fn test_tcp_download() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -212,6 +216,7 @@ async fn test_tcp_bidir() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -268,6 +273,7 @@ async fn test_udp_upload() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -307,6 +313,7 @@ async fn test_udp_download() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -343,6 +350,7 @@ async fn test_udp_bidir() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -381,6 +389,7 @@ async fn test_udp_multi_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -424,6 +433,7 @@ async fn test_multi_client_concurrent() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -444,6 +454,7 @@ async fn test_multi_client_concurrent() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -530,6 +541,7 @@ async fn test_psk_auth_success() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -572,6 +584,7 @@ async fn test_psk_auth_failure() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -614,6 +627,7 @@ async fn test_psk_auth_missing_client_key() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -654,6 +668,7 @@ async fn test_acl_allow() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -691,6 +706,7 @@ async fn test_rate_limit() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -718,6 +734,7 @@ async fn test_rate_limit() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -766,6 +783,7 @@ async fn test_quic_upload() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -805,6 +823,7 @@ async fn test_quic_download() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -843,6 +862,7 @@ async fn test_quic_multi_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -885,6 +905,7 @@ async fn test_quic_bidir() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -924,6 +945,7 @@ async fn test_quic_with_psk() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -965,6 +987,7 @@ async fn test_acl_deny() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1021,6 +1044,7 @@ async fn test_ipv6_localhost() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1064,6 +1088,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1115,6 +1140,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1162,6 +1188,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1231,6 +1258,7 @@ async fn test_udp_ipv4_explicit() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1287,6 +1315,7 @@ async fn test_udp_ipv6_explicit() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1343,6 +1372,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1383,6 +1413,7 @@ async fn test_tcp_cport_single_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1426,6 +1457,7 @@ async fn test_tcp_cport_multi_stream() {
         sequential_ports: true,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1485,6 +1517,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1540,6 +1573,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1580,6 +1614,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         sequential_ports: true,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1627,6 +1662,7 @@ async fn test_udp_bitrate_underflow_regression() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1697,6 +1733,7 @@ async fn test_quic_ipv6() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1753,6 +1790,7 @@ async fn test_tcp_one_off_multi_stream() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1818,6 +1856,7 @@ async fn test_quic_one_off() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -1862,6 +1901,7 @@ fn test_pause_not_ready_before_test_run() {
         sequential_ports: false,
         mptcp: false,
         random_payload: false,
+        zerocopy: false,
         dscp: None,
     };
 
@@ -2124,6 +2164,7 @@ async fn test_serve_bind_ipv4_loopback() {
         direction: Direction::Upload,
         address_family: xfr::net::AddressFamily::V4Only,
         random_payload: false,
+        zerocopy: false,
         ..Default::default()
     };
     let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
@@ -2166,6 +2207,7 @@ async fn test_serve_bind_ipv6_loopback() {
         direction: Direction::Upload,
         address_family: xfr::net::AddressFamily::V6Only,
         random_payload: false,
+        zerocopy: false,
         ..Default::default()
     };
     let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
@@ -2200,6 +2242,7 @@ async fn test_serve_bind_ipv4_quic() {
         direction: Direction::Upload,
         address_family: xfr::net::AddressFamily::V4Only,
         random_payload: false,
+        zerocopy: false,
         ..Default::default()
     };
     let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
@@ -2241,6 +2284,7 @@ async fn test_serve_bind_ipv6_quic() {
         direction: Direction::Upload,
         address_family: xfr::net::AddressFamily::V6Only,
         random_payload: false,
+        zerocopy: false,
         ..Default::default()
     };
     let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;
@@ -2358,6 +2402,7 @@ async fn test_serve_bind_ipv4_udp() {
         direction: Direction::Upload,
         address_family: xfr::net::AddressFamily::V4Only,
         random_payload: false,
+        zerocopy: false,
         ..Default::default()
     };
     let result = timeout(Duration::from_secs(10), Client::new(client_cfg).run(None)).await;

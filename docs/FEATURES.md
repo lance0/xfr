@@ -60,6 +60,15 @@ Both client and server use random payloads by default for TCP and UDP, avoiding 
 - `--zeros` only affects client-sent traffic; the server always sends random. Payload mode is not negotiated over the wire (future enhancement).
 - QUIC payloads are ignored since QUIC encrypts all traffic via TLS 1.3.
 
+### Zero-Copy Sends (`--zerocopy`, Linux)
+
+TCP sends can skip the per-write userspace-to-kernel copy with `-Z`/`--zerocopy` (issue #33), which serves the payload from an anonymous in-memory file via `sendfile(2)` — the same mechanism as iperf3's `-Z`. On constrained CPUs (embedded routers, SBCs) the copy itself is often the bottleneck, so this raises the throughput ceiling and lowers CPU load at any given rate.
+
+- Client-sent traffic uses zero-copy directly; for `-R`/`--bidir`, the request is forwarded in `TestStart` and servers that advertise the `zerocopy_v1` capability apply it to their sends (older servers ignore it, and the client warns).
+- Works with MPTCP (`sendfile` goes through the regular splice path, unlike `MSG_ZEROCOPY`).
+- Falls back to regular writes — with a warning, never a failed test — on non-Linux platforms, kernels without `memfd_create`, or sockets that reject `sendfile`.
+- Payload semantics are unchanged: the in-memory file is filled once with the same random (or `--zeros`) pattern the regular path uses.
+
 ### QUIC
 
 Encrypted transport over UDP using TLS 1.3:
@@ -569,6 +578,7 @@ See `xfr --help` for complete CLI documentation.
 | `--mptcp` | | false | MPTCP mode (Multi-Path TCP, Linux 5.6+) |
 | `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
+| `--zerocopy` | `-Z` | false | Zero-copy TCP sends via sendfile(2) (Linux; lowers sender CPU overhead) |
 
 ### Server-Specific Flags
 

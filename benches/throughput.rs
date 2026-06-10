@@ -125,6 +125,7 @@ fn bench_protocol_serialize_test_start(c: &mut Criterion) {
         mptcp: false,
         dscp: None,
         window_size: None,
+        zerocopy: false,
     };
 
     c.bench_function("protocol_serialize_test_start", |b| {

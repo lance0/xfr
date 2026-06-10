@@ -445,6 +445,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
 | `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
+| `--zerocopy` | `-Z` | false | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
@@ -560,6 +561,7 @@ Ensure the server is running and the port is not blocked by a firewall. TCP only
 - Try multiple parallel streams: `-P 4`
 - Disable Nagle's algorithm: `--tcp-nodelay`
 - Increase TCP socket buffer: `--window 4M`
+- On CPU-bound senders (embedded routers, SBCs), skip the per-write userspace copy: `--zerocopy` (TCP, Linux). Applies to client sends, and to server sends in `-R`/`--bidir` when the server supports it
 
 ### UDP packet loss
 

@@ -119,6 +119,12 @@ pub enum ControlMessage {
         /// that large values like `-w 4G` round-trip without silent truncation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_size: Option<u64>,
+        /// Request zero-copy (sendfile) sends on the server side for
+        /// download/bidir TCP (`--zerocopy`, issue #33). Wire-additive:
+        /// absent means false, and older servers ignore the field — the
+        /// client warns via the `zerocopy_v1` capability when that happens.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        zerocopy: bool,
     },
     TestAck {
         id: String,
@@ -433,6 +439,10 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // UDP at 2 Hz when both peers advertise this. Sidesteps TCP control
     // for live UDP-loss visibility under upload-mode saturation.
     "udp_feedback_v1",
+    // v0.9.15: server honors TestStart.zerocopy (sendfile-based sends for
+    // download/bidir TCP, issue #33). Advertised so clients can warn when
+    // a `-R --zerocopy` request lands on a server that will ignore it.
+    "zerocopy_v1",
 ];
 
 fn supported_capabilities() -> Vec<String> {
@@ -535,6 +545,7 @@ mod tests {
             mptcp: false,
             dscp: None,
             window_size: None,
+            zerocopy: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -582,6 +593,7 @@ mod tests {
             mptcp: false,
             dscp: None,
             window_size: Some(262_144),
+            zerocopy: false,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"window_size\":262144"));
@@ -610,6 +622,7 @@ mod tests {
             mptcp: false,
             dscp: None,
             window_size: Some(big),
+            zerocopy: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -636,6 +649,7 @@ mod tests {
             mptcp: false,
             dscp: None,
             window_size: None,
+            zerocopy: false,
         };
         let json = msg.serialize().unwrap();
         assert!(
@@ -643,6 +657,50 @@ mod tests {
             "None must be skipped in serialization, got: {}",
             json
         );
+        assert!(
+            !json.contains("zerocopy"),
+            "false zerocopy must be skipped in serialization, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_test_start_backward_compat_without_zerocopy() {
+        // Older peers don't send the zerocopy field; it must default to false.
+        let json = r#"{"type":"test_start","id":"x","protocol":"tcp","streams":1,"duration_secs":5,"direction":"download"}"#;
+        let decoded = ControlMessage::deserialize(json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { zerocopy, .. } => {
+                assert!(!zerocopy, "absent field must deserialize to false");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_test_start_roundtrip_with_zerocopy() {
+        let msg = ControlMessage::TestStart {
+            id: "x".to_string(),
+            protocol: Protocol::Tcp,
+            streams: 1,
+            duration_secs: 5,
+            direction: Direction::Download,
+            bitrate: None,
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: None,
+            zerocopy: true,
+        };
+        let json = msg.serialize().unwrap();
+        assert!(json.contains("\"zerocopy\":true"));
+        let decoded = ControlMessage::deserialize(&json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { zerocopy, .. } => {
+                assert!(zerocopy);
+            }
+            _ => panic!("wrong message type"),
+        }
     }
 
     #[test]
