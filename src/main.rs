@@ -289,6 +289,12 @@ struct Cli {
     /// Use zero-filled payload data instead of random bytes
     #[arg(long, conflicts_with = "random")]
     zeros: bool,
+
+    /// Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux only;
+    /// lowers sender CPU overhead). Falls back to regular writes when
+    /// unsupported.
+    #[arg(short = 'Z', long, conflicts_with_all = ["udp", "quic"])]
+    zerocopy: bool,
 }
 
 #[derive(Subcommand)]
@@ -617,6 +623,21 @@ fn random_payload_notice(
     None
 }
 
+/// Warn when --zerocopy cannot take effect for client-sent traffic on this
+/// platform. Download mode is exempt: the client sends no bulk data there,
+/// and the (possibly Linux) server decides its own zero-copy support.
+fn zerocopy_notice(zerocopy: bool, direction: Direction) -> Option<&'static str> {
+    if !zerocopy || cfg!(target_os = "linux") {
+        return None;
+    }
+    match direction {
+        Direction::Download => None,
+        Direction::Upload | Direction::Bidir => Some(
+            "--zerocopy requires Linux sendfile(2); client-sent traffic will use regular writes",
+        ),
+    }
+}
+
 fn generate_completions(shell: &str) {
     use clap::CommandFactory;
     use clap_complete::{Shell, generate};
@@ -897,6 +918,10 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: {msg}");
             }
 
+            if let Some(msg) = zerocopy_notice(cli.zerocopy, direction) {
+                eprintln!("Warning: {msg}");
+            }
+
             if cli.dscp.is_some() && protocol == xfr::protocol::Protocol::Quic {
                 eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
             }
@@ -1040,6 +1065,7 @@ async fn main() -> Result<()> {
                 sequential_ports: protocol != Protocol::Quic && cport.is_some() && streams > 1,
                 mptcp: cli.mptcp,
                 random_payload,
+                zerocopy: cli.zerocopy,
                 dscp: cli
                     .dscp
                     .as_ref()
@@ -2018,6 +2044,47 @@ mod tests {
 
         let cli = Cli::try_parse_from(["xfr", "host", "--zeros"]).unwrap();
         assert!(!effective_random_payload(&cli));
+    }
+
+    #[test]
+    fn test_cli_zerocopy_flag() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
+        assert!(!cli.zerocopy, "zero-copy must be opt-in");
+
+        let cli = Cli::try_parse_from(["xfr", "host", "-Z"]).unwrap();
+        assert!(cli.zerocopy);
+
+        let cli = Cli::try_parse_from(["xfr", "host", "--zerocopy"]).unwrap();
+        assert!(cli.zerocopy);
+
+        // sendfile is a TCP-only mechanism: UDP and QUIC must conflict
+        assert!(Cli::try_parse_from(["xfr", "host", "-Z", "-u"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "-Z", "-Q"]).is_err());
+
+        // MPTCP is allowed (sendfile goes through the regular splice path)
+        assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--mptcp"]).is_ok());
+    }
+
+    #[test]
+    fn test_zerocopy_notice() {
+        // No request, no warning — regardless of platform or direction.
+        assert!(zerocopy_notice(false, Direction::Upload).is_none());
+        assert!(zerocopy_notice(false, Direction::Download).is_none());
+
+        if cfg!(target_os = "linux") {
+            // Supported platform: never warn.
+            assert!(zerocopy_notice(true, Direction::Upload).is_none());
+            assert!(zerocopy_notice(true, Direction::Download).is_none());
+            assert!(zerocopy_notice(true, Direction::Bidir).is_none());
+        } else {
+            // Unsupported platform: warn only when the client itself sends.
+            assert!(zerocopy_notice(true, Direction::Upload).is_some());
+            assert!(zerocopy_notice(true, Direction::Bidir).is_some());
+            // Download mode: the server decides its own zero-copy support.
+            assert!(zerocopy_notice(true, Direction::Download).is_none());
+        }
     }
 
     #[test]

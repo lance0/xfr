@@ -6,7 +6,11 @@
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
+// Only the non-Linux teardown path calls shutdown(); Linux relies on
+// SO_LINGER=0 + drop. write()/flush() are no longer used — see write_chunk.
+#[cfg(not(target_os = "linux"))]
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
@@ -14,6 +18,7 @@ use tracing::{debug, error, warn};
 
 use crate::stats::StreamStats;
 use crate::tcp_info::get_tcp_info;
+use crate::zerocopy::ZerocopyPayload;
 
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024; // 128 KB
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
@@ -86,6 +91,10 @@ pub struct TcpConfig {
     pub window_size: Option<usize>,
     pub congestion: Option<String>,
     pub random_payload: bool,
+    /// Send via sendfile(2) from a memfd instead of write(2), skipping the
+    /// per-chunk userspace-to-kernel copy (issue #33). Linux-only; falls
+    /// back to regular writes elsewhere or when setup fails.
+    pub zerocopy: bool,
 }
 
 impl Default for TcpConfig {
@@ -96,6 +105,7 @@ impl Default for TcpConfig {
             window_size: None,
             congestion: None,
             random_payload: false,
+            zerocopy: false,
         }
     }
 }
@@ -329,10 +339,61 @@ pub fn configure_control_stream(stream: &TcpStream) -> std::io::Result<()> {
     stream.set_nodelay(true)
 }
 
+/// Write one payload chunk to the socket: sendfile(2) from the memfd when
+/// zero-copy is active, otherwise a regular write. The readiness-then-try_write
+/// loop is the same mechanism `AsyncWriteExt::write` uses internally, so the
+/// regular path is behaviorally unchanged; both paths return bytes queued with
+/// partial-write semantics. Cancel-safe: dropping the future mid-await queues
+/// nothing.
+async fn write_chunk(
+    stream: &TcpStream,
+    buffer: &[u8],
+    zerocopy: Option<&ZerocopyPayload>,
+) -> io::Result<usize> {
+    if let Some(payload) = zerocopy {
+        return payload.send_chunk(stream).await;
+    }
+    loop {
+        stream.writable().await?;
+        match stream.try_write(buffer) {
+            Ok(n) => return Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Build the zero-copy payload from the already-filled send buffer when
+/// requested, logging (not failing) on setup errors so the caller can fall
+/// back to regular writes — e.g. non-Linux platforms or kernels without
+/// memfd_create.
+fn setup_zerocopy(config: &TcpConfig, buffer: &[u8], stream_id: u8) -> Option<ZerocopyPayload> {
+    if !config.zerocopy {
+        return None;
+    }
+    match ZerocopyPayload::new(buffer) {
+        Ok(payload) => {
+            debug!(
+                "Stream {}: zero-copy enabled ({}B sendfile chunks)",
+                stream_id,
+                payload.len()
+            );
+            Some(payload)
+        }
+        Err(e) => {
+            warn!(
+                "Stream {}: zero-copy unavailable ({}); using regular writes",
+                stream_id, e
+            );
+            None
+        }
+    }
+}
+
 /// Send data as fast as possible for the given duration
 /// Returns the final TCP_INFO snapshot (for RTT, retransmits, cwnd)
 pub async fn send_data(
-    mut stream: TcpStream,
+    stream: TcpStream,
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
@@ -375,6 +436,7 @@ pub async fn send_data(
     if config.random_payload {
         rand::RngExt::fill(&mut rand::rng(), buffer.as_mut_slice());
     }
+    let mut zerocopy = setup_zerocopy(&config, &buffer, stats.stream_id);
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
@@ -431,7 +493,7 @@ pub async fn send_data(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = stream.write(&buffer) => r,
+            r = write_chunk(&stream, &buffer, zerocopy.as_ref()) => r,
         };
 
         match write_result {
@@ -462,6 +524,22 @@ pub async fn send_data(
                         }
                     }
                 }
+            }
+            // sendfile rejected by this socket/kernel combo (e.g. MPTCP before
+            // splice support): demote to regular writes and keep the test
+            // running rather than failing it.
+            Err(e)
+                if zerocopy.is_some()
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+                    ) =>
+            {
+                warn!(
+                    "Stream {}: sendfile failed ({}); falling back to regular writes",
+                    stats.stream_id, e
+                );
+                zerocopy = None;
             }
             Err(e) => {
                 let now = tokio::time::Instant::now();
@@ -508,6 +586,8 @@ pub async fn send_data(
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST (skipping drain).
     // On other platforms, call shutdown() for graceful FIN — slower but preserves
     // accounting accuracy since we don't have bytes_acked to clamp overcount.
+    #[cfg(not(target_os = "linux"))]
+    let mut stream = stream;
     #[cfg(not(target_os = "linux"))]
     if let Err(e) = stream.shutdown().await {
         if *cancel.borrow() || is_peer_closed_error(&e) {
@@ -630,7 +710,7 @@ pub fn get_stream_tcp_info(stream: &TcpStream) -> Option<crate::protocol::TcpInf
 /// post-reunite, since a second read would see a later (larger) `bytes_acked`
 /// that could exceed the clamped `bytes_sent`.
 pub async fn send_data_half(
-    mut write_half: OwnedWriteHalf,
+    write_half: OwnedWriteHalf,
     stats: Arc<StreamStats>,
     duration: Duration,
     config: TcpConfig,
@@ -668,6 +748,7 @@ pub async fn send_data_half(
     if config.random_payload {
         rand::RngExt::fill(&mut rand::rng(), buffer.as_mut_slice());
     }
+    let mut zerocopy = setup_zerocopy(&config, &buffer, stats.stream_id);
     let start = tokio::time::Instant::now();
     let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
@@ -718,7 +799,7 @@ pub async fn send_data_half(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = write_half.write(&buffer) => r,
+            r = write_chunk(write_half.as_ref(), &buffer, zerocopy.as_ref()) => r,
         };
 
         match write_result {
@@ -748,6 +829,21 @@ pub async fn send_data_half(
                         }
                     }
                 }
+            }
+            // sendfile rejected by this socket/kernel combo: demote to regular
+            // writes and keep the test running. See send_data for rationale.
+            Err(e)
+                if zerocopy.is_some()
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+                    ) =>
+            {
+                warn!(
+                    "Stream {}: sendfile failed ({}); falling back to regular writes",
+                    stats.stream_id, e
+                );
+                zerocopy = None;
             }
             Err(e) => {
                 let now = tokio::time::Instant::now();
@@ -791,6 +887,8 @@ pub async fn send_data_half(
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST.
     // On other platforms, do graceful shutdown to preserve accounting accuracy.
+    #[cfg(not(target_os = "linux"))]
+    let mut write_half = write_half;
     #[cfg(not(target_os = "linux"))]
     let _ = write_half.shutdown().await;
 
@@ -893,6 +991,63 @@ mod tests {
             config.window_size.is_none(),
             "default must not force SO_SNDBUF/SO_RCVBUF — leave it to the kernel"
         );
+        assert!(!config.zerocopy, "zero-copy must be opt-in");
+    }
+
+    /// End-to-end: send_data with zerocopy enabled pushes real bytes through
+    /// the sendfile path and records them in stats, over a finite test
+    /// duration. Linux-only — elsewhere setup falls back to regular writes,
+    /// which the other tests already cover.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn send_data_zerocopy_delivers_bytes_and_counts_them() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, server) = tokio::join!(connect, accept);
+        let client = client.unwrap();
+        let (mut server, _) = server.unwrap();
+
+        let stats = Arc::new(StreamStats::new(0));
+        let config = TcpConfig {
+            zerocopy: true,
+            random_payload: true,
+            ..Default::default()
+        };
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+
+        // Drain continuously so the sender isn't stalled on a full buffer.
+        // Read errors are expected at the end: SO_LINGER=0 teardown RSTs.
+        let recv_task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut total = 0u64;
+            loop {
+                match server.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => total += n as u64,
+                }
+            }
+            total
+        });
+
+        send_data(
+            client,
+            stats.clone(),
+            Duration::from_millis(300),
+            config,
+            cancel_rx,
+            None,
+            pause_rx,
+        )
+        .await
+        .expect("zerocopy send_data should succeed on Linux");
+
+        let received = recv_task.await.unwrap();
+        let sent = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(sent > 0, "sendfile path must record bytes_sent");
+        assert!(received > 0, "receiver must observe sendfile-pushed bytes");
     }
 
     #[tokio::test]

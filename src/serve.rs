@@ -1258,6 +1258,7 @@ async fn handle_test_request(
             mptcp,
             dscp,
             window_size,
+            zerocopy,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1359,6 +1360,7 @@ async fn handle_test_request(
                 client_supports_udp_feedback,
                 dscp,
                 window_size,
+                zerocopy,
             )
             .await;
 
@@ -1746,6 +1748,7 @@ async fn run_test(
     client_supports_udp_feedback: bool,
     dscp: Option<u8>,
     client_window_size: Option<u64>,
+    zerocopy: bool,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -1916,6 +1919,7 @@ async fn run_test(
                         pause_clone,
                         dscp,
                         client_window_size,
+                        zerocopy,
                     )
                     .await
                 });
@@ -2282,6 +2286,7 @@ async fn spawn_tcp_handlers(
                         window_size: config.window_size,
                         congestion: config.congestion.clone(),
                         random_payload: true,
+                        zerocopy: config.zerocopy,
                     };
                     let recv_config = config;
 
@@ -2341,6 +2346,7 @@ async fn spawn_tcp_stream_handlers(
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
     client_window_size: Option<u64>,
+    zerocopy: bool,
 ) -> Vec<JoinHandle<()>> {
     let per_stream_bitrate = bitrate.map(|b| {
         if b == 0 {
@@ -2412,6 +2418,7 @@ async fn spawn_tcp_stream_handlers(
                         window_size: client_window_to_host(client_window_size),
                         congestion,
                         random_payload: true,
+                        zerocopy,
                         ..Default::default()
                     };
 
