@@ -51,7 +51,17 @@ impl ZerocopyPayload {
         // CStr literal avoids a CString allocation; name is debug-only
         // (shows up in /proc/<pid>/fd).
         let name = c"xfr-zerocopy";
-        let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+        // Raw syscall rather than libc::memfd_create: the glibc wrapper only
+        // exists since 2.27, and both cross-compile toolchains and the old
+        // embedded systems this feature targets ship older glibc. The kernel
+        // interface (3.17+) is the actual requirement either way.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_memfd_create,
+                name.as_ptr(),
+                libc::MFD_CLOEXEC as libc::c_uint,
+            )
+        } as libc::c_int;
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
