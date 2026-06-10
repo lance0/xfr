@@ -33,7 +33,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 
 # Discovery
-mdns-sd = { version = "0.19", optional = true }
+mdns-sd = { version = "0.20", optional = true }
 
 # Config
 toml = "1.1"
