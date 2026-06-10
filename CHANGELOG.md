@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.15] - 2026-06-10
+## [0.9.16] - 2026-06-10
+
+> v0.9.15 was tagged but never released: its release CI failed on the aarch64-gnu cross build (glibc < 2.27 lacks the `memfd_create` wrapper; now invoked via raw syscall). All v0.9.15 changes ship here.
 
 ### Fixed
 - **`-R` UDP no longer reports the server's send rate as throughput** (issue #81) — in download mode the server is the UDP sender, and both the live intervals and the final result carried its `bytes_sent`: every `send_to` the kernel accepted counted, so over a constrained link the display tracked the requested `-b` rate (brettowe's 999.7 Mbps over 100 Mbps Wi-Fi) instead of what arrived. The client — the receiver, the only side that knows wire truth — now overlays its own receive counters onto live intervals (TUI, `--json-stream`, CSV, plain) and the final result (total, per-stream, throughput). Forward mode was always correct because there the server is the receiver. Repro: CPU-starved receiver with a 4 KB receive buffer showed 2.6 Gbps sender-side vs 1.18 Gbps actually received; the display previously claimed the former and now reports the latter, exactly matching received-packets × packet-size.
@@ -24,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Maintenance
 - Rust dependencies group bump (PR #86): ratatui 0.30.1, clap_complete 4.6.5, serde_json 1.0.150, hyper 1.10.1, mdns-sd 0.20.0, uuid 1.23.3, chrono 0.4.45, rcgen 0.14.8, dashmap 6.2.1, socket2 0.6.4. No source changes required.
-- Bump `Cargo.toml` to `0.9.15`.
+- Bump `Cargo.toml` to `0.9.16`.
 
 ## [0.9.14] - 2026-05-03
 
