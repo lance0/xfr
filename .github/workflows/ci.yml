@@ -83,3 +83,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-features
+
+  # The release workflow cross-compiles aarch64-unknown-linux-gnu with an
+  # old-glibc toolchain that the ubuntu/macos test jobs never exercise.
+  # v0.9.15 died at release time on a glibc symbol (memfd_create, glibc
+  # 2.27+) that linked fine everywhere else. Same pinned cross version as
+  # release.yml so the Docker image (and its glibc) match; debug profile is
+  # enough — linking is what catches missing symbols.
+  cross-aarch64-gnu:
+    name: Cross build (aarch64-gnu, release-toolchain glibc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        run: cargo install cross --version 0.2.5
+      - name: Cross build
+        run: cross build --target aarch64-unknown-linux-gnu --features prometheus
