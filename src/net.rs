@@ -406,10 +406,12 @@ pub async fn create_connected_udp_same_port(
 }
 
 /// Startup self-test gating the `single_port_udp_v1` capability (issue
-/// #63): replicate the exact production socket arrangement on a
-/// loopback ephemeral port — shared wildcard-style socket bound first,
-/// same-port connected socket second — and verify a datagram from the
-/// connected peer lands on the connected socket, not the shared one.
+/// #63): replicate the production socket topology on an ephemeral port —
+/// shared WILDCARD-bound socket first (same bind shape and v6only as
+/// the real lane), same-port connected socket second — and verify a
+/// datagram from the connected peer lands on the connected socket, not
+/// the shared one. Dual-stack additionally proves the IPv4-mapped path
+/// (`::ffff:x` sources), which is what every plain-IPv4 client hits.
 /// Kernel UDP lookup is supposed to score connected sockets above
 /// wildcards, but SO_REUSEPORT group semantics vary across kernels and
 /// platforms, so we prove it on the running system instead of assuming.
@@ -432,26 +434,82 @@ pub async fn single_port_udp_self_test(family: AddressFamily) -> bool {
 }
 
 async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()> {
-    use std::time::Duration;
-
-    let loopback: IpAddr = match family {
-        AddressFamily::V4Only => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        AddressFamily::V6Only | AddressFamily::DualStack => IpAddr::V6(Ipv6Addr::LOCALHOST),
-    };
+    // Bind the shared socket exactly the way production binds the main
+    // UDP lane: WILDCARD for the family, same v6only setting. A concrete
+    // loopback bind would exercise a different kernel lookup path
+    // (exact-address-bound sockets score differently from wildcard-bound
+    // ones), and the whole point of this gate is to prove the production
+    // topology, not a lookalike.
     let v6only = match family {
         AddressFamily::V4Only => None,
         AddressFamily::V6Only => Some(true),
         AddressFamily::DualStack => Some(false),
     };
+    let wildcard = family.bind_addr(0);
+    let shared = create_shared_udp_socket(wildcard, v6only).await?;
+    let port = shared.local_addr()?.port();
+    // Production passes the shared socket's own local address when
+    // binding each connected socket; mirror that.
+    let local = SocketAddr::new(wildcard.ip(), port);
 
-    let shared = create_shared_udp_socket(SocketAddr::new(loopback, 0), v6only).await?;
-    let shared_addr = shared.local_addr()?;
-    let peer = UdpSocket::bind(SocketAddr::new(loopback, 0)).await?;
+    let native_loopback: IpAddr = match family {
+        AddressFamily::V4Only => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        AddressFamily::V6Only | AddressFamily::DualStack => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    };
+    check_connected_precedence(&shared, local, v6only, native_loopback, port, false).await?;
+
+    // A dual-stack lane also serves IPv4 clients, whose source addresses
+    // arrive as ::ffff:x.x.x.x and whose connected sockets are
+    // connect()ed to that mapped form. That is the path every ordinary
+    // IPv4 client takes, so prove it separately — native-IPv6 routing
+    // passing says nothing about mapped-address routing.
+    if family == AddressFamily::DualStack {
+        check_connected_precedence(
+            &shared,
+            local,
+            v6only,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+            true,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// One self-test round: a peer on `peer_loopback` gets a same-port
+/// connected socket (connect target in the mapped form when `map_peer`,
+/// mirroring how a dual-stack lane observes IPv4 sources), then we
+/// verify (1) the peer's datagram lands on the connected socket and
+/// (2) an unrelated source on the same family still reaches the shared
+/// socket — guarding against reuseport semantics where the last-bound
+/// group member captures all unicast, which would starve QUIC and
+/// new-client hellos in production.
+async fn check_connected_precedence(
+    shared: &UdpSocket,
+    local: SocketAddr,
+    v6only: Option<bool>,
+    peer_loopback: IpAddr,
+    port: u16,
+    map_peer: bool,
+) -> io::Result<()> {
+    use std::time::Duration;
+
+    let peer = UdpSocket::bind(SocketAddr::new(peer_loopback, 0)).await?;
     let peer_addr = peer.local_addr()?;
-    let connected = create_connected_udp_same_port(shared_addr, v6only, peer_addr).await?;
+    let connect_to = match (map_peer, peer_addr.ip()) {
+        (true, IpAddr::V4(v4)) => {
+            SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), peer_addr.port())
+        }
+        _ => peer_addr,
+    };
+    let connected = create_connected_udp_same_port(local, v6only, connect_to).await?;
+    // The shared socket is wildcard-bound; the peer reaches it via its
+    // own family's loopback at the shared port.
+    let dest = SocketAddr::new(peer_loopback, port);
 
     const PROBE: &[u8] = b"xfr-single-port-self-test";
-    peer.send_to(PROBE, shared_addr).await?;
+    peer.send_to(PROBE, dest).await?;
 
     let mut connected_buf = [0u8; 64];
     let mut shared_buf = [0u8; 64];
@@ -472,13 +530,8 @@ async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()
         )),
     }
 
-    // Second half: traffic from an UNRELATED source must still reach the
-    // shared socket while the connected one is in the group. Guards
-    // against reuseport semantics where the last-bound socket captures
-    // all unicast — that would pass the check above while silently
-    // starving QUIC and new-client hellos in production.
-    let stranger = UdpSocket::bind(SocketAddr::new(loopback, 0)).await?;
-    stranger.send_to(PROBE, shared_addr).await?;
+    let stranger = UdpSocket::bind(SocketAddr::new(peer_loopback, 0)).await?;
+    stranger.send_to(PROBE, dest).await?;
     tokio::select! {
         result = shared.recv_from(&mut shared_buf) => {
             let (n, _) = result?;
