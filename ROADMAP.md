@@ -132,11 +132,15 @@
 - [ ] **High-loss UDP `Connection refused` storm** (#70 follow-up) — under `tc netem loss 50%` on lo with short tests, TCP control handshake delay eats into test duration; if server's test-end fires before client's first UDP packet, kernel sticks ECONNREFUSED on the connected socket and rejects every subsequent send. Pre-existing in v0.9.13. Fix candidates: extend handshake budget under observed loss, recreate connected UDP socket on first ECONNREFUSED, or surface kernel-level signal to the client retry path
 - [ ] **Surface kernel-side UDP drops via SO_RXQ_OVFL** (#70 follow-up) — Linux `SO_RXQ_OVFL` cmsg distinguishes receiver-buffer saturation from on-wire loss. Currently both surface as plain "lost" in the sequence-gap tracker. Track separately so users can tell whether to tune `-w`/`SO_RCVBUF` vs accept the link's actual loss
 - [ ] **Control-plane DSCP for UDP feedback packets** (#70 follow-up) — `udp_feedback_v1` packets share the data socket and inherit the data DSCP, which could queue feedback behind low-priority test traffic on the return path. Mark feedback packets with a control-plane DSCP (CS6 or 0)
-- [ ] **Feedback-driven scripted output cadence** (#70 follow-up) — v0.9.14 refreshes non-TUI `lost` values from `udp_feedback_v1`, but `--json-stream`, CSV, and plain interval rows still print on TCP control `Interval` arrival. Under extreme loss those rows can bunch even while the TUI live Packet Loss counter stays current via UDP feedback. Candidate fixes: emit explicit feedback-only JSON-stream events with a schema marker, or decouple the scripted interval clock from TCP control-message delivery and merge the freshest cached UDP loss into scheduled rows
+- [ ] **Feedback-driven scripted output cadence** (#70 follow-up, non-TUI half) — the TUI half shipped in v0.9.17 (issue #93): the sparkline now synthesizes bars from feedback state on a local clock when control-channel Intervals stall. `--json-stream`, CSV, and plain interval rows still print on TCP control `Interval` arrival and can bunch under extreme loss. The #93 approach generalizes: decouple the scripted interval clock from control-message delivery and merge the freshest cached UDP loss into scheduled rows (or emit explicit feedback-only events with a schema marker)
 - [x] **Summary on early exit** (issue #35) — Ctrl+C now triggers the cancel path and displays the test summary with accumulated stats. Plain mode uses `tokio::signal::ctrl_c`; TUI treats Ctrl+C as a key event in raw mode. Double Ctrl+C force-exits (exit code 130). Fallback summary from cumulative counters when server is unreachable
 - [x] **Delta retransmits in plain-text interval output** (issue #36) - plain-text interval reports now show retransmit deltas instead of cumulative totals while the final summary remains cumulative. TUI stats remain cumulative by design, and server-reported per-stream interval deltas continue in JSON/CSV output
 - [x] **`omit_secs` in config file** (issue #43) — `[client] omit_secs` in config.toml sets default `--omit` value
 - [ ] **Group CLI help by client/server** (issue #43) — restructure `--help` output into client-only, server-only, and shared sections like iperf3
+- [ ] **CSV bidir intervals lack per-direction columns** — JSON `AggregateInterval` carries `throughput_send_mbps`/`throughput_recv_mbps` but the CSV interval schema only has the combined number, so scripted bidir consumers can't see the split (#56 family)
+- [ ] **Log client version and capability mismatches server-side** — the server reads the client Hello but never logs version or capability deltas; "which client version was that" is the first question for every field report and the log can't answer it
+- [ ] **Config-file drift sweep** — `bitrate`, `congestion`, `dscp`, `interval`, `cport`, and `bind` have no `config.toml` equivalents while their siblings do; one pass to close the gap and a test that pins CLI/config parity going forward
+- [ ] **Per-stream direction splits + download-direction loss/jitter in bidir** (out-of-scope notes from issue #91) — per-stream rows in bidir show the server's combined view, and bidir has one `udp_stats` field for two directions. Both need wire-format additions; batch them with the next protocol-touching feature
 
 ### Code Quality
 - [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
@@ -151,6 +155,8 @@
 - [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
 - [x] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
 - [ ] **Audit unwrap()/expect() calls** - reduce calls in production code, especially auth.rs HMAC init and serve.rs PSK handling
+- [ ] **Audit swallowed channel sends** - ~15 `let _ =` sites on `try_send`/`send` in serve.rs (TUI event channel, cancel/shutdown signals). Most are benign watch-channel semantics, but the cancel-path ones could mask a test that didn't actually stop; classify each and log the ones that matter
+- [ ] **Finish the settings-modal restart path** - `src/main.rs` has a live TODO ("Return restart signal with new params"); settings changed mid-test from the TUI modal may not fully apply
 - [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime, async-trait
 - [x] **Join client data tasks** - Client::run now collects JoinHandles and joins with 2s timeout + abort before returning
 - [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
@@ -164,7 +170,7 @@
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 - [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
 - [ ] **UDP feedback aggregator stress test** (#70 follow-up) — exercise `spawn_udp_feedback_consumer` with `-P 32`, `-P 64`, `-P 128` under saturation. parking_lot::Mutex contention between writers (per-stream feedback recv tasks) and the 1 Hz consumer is unproven at high concurrency; high stream count + high feedback rate is the relevant failure mode
-- [ ] **Relax MPTCP 10-stream throughput threshold in CI** — current threshold `> 20 Mbps` flakes at ~19.5–19.8 Mbps on GHA runners. The bug it actually catches (#24 JoinHandle panic) crashes throughput to ~0, not 19.x; lower the threshold to ~17 Mbps so flakes stop without losing coverage of the real failure
+- [x] **Relax MPTCP 10-stream throughput threshold in CI** — lowered to 17 Mbps (PR #90); the bug it catches (#24 JoinHandle panic) crashes throughput to ~0, so no coverage lost
 - [ ] **TUI render fuzzing** - existing TUI tests assert against `App` state and ratatui `Buffer` cells, but never put the rendered escape-sequence stream through a real terminal emulator. Drive randomized `App` state through the renderer and parse the output with the [`vt100`](https://crates.io/crates/vt100) crate to assert no panics, no overflow past widget bounds, and no escape-sequence injection escaping the server-version sanitizer or other future text fields. Eventual target: [libghostty](https://github.com/ghostty-org/ghostty) (C-ABI library from Mitchell Hashimoto's terminal, embeddable from Rust via `bindgen`) for highest-fidelity emulation and Antithesis-style deterministic fuzzing — but its API is explicitly pre-1.0 ("signatures still in flux") so wait for a tagged release before depending on it. Bugs this catches that nothing else does: extreme values overflowing layout (PB-scale transfers, jitter that won't fit format width), rapid state transitions during paint, theme switching mid-redraw, resize storms.
 
 ### Documentation
@@ -183,14 +189,19 @@
 - [x] **TCP bitrate pacing** (`-b` for TCP) - byte-budget sleep pacing with interruptible sleeps and buffer auto-capping; `-b` flag now applies to TCP and UDP (issue #14). On Linux, uses kernel `SO_MAX_PACING_RATE` for precise per-packet pacing via the FQ scheduler (issue #30)
 - [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP and TCP data streams use sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
 - [x] **Random payload data** (`--random`) - fill send buffers with random bytes to defeat WAN optimizer/compression/dedup bias (issue #34). Both client and server TCP/UDP; QUIC skipped (already encrypted). Fill-once per buffer, no per-write overhead. `--zeros` only affects client-sent traffic; server payload mode not yet negotiated over wire
-- [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861)
+- [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861). `--probe-mtu` (v0.9.17) answers "what size survives" — this is the complement: actually *running the test* at that size
+- [ ] **QUIC silently drops TestStart parameters** - the QUIC server path pattern-matches TestStart with `..` and ignores `bitrate`, `window_size`, and `dscp`; `-b 100M -Q` runs unpaced with no warning. Minimum fix: warn on every ignored flag (like `--dscp` already does client-side). Real fix: pace QUIC sends with the same byte-budget loop UDP uses
+- [ ] **Connect timeout** (`--connect-timeout`) - a client pointed at a dead or filtered server waits on OS TCP defaults (can be minutes). CI/scripted use needs a bounded, configurable timeout with a clean error. Verify current behavior per-protocol first (TCP control connect, QUIC handshake, UDP hello budget)
+- [ ] **Propagate `--tcp-nodelay` to the server** - today it shapes client sends only; in `-R`/`--bidir` the server is the latency-relevant sender and never hears about it. Wire-additive TestStart field + capability fallback, same pattern as `zerocopy`
+- [ ] **Test by amount** (`-n`/`--bytes`) - "send exactly 1 GiB then stop" instead of time-based; gives comparable runs across link speeds for CI and benchmarking. iperf3 parity (`-n`/`-k`)
+- [ ] **Result metadata passthrough** (`--title`, `--extra-data`) - tag JSON/CSV results with a run label or arbitrary metadata for CI log ingestion; pairs with the JSON-schema item below
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [x] **DSCP/TOS marking** (`--dscp`) - set DSCP/TOS on client TCP/UDP sockets for QoS policy testing; QUIC ignores it. Accepts numeric (0-255) or DSCP names (EF, AF11-AF43, CS0-CS7)
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 - [ ] **CC algorithm A/B comparison** (`xfr cca-compare <host>`) - run back-to-back tests with different congestion control algorithms (BBR, CUBIC, Reno, etc.) and produce side-by-side comparison (throughput, retransmits, RTT). Leverages existing `--congestion` and `xfr diff`. BBR vs CUBIC is one of the most common network testing questions
 - [ ] **Server-side bandwidth caps** (`--max-bandwidth`) - per-test server-enforced bandwidth limit to prevent abuse of public servers. iperf3 issue #937 is highly requested. Distinct from `--rate-limit` (which limits concurrent tests per IP)
 - [ ] **Download-mode authoritative live loss from local recv stats** (#70 follow-up) — v0.9.14's `udp_feedback_v1` sidesteps the TCP control channel for upload-mode live loss visibility, but download (`-R`) and the receive half of bidir still rely on TCP control `Interval` messages. The client is the receiver in download mode and has authoritative recv-side stats locally; plumb them directly to consumers (TUI/plain/JSON-stream) the same way upload feedback flows
-- [ ] **Reverse-flow data accounting bug** (issue #81) — brettowe observed `-R` UDP showing 999.7 Mbps over a 100 Mbps Wi-Fi link. Working hypothesis: sender-side bytes (server's `socket.send_to`-returns-Ok count) being reported as throughput rather than receiver-side wire-rate, since on `-R` the server is the sender and the kernel UDP send buffer happily absorbs sends well past the actual outbound capacity. Confirm via `--no-tui --json-stream` + tcpdump byte-count on a known-rate-limited link. Look at `src/serve.rs::run_test` Result emission path and whether `-b 1G` server-side pacing respects actual outbound capacity
+- [x] **Reverse-flow data accounting bug** (issue #81) — confirmed structural and fixed in v0.9.16: `-R` UDP displayed the server's send-side counts; the client (receiver) now overlays its own counters onto live intervals and the final result. The bidir download half had the same flaw, fixed in v0.9.17 (issue #91). Remaining wire-change follow-ups tracked below (per-stream bidir splits, bidir download loss/jitter)
 
 ### Firewall Traversal Decision Tree
 
@@ -222,8 +233,8 @@ Client behind strict firewall → which protocol?
          Server control port is configurable via -p.
          Server data ports are still ephemeral (random).
          → Use QUIC as workaround (single port, multiplexed).
-         → Future: UDP single-port mode would multiplex all
-           streams through one port (like TCP's DataHello).
+         → In progress: UDP single-port mode (issue #63) puts all
+           UDP streams on the server port via connected sockets.
 ```
 
 **TCP `--cport` scope:** only TCP data-stream source ports are pinned. The control connection still uses an ephemeral source port, and xfr fails fast if that ephemeral control port overlaps the requested data-port range.
@@ -235,9 +246,9 @@ Client behind strict firewall → which protocol?
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring. Could extend to `xfr monitor` with local time-series storage (SQLite/JSON) and percentile tracking (p50/p95/p99)
 - [ ] **Responsiveness / bufferbloat scoring** (`xfr responsiveness`) - saturate the link (upload + download) while measuring latency every 200ms, report RPM (Roundtrips Per Minute) score and bufferbloat letter grade (A-F). Follows IETF `draft-ietf-ippm-responsiveness` methodology. No single-binary CLI tool does both throughput AND responsiveness scoring — Crusader, Flent, and Apple's `networkQuality` each require separate tools or are platform-specific. Highest differentiation opportunity
 - [ ] **Server UDP port range** (`--data-port-range`) - configurable ephemeral port range for server-side UDP data sockets (requested in issue #38 for strict firewall environments on Windows)
-- [ ] **UDP single-port mode** (issue #63) - multiplex all UDP streams through a single port, eliminating per-stream port allocation. Analogous to TCP's DataHello approach. Would make UDP fully firewall-friendly without `--cport`
+- [ ] **UDP single-port mode** (issue #63) - **design settled, implementation in progress** (see the design comment on the issue): connected per-stream sockets bound to 5201 with `SO_REUSEPORT` (kernel routes established 4-tuples to them, verified on Linux + FreeBSD/XNU source), hello/ack handshake with per-test token, first-byte QUIC demux on the shared socket (requires `EndpointConfig::grease_quic_bit(false)` server-side), `single_port_udp_v1` capability gated by a startup self-test. Legacy per-stream ports remain the fallback
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
-- [ ] **UDP packet-size / MTU probe** (issue #64) - send UDP packets at increasing payload sizes with DF set (`IP_MTU_DISCOVER`) to discover the largest size that traverses the path. Useful for NFS-over-UDP tuning and path-MTU discovery. Requires server echo support
+- [x] **UDP packet-size / MTU probe** (issue #64) - shipped in v0.9.17 as `--probe-mtu`: ladder + binary search with DF set, per-direction attribution via ack + same-size echo (`mtu_probe_v1` capability), netns CI coverage. Follow-up if users hit it: server-driven probe schedule so a reverse path *wider* than the forward one is observable
 
 ### Larger Projects (high effort, high impact)
 - [ ] **Real-time traffic emulation** (`--profile voip|gaming|video`) - preset packet sizes and intervals to emulate real-time traffic: VoIP (64B/20ms bidirectional), gaming (100-300B/8-16ms), video call (1200B/33ms). Reports jitter, out-of-order, and MOS (Mean Opinion Score) estimate. Replaces IRTT for most use cases in a single binary
@@ -307,7 +318,7 @@ Client behind strict firewall → which protocol?
 *Rationale: Simple socket-level change via socket2. Requested by kernel MPTCP co-maintainer (issue #24). Per-subflow stats via `MPTCP_FULL_INFO` would show multi-path behavior in the TUI.*
 
 ### IO Optimization / Zero-Copy (issue #33)
-- [x] `sendfile()` on the TCP send path — shipped as `-Z`/`--zerocopy` (v0.9.15): payload lives in a `memfd_create` anonymous file and is pushed with `sendfile(2)`, skipping the per-write userspace copy. Forwarded to the server via `TestStart.zerocopy` for `-R`/`--bidir` (`zerocopy_v1` capability); MPTCP-compatible; falls back to regular writes when unsupported
+- [x] `sendfile()` on the TCP send path — shipped as `-Z`/`--zerocopy` (v0.9.16): payload lives in a `memfd_create` anonymous file and is pushed with `sendfile(2)`, skipping the per-write userspace copy. Forwarded to the server via `TestStart.zerocopy` for `-R`/`--bidir` (`zerocopy_v1` capability); MPTCP-compatible; falls back to regular writes when unsupported. **On by default since v0.9.17** (`--no-zerocopy` opts out; explicit `-Z` warns on downgrade)
 - [ ] `MSG_ZEROCOPY` on the send path — `setsockopt(SO_ZEROCOPY)` + `send()` with `MSG_ZEROCOPY` flag, picked automatically under the existing `--zerocopy` flag when supported and beneficial. Must stay optional: MPTCP doesn't support it yet ([mptcp_net-next#578](https://github.com/multipath-tcp/mptcp_net-next/issues/578)). Linux 4.14+, needs error-queue completion reaping
 - [ ] io_uring with fixed buffers — biggest win but requires different async runtime story (tokio-uring or glommio)
 - [ ] Multi-queue NIC support
@@ -376,7 +387,7 @@ If you need these features, combine xfr with purpose-built tools.
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for documented edge cases and limitations.
 
 **Potential future improvements** (from known issues):
-- [ ] QUIC bitrate pacing support
+- [ ] QUIC bitrate pacing support — folded into the "QUIC silently drops TestStart parameters" quick win above
 - [ ] UDP reverse mode error reporting to client
 
 ---
