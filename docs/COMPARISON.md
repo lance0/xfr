@@ -87,7 +87,7 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 
 4. **JSON streaming**: xfr supports `--json-stream` for one JSON object per interval (useful for real-time parsing).
 
-5. **Single-port TCP**: xfr multiplexes all data connections over the control port (5201) using `DataHello` identification. iperf3 opens separate ephemeral ports for each stream, which can be problematic with firewalls.
+5. **Single-port TCP and UDP**: xfr multiplexes all TCP data connections over the control port (5201) using `DataHello` identification, and (since v0.9.18) routes all UDP stream data to the same port number via per-stream connected sockets negotiated with a token-bearing hello. iperf3 opens separate ephemeral ports for each TCP stream, which can be problematic with firewalls.
 
 6. **Protocol negotiation**: xfr clients and servers exchange capabilities during the Hello handshake (protocol v1.1). The server falls back to multi-port TCP for legacy clients that do not advertise `single_port_tcp`.
 
@@ -140,7 +140,7 @@ xfr serve --one-off
 ### Use xfr when you need:
 
 - **Multi-client server** - iperf3's single-client limitation is its biggest complaint
-- **Firewall-friendly testing** - Single-port TCP mode keeps everything on one port (no ephemeral data ports to open)
+- **Firewall-friendly testing** - Single-port TCP and UDP keep everything on one port (no ephemeral data ports to open)
 - **Visual monitoring** - Live TUI with throughput graphs
 - **CI/CD integration** - JSON streaming, result comparison, Prometheus metrics
 - **QUIC testing** - Test encrypted transport with built-in TLS 1.3

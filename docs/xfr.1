@@ -1,4 +1,4 @@
-.TH XFR 1 "May 2026" "xfr 0.9.14" "User Commands"
+.TH XFR 1 "June 2026" "xfr 0.9.18" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -120,7 +120,16 @@ Use random payload data (default for TCP/UDP client\-sent traffic)
 Use zero\-filled payload data instead of random bytes
 .TP
 .B \-Z ", " \-\-zerocopy
-Zero\-copy TCP sends via sendfile(2), like iperf3 \-Z (Linux only; lowers sender CPU overhead). Applies to client\-sent traffic, and is forwarded to servers that support it for \-R/\-\-bidir. Falls back to regular writes when unsupported
+Zero\-copy TCP sends via sendfile(2), like iperf3 \-Z (Linux only; lowers sender CPU overhead). On by default for TCP since v0.9.17; passing \-Z explicitly warns when zero\-copy cannot take effect instead of falling back silently. Forwarded to servers that support it for \-R/\-\-bidir
+.TP
+.B \-\-no\-zerocopy
+Disable zero\-copy TCP sends (use regular buffered writes)
+.TP
+.B \-\-probe\-mtu
+Probe the path MTU instead of running a throughput test: walks UDP payload sizes with the don't\-fragment flag set and reports the largest size surviving in each direction. Implies UDP; requires a server with mtu_probe_v1 support (xfr >= 0.9.17)
+.TP
+.BI \-\-connect\-timeout " DURATION"
+Fail if the control connection (TCP connect or QUIC handshake) takes longer than this (e.g. 5s). Without it, a dead or filtered server is bounded only by OS defaults
 .TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
@@ -302,6 +311,15 @@ key in the TUI (or a control message in scripted mode) pauses and resumes the te
 Server emits 36-byte cumulative
 .I (packets_received, packets_lost)
 feedback packets back to the client at 2 Hz on the same UDP data socket, sidestepping the TCP control channel for live UDP-loss visibility under upload-mode saturation (issue #70). Available v0.9.14+. Capability negotiation gates emission so older clients never see a packet they don't understand.
+.TP
+.B zerocopy_v1
+Server honors a zero-copy request for its own sends in \-R/\-\-bidir TCP tests (sendfile-based, issue #33). Available v0.9.16+.
+.TP
+.B mtu_probe_v1
+Server answers path-MTU probe packets (ack + same-size echo) for \-\-probe\-mtu (issue #64). Hard requirement: the client refuses to probe servers without it. Available v0.9.17+.
+.TP
+.B single_port_udp_v1
+All UDP stream data flows to the server's main port via per-stream connected sockets negotiated with a token-bearing hello, instead of per-stream ephemeral server ports (issue #63). Advertised only when a startup self-test proves the kernel's connected-socket routing; servers fall back to ephemeral ports for older clients or unsupported platforms. Available v0.9.18+.
 
 .SH SIGNALS
 .TP

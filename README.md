@@ -38,7 +38,7 @@ See [Installation](#installation) below for setup instructions.
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP, UDP, QUIC, and MPTCP** with configurable bitrate pacing and parallel streams
-- **Firewall-friendly** - single-port TCP, QUIC multiplexing, and `--cport` for pinning UDP/QUIC/TCP data source ports
+- **Firewall-friendly** - single-port TCP *and* UDP (all traffic on 5201), QUIC multiplexing, and `--cport` for pinning data source ports
 - **Bidirectional testing** - measure upload and download simultaneously
 - **Multiple output formats** - plain text, JSON, JSON streaming, CSV
 - **Result comparison** - `xfr diff` to detect performance regressions
@@ -54,7 +54,7 @@ See [Installation](#installation) below for setup instructions.
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
 | MPTCP | No | Yes (auto on server, `--mptcp` on client, Linux 5.6+) |
-| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP + `--cport` (UDP/QUIC/TCP data) |
+| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP & UDP + `--cport` |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
 | Compare runs | No | `xfr diff` |
@@ -573,7 +573,7 @@ xfr serve -p 9000
 
 ### Connection refused
 
-Ensure the server is running and the port is not blocked by a firewall. TCP only requires port 5201 (or your custom port) to be open on the server -- no additional server-side data ports are needed. For strict egress policies or ECMP testing, use `--cport` to pin client source ports for TCP or UDP, or use QUIC which multiplexes on a single port.
+Ensure the server is running and the port is not blocked by a firewall. TCP, UDP, and QUIC all run entirely on port 5201 (or your custom port) when both ends are current -- no server-side ephemeral data ports are needed (UDP single-port requires both ends ≥ v0.9.18; older pairings fall back to ephemeral server ports automatically). For strict egress policies or ECMP testing, use `--cport` to pin client source ports.
 
 ### Low throughput
 

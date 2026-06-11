@@ -49,10 +49,13 @@ firewall.
 **QUIC** also uses a single port (5201/UDP by default). The server listens on
 the same port number for both TCP and QUIC simultaneously.
 
-**UDP** mode allocates separate ephemeral data ports on the server for each
-stream. The control channel still uses TCP port 5201, but data transfer happens
-on dynamically assigned UDP ports. If you are behind a restrictive firewall,
-you may need to allow a range of high ports or use TCP/QUIC instead.
+**UDP** also uses single-port mode when both ends run v0.9.18 or newer: all
+per-stream data flows to the server's main port (5201/UDP by default), so the
+firewall story matches TCP — one port, both protocols. Against an older client
+or server (or on platforms without `SO_REUSEPORT`, e.g. Windows), the server
+falls back to allocating ephemeral per-stream data ports automatically; a
+restrictive firewall then needs a range of high UDP ports opened, or use
+TCP/QUIC instead.
 
 ## JSON Output
 

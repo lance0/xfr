@@ -50,6 +50,10 @@ UDP provides:
 - Out-of-order detection
 - Live receiver-progress feedback at 2 Hz on the data socket (when both peers advertise `udp_feedback_v1`), so the live loss counter stays current under upload-mode saturation even when the TCP control channel back-pressures. Surfaces in the TUI live counter and in `--no-tui --json-stream` / `--csv` / plain interval output via a producer-side cumulative-monotonic filter that admits only the freshest reading from either source
 
+#### Single-Port UDP (Default, v0.9.18+)
+
+When both peers advertise `single_port_udp_v1`, all per-stream UDP data flows to the server's main port (5201/UDP by default) instead of per-stream ephemeral server ports — the UDP firewall story matches single-port TCP. Per stream, the client sends a token-bearing hello datagram to the main port; the server creates a connected same-port socket (`SO_REUSEPORT`) for that stream and acks from it, after which the kernel routes the stream's traffic to its dedicated socket. The server advertises the capability only after a startup self-test proves the running kernel's connected-socket routing; on unsupported platforms (e.g. Windows) or against older peers, it falls back to ephemeral per-stream ports automatically.
+
 **Note**: UDP is not congestion-controlled. High bitrates can cause network congestion.
 
 ### Payload Pattern
@@ -122,7 +126,7 @@ The control protocol version is 1.1. Client and server exchange version informat
 
 ### Capability Negotiation
 
-Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, and `udp_feedback_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port TCP mode); a feature activates only when both peers advertise it. Older peers that don't list a capability fall back to the prior behavior — adding a capability is wire-additive.
+Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, `udp_feedback_v1`, `zerocopy_v1`, `mtu_probe_v1`, and `single_port_udp_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port mode); a feature activates only when both peers advertise it. Older peers that don't list a capability fall back to the prior behavior — adding a capability is wire-additive. The server may withhold a capability it can't honor at runtime (e.g. `single_port_udp_v1` when the startup self-test fails).
 
 The `udp_feedback_v1` capability (added in v0.9.14) lets the server send 36-byte cumulative-counts packets back to the client at 2 Hz on the same UDP data socket, providing live UDP loss visibility without depending on the TCP control channel that may be competing for ACKs against a saturated UDP uplink.
 
