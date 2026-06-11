@@ -702,6 +702,7 @@ impl Client {
             window_size: self.config.window_size.map(|w| w as u64),
             zerocopy: self.config.protocol == Protocol::Tcp && self.config.zerocopy.enabled(),
             mtu_probe: self.config.mtu_probe,
+            tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -1852,10 +1853,11 @@ impl Client {
             bitrate: self.config.bitrate,
             congestion: None,
             mptcp: false,
-            dscp: None,        // QUIC manages its own TOS via the transport layer
-            window_size: None, // QUIC flow control is handled at the transport layer
-            zerocopy: false,   // sendfile is incompatible with QUIC's userspace encryption
-            mtu_probe: false,  // probe mode is UDP-only
+            dscp: None,         // QUIC manages its own TOS via the transport layer
+            window_size: None,  // QUIC flow control is handled at the transport layer
+            zerocopy: false,    // sendfile is incompatible with QUIC's userspace encryption
+            mtu_probe: false,   // probe mode is UDP-only
+            tcp_nodelay: false, // QUIC manages its own transport; Nagle is a TCP concept
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
