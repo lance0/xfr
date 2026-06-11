@@ -122,14 +122,26 @@ cat "$OUT"
 
 echo
 echo "=== Asserting no control-channel bunching ==="
-# The Nagle-bunching pattern collapses 3+ consecutive interval messages
-# to the same client-side arrival timestamp (server-side TCP holds them
-# until end-of-test, then flushes the backlog as a single segment). A
-# healthy NODELAY-enabled control channel produces near-unique
-# timestamps; a 2-line tail collision near test-end is acceptable
-# coincidence (the last interval and the post-test drain can race into
-# the same kernel read). The actual bug shows 3+ lines sharing a single
-# timestamp, which this assertion specifically targets.
+# The Nagle-bunching pattern collapses interval messages to ONE shared
+# client-side arrival timestamp (server-side TCP holds them until
+# end-of-test, then flushes the whole backlog as a single segment): the
+# original #70 failure bunched essentially every line. A healthy
+# NODELAY-enabled control channel still does NOT deliver cleanly at
+# 1 Hz under this profile — the netem FIFO holds ~2.2 s of queue at
+# 50 Mbit, so even correctly-NODELAY'd control segments queue behind
+# the UDP flood, tail-drop, and retransmit. Packet captures (v0.9.18
+# cycle) show the channel oscillating between two stable delivery
+# rhythms: ~2.1 s batches of 2 lines, and ~4.2 s batches of 3 (one
+# extra RTO backoff doubling when a retransmitted segment also
+# tail-drops). Which rhythm a run locks onto is decided by startup
+# phase — the single-port UDP handshake (#63) shifted that phase by
+# ~100 ms and made the 3-bunch rhythm dominant, with no change to the
+# control channel's own behavior (server emit cadence and retransmit
+# patterns are identical on the wire in both data planes).
+#
+# The assertion therefore targets what the bug actually does — total
+# collapse — and tolerates both bloat rhythms: 5+ lines at one
+# timestamp, or fewer than 3 distinct timestamps overall, fails.
 #
 # Skip the startup line (elapsed_secs near 0 — emitted on connect
 # before any data has been exchanged) since it's always isolated in
@@ -162,14 +174,17 @@ echo "  interval lines (excluding startup): $TOTAL"
 echo "  unique client-side timestamps:      $UNIQUE"
 echo "  max lines sharing one timestamp:    $MAX_BUNCH"
 
-# Threshold: 3+ lines at one timestamp is the Nagle pattern. 2 is
-# acceptable (test-end tail collision).
-if [[ "$MAX_BUNCH" -ge 3 ]]; then
-    echo "FAIL: detected control-channel bunching — $MAX_BUNCH interval"   >&2
-    echo "      lines share a single client-side timestamp. The Nagle-"   >&2
-    echo "      held-control-channel pattern (issue #70 follow-up) has"   >&2
-    echo "      regressed; verify TCP_NODELAY is being applied to the"    >&2
-    echo "      control TcpStream in client.rs and serve.rs (look for"    >&2
+# Thresholds: the #70 regression collapses everything to one stamp
+# (max bunch ~= line count, distinct stamps ~= 1). Bloat rhythms top
+# out at 3-line bunches with 4+ distinct stamps. 5+ in one bunch, or
+# fewer than 3 distinct stamps, means real collapse.
+if [[ "$MAX_BUNCH" -ge 5 || "$UNIQUE" -lt 3 ]]; then
+    echo "FAIL: detected control-channel collapse — $MAX_BUNCH interval"  >&2
+    echo "      lines share one client-side timestamp ($UNIQUE distinct"  >&2
+    echo "      timestamps total). The Nagle-held-control-channel"        >&2
+    echo "      pattern (issue #70 follow-up) has regressed; verify"      >&2
+    echo "      TCP_NODELAY is being applied to the control TcpStream"    >&2
+    echo "      in client.rs and serve.rs (look for"                      >&2
     echo "      tcp::configure_control_stream calls before into_split)."  >&2
     echo                                                                  >&2
     echo "      Bunched timestamps (count repeated):"                     >&2
@@ -177,6 +192,7 @@ if [[ "$MAX_BUNCH" -ge 3 ]]; then
     exit 1
 fi
 
-echo "PASS: no 3-or-more-line bunch detected — control channel is"
-echo "      delivering interval messages live, not as an end-of-test"
-echo "      flush. TCP_NODELAY plumbing is intact."
+echo "PASS: no collapse detected (max bunch $MAX_BUNCH, $UNIQUE distinct"
+echo "      timestamps) — control channel is delivering interval"
+echo "      messages live, not as an end-of-test flush. TCP_NODELAY"
+echo "      plumbing is intact."

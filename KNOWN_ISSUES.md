@@ -114,6 +114,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### Control-Channel Delivery Stalls Under Deep FIFO Bufferbloat
+
+**Issue:** When the path to the server holds multiple seconds of FIFO queue (no AQM) and a UDP test oversubscribes it, TCP control messages queue behind the test's own flood, tail-drop, and retransmit. Packet captures during the v0.9.18 cycle show interval messages then arriving in batches every ~2 or ~4 seconds (the two stable rhythms of the queue/RTO interaction) instead of at the 1 Hz report cadence. The server's interval emission itself also degrades to ~2 s under this condition because stats sampling is coupled to the blocked control write. Which rhythm a given run locks onto is sensitive to startup phase — the single-port UDP handshake (v0.9.18, issue #63) shifts that phase, which changes the typical batch size in synthetic tests without changing the control channel's behavior.
+
+**Impact:** Live interval rows (plain/CSV/JSON-stream) batch up under pathological bufferbloat. The TUI live loss counter and sparkline are unaffected (they ride `udp_feedback_v1` over UDP and the local-tick sparkline cadence). End-of-test results are always correct.
+
+**Mitigation:** This is inherent to sharing a FIFO-bloated link with the traffic being tested; AQM (fq_codel, the modern Linux default) eliminates it entirely. The durable in-product improvements are tracked in ROADMAP.md: decoupling stats sampling from control writes, and feedback-driven scripted output cadence.
+
+---
+
 ### Windows Support is Experimental
 
 **Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently.
