@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-06-11
+
 ### Added
 - **Path-MTU probe: `--probe-mtu`** (issue #64) — discovers the largest UDP payload that survives the path in each direction, instead of running a throughput test. The client walks a ladder of common wire MTUs (576, 1280, 1492, 1500, 4352, 9000, 9216) and binary-searches the gap, RFC 8899 style, with the IP don't-fragment flag set so middleboxes must drop oversized packets rather than quietly fragment them. Each probe gets two replies from the server: a small ack (proves the client→server direction) and a same-size echo (proves server→client), so an asymmetric path shows up as ack-without-echo — per-direction attribution was brettowe's suggestion on the issue. Output is a per-size table plus the largest surviving payload and derived path MTU per direction; `--json` carries the full report. Requires a server advertising the new `mtu_probe_v1` capability (the client refuses old servers up front, since they'd silently swallow probes). Validated in a netns harness with a 1500-byte middle hop on a jumbo-framed client (`test-mtu-probe-ns.sh`, now a CI job).
 
