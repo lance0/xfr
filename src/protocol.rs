@@ -138,6 +138,15 @@ pub enum ControlMessage {
     TestAck {
         id: String,
         data_ports: Vec<u16>,
+        /// Per-test routing token for single-port UDP mode (issue #63),
+        /// hex-encoded 16 random bytes. Present (with empty `data_ports`)
+        /// when the server selected single-port UDP; the client echoes it
+        /// inside each per-stream UDP hello datagram so the server can
+        /// route hellos to the right test even across NAT or multiple
+        /// concurrent clients. Wire-additive: absent for TCP/QUIC and for
+        /// legacy multi-port UDP.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_token: Option<String>,
     },
     Interval {
         id: String,
@@ -463,11 +472,35 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // --probe-mtu — without it the client refuses to start, since an old
     // server would silently count probes as malformed data packets.
     "mtu_probe_v1",
+    // Issue #63: all per-stream UDP data rides connected sockets bound to
+    // the server's main port instead of per-stream ephemeral ports, so a
+    // firewall only needs one UDP port open. The client always advertises
+    // it; the server advertises it only when its startup self-test proved
+    // the kernel routes connected-socket traffic past the shared wildcard
+    // socket (see net::single_port_udp_self_test). Default when both
+    // peers advertise, mirroring single_port_tcp.
+    SINGLE_PORT_UDP_CAPABILITY,
 ];
 
-fn supported_capabilities() -> Vec<String> {
+/// Capability string for single-port UDP (issue #63). Kept as a named
+/// constant because the server filters it out of its hello at runtime
+/// when the startup self-test fails.
+pub const SINGLE_PORT_UDP_CAPABILITY: &str = "single_port_udp_v1";
+
+pub fn supported_capabilities() -> Vec<String> {
     SUPPORTED_CAPABILITIES
         .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The full capability list minus one entry. Used by the server to
+/// suppress runtime-gated capabilities (currently only
+/// [`SINGLE_PORT_UDP_CAPABILITY`]) without duplicating the list.
+pub fn supported_capabilities_without(excluded: &str) -> Vec<String> {
+    SUPPORTED_CAPABILITIES
+        .iter()
+        .filter(|c| **c != excluded)
         .map(|s| s.to_string())
         .collect()
 }
@@ -495,21 +528,34 @@ impl ControlMessage {
     }
 
     pub fn server_hello() -> Self {
+        Self::server_hello_with_capabilities(supported_capabilities())
+    }
+
+    /// Server hello with a runtime-determined capability list (the static
+    /// list minus capabilities whose startup self-tests failed).
+    pub fn server_hello_with_capabilities(capabilities: Vec<String>) -> Self {
         ControlMessage::Hello {
             version: PROTOCOL_VERSION.to_string(),
             client: None,
             server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
-            capabilities: Some(supported_capabilities()),
+            capabilities: Some(capabilities),
             auth: None,
         }
     }
 
     pub fn server_hello_with_auth(nonce: String) -> Self {
+        Self::server_hello_with_auth_and_capabilities(nonce, supported_capabilities())
+    }
+
+    pub fn server_hello_with_auth_and_capabilities(
+        nonce: String,
+        capabilities: Vec<String>,
+    ) -> Self {
         ControlMessage::Hello {
             version: PROTOCOL_VERSION.to_string(),
             client: None,
             server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
-            capabilities: Some(supported_capabilities()),
+            capabilities: Some(capabilities),
             auth: Some(AuthChallenge {
                 method: "psk".to_string(),
                 nonce,
@@ -732,5 +778,49 @@ mod tests {
     fn test_protocol_display() {
         assert_eq!(Protocol::Tcp.to_string(), "TCP");
         assert_eq!(Protocol::Udp.to_string(), "UDP");
+    }
+
+    #[test]
+    fn test_test_ack_udp_token_roundtrip_and_omission() {
+        let msg = ControlMessage::TestAck {
+            id: "x".to_string(),
+            data_ports: vec![],
+            udp_token: Some("00112233445566778899aabbccddeeff".to_string()),
+        };
+        let json = msg.serialize().unwrap();
+        assert!(json.contains("\"udp_token\""));
+        match ControlMessage::deserialize(&json).unwrap() {
+            ControlMessage::TestAck { udp_token, .. } => {
+                assert_eq!(
+                    udp_token.as_deref(),
+                    Some("00112233445566778899aabbccddeeff")
+                );
+            }
+            _ => panic!("wrong message type"),
+        }
+
+        // None must be omitted so pre-#63 deserializers never see the field,
+        // and a legacy TestAck without it must decode as None.
+        let msg = ControlMessage::TestAck {
+            id: "x".to_string(),
+            data_ports: vec![5202],
+            udp_token: None,
+        };
+        let json = msg.serialize().unwrap();
+        assert!(!json.contains("udp_token"));
+        let legacy = r#"{"type":"test_ack","id":"x","data_ports":[5202]}"#;
+        match ControlMessage::deserialize(legacy).unwrap() {
+            ControlMessage::TestAck { udp_token, .. } => assert!(udp_token.is_none()),
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_supported_capabilities_without_filters_only_named_entry() {
+        let full = supported_capabilities();
+        assert!(full.iter().any(|c| c == SINGLE_PORT_UDP_CAPABILITY));
+        let filtered = supported_capabilities_without(SINGLE_PORT_UDP_CAPABILITY);
+        assert!(!filtered.iter().any(|c| c == SINGLE_PORT_UDP_CAPABILITY));
+        assert_eq!(filtered.len(), full.len() - 1);
     }
 }

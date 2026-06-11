@@ -33,22 +33,30 @@
 //! 2. PSK authentication provides mutual authentication when needed
 //! 3. CA infrastructure is impractical for ephemeral test servers
 
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use quinn::{
-    ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
-    TransportConfig, VarInt,
+    AsyncUdpSocket, ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
+    ServerConfig, TransportConfig, UdpPoller, VarInt,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use socket2::{Protocol, Socket, Type};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
 
 use crate::net::AddressFamily;
 use crate::stats::StreamStats;
+use crate::udp::SharedSocketLane;
+
+/// A single-port UDP hello diverted off the shared server socket:
+/// raw datagram bytes plus the client's source address.
+pub type XfrHelloDatagram = (Vec<u8>, SocketAddr);
 
 /// Default buffer size for QUIC send/receive operations (128 KB)
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
@@ -71,11 +79,19 @@ pub fn generate_self_signed_cert()
 /// Uses socket2 to create the UDP socket with proper dual-stack handling.
 /// On Windows, `std::net::UdpSocket::bind("[::]:port")` does NOT accept IPv4
 /// connections by default — we must explicitly set `IPV6_V6ONLY=false`.
+///
+/// When `xfr_hello_tx` is `Some` (single-port UDP enabled, issue #63),
+/// the socket also joins an SO_REUSEPORT group so per-stream connected
+/// data sockets can bind the same port later, and quinn receives a tee
+/// wrapper that diverts xfr hello datagrams to the dispatcher while
+/// passing QUIC through untouched. The endpoint then disables QUIC-bit
+/// greasing — see [`XfrLaneTee`] for why that is load-bearing.
 pub fn create_server_endpoint(
     addr: SocketAddr,
     family: AddressFamily,
     cert: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
+    xfr_hello_tx: Option<mpsc::Sender<XfrHelloDatagram>>,
 ) -> anyhow::Result<Endpoint> {
     let mut crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -100,21 +116,138 @@ pub fn create_server_endpoint(
         socket.set_only_v6(v6only)?;
         debug!("QUIC socket IPV6_V6ONLY={} for {} mode", v6only, family);
     }
+    if xfr_hello_tx.is_some() {
+        // Both options must be set BEFORE bind for later same-port
+        // connected sockets to be admitted to the group.
+        socket.set_reuse_address(true)?;
+        #[cfg(unix)]
+        socket.set_reuse_port(true)?;
+    }
     socket.bind(&socket2::SockAddr::from(addr))?;
     socket.set_nonblocking(true)?;
     let std_socket: std::net::UdpSocket = socket.into();
 
     let runtime =
         quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("no async runtime found"))?;
-    let endpoint = Endpoint::new(
-        EndpointConfig::default(),
-        Some(server_config),
-        std_socket,
-        runtime,
-    )?;
+    let mut endpoint_config = EndpointConfig::default();
+    // Wrap the runtime's own quinn-udp-backed socket object so the
+    // GSO/GRO/ECN metadata paths are preserved — the tee only inspects
+    // and reroutes, it never reimplements IO.
+    let inner = runtime.wrap_udp_socket(std_socket)?;
+    let socket: Arc<dyn AsyncUdpSocket> = match xfr_hello_tx {
+        Some(hello_tx) => {
+            // The shared-socket classifier routes short-header QUIC by its
+            // fixed bit (0x40). Quinn greases that bit by default (RFC
+            // 9287); greasing is permission-based, so a server that never
+            // advertises the grease transport parameter stops compliant
+            // peers from clearing the bit toward us — which is what makes
+            // the classifier sound.
+            endpoint_config.grease_quic_bit(false);
+            Arc::new(XfrLaneTee { inner, hello_tx })
+        }
+        None => inner,
+    };
+    let endpoint =
+        Endpoint::new_with_abstract_socket(endpoint_config, Some(server_config), socket, runtime)?;
     info!("QUIC server listening on {} ({})", addr, family);
 
     Ok(endpoint)
+}
+
+/// Tee on the shared server UDP socket (issue #63): inbound datagrams
+/// matching the xfr single-port hello lane divert to the dispatcher
+/// channel; everything else flows through to quinn untouched. Delegates
+/// every `AsyncUdpSocket` operation to the real quinn-udp-backed socket,
+/// so send-side GSO/ECN and recv-side GRO behavior are unchanged.
+///
+/// This is a low-rate hello/straggler lane ONLY. Per-stream data rides
+/// connected sockets that the kernel scores above this wildcard, so
+/// after the handshake the tee never sees test traffic.
+#[derive(Debug)]
+struct XfrLaneTee {
+    inner: Arc<dyn AsyncUdpSocket>,
+    hello_tx: mpsc::Sender<XfrHelloDatagram>,
+}
+
+impl AsyncUdpSocket for XfrLaneTee {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, transmit: &quinn::udp::Transmit) -> io::Result<()> {
+        self.inner.try_send(transmit)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        bufs: &mut [io::IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let n = match self.inner.poll_recv(cx, bufs, meta) {
+                Poll::Ready(Ok(n)) => n,
+                other => return other,
+            };
+            // Divert xfr-lane entries and compact the QUIC ones down so
+            // quinn sees a contiguous prefix of buffers it owns.
+            let mut kept = 0;
+            for i in 0..n {
+                let len = meta[i].len.min(bufs[i].len());
+                match crate::udp::classify_shared_datagram(&bufs[i][..len]) {
+                    SharedSocketLane::Quic => {
+                        if kept != i {
+                            let (front, back) = bufs.split_at_mut(i);
+                            if front[kept].len() < len {
+                                // Can't happen with quinn's equal-size recv
+                                // buffers; drop rather than panic in poll.
+                                debug!("shared-socket tee: buffer too small to compact");
+                                continue;
+                            }
+                            front[kept][..len].copy_from_slice(&back[0][..len]);
+                            meta[kept] = meta[i];
+                        }
+                        kept += 1;
+                    }
+                    SharedSocketLane::XfrHello => {
+                        // Low-rate lane with client-side retry: dropping on
+                        // a full channel is safe, blocking quinn's recv
+                        // path is not.
+                        let _ = self
+                            .hello_tx
+                            .try_send((bufs[i][..len].to_vec(), meta[i].addr));
+                    }
+                    SharedSocketLane::XfrStray => {
+                        debug!(
+                            "shared-socket tee: dropping {}-byte non-QUIC datagram from {}",
+                            meta[i].len, meta[i].addr
+                        );
+                    }
+                }
+            }
+            if kept > 0 || n == 0 {
+                return Poll::Ready(Ok(kept));
+            }
+            // Every datagram in the batch was diverted; poll the inner
+            // socket again instead of handing quinn an empty result.
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
 }
 
 /// Create a QUIC client endpoint with optional local bind address
