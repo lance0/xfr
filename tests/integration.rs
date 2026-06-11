@@ -2507,3 +2507,292 @@ async fn test_serve_bind_ipv4_udp() {
         "UDP to bound 127.0.0.1 should succeed"
     );
 }
+
+// ============================================================================
+// Single-port UDP (issue #63)
+// ============================================================================
+
+/// Raw control-channel driver for protocol-shape assertions that the
+/// `Client` API hides (capability negotiation, TestAck contents).
+struct RawControl {
+    reader: tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: tokio::net::tcp::OwnedWriteHalf,
+    server_capabilities: Vec<String>,
+}
+
+impl RawControl {
+    async fn connect(port: u16, capabilities: Vec<String>) -> Self {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use xfr::protocol::ControlMessage;
+
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("control connect");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let hello = ControlMessage::Hello {
+            version: "1.1".to_string(),
+            client: Some("xfr-test".to_string()),
+            server: None,
+            capabilities: Some(capabilities),
+            auth: None,
+        };
+        writer
+            .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+            .await
+            .expect("send hello");
+
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read server hello");
+        let server_capabilities = match ControlMessage::deserialize(line.trim()).unwrap() {
+            ControlMessage::Hello { capabilities, .. } => capabilities.unwrap_or_default(),
+            other => panic!("expected server hello, got {:?}", other),
+        };
+
+        Self {
+            reader,
+            writer,
+            server_capabilities,
+        }
+    }
+
+    /// Send a UDP TestStart and return the TestAck's (data_ports, udp_token).
+    async fn start_udp_test(&mut self, duration_secs: u32) -> (Vec<u16>, Option<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use xfr::protocol::ControlMessage;
+
+        let start = ControlMessage::TestStart {
+            id: "raw-test".to_string(),
+            protocol: Protocol::Udp,
+            streams: 1,
+            duration_secs,
+            direction: Direction::Upload,
+            bitrate: Some(10_000_000),
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: None,
+            zerocopy: false,
+            mtu_probe: false,
+        };
+        self.writer
+            .write_all(format!("{}\n", start.serialize().unwrap()).as_bytes())
+            .await
+            .expect("send test_start");
+
+        let mut line = String::new();
+        self.reader.read_line(&mut line).await.expect("read ack");
+        match ControlMessage::deserialize(line.trim()).unwrap() {
+            ControlMessage::TestAck {
+                data_ports,
+                udp_token,
+                ..
+            } => (data_ports, udp_token),
+            other => panic!("expected test_ack, got {:?}", other),
+        }
+    }
+
+    /// Drain Interval messages until the final Result arrives.
+    async fn wait_for_result(&mut self) -> xfr::protocol::TestResult {
+        use tokio::io::AsyncBufReadExt;
+        use xfr::protocol::ControlMessage;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let mut line = String::new();
+            let n = tokio::time::timeout_at(deadline, self.reader.read_line(&mut line))
+                .await
+                .expect("result before deadline")
+                .expect("control read");
+            assert!(n > 0, "connection closed before Result");
+            match ControlMessage::deserialize(line.trim()).unwrap() {
+                ControlMessage::Result(result) => return result,
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// The TestAck shape must match what was negotiated: a server that
+/// advertises single_port_udp_v1 (self-test passed) answers a capable
+/// client with no data ports plus a routing token; a server that
+/// doesn't (platforms where the kernel routing check fails) must keep
+/// allocating per-stream ports. Self-validating on either platform.
+#[tokio::test]
+async fn test_single_port_udp_testack_shape() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut control = RawControl::connect(port, xfr::protocol::supported_capabilities()).await;
+    let server_single_port = control
+        .server_capabilities
+        .iter()
+        .any(|c| c == xfr::protocol::SINGLE_PORT_UDP_CAPABILITY);
+    let (data_ports, udp_token) = control.start_udp_test(1).await;
+
+    if server_single_port {
+        assert!(
+            data_ports.is_empty(),
+            "single-port UDP must not allocate per-stream ports, got {:?}",
+            data_ports
+        );
+        let token = udp_token.expect("single-port TestAck must carry a routing token");
+        assert!(
+            xfr::udp::parse_hello_token(&token).is_some(),
+            "token must be 32 hex digits, got {:?}",
+            token
+        );
+    } else {
+        assert!(
+            !data_ports.is_empty(),
+            "without the capability the server must allocate legacy ports"
+        );
+        assert!(udp_token.is_none());
+    }
+
+    // Let the 1s test run out so the server tears down cleanly.
+    let _ = control.wait_for_result().await;
+}
+
+/// Legacy fallback: a client that doesn't advertise single_port_udp_v1
+/// must get per-stream ephemeral ports and a fully working legacy data
+/// plane, even on a server with single-port enabled.
+#[tokio::test]
+async fn test_legacy_udp_fallback_allocates_ports() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let legacy_caps: Vec<String> = ["tcp", "udp", "multistream"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut control = RawControl::connect(port, legacy_caps).await;
+    let (data_ports, udp_token) = control.start_udp_test(2).await;
+
+    assert_eq!(data_ports.len(), 1, "legacy client must get a data port");
+    assert!(
+        udp_token.is_none(),
+        "legacy negotiation must not carry a token"
+    );
+
+    // Drive the legacy data plane for real: send sequenced packets to the
+    // allocated ephemeral port and verify the server counted them.
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(("127.0.0.1", data_ports[0])).await.unwrap();
+    let mut packet = vec![0u8; 1400];
+    for seq in 0..200u64 {
+        let header = xfr::udp::UdpPacketHeader {
+            sequence: seq,
+            timestamp_us: seq * 1000,
+        };
+        assert!(header.encode(&mut packet));
+        socket.send(&packet).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let result = control.wait_for_result().await;
+    assert!(
+        result.bytes_total > 0,
+        "server must have counted legacy UDP data, got {} bytes",
+        result.bytes_total
+    );
+}
+
+/// QUIC and single-port UDP share the server's main UDP port (the tee on
+/// quinn's socket). Run both protocols against the same server instance
+/// at the same time to prove neither lane disturbs the other.
+#[tokio::test]
+async fn test_quic_and_single_port_udp_coexist() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let udp_config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 2,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(50_000_000),
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        ..Default::default()
+    };
+    let quic_config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        ..Default::default()
+    };
+
+    let udp_client = Client::new(udp_config);
+    let quic_client = Client::new(quic_config);
+    let (udp_result, quic_result) = tokio::join!(
+        timeout(Duration::from_secs(20), udp_client.run(None)),
+        timeout(Duration::from_secs(20), quic_client.run(None)),
+    );
+
+    let udp_result = udp_result
+        .expect("UDP test should complete")
+        .expect("UDP test should succeed alongside QUIC");
+    assert!(udp_result.duration_ms > 0);
+    assert_eq!(udp_result.streams.len(), 2);
+
+    let quic_result = quic_result
+        .expect("QUIC test should complete")
+        .expect("QUIC test should succeed with the tee in place");
+    assert!(
+        quic_result.bytes_total > 0,
+        "QUIC must still move data through the shared socket"
+    );
+}
+
+/// Single-port UDP download: server-sent data must flow over the
+/// connected same-port socket and the client's receiver-truth overlay
+/// (issue #81) must still populate loss/jitter stats.
+#[tokio::test]
+async fn test_single_port_udp_download_stats() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: Some(50_000_000),
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        ..Default::default()
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(20), client.run(None))
+        .await
+        .expect("download should complete")
+        .expect("download should succeed");
+    assert!(result.duration_ms > 0);
+    assert!(
+        result.bytes_total > 0,
+        "client must have received data over the connected socket"
+    );
+    assert!(
+        result.udp_stats.is_some(),
+        "download summary must carry receiver-side loss/jitter stats"
+    );
+}
