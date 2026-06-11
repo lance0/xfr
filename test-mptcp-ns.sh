@@ -257,7 +257,11 @@ if [[ "$CI" == "true" ]]; then
 	echo ""
 	echo "--- MPTCP 10-stream stress (JoinHandle panic regression, #24) ---"
 	run_json_test "MPTCP 10-stream" xfr_cli -t "$DURATION" -P 10
-	assert_gt "$LAST_MBPS" 20 "MPTCP 10-stream > 20 Mbps"
+	# Threshold 17, not 20: on GHA runners the 10-stream run lands at
+	# ~19.5-19.8 Mbps often enough to flake. The regression this guards
+	# (#24 JoinHandle panic) crashes throughput to ~0, so anything well
+	# above single-path TCP (10 Mbps) still proves the point.
+	assert_gt "$LAST_MBPS" 17 "MPTCP 10-stream > 17 Mbps"
 
 	echo ""
 	if [[ "$FAILED" -eq 0 ]]; then
