@@ -145,6 +145,29 @@ pub enum PauseResult {
     NotReady,
 }
 
+/// How zero-copy TCP sends (sendfile(2), issue #33) were selected.
+///
+/// `Auto` and `Requested` are identical on the wire and the send path; they
+/// differ only in how loudly downgrades are reported. The default-on path
+/// stays quiet when zero-copy isn't available (non-Linux, old kernels, old
+/// servers), while an explicit `-Z` warns so the user knows their request
+/// didn't take effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZerocopyMode {
+    /// Zero-copy disabled (`--no-zerocopy`, or non-TCP protocols).
+    Off,
+    /// On by default for TCP; downgrades are silent.
+    Auto,
+    /// Explicitly requested (`-Z`); downgrades warn.
+    Requested,
+}
+
+impl ZerocopyMode {
+    pub fn enabled(self) -> bool {
+        !matches!(self, ZerocopyMode::Off)
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientConfig {
     pub host: String,
@@ -172,9 +195,9 @@ pub struct ClientConfig {
     pub random_payload: bool,
     /// Zero-copy TCP sends via sendfile(2) (Linux only, issue #33). Applies
     /// to client-sent traffic and is forwarded to the server for its sends
-    /// in download/bidir modes. Falls back to regular writes when
-    /// unsupported.
-    pub zerocopy: bool,
+    /// in download/bidir modes. On by default for TCP ([`ZerocopyMode::Auto`]);
+    /// falls back to regular writes when unsupported.
+    pub zerocopy: ZerocopyMode,
     /// DSCP/TOS value for IP_TOS socket option
     pub dscp: Option<u8>,
 }
@@ -198,7 +221,7 @@ impl Default for ClientConfig {
             sequential_ports: false,
             mptcp: false,
             random_payload: true,
-            zerocopy: false,
+            zerocopy: ZerocopyMode::Auto,
             dscp: None,
         }
     }
@@ -581,8 +604,9 @@ impl Client {
 
         // Zero-copy on the server's sends (download/bidir) rides on the
         // TestStart.zerocopy field; servers predating zerocopy_v1 silently
-        // ignore it, so tell the user their request won't take effect there.
-        if self.config.zerocopy
+        // ignore it. Only an explicit -Z warns about that — with the
+        // default-on mode the downgrade is invisible and harmless.
+        if self.config.zerocopy == ZerocopyMode::Requested
             && matches!(
                 self.config.direction,
                 Direction::Download | Direction::Bidir
@@ -614,7 +638,7 @@ impl Client {
             mptcp: self.config.mptcp,
             dscp: self.config.dscp,
             window_size: self.config.window_size.map(|w| w as u64),
-            zerocopy: self.config.zerocopy,
+            zerocopy: self.config.protocol == Protocol::Tcp && self.config.zerocopy.enabled(),
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -1078,7 +1102,7 @@ impl Client {
                 window_size: self.config.window_size,
                 congestion: self.config.tcp_congestion.clone(),
                 random_payload: self.config.random_payload,
-                zerocopy: self.config.zerocopy,
+                zerocopy: self.config.zerocopy.enabled(),
                 ..Default::default()
             };
 

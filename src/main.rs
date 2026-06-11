@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use xfr::client::{Client, ClientConfig, TestProgress};
+use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
 use xfr::diff::{DiffConfig, run_diff};
 use xfr::output::{output_csv, output_json, output_plain};
@@ -291,10 +291,15 @@ struct Cli {
     zeros: bool,
 
     /// Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux only;
-    /// lowers sender CPU overhead). Falls back to regular writes when
-    /// unsupported.
+    /// lowers sender CPU overhead). On by default for TCP; passing -Z
+    /// explicitly warns when zero-copy cannot take effect instead of
+    /// silently falling back to regular writes.
     #[arg(short = 'Z', long, conflicts_with_all = ["udp", "quic"])]
     zerocopy: bool,
+
+    /// Disable zero-copy TCP sends (use regular buffered writes)
+    #[arg(long, conflicts_with = "zerocopy")]
+    no_zerocopy: bool,
 }
 
 #[derive(Subcommand)]
@@ -623,11 +628,27 @@ fn random_payload_notice(
     None
 }
 
-/// Warn when --zerocopy cannot take effect for client-sent traffic on this
-/// platform. Download mode is exempt: the client sends no bulk data there,
+/// Resolve the zero-copy mode from CLI flags. Zero-copy is on by default
+/// for TCP (issue #33 follow-up); an explicit -Z upgrades silent fallback
+/// to a warning, and --no-zerocopy opts out. Non-TCP protocols never use
+/// it (clap already rejects an explicit -Z with -u/-Q).
+fn effective_zerocopy(cli: &Cli, protocol: Protocol) -> ZerocopyMode {
+    debug_assert!(!(cli.zerocopy && cli.no_zerocopy));
+    if protocol != Protocol::Tcp || cli.no_zerocopy {
+        ZerocopyMode::Off
+    } else if cli.zerocopy {
+        ZerocopyMode::Requested
+    } else {
+        ZerocopyMode::Auto
+    }
+}
+
+/// Warn when zero-copy cannot take effect for client-sent traffic on this
+/// platform. Only an explicit -Z warns — the default-on mode falls back
+/// silently. Download mode is exempt: the client sends no bulk data there,
 /// and the (possibly Linux) server decides its own zero-copy support.
-fn zerocopy_notice(zerocopy: bool, direction: Direction) -> Option<&'static str> {
-    if !zerocopy || cfg!(target_os = "linux") {
+fn zerocopy_notice(zerocopy: ZerocopyMode, direction: Direction) -> Option<&'static str> {
+    if zerocopy != ZerocopyMode::Requested || cfg!(target_os = "linux") {
         return None;
     }
     match direction {
@@ -913,12 +934,13 @@ async fn main() -> Result<()> {
             };
 
             let random_payload = effective_random_payload(&cli);
+            let zerocopy = effective_zerocopy(&cli, protocol);
 
             if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
                 eprintln!("Warning: {msg}");
             }
 
-            if let Some(msg) = zerocopy_notice(cli.zerocopy, direction) {
+            if let Some(msg) = zerocopy_notice(zerocopy, direction) {
                 eprintln!("Warning: {msg}");
             }
 
@@ -1065,7 +1087,7 @@ async fn main() -> Result<()> {
                 sequential_ports: protocol != Protocol::Quic && cport.is_some() && streams > 1,
                 mptcp: cli.mptcp,
                 random_payload,
-                zerocopy: cli.zerocopy,
+                zerocopy,
                 dscp: cli
                     .dscp
                     .as_ref()
@@ -2050,18 +2072,37 @@ mod tests {
     fn test_cli_zerocopy_flag() {
         use clap::Parser;
 
+        // Bare invocation: neither flag set, mode resolves to Auto for TCP.
         let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
-        assert!(!cli.zerocopy, "zero-copy must be opt-in");
+        assert!(!cli.zerocopy);
+        assert!(!cli.no_zerocopy);
+        assert_eq!(effective_zerocopy(&cli, Protocol::Tcp), ZerocopyMode::Auto);
+        // Non-TCP protocols never use zero-copy, even in Auto mode.
+        assert_eq!(effective_zerocopy(&cli, Protocol::Udp), ZerocopyMode::Off);
+        assert_eq!(effective_zerocopy(&cli, Protocol::Quic), ZerocopyMode::Off);
 
         let cli = Cli::try_parse_from(["xfr", "host", "-Z"]).unwrap();
         assert!(cli.zerocopy);
+        assert_eq!(
+            effective_zerocopy(&cli, Protocol::Tcp),
+            ZerocopyMode::Requested
+        );
 
         let cli = Cli::try_parse_from(["xfr", "host", "--zerocopy"]).unwrap();
         assert!(cli.zerocopy);
 
-        // sendfile is a TCP-only mechanism: UDP and QUIC must conflict
+        let cli = Cli::try_parse_from(["xfr", "host", "--no-zerocopy"]).unwrap();
+        assert!(cli.no_zerocopy);
+        assert_eq!(effective_zerocopy(&cli, Protocol::Tcp), ZerocopyMode::Off);
+
+        // Opt-in and opt-out are mutually exclusive
+        assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--no-zerocopy"]).is_err());
+
+        // sendfile is a TCP-only mechanism: explicit -Z with UDP/QUIC must
+        // conflict; --no-zerocopy with them is a harmless no-op.
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "-u"]).is_err());
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "-Q"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "--no-zerocopy", "-u"]).is_ok());
 
         // MPTCP is allowed (sendfile goes through the regular splice path)
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--mptcp"]).is_ok());
@@ -2069,21 +2110,24 @@ mod tests {
 
     #[test]
     fn test_zerocopy_notice() {
-        // No request, no warning — regardless of platform or direction.
-        assert!(zerocopy_notice(false, Direction::Upload).is_none());
-        assert!(zerocopy_notice(false, Direction::Download).is_none());
+        // Off and Auto never warn — default-on falls back silently.
+        for mode in [ZerocopyMode::Off, ZerocopyMode::Auto] {
+            assert!(zerocopy_notice(mode, Direction::Upload).is_none());
+            assert!(zerocopy_notice(mode, Direction::Bidir).is_none());
+            assert!(zerocopy_notice(mode, Direction::Download).is_none());
+        }
 
         if cfg!(target_os = "linux") {
             // Supported platform: never warn.
-            assert!(zerocopy_notice(true, Direction::Upload).is_none());
-            assert!(zerocopy_notice(true, Direction::Download).is_none());
-            assert!(zerocopy_notice(true, Direction::Bidir).is_none());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Upload).is_none());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Download).is_none());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Bidir).is_none());
         } else {
             // Unsupported platform: warn only when the client itself sends.
-            assert!(zerocopy_notice(true, Direction::Upload).is_some());
-            assert!(zerocopy_notice(true, Direction::Bidir).is_some());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Upload).is_some());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Bidir).is_some());
             // Download mode: the server decides its own zero-copy support.
-            assert!(zerocopy_notice(true, Direction::Download).is_none());
+            assert!(zerocopy_notice(ZerocopyMode::Requested, Direction::Download).is_none());
         }
     }
 

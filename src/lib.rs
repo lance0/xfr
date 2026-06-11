@@ -58,6 +58,6 @@ pub mod udp;
 pub mod update;
 pub mod zerocopy;
 
-pub use client::{Client, ClientConfig};
+pub use client::{Client, ClientConfig, ZerocopyMode};
 pub use protocol::{ControlMessage, Direction, Protocol, TestResult};
 pub use serve::{Server, ServerConfig};
