@@ -1259,6 +1259,7 @@ async fn handle_test_request(
             dscp,
             window_size,
             zerocopy,
+            mtu_probe,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1361,6 +1362,7 @@ async fn handle_test_request(
                 dscp,
                 window_size,
                 zerocopy,
+                mtu_probe,
             )
             .await;
 
@@ -1692,6 +1694,7 @@ async fn run_quic_test(
         bytes_received,
         throughput_send_mbps,
         throughput_recv_mbps,
+        mtu_probe: None,
     });
 
     ctrl_send
@@ -1749,6 +1752,7 @@ async fn run_test(
     dscp: Option<u8>,
     client_window_size: Option<u64>,
     zerocopy: bool,
+    mtu_probe: bool,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -1928,6 +1932,35 @@ async fn run_test(
                 (None, Vec::new())
             }
         }
+        Protocol::Udp if mtu_probe => {
+            // Probe mode replaces the bulk handlers entirely: every
+            // socket answers XFRP probes with ack + same-size echo until
+            // the control channel ends the test. DF is set so oversized
+            // echoes die at the constraining hop instead of fragmenting;
+            // a failure to set it degrades reverse-direction results, so
+            // it warns rather than aborting the probe.
+            let handles = udp_sockets
+                .iter()
+                .map(|socket| {
+                    let ipv6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+                    if let Err(e) = net::set_dont_fragment(socket, ipv6) {
+                        warn!(
+                            "MTU probe: could not set don't-fragment on echo socket: {} \
+                             (oversized echoes may fragment and overstate the reverse path)",
+                            e
+                        );
+                    }
+                    let socket = socket.clone();
+                    let cancel = cancel_rx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = udp::respond_mtu_probes(socket, cancel).await {
+                            error!("MTU probe responder error: {}", e);
+                        }
+                    })
+                })
+                .collect();
+            (None, handles)
+        }
         Protocol::Udp => {
             let handles = spawn_udp_handlers(
                 udp_sockets,
@@ -2106,6 +2139,7 @@ async fn run_test(
         bytes_received,
         throughput_send_mbps,
         throughput_recv_mbps,
+        mtu_probe: None,
     });
 
     // Send result FIRST so the client isn't blocked by slow post-processing

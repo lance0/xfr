@@ -61,6 +61,7 @@ async fn test_tcp_single_stream() {
         // regular-write fallback elsewhere (macOS CI).
         zerocopy: ZerocopyMode::Auto,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -113,6 +114,7 @@ async fn test_tcp_multi_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -147,6 +149,7 @@ async fn test_connection_refused() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -181,6 +184,7 @@ async fn test_tcp_download() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -220,6 +224,7 @@ async fn test_tcp_bidir() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -277,6 +282,7 @@ async fn test_udp_upload() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -288,6 +294,59 @@ async fn test_udp_upload() {
 
     let result = result.unwrap();
     assert!(result.duration_ms > 0, "Should have duration");
+}
+
+/// `--probe-mtu` end to end (issue #64): full control-channel handshake,
+/// probe exchange against the server's responder, cancel, and the report
+/// riding home on the result. Loopback passes every size, so both
+/// directions must converge to the probe ceiling.
+#[tokio::test]
+async fn test_mtu_probe() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(60), // server-side safety deadline only
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: true,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(30), client.run(None)).await;
+
+    assert!(result.is_ok(), "probe should complete well under deadline");
+    let result = result.unwrap().expect("probe should succeed");
+
+    let report = result.mtu_probe.expect("result must carry a probe report");
+    assert_eq!(
+        report.forward_max_payload,
+        Some(xfr::probe::MAX_PROBE_PAYLOAD),
+        "loopback passes every size forward"
+    );
+    assert_eq!(
+        report.reverse_max_payload,
+        Some(xfr::probe::MAX_PROBE_PAYLOAD),
+        "loopback passes every size in reverse"
+    );
+    assert!(!report.sizes.is_empty());
 }
 
 #[tokio::test]
@@ -317,6 +376,7 @@ async fn test_udp_download() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -354,6 +414,7 @@ async fn test_udp_bidir() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -393,6 +454,7 @@ async fn test_udp_multi_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -437,6 +499,7 @@ async fn test_multi_client_concurrent() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let config2 = ClientConfig {
@@ -458,6 +521,7 @@ async fn test_multi_client_concurrent() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client1 = Client::new(config1);
@@ -545,6 +609,7 @@ async fn test_psk_auth_success() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -588,6 +653,7 @@ async fn test_psk_auth_failure() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -631,6 +697,7 @@ async fn test_psk_auth_missing_client_key() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -672,6 +739,7 @@ async fn test_acl_allow() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -710,6 +778,7 @@ async fn test_rate_limit() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client1 = Client::new(config1.clone());
@@ -738,6 +807,7 @@ async fn test_rate_limit() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client2 = Client::new(config2);
@@ -787,6 +857,7 @@ async fn test_quic_upload() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -827,6 +898,7 @@ async fn test_quic_download() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -866,6 +938,7 @@ async fn test_quic_multi_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -909,6 +982,7 @@ async fn test_quic_bidir() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -949,6 +1023,7 @@ async fn test_quic_with_psk() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -991,6 +1066,7 @@ async fn test_acl_deny() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1048,6 +1124,7 @@ async fn test_ipv6_localhost() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1092,6 +1169,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1144,6 +1222,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1192,6 +1271,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1262,6 +1342,7 @@ async fn test_udp_ipv4_explicit() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1319,6 +1400,7 @@ async fn test_udp_ipv6_explicit() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1376,6 +1458,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1417,6 +1500,7 @@ async fn test_tcp_cport_single_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1461,6 +1545,7 @@ async fn test_tcp_cport_multi_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1521,6 +1606,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1577,6 +1663,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1618,6 +1705,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1666,6 +1754,7 @@ async fn test_udp_bitrate_underflow_regression() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1737,6 +1826,7 @@ async fn test_quic_ipv6() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1794,6 +1884,7 @@ async fn test_tcp_one_off_multi_stream() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1860,6 +1951,7 @@ async fn test_quic_one_off() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);
@@ -1905,6 +1997,7 @@ fn test_pause_not_ready_before_test_run() {
         random_payload: false,
         zerocopy: ZerocopyMode::Off,
         dscp: None,
+        mtu_probe: false,
     };
 
     let client = Client::new(config);

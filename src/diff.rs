@@ -161,6 +161,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            mtu_probe: None,
         }
     }
 

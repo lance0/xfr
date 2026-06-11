@@ -228,6 +228,10 @@ pub struct ClientConfig {
     pub zerocopy: ZerocopyMode,
     /// DSCP/TOS value for IP_TOS socket option
     pub dscp: Option<u8>,
+    /// Run a path-MTU probe instead of a throughput test (issue #64,
+    /// `--probe-mtu`). UDP only; requires a server advertising
+    /// `mtu_probe_v1`.
+    pub mtu_probe: bool,
 }
 
 impl Default for ClientConfig {
@@ -251,6 +255,7 @@ impl Default for ClientConfig {
             random_payload: true,
             zerocopy: ZerocopyMode::Auto,
             dscp: None,
+            mtu_probe: false,
         }
     }
 }
@@ -644,6 +649,19 @@ impl Client {
             warn!("Server does not support zero-copy; server-sent traffic will use regular writes");
         }
 
+        // MTU probing needs active server cooperation (ack + echo per
+        // probe); an old server would silently count probes as junk
+        // data and the search would read as "everything blocked".
+        // Refuse up front instead.
+        if self.config.mtu_probe
+            && !crate::protocol::capability_advertised(&server_capabilities, "mtu_probe_v1")
+        {
+            return Err(anyhow::anyhow!(
+                "Server does not support MTU probing (mtu_probe_v1 capability missing); \
+                 upgrade the server to use --probe-mtu"
+            ));
+        }
+
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -667,6 +685,7 @@ impl Client {
             dscp: self.config.dscp,
             window_size: self.config.window_size.map(|w| w as u64),
             zerocopy: self.config.protocol == Protocol::Tcp && self.config.zerocopy.enabled(),
+            mtu_probe: self.config.mtu_probe,
         };
         writer
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -702,6 +721,15 @@ impl Client {
                     The server may be an older version that is incompatible with this client."
                 ));
             }
+        }
+
+        // --probe-mtu: the handshake above is shared with throughput
+        // tests, but from here probe mode runs its own exchange on the
+        // data socket instead of bulk streams, then cancels the test.
+        if self.config.mtu_probe {
+            return self
+                .run_mtu_probe_exchange(&mut reader, &mut writer, &test_id, server_ip, &data_ports)
+                .await;
         }
 
         // Create stats
@@ -1344,6 +1372,78 @@ impl Client {
         Ok(handles)
     }
 
+    /// The `--probe-mtu` data exchange (issue #64): walk payload sizes
+    /// against the server's probe responder on the (single) UDP data
+    /// socket, then cancel the test on the control channel and wait for
+    /// the server's Result so the connection closes out the normal way.
+    /// The probe report rides home on the result's `mtu_probe` field.
+    async fn run_mtu_probe_exchange(
+        &self,
+        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        test_id: &str,
+        server_ip: SocketAddr,
+        data_ports: &[u16],
+    ) -> anyhow::Result<TestResult> {
+        let port = data_ports
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Server allocated no UDP port for the MTU probe"))?;
+        let server_addr = SocketAddr::new(server_ip.ip(), port);
+
+        let socket = net::create_udp_socket_for_remote(server_addr).await?;
+        socket.connect(server_addr).await?;
+        let ipv6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+        // Without DF the kernel fragments oversized probes and every
+        // size "passes" — the forward results would be meaningless.
+        // Reverse stays valid (the server sets DF on its echoes), so
+        // degrade with a warning rather than refuse.
+        if let Err(e) = net::set_dont_fragment(&socket, ipv6) {
+            warn!(
+                "Could not set don't-fragment on probe socket: {} \
+                 (client-to-server results may overstate the path)",
+                e
+            );
+        }
+
+        let report = crate::probe::run_probe(&socket, ipv6).await?;
+
+        // The probe converged well before the test duration; cancel so
+        // the server sends its Result now instead of at the deadline.
+        let cancel_msg = ControlMessage::Cancel {
+            id: test_id.to_string(),
+            reason: "MTU probe complete".to_string(),
+        };
+        writer
+            .write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes())
+            .await?;
+
+        // Drain control messages (Intervals that accumulated during the
+        // probe, the Cancelled ack) until the Result lands. If the test
+        // deadline beat our cancel, the Result may already be queued.
+        let mut line = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut result = loop {
+            line.clear();
+            let n = tokio::time::timeout_at(deadline, read_bounded_line(reader, &mut line))
+                .await
+                .map_err(|_| anyhow::anyhow!("Timeout waiting for probe result"))??;
+            if n == 0 {
+                return Err(anyhow::anyhow!("Connection closed before probe result"));
+            }
+            match ControlMessage::deserialize(line.trim())? {
+                ControlMessage::Result(result) => break result,
+                ControlMessage::Error { message } => {
+                    return Err(anyhow::anyhow!("Server error: {}", message));
+                }
+                _ => continue,
+            }
+        };
+
+        result.mtu_probe = Some(report);
+        Ok(result)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_udp_streams(
         &self,
@@ -1709,6 +1809,7 @@ impl Client {
             dscp: None,        // QUIC manages its own TOS via the transport layer
             window_size: None, // QUIC flow control is handled at the transport layer
             zerocopy: false,   // sendfile is incompatible with QUIC's userspace encryption
+            mtu_probe: false,  // probe mode is UDP-only
         };
         ctrl_send
             .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
@@ -2214,6 +2315,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            mtu_probe: None,
         };
 
         overlay_udp_download_result(&mut result, &stats);
@@ -2243,6 +2345,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            mtu_probe: None,
         };
         overlay_udp_download_result(&mut result, &stats);
         assert_eq!(result.bytes_total, 1_000);
@@ -2271,6 +2374,7 @@ mod tests {
             bytes_received: Some(300_000_000),
             throughput_send_mbps: Some(160.0),
             throughput_recv_mbps: Some(2_400.0),
+            mtu_probe: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -2306,6 +2410,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            mtu_probe: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);

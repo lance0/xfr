@@ -79,6 +79,14 @@ Test UDP at your expected rate to detect packet loss:
 xfr <host> -u -b 500M -t 60s    # Watch for loss percentage in TUI
 ```
 
+### Path MTU Discovery
+Find the largest UDP payload that survives the path — per direction, with
+the don't-fragment flag set so middleboxes can't hide the limit by
+fragmenting (useful for NFS-over-UDP and VPN/tunnel tuning):
+```bash
+xfr <host> --probe-mtu
+```
+
 ### Before/After Comparison
 Quantify the impact of network changes:
 ```bash
@@ -455,6 +463,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
 | `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
 | `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
+| `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; needs server ≥ this version) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |

@@ -774,6 +774,85 @@ pub async fn receive_udp_feedback_only(
     Ok(())
 }
 
+/// Server side of `--probe-mtu` (issue #64, `mtu_probe_v1`): answer each
+/// incoming `XFRP` probe with a small ack plus a same-size echo, both
+/// addressed to wherever the probe came from. The ack is header-sized so
+/// it survives nearly any path and proves the forward direction; the
+/// echo is padded to the probe's declared size and proves the reverse
+/// direction. Runs until `cancel` fires (the control channel owns test
+/// lifetime, same as the bulk handlers).
+///
+/// The echo is sent with don't-fragment set by the caller on the socket;
+/// an oversized echo then dies at the constraining hop instead of being
+/// fragmented into deceptive success. EMSGSIZE on the echo send means
+/// the server's own interface MTU is the reverse-path limit — that's a
+/// legitimate probe outcome, not an error, so it's logged at debug and
+/// the ack still goes out.
+pub async fn respond_mtu_probes(
+    socket: Arc<UdpSocket>,
+    mut cancel: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    use crate::probe::{PROBE_KIND_ACK, PROBE_KIND_ECHO, PROBE_KIND_PROBE, ProbePacket};
+
+    let mut recv_buf = vec![0u8; crate::probe::MAX_PROBE_PAYLOAD + 100];
+    let mut send_buf = vec![0u8; crate::probe::MAX_PROBE_PAYLOAD];
+
+    let cancel_changed = async move {
+        loop {
+            if *cancel.borrow() {
+                return;
+            }
+            if cancel.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(cancel_changed);
+
+    loop {
+        tokio::select! {
+            result = socket.recv_from(&mut recv_buf) => {
+                let (n, from) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("MTU probe recv error: {}", e);
+                        continue;
+                    }
+                };
+                let Some(pkt) = ProbePacket::decode(&recv_buf[..n]) else {
+                    continue;
+                };
+                if pkt.kind != PROBE_KIND_PROBE {
+                    continue;
+                }
+                let ack = ProbePacket {
+                    kind: PROBE_KIND_ACK,
+                    seq: pkt.seq,
+                    declared_size: pkt.declared_size,
+                };
+                if let Some(len) = ack.encode(&mut send_buf)
+                    && let Err(e) = socket.send_to(&send_buf[..len], from).await
+                {
+                    debug!("MTU probe ack send failed (seq {}): {}", pkt.seq, e);
+                }
+                let echo = ProbePacket {
+                    kind: PROBE_KIND_ECHO,
+                    seq: pkt.seq,
+                    declared_size: pkt.declared_size,
+                };
+                if let Some(len) = echo.encode(&mut send_buf)
+                    && let Err(e) = socket.send_to(&send_buf[..len], from).await
+                {
+                    // EMSGSIZE here is the reverse path speaking, not a bug.
+                    debug!("MTU probe echo send failed (seq {}, {}B): {}", pkt.seq, len, e);
+                }
+            }
+            _ = &mut cancel_changed => break,
+        }
+    }
+    Ok(())
+}
+
 /// Wait for the first packet from a client and return their address.
 /// Used in server reverse mode to learn where to send data.
 pub async fn wait_for_client(socket: &UdpSocket, timeout: Duration) -> anyhow::Result<SocketAddr> {

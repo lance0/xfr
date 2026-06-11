@@ -84,6 +84,18 @@ jobs:
       - name: Check MSRV
         run: cargo check --all-features
 
+  mtu-probe:
+    name: MTU probe (#64 netns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Probe through a constrained middle hop
+        run: sudo ./test-mtu-probe-ns.sh --ci
+
   # The release workflow cross-compiles aarch64-unknown-linux-gnu with an
   # old-glibc toolchain that the ubuntu/macos test jobs never exercise.
   # v0.9.15 died at release time on a glibc symbol (memfd_create, glibc

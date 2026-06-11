@@ -300,6 +300,17 @@ struct Cli {
     /// Disable zero-copy TCP sends (use regular buffered writes)
     #[arg(long, conflicts_with = "zerocopy")]
     no_zerocopy: bool,
+
+    /// Probe the path MTU instead of running a throughput test: walks
+    /// UDP payload sizes with the don't-fragment flag set and reports
+    /// the largest size surviving in each direction (issue #64).
+    /// Implies UDP (a redundant -u is accepted); requires a server with
+    /// mtu_probe_v1 support.
+    #[arg(
+        long,
+        conflicts_with_all = ["quic", "reverse", "bidir", "bitrate", "parallel", "zerocopy", "zeros"]
+    )]
+    probe_mtu: bool,
 }
 
 #[derive(Subcommand)]
@@ -927,7 +938,7 @@ async fn main() -> Result<()> {
 
             let protocol = if cli.quic {
                 Protocol::Quic
-            } else if cli.udp {
+            } else if cli.udp || cli.probe_mtu {
                 Protocol::Udp
             } else {
                 Protocol::Tcp
@@ -960,6 +971,12 @@ async fn main() -> Result<()> {
             // Apply config file defaults where CLI didn't override
             let duration = if cli.time != Duration::from_secs(10) {
                 cli.time
+            } else if cli.probe_mtu {
+                // Probe mode: the duration is only a server-side safety
+                // deadline (the client cancels as soon as the search
+                // converges, normally within seconds). The 10s default
+                // could truncate a slow search, so give it headroom.
+                Duration::from_secs(60)
             } else {
                 file_config
                     .client
@@ -1088,6 +1105,7 @@ async fn main() -> Result<()> {
                 mptcp: cli.mptcp,
                 random_payload,
                 zerocopy,
+                mtu_probe: cli.probe_mtu,
                 dscp: cli
                     .dscp
                     .as_ref()
@@ -1108,7 +1126,10 @@ async fn main() -> Result<()> {
                 timestamp_format,
             };
 
-            if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet {
+            // Probe mode always uses plain output: there is no live
+            // throughput to graph, the run lasts seconds, and the
+            // deliverable is the per-size table.
+            if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet || cli.probe_mtu {
                 // Plain/JSON/CSV mode
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {
@@ -1416,6 +1437,7 @@ fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protoco
         bytes_received: None,
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
+        mtu_probe: None,
     }
 }
 
@@ -2106,6 +2128,27 @@ mod tests {
 
         // MPTCP is allowed (sendfile goes through the regular splice path)
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--mptcp"]).is_ok());
+    }
+
+    #[test]
+    fn test_cli_probe_mtu_flag() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["xfr", "host", "--probe-mtu"]).unwrap();
+        assert!(cli.probe_mtu);
+
+        // Redundant -u is accepted (probe implies UDP anyway)
+        assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-u"]).is_ok());
+
+        // A diagnostic mode: throughput-test knobs conflict
+        for forbidden in ["-Q", "-R", "--bidir", "-Z", "--zeros"] {
+            assert!(
+                Cli::try_parse_from(["xfr", "host", "--probe-mtu", forbidden]).is_err(),
+                "--probe-mtu must conflict with {forbidden}"
+            );
+        }
+        assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-b", "1G"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-P", "4"]).is_err());
     }
 
     #[test]
