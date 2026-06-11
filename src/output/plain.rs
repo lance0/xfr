@@ -1,9 +1,15 @@
 //! Plain text output
 
+use crate::probe::{MtuProbeReport, SizeVerdict};
 use crate::protocol::TestResult;
 use crate::stats::{bytes_to_human, mbps_to_human};
 
 pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
+    // A probe run carries no meaningful throughput numbers; the
+    // per-size table IS the result.
+    if let Some(ref probe) = result.mtu_probe {
+        return format_mtu_probe(probe);
+    }
     let mut output = String::new();
 
     output.push_str("─".repeat(60).as_str());
@@ -124,6 +130,67 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     output
 }
 
+/// Render a `--probe-mtu` report (issue #64): the per-size walk, then
+/// the largest surviving payload and derived path MTU per direction.
+fn format_mtu_probe(probe: &MtuProbeReport) -> String {
+    let mut output = String::new();
+
+    output.push_str("─".repeat(60).as_str());
+    output.push('\n');
+    output.push_str("  xfr Path MTU Probe\n");
+    output.push_str("─".repeat(60).as_str());
+    output.push_str("\n\n");
+
+    output.push_str(&format!(
+        "  Address family: {} ({} bytes IP+UDP overhead)\n\n",
+        if probe.ipv6 { "IPv6" } else { "IPv4" },
+        crate::probe::ip_overhead(probe.ipv6)
+    ));
+
+    output.push_str("  Payload      client → server    server → client\n");
+    for size in &probe.sizes {
+        output.push_str(&format!(
+            "  {:>7}      {:<18} {}\n",
+            size.payload,
+            format_verdict(size.forward, size.forward_ok, size.attempts),
+            format_verdict(size.reverse, size.reverse_ok, size.attempts),
+        ));
+    }
+    output.push('\n');
+
+    match (probe.forward_max_payload, probe.forward_path_mtu) {
+        (Some(payload), Some(mtu)) => output.push_str(&format!(
+            "  Largest payload client → server: {} bytes  (path MTU ≈ {})\n",
+            payload, mtu
+        )),
+        _ => output.push_str("  Largest payload client → server: none survived\n"),
+    }
+    match (probe.reverse_max_payload, probe.reverse_path_mtu) {
+        (Some(payload), Some(mtu)) => output.push_str(&format!(
+            "  Largest payload server → client: {} bytes  (path MTU ≈ {})\n",
+            payload, mtu
+        )),
+        _ => output.push_str("  Largest payload server → client: none observed\n"),
+    }
+    // The echo can only ever be as large as the probe that triggered
+    // it, so a wider reverse path is invisible from this side.
+    output.push_str("  (server → client is a lower bound, capped by the client → server path)\n");
+
+    output.push_str("─".repeat(60).as_str());
+    output.push('\n');
+
+    output
+}
+
+fn format_verdict(verdict: SizeVerdict, ok: u8, attempts: u8) -> String {
+    match verdict {
+        SizeVerdict::Pass => format!("pass ({}/{})", ok, attempts),
+        SizeVerdict::Fail => format!("BLOCKED (0/{})", attempts),
+        SizeVerdict::LocalLimit => "local MTU limit".to_string(),
+        SizeVerdict::Untested => "untested".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn output_interval_plain(
     timestamp: &str,
@@ -192,6 +259,7 @@ mod tests {
             bytes_received: None,
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
+            mtu_probe: None,
         }
     }
 

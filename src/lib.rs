@@ -46,6 +46,7 @@ pub mod net;
 pub mod output;
 mod pause;
 pub mod prefs;
+pub mod probe;
 pub mod protocol;
 pub mod quic;
 pub mod rate_limit;

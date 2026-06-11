@@ -41,6 +41,7 @@ fn test_test_start_roundtrip() {
         dscp: None,
         window_size: None,
         zerocopy: false,
+        mtu_probe: false,
     };
 
     let json = msg.serialize().unwrap();
@@ -103,6 +104,7 @@ fn test_udp_test_start() {
         dscp: None,
         window_size: None,
         zerocopy: false,
+        mtu_probe: false,
     };
 
     let json = msg.serialize().unwrap();
@@ -293,6 +295,7 @@ fn test_result_message() {
         bytes_received: None,
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
+        mtu_probe: None,
     };
 
     let msg = ControlMessage::Result(result);
@@ -337,6 +340,7 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
         bytes_received: None,
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
+        mtu_probe: None,
     };
 
     let msg = ControlMessage::Result(result);

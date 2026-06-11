@@ -520,6 +520,81 @@ pub fn set_tos_on_udp(_socket: &UdpSocket, _tos: u8) -> io::Result<()> {
     Ok(())
 }
 
+/// Set the IP don't-fragment behavior on a UDP socket so oversized
+/// MTU-probe packets are dropped (surfacing EMSGSIZE locally, or dying
+/// at the constraining hop) instead of being fragmented — fragmentation
+/// would hide exactly the path limit `--probe-mtu` measures (issue #64).
+///
+/// Linux exposes this as `IP_MTU_DISCOVER = IP_PMTUDISC_DO` (and the
+/// IPv6 twin); macOS/BSD use the boolean `IP_DONTFRAG`/`IPV6_DONTFRAG`.
+#[cfg(target_os = "linux")]
+pub fn set_dont_fragment(socket: &UdpSocket, ipv6: bool) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let (level, optname, value) = if ipv6 {
+        (
+            libc::IPPROTO_IPV6,
+            libc::IPV6_MTU_DISCOVER,
+            libc::IPV6_PMTUDISC_DO,
+        )
+    } else {
+        (
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            libc::IP_PMTUDISC_DO,
+        )
+    };
+    let value = value as libc::c_int;
+    // SAFETY: fd is a valid descriptor, value is a c_int on the stack.
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            optname,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub fn set_dont_fragment(socket: &UdpSocket, ipv6: bool) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let (level, optname) = if ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_DONTFRAG)
+    };
+    let value: libc::c_int = 1;
+    // SAFETY: fd is a valid descriptor, value is a c_int on the stack.
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            optname,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// Only platforms with a verified DONTFRAG constant get the real call;
+// guessing option numbers risks setting an unrelated IP option.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+pub fn set_dont_fragment(_socket: &UdpSocket, _ipv6: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "don't-fragment control is not supported on this platform",
+    ))
+}
+
 /// Apply `-w`/`--window` to a UDP socket via `SO_SNDBUF`/`SO_RCVBUF`.
 ///
 /// Sets both buffers to the same size for symmetry with the existing TCP

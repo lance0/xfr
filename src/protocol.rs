@@ -125,6 +125,15 @@ pub enum ControlMessage {
         /// client warns via the `zerocopy_v1` capability when that happens.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         zerocopy: bool,
+        /// Run a path-MTU probe instead of a throughput test (issue #64,
+        /// `--probe-mtu`). The server answers variable-size `XFRP` probe
+        /// packets on the data socket with an ack + same-size echo
+        /// instead of running bulk handlers. Wire-additive: absent means
+        /// false; the client refuses to start against a server that
+        /// doesn't advertise `mtu_probe_v1` (an old server would treat
+        /// probes as junk data and never reply).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mtu_probe: bool,
     },
     TestAck {
         id: String,
@@ -301,6 +310,12 @@ pub struct TestResult {
     /// Bidirectional test: per-direction throughput (download) in Mbps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throughput_recv_mbps: Option<f64>,
+    /// Path-MTU probe report (issue #64). Populated client-side after a
+    /// `--probe-mtu` run — the client is the only side with the full
+    /// per-size picture — so it rides into `--json` output. The server
+    /// never sets it; wire-additive, absent for throughput tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu_probe: Option<crate::probe::MtuProbeReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,6 +458,11 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // download/bidir TCP, issue #33). Advertised so clients can warn when
     // a `-R --zerocopy` request lands on a server that will ignore it.
     "zerocopy_v1",
+    // v0.9.17: server answers XFRP path-MTU probe packets (ack + echo)
+    // when TestStart.mtu_probe is set (issue #64). Hard requirement for
+    // --probe-mtu — without it the client refuses to start, since an old
+    // server would silently count probes as malformed data packets.
+    "mtu_probe_v1",
 ];
 
 fn supported_capabilities() -> Vec<String> {
@@ -546,6 +566,7 @@ mod tests {
             dscp: None,
             window_size: None,
             zerocopy: false,
+            mtu_probe: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -594,6 +615,7 @@ mod tests {
             dscp: None,
             window_size: Some(262_144),
             zerocopy: false,
+            mtu_probe: false,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"window_size\":262144"));
@@ -623,6 +645,7 @@ mod tests {
             dscp: None,
             window_size: Some(big),
             zerocopy: false,
+            mtu_probe: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -650,6 +673,7 @@ mod tests {
             dscp: None,
             window_size: None,
             zerocopy: false,
+            mtu_probe: false,
         };
         let json = msg.serialize().unwrap();
         assert!(
@@ -691,6 +715,7 @@ mod tests {
             dscp: None,
             window_size: None,
             zerocopy: true,
+            mtu_probe: false,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"zerocopy\":true"));
