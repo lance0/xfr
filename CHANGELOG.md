@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Zero-copy TCP sends are now on by default** (issue #33 follow-up) — `sendfile(2)` needs only Linux 3.17+ and every unsupported configuration (non-Linux, old kernels, old servers, sockets that reject `sendfile`) already falls back to regular writes, so there is no reason to make users opt in to the cheaper send path. `-Z`/`--zerocopy` is kept: passing it explicitly upgrades the silent fallback to a warning (non-Linux client sends, or a `-R`/`--bidir` server that doesn't advertise `zerocopy_v1`). New `--no-zerocopy` flag opts out. Payload semantics are unchanged, and on links where the sender isn't CPU-bound results are identical — where it is, throughput now reflects the network rather than the sender's copy overhead.
 
+### Fixed
+- **Bidir UDP no longer reports the server's send rate as download throughput** (issue #91) — same root cause as the `-R` fix in 0.9.16 (issue #81), on the other code path: in bidirectional UDP tests the download half of the split (`bytes_received`, `throughput_recv_mbps`) was computed from the server's send-side counters, which track the requested `-b` rate rather than what arrived. The client now overlays its own receive counters onto both the live split and the final result, and the combined totals are rebuilt from the two corrected halves (upload was always receiver-truth — the server counts what it actually received). Per-stream rows still show the server's combined view; splitting those per-direction needs wire changes and is out of scope here.
+
 ### Library API (pre-1.0 break)
 - `client::ClientConfig.zerocopy` is now a `ZerocopyMode` enum (`Off` / `Auto` / `Requested`) instead of `bool`; `Default` is `Auto`. `Auto` and `Requested` behave identically except `Requested` warns on downgrade. `tcp::TcpConfig.zerocopy` stays `bool`.
 

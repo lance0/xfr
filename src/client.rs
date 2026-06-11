@@ -123,6 +123,34 @@ fn overlay_udp_download_result(result: &mut TestResult, stats: &crate::stats::Te
     }
 }
 
+/// Bidir analog of [`overlay_udp_download_result`]: the download direction of
+/// a bidirectional UDP result (`bytes_received` from the client's view) is
+/// computed server-side from the server's *send* counters, which inflate the
+/// same way issue #81 described — every kernel-accepted `send_to` counts,
+/// whether or not it survived the wire. Replace it with the client's own
+/// receive counters. The upload direction (`bytes_sent`) is already
+/// receiver-truth — the server counts what actually arrived — so it is kept,
+/// and the combined totals are recomputed from the two corrected halves.
+/// Pre-split servers (no `bytes_sent` reported) only get the receive-side
+/// fields filled in; the combined total is left alone rather than rebuilt
+/// from a half-known pair.
+fn overlay_udp_bidir_result(result: &mut TestResult, stats: &crate::stats::TestStats) {
+    let mbps = |bytes: u64| {
+        if result.duration_ms > 0 {
+            (bytes as f64 * 8.0) / (result.duration_ms as f64 / 1000.0) / 1_000_000.0
+        } else {
+            0.0
+        }
+    };
+    let received = stats.total_bytes_received();
+    result.bytes_received = Some(received);
+    result.throughput_recv_mbps = Some(mbps(received));
+    if let Some(sent) = result.bytes_sent {
+        result.bytes_total = sent + received;
+        result.throughput_mbps = mbps(sent + received);
+    }
+}
+
 use crate::auth;
 use crate::net::{self, AddressFamily};
 use crate::protocol::{
@@ -769,6 +797,10 @@ impl Client {
         // server's send-side counts.
         let udp_download =
             self.config.protocol == Protocol::Udp && self.config.direction == Direction::Download;
+        // Bidir UDP has the same problem on its download half: the server
+        // reports its own send counters as the client's `bytes_received`.
+        let udp_bidir =
+            self.config.protocol == Protocol::Udp && self.config.direction == Direction::Bidir;
         let mut last_recv_bytes: Vec<u64> = vec![0; stats.streams.len()];
         let mut last_recv_instant = tokio::time::Instant::now();
 
@@ -919,6 +951,41 @@ impl Client {
                         } else {
                             (aggregate.bytes, aggregate.throughput_mbps, streams)
                         };
+                        // Bidir UDP: the download half of the server's split
+                        // (`bytes_received` from our view) is its send-side
+                        // counter — same inflation as above. Substitute our
+                        // own receive deltas; the upload half is already
+                        // receiver-truth (the server counts what arrived).
+                        // The combined totals are recomputed from the two
+                        // corrected halves when the server reported a split.
+                        let (bytes_received, throughput_recv_mbps, total_bytes, throughput_mbps) =
+                            if udp_bidir {
+                                let now = tokio::time::Instant::now();
+                                let dt = now.duration_since(last_recv_instant).as_secs_f64();
+                                last_recv_instant = now;
+                                let (interval_recv, _) =
+                                    udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
+                                let recv_mbps = if dt > 0.0 {
+                                    (interval_recv as f64 * 8.0) / dt / 1_000_000.0
+                                } else {
+                                    0.0
+                                };
+                                let (total, total_mbps) =
+                                    match (aggregate.bytes_sent, aggregate.throughput_send_mbps) {
+                                        (Some(sent), Some(send_mbps)) => {
+                                            (sent + interval_recv, send_mbps + recv_mbps)
+                                        }
+                                        _ => (total_bytes, throughput_mbps),
+                                    };
+                                (Some(interval_recv), Some(recv_mbps), total, total_mbps)
+                            } else {
+                                (
+                                    aggregate.bytes_received,
+                                    aggregate.throughput_recv_mbps,
+                                    total_bytes,
+                                    throughput_mbps,
+                                )
+                            };
                         // Apply the producer-side monotonic-denominator
                         // filter so a delayed TCP `Interval` cannot clobber
                         // a fresher reading we already saw via UDP feedback.
@@ -945,9 +1012,9 @@ impl Client {
                                 total_retransmits,
                                 streams,
                                 bytes_sent: aggregate.bytes_sent,
-                                bytes_received: aggregate.bytes_received,
+                                bytes_received,
                                 throughput_send_mbps: aggregate.throughput_send_mbps,
-                                throughput_recv_mbps: aggregate.throughput_recv_mbps,
+                                throughput_recv_mbps,
                                 udp_progress: filtered_udp_progress,
                                 udp_feedback_only: false,
                             })
@@ -1027,6 +1094,11 @@ impl Client {
         // the receive tasks have recorded their final UdpStats (loss/jitter).
         if udp_download && let Ok(ref mut result) = test_result {
             overlay_udp_download_result(result, &stats);
+        }
+        // Bidir UDP: same receiver-truth substitution, scoped to the
+        // download half of the split (upload is already receiver-truth).
+        if udp_bidir && let Ok(ref mut result) = test_result {
+            overlay_udp_bidir_result(result, &stats);
         }
 
         test_result
@@ -2175,6 +2247,73 @@ mod tests {
         overlay_udp_download_result(&mut result, &stats);
         assert_eq!(result.bytes_total, 1_000);
         assert_eq!(result.throughput_mbps, 0.0);
+    }
+
+    /// Bidir UDP: the download half of the server's split is its send-side
+    /// counter and must be replaced with the client's receive totals. The
+    /// upload half is already receiver-truth (counted by the server as it
+    /// arrived) and must be preserved; the combined totals are rebuilt from
+    /// the corrected pair.
+    #[test]
+    fn overlay_udp_bidir_result_replaces_download_half_only() {
+        let stats = test_stats_with_recv_bytes(&[10_000_000, 5_000_000]);
+
+        let mut result = TestResult {
+            id: "t".to_string(),
+            // Server combined: 20 MB upload truth + 300 MB send-side attempts.
+            bytes_total: 320_000_000,
+            duration_ms: 1_000,
+            throughput_mbps: 2_560.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: Some(20_000_000),
+            bytes_received: Some(300_000_000),
+            throughput_send_mbps: Some(160.0),
+            throughput_recv_mbps: Some(2_400.0),
+        };
+
+        overlay_udp_bidir_result(&mut result, &stats);
+
+        // Upload half untouched.
+        assert_eq!(result.bytes_sent, Some(20_000_000));
+        assert_eq!(result.throughput_send_mbps, Some(160.0));
+        // Download half replaced with our 15 MB receive truth.
+        assert_eq!(result.bytes_received, Some(15_000_000));
+        assert!((result.throughput_recv_mbps.unwrap() - 120.0).abs() < 0.001);
+        // Combined rebuilt from the corrected halves.
+        assert_eq!(result.bytes_total, 35_000_000);
+        assert!((result.throughput_mbps - 280.0).abs() < 0.001);
+    }
+
+    /// A pre-split server (no bytes_sent in the result) gives us no trusted
+    /// upload number, so only the receive-side fields are filled in; the
+    /// combined total is left as reported rather than rebuilt from a
+    /// half-known pair.
+    #[test]
+    fn overlay_udp_bidir_result_without_server_split_keeps_total() {
+        let stats = test_stats_with_recv_bytes(&[15_000_000]);
+
+        let mut result = TestResult {
+            id: "t".to_string(),
+            bytes_total: 320_000_000,
+            duration_ms: 1_000,
+            throughput_mbps: 2_560.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+        };
+
+        overlay_udp_bidir_result(&mut result, &stats);
+
+        assert_eq!(result.bytes_received, Some(15_000_000));
+        assert!((result.throughput_recv_mbps.unwrap() - 120.0).abs() < 0.001);
+        assert_eq!(result.bytes_total, 320_000_000);
+        assert!((result.throughput_mbps - 2_560.0).abs() < 0.001);
     }
 
     #[test]
