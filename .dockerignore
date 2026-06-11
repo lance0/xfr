@@ -1,0 +1,4 @@
+target/
+.git/
+artifacts/
+docker/

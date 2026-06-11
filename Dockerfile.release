@@ -1,0 +1,12 @@
+# Used by the release workflow: packages prebuilt static musl binaries
+# (downloaded from the build matrix) into a minimal multi-arch image.
+FROM alpine:3.21
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates
+COPY bin/${TARGETARCH}/xfr /usr/local/bin/xfr
+
+# Server mode listens on 5201: TCP for control + data, UDP for UDP/QUIC tests.
+EXPOSE 5201/tcp 5201/udp
+
+ENTRYPOINT ["xfr"]
+CMD ["--help"]

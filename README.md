@@ -122,6 +122,14 @@ cargo install xfr
 brew install lance0/tap/xfr
 ```
 
+### Docker (GHCR)
+
+Multi-arch image (amd64/arm64), handy for running a server:
+
+```bash
+docker run --rm -p 5201:5201 -p 5201:5201/udp ghcr.io/lance0/xfr:latest serve
+```
+
 ### Pre-built Binaries
 
 Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
@@ -129,7 +137,7 @@ Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
 | Platform | Target |
 |----------|--------|
 | Linux x86_64 | `xfr-x86_64-unknown-linux-musl.tar.gz` |
-| Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` (or `-musl` for fully static) |
 | macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | Use `cargo install xfr` |
 | Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
