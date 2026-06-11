@@ -134,6 +134,16 @@ pub enum ControlMessage {
         /// probes as junk data and never reply).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mtu_probe: bool,
+        /// Propagate the client's `--tcp-nodelay` to the server's TCP data
+        /// sockets — in download/bidir the server is the latency-relevant
+        /// bulk sender and previously never heard about the flag. The
+        /// server ORs this into its own nodelay default rather than
+        /// replacing it, so the field can only ever add `TCP_NODELAY`,
+        /// never disable it. Wire-additive: absent means false, and older
+        /// servers ignore the field and keep their default (same
+        /// acceptable-degradation call as `window_size`, no capability).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tcp_nodelay: bool,
     },
     TestAck {
         id: String,
@@ -613,6 +623,7 @@ mod tests {
             window_size: None,
             zerocopy: false,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -662,6 +673,7 @@ mod tests {
             window_size: Some(262_144),
             zerocopy: false,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"window_size\":262144"));
@@ -692,6 +704,7 @@ mod tests {
             window_size: Some(big),
             zerocopy: false,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -720,6 +733,7 @@ mod tests {
             window_size: None,
             zerocopy: false,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         let json = msg.serialize().unwrap();
         assert!(
@@ -732,6 +746,52 @@ mod tests {
             "false zerocopy must be skipped in serialization, got: {}",
             json
         );
+        assert!(
+            !json.contains("tcp_nodelay"),
+            "false tcp_nodelay must be skipped in serialization, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_test_start_backward_compat_without_tcp_nodelay() {
+        // Older peers don't send the tcp_nodelay field; it must default to false.
+        let json = r#"{"type":"test_start","id":"x","protocol":"tcp","streams":1,"duration_secs":5,"direction":"download"}"#;
+        let decoded = ControlMessage::deserialize(json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { tcp_nodelay, .. } => {
+                assert!(!tcp_nodelay, "absent field must deserialize to false");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_test_start_roundtrip_with_tcp_nodelay() {
+        let msg = ControlMessage::TestStart {
+            id: "x".to_string(),
+            protocol: Protocol::Tcp,
+            streams: 1,
+            duration_secs: 5,
+            direction: Direction::Download,
+            bitrate: None,
+            congestion: None,
+            mptcp: false,
+            dscp: None,
+            window_size: None,
+            zerocopy: false,
+            mtu_probe: false,
+            tcp_nodelay: true,
+        };
+        let json = msg.serialize().unwrap();
+        assert!(json.contains("\"tcp_nodelay\":true"));
+        let decoded = ControlMessage::deserialize(&json).unwrap();
+        match decoded {
+            ControlMessage::TestStart { tcp_nodelay, .. } => {
+                assert!(tcp_nodelay);
+            }
+            _ => panic!("wrong message type"),
+        }
     }
 
     #[test]
@@ -762,6 +822,7 @@ mod tests {
             window_size: None,
             zerocopy: true,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"zerocopy\":true"));

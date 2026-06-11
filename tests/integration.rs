@@ -2619,6 +2619,7 @@ impl RawControl {
             window_size: None,
             zerocopy: false,
             mtu_probe: false,
+            tcp_nodelay: false,
         };
         self.writer
             .write_all(format!("{}\n", start.serialize().unwrap()).as_bytes())

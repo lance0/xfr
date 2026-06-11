@@ -387,6 +387,26 @@ fn client_window_to_host(window: Option<u64>) -> Option<usize> {
     })
 }
 
+/// The server has always enabled `TCP_NODELAY` on its data sockets,
+/// independent of any client setting — harmless for bulk transfers
+/// (Nagle never delays full-MSS writes) and it keeps the final partial
+/// segment from stalling at end of test.
+const SERVER_DATA_NODELAY: bool = true;
+
+/// Effective nodelay for a server-side TCP data socket.
+///
+/// The client's `--tcp-nodelay` request (`TestStart.tcp_nodelay`) ORs
+/// into the server's own default rather than replacing it: a client
+/// that passes the flag is guaranteed nodelay on the server's sends
+/// (the latency-relevant direction in `-R`/`--bidir`), while a client
+/// that doesn't cannot turn off the historical always-on behavior.
+/// With today's default the OR is identity-true; the threading exists
+/// so the client's request stays honored if the server-side default
+/// ever changes.
+fn server_data_nodelay(client_requested: bool) -> bool {
+    client_requested || SERVER_DATA_NODELAY
+}
+
 fn initial_read_timeout_for_peer(
     active_tests: &HashMap<String, ActiveTest>,
     peer_ip: std::net::IpAddr,
@@ -1636,6 +1656,7 @@ async fn handle_test_request(
             window_size,
             zerocopy,
             mtu_probe,
+            tcp_nodelay,
         } => {
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
@@ -1747,6 +1768,7 @@ async fn handle_test_request(
                 window_size,
                 zerocopy,
                 mtu_probe,
+                tcp_nodelay,
             )
             .await;
 
@@ -2138,6 +2160,7 @@ async fn run_test(
     client_window_size: Option<u64>,
     zerocopy: bool,
     mtu_probe: bool,
+    tcp_nodelay: bool,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -2350,6 +2373,7 @@ async fn run_test(
                         dscp,
                         client_window_size,
                         zerocopy,
+                        tcp_nodelay,
                     )
                     .await
                 });
@@ -2700,7 +2724,7 @@ async fn spawn_tcp_handlers(
             // Respect the client's window_size if they passed -w; otherwise leave
             // kernel autotuning alone. Keep nodelay on to match historical behavior.
             let config = TcpConfig {
-                nodelay: true,
+                nodelay: SERVER_DATA_NODELAY,
                 window_size: client_window_to_host(client_window_size),
                 congestion: congestion.clone(),
                 random_payload: true,
@@ -2831,6 +2855,7 @@ async fn spawn_tcp_stream_handlers(
     dscp: Option<u8>,
     client_window_size: Option<u64>,
     zerocopy: bool,
+    tcp_nodelay: bool,
 ) -> Vec<JoinHandle<()>> {
     let per_stream_bitrate = bitrate.map(|b| {
         if b == 0 {
@@ -2898,7 +2923,7 @@ async fn spawn_tcp_stream_handlers(
                 let congestion = congestion.clone();
                 let handle = tokio::spawn(async move {
                     let config = TcpConfig {
-                        nodelay: true,
+                        nodelay: server_data_nodelay(tcp_nodelay),
                         window_size: client_window_to_host(client_window_size),
                         congestion,
                         random_payload: true,
@@ -3412,6 +3437,16 @@ mod tests {
             control_peer_ip: ip,
             expected_streams: streams,
         }
+    }
+
+    #[test]
+    fn test_server_data_nodelay_honors_client_and_never_disables() {
+        // A client that passed --tcp-nodelay must end up with nodelay on the
+        // server's data sockets (the bulk-send direction in -R/--bidir)...
+        assert!(server_data_nodelay(true));
+        // ...and a client that didn't gets exactly the server default, which
+        // is always-on today — so the historical behavior cannot regress.
+        assert_eq!(server_data_nodelay(false), SERVER_DATA_NODELAY);
     }
 
     #[test]
