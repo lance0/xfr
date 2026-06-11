@@ -464,6 +464,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
 | `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
 | `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; needs server ≥ this version) |
+| `--connect-timeout` | | none | Fail if the control connection takes longer than this (e.g. `5s`); without it, dead servers are bounded only by OS defaults |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |

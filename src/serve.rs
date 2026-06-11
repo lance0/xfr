@@ -837,8 +837,9 @@ async fn handle_new_connection(
                 }
             };
 
-            info!("Client connected: {}", peer_addr);
-
+            // The detailed connect line (software, protocol, capability
+            // deltas) is logged from the Hello processing in
+            // handle_client_with_first_message via log_client_hello.
             let handle = tokio::spawn(async move {
                 let _permit = permit;
                 let _rate_guard = rate_limit_guard;
@@ -1099,7 +1100,19 @@ async fn handle_quic_client(
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     let auth_nonce = match msg {
-        ControlMessage::Hello { version, .. } => {
+        ControlMessage::Hello {
+            version,
+            client,
+            capabilities,
+            ..
+        } => {
+            log_client_hello(
+                peer_addr,
+                &version,
+                client.as_ref(),
+                &capabilities,
+                &security.capabilities,
+            );
             if !versions_compatible(&version, PROTOCOL_VERSION) {
                 let error = ControlMessage::error(format!(
                     "Incompatible protocol version: {} (server: {})",
@@ -1288,6 +1301,42 @@ async fn handle_quic_client(
     Ok(())
 }
 
+/// One-line observability for every control connection: client software,
+/// protocol version, and which of the server's capabilities the client
+/// does NOT advertise — i.e. the features that will silently fall back
+/// for this session. "Which client version was that" is the first
+/// question for any field report, so the log answers it up front.
+fn log_client_hello(
+    peer_addr: SocketAddr,
+    version: &str,
+    client: Option<&String>,
+    client_capabilities: &Option<Vec<String>>,
+    server_capabilities: &[String],
+) {
+    info!(
+        "Client connected: {} ({}, protocol {})",
+        peer_addr,
+        client.map(String::as_str).unwrap_or("unknown client"),
+        version
+    );
+    let missing: Vec<&str> = server_capabilities
+        .iter()
+        .filter(|cap| {
+            !client_capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.iter().any(|c| c == *cap))
+        })
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        info!(
+            "Client {} lacks capabilities: {} (affected features fall back this session)",
+            peer_addr,
+            missing.join(", ")
+        );
+    }
+}
+
 /// Handle client with pre-read first message (Hello already parsed in route_connection)
 async fn handle_client_with_first_message(
     stream: TcpStream,
@@ -1309,9 +1358,17 @@ async fn handle_client_with_first_message(
     let (auth_nonce, client_capabilities) = match first_msg {
         ControlMessage::Hello {
             version,
+            client,
             capabilities,
             ..
         } => {
+            log_client_hello(
+                peer_addr,
+                &version,
+                client.as_ref(),
+                &capabilities,
+                &security.capabilities,
+            );
             if !versions_compatible(&version, PROTOCOL_VERSION) {
                 let error = ControlMessage::error(format!(
                     "Incompatible protocol version: {} (server: {})",

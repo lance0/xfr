@@ -311,6 +311,12 @@ struct Cli {
         conflicts_with_all = ["quic", "reverse", "bidir", "bitrate", "parallel", "zerocopy", "zeros"]
     )]
     probe_mtu: bool,
+
+    /// Fail if the control connection (TCP connect / QUIC handshake)
+    /// takes longer than this (e.g. 5s). Without it, a dead or filtered
+    /// server is bounded only by OS defaults, which can be minutes.
+    #[arg(long, value_parser = parse_nonzero_duration, value_name = "DURATION")]
+    connect_timeout: Option<Duration>,
 }
 
 #[derive(Subcommand)]
@@ -959,6 +965,34 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
             }
 
+            // The QUIC paths don't implement these knobs (the server-side
+            // handler drops them from TestStart); say so instead of letting
+            // a rate-limited or buffer-tuned test silently run untuned.
+            if protocol == xfr::protocol::Protocol::Quic {
+                for (set, msg) in [
+                    (
+                        cli.bitrate.is_some(),
+                        "-b/--bitrate is ignored with QUIC (pacing is not implemented for QUIC)",
+                    ),
+                    (
+                        cli.window.is_some(),
+                        "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
+                    ),
+                    (
+                        cli.congestion.is_some(),
+                        "--congestion is ignored with QUIC (kernel TCP CC does not apply)",
+                    ),
+                    (
+                        cli.tcp_nodelay,
+                        "--tcp-nodelay is ignored with QUIC (no Nagle on UDP transport)",
+                    ),
+                ] {
+                    if set {
+                        eprintln!("Warning: {msg}");
+                    }
+                }
+            }
+
             #[cfg(not(unix))]
             if cli.dscp.is_some() && protocol != xfr::protocol::Protocol::Quic {
                 eprintln!("Warning: --dscp is not supported on this platform");
@@ -1106,6 +1140,7 @@ async fn main() -> Result<()> {
                 random_payload,
                 zerocopy,
                 mtu_probe: cli.probe_mtu,
+                connect_timeout: cli.connect_timeout,
                 dscp: cli
                     .dscp
                     .as_ref()
@@ -2128,6 +2163,21 @@ mod tests {
 
         // MPTCP is allowed (sendfile goes through the regular splice path)
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--mptcp"]).is_ok());
+    }
+
+    #[test]
+    fn test_cli_connect_timeout() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
+        assert!(cli.connect_timeout.is_none(), "no timeout by default");
+
+        let cli = Cli::try_parse_from(["xfr", "host", "--connect-timeout", "5s"]).unwrap();
+        assert_eq!(cli.connect_timeout, Some(Duration::from_secs(5)));
+
+        // Zero would mean "fail instantly, always" — rejected like the
+        // other nonzero-duration flags.
+        assert!(Cli::try_parse_from(["xfr", "host", "--connect-timeout", "0s"]).is_err());
     }
 
     #[test]
