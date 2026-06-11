@@ -11,6 +11,15 @@ use super::theme::Theme;
 
 const SPARKLINE_HISTORY: usize = 60;
 const LOG_HISTORY: usize = 100;
+// Sparkline bar cadence. Server `Interval` messages arrive at 1 Hz, so in
+// the normal path one bar per second comes straight from `on_progress`.
+// When the TCP control channel stalls (upload-mode UDP saturation, issue
+// #93), `tick()` keeps the graph advancing at the same cadence from the
+// freshest UDP-feedback state. The stall threshold is two report intervals
+// so ordinary delivery jitter on a healthy control channel never gets a
+// synthesized bar in ahead of a slightly-late Interval.
+const BAR_INTERVAL: Duration = Duration::from_secs(1);
+const BAR_STALL_AFTER: Duration = Duration::from_secs(2);
 // Rolling window for aggregate jitter display. Progress events fire at 1Hz,
 // so 10 samples ≈ 10s smoothing window — long enough to damp per-second
 // noise, short enough to still track real network changes.
@@ -129,11 +138,28 @@ pub struct App {
     peak_throughput_mbps: f64,
     prev_retransmits: u64,
     prev_udp_lost: u64,
-    /// Last cumulative `udp_progress` snapshot, kept so each new Interval
-    /// can compute the per-interval delta (lost_packets / total_packets) for
-    /// the throughput sparkline severity tint. None before the first UDP
+    /// Last cumulative `udp_progress` snapshot already rendered into a
+    /// sparkline bar, kept so each new bar can compute its per-interval
+    /// delta (lost_packets / total_packets) for the severity tint. Advanced
+    /// only by the two bar-appending paths (`on_progress` full Intervals and
+    /// `maybe_append_stalled_bar`), never by feedback-only updates — that's
+    /// what keeps a resumed Interval from re-counting loss that
+    /// feedback-derived bars already showed. None before the first UDP
     /// progress arrives.
     prev_udp_progress: Option<crate::protocol::UdpIntervalProgress>,
+    /// Freshest cumulative `udp_progress` seen from either source: full TCP
+    /// `Interval` messages or feedback-only updates (2 Hz UDP feedback under
+    /// `udp_feedback_v1`). Both producer paths route through
+    /// `UdpProgressFilter`, so denominators are monotonic and a plain
+    /// overwrite is safe. `maybe_append_stalled_bar` deltas this against
+    /// `prev_udp_progress` to tint bars while the control channel is stalled.
+    latest_udp_progress: Option<crate::protocol::UdpIntervalProgress>,
+    /// Instant the most recent sparkline bar was appended, by either path.
+    /// `tick()` synthesizes a bar once this falls `BAR_STALL_AFTER` behind
+    /// the wall clock. None until the first bar; before that, `start_time`
+    /// serves as the baseline so a control channel that stalls before the
+    /// first Interval still gets an advancing graph.
+    last_bar_at: Option<Instant>,
 
     // Update notification
     pub update_available: Option<String>,
@@ -222,6 +248,8 @@ impl App {
             prev_retransmits: 0,
             prev_udp_lost: 0,
             prev_udp_progress: None,
+            latest_udp_progress: None,
+            last_bar_at: None,
 
             update_available: None,
             server_version: None,
@@ -325,11 +353,91 @@ impl App {
     /// Running — `on_progress` does NOT update it (doing so was a visual
     /// no-op since the next tick immediately overwrote the server's value).
     /// `on_result` pins `self.duration` once completed.
+    ///
+    /// Also owns the sparkline's stall cadence (issue #93): when full
+    /// Intervals stop arriving, bars keep advancing from the freshest
+    /// feedback-derived state instead of freezing.
     pub fn tick(&mut self) {
         if self.state == AppState::Running
             && let Some(start) = self.start_time
         {
             self.elapsed = start.elapsed();
+            self.maybe_append_stalled_bar(Instant::now());
+        }
+    }
+
+    /// Append a synthesized sparkline bar when full `Interval` messages have
+    /// stalled (issue #93). Under upload-mode UDP saturation the TCP control
+    /// channel is exactly what stalls, so bar cadence can't depend on
+    /// Interval arrival alone: without this the graph freezes while the
+    /// numeric loss counter — fed by 2 Hz UDP feedback — keeps moving.
+    ///
+    /// Cadence: a bar is synthesized only once `BAR_STALL_AFTER` (two report
+    /// intervals) has passed since the last appended bar, so normal 1 Hz
+    /// Interval delivery never double-renders a window. During a sustained
+    /// stall `last_bar_at` advances by one `BAR_INTERVAL` per bar, holding
+    /// the regular one-bar-per-second rhythm; if it falls a full threshold
+    /// behind even after advancing (TUI loop itself was blocked) it snaps to
+    /// `now` so a long freeze yields one aggregated bar, not a catch-up
+    /// flood. The aggregated bar stays honest because both its loss and
+    /// packet counts span the same window.
+    ///
+    /// Loss tint: delta of the freshest cumulative `udp_progress` against
+    /// `prev_udp_progress`, the last cumulative already rendered into a bar
+    /// — the same monotonic-denominator trick `UdpProgressFilter` relies on.
+    /// Advancing `prev_udp_progress` here is what keeps a resuming Interval
+    /// from re-counting loss these bars already showed.
+    ///
+    /// Throughput: repeat-last-known. A zero-mbps sample renders as a blank
+    /// cell in the Sparkline (no glyph, so nothing to tint), which would
+    /// hide the loss signal entirely; repeating the stale height keeps the
+    /// bar visible so the loss tint can mark the segment. A flat plateau
+    /// with warning/error tint reads as "no fresh throughput reading, loss
+    /// still arriving" rather than a frozen graph.
+    fn maybe_append_stalled_bar(&mut self, now: Instant) {
+        // Baseline from the last bar, or test start before any bar exists —
+        // the control channel can stall before the first Interval lands.
+        let Some(last) = self.last_bar_at.or(self.start_time) else {
+            return;
+        };
+        if now.duration_since(last) < BAR_STALL_AFTER {
+            return;
+        }
+        let (interval_packets, interval_lost) =
+            match (self.latest_udp_progress, self.prev_udp_progress) {
+                (Some(curr), Some(prev)) => {
+                    let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
+                    let received = curr.packets_received.saturating_sub(prev.packets_received);
+                    (received.saturating_add(lost), lost)
+                }
+                // First cumulative sample (or none at all): baseline
+                // silently, mirroring `on_progress` — magnitude unknown,
+                // renderer stays primary-colored.
+                _ => (0, 0),
+            };
+        self.push_throughput_sample(ThroughputSample {
+            mbps: self.current_throughput_mbps,
+            lost_packets: interval_lost,
+            interval_packets,
+        });
+        if let Some(latest) = self.latest_udp_progress {
+            self.prev_udp_progress = Some(latest);
+        }
+        let advanced = last + BAR_INTERVAL;
+        self.last_bar_at = Some(if now.duration_since(advanced) >= BAR_STALL_AFTER {
+            now
+        } else {
+            advanced
+        });
+    }
+
+    /// Append a sample to the sparkline history, evicting the oldest once
+    /// the window is full. Shared by the Interval path (`on_progress`) and
+    /// the stall path (`maybe_append_stalled_bar`).
+    fn push_throughput_sample(&mut self, sample: ThroughputSample) {
+        self.throughput_history.push_back(sample);
+        if self.throughput_history.len() > SPARKLINE_HISTORY {
+            self.throughput_history.pop_front();
         }
     }
 
@@ -346,18 +454,20 @@ impl App {
     pub fn on_progress(&mut self, progress: TestProgress) {
         // Feedback-only updates carry just `udp_progress`; everything
         // else is sentinel/None and consumers must preserve their last
-        // full-interval values. Update only UDP loss state and return,
-        // skipping throughput history (sparkline), retransmits, jitter,
-        // RTT/cwnd, and byte-count fields the feedback path doesn't know
-        // about. Skipping prev_udp_progress here keeps the sparkline's
-        // per-bar loss-delta computation aligned to full-interval
-        // boundaries; feedback only powers the "current loss percent"
-        // numeric reading, not the bar history.
+        // full-interval values. Record the freshest cumulative for the
+        // numeric loss readout and for `tick()`'s stall-cadence bars,
+        // then return — retransmits, jitter, RTT/cwnd, and byte-count
+        // fields all keep their last full-interval values, and no bar is
+        // appended here (bars come from full Intervals or from `tick()`
+        // once those stall). `prev_udp_progress` is NOT advanced: it
+        // tracks what's already rendered into a bar, and only the two
+        // bar-appending paths move it.
         if progress.udp_feedback_only {
-            if let Some(p) = progress.udp_progress
-                && let Some(percent) = p.lost_percent()
-            {
-                self.udp_lost_percent = Some(percent);
+            if let Some(p) = progress.udp_progress {
+                self.latest_udp_progress = Some(p);
+                if let Some(percent) = p.lost_percent() {
+                    self.udp_lost_percent = Some(percent);
+                }
             }
             return;
         }
@@ -433,17 +543,21 @@ impl App {
                 // Baseline silently; real deltas start from sample 2.
                 _ => (0, 0),
             };
-        self.throughput_history.push_back(ThroughputSample {
+        self.push_throughput_sample(ThroughputSample {
             mbps: progress.throughput_mbps,
             lost_packets: interval_lost,
             interval_packets,
         });
-        if self.throughput_history.len() > SPARKLINE_HISTORY {
-            self.throughput_history.pop_front();
-        }
         if let Some(curr) = progress.udp_progress {
+            // `curr` passed the producer-side monotonic filter, so it can't
+            // regress below a feedback value a stall-synthesized bar already
+            // rendered — both writes below are safe plain overwrites.
             self.prev_udp_progress = Some(curr);
+            self.latest_udp_progress = Some(curr);
         }
+        // A full Interval just rendered a bar; reset the stall clock so
+        // `tick()` doesn't synthesize a second bar for the same window.
+        self.last_bar_at = Some(Instant::now());
 
         // Use local TCP_INFO retransmits when available (sender-side), otherwise sum from server
         if let Some(total) = progress.total_retransmits {
@@ -1117,5 +1231,177 @@ mod tests {
         let s = app.throughput_history.back().copied().unwrap();
         assert_eq!(s.interval_packets, 0);
         assert_eq!(s.loss_rate_percent(), None);
+    }
+
+    fn make_feedback(packets_received: u64, packets_lost: u64) -> crate::client::TestProgress {
+        let mut p = make_progress(
+            0.0, // sentinel — feedback updates don't carry throughput
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received,
+                packets_lost,
+            }),
+        );
+        p.udp_feedback_only = true;
+        p
+    }
+
+    #[test]
+    fn stalled_intervals_synthesize_bars_from_feedback_deltas() {
+        // Issue #93: full Intervals stall (saturated control channel) while
+        // 2 Hz UDP feedback keeps flowing. tick()'s stall path must keep
+        // appending bars at the report cadence, tinted from feedback-derived
+        // deltas, with throughput repeating the last-known reading.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        // Two full Intervals land normally: baseline + one clean bar.
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1000,
+                packets_lost: 0,
+            }),
+        ));
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 2000,
+                packets_lost: 0,
+            }),
+        ));
+        assert_eq!(app.throughput_history.len(), 2);
+        let t0 = app.last_bar_at.unwrap();
+
+        // Control channel stalls; feedback advances the cumulative counts.
+        app.on_progress(make_feedback(2500, 100));
+
+        // Below the stall threshold — no synthesized bar yet.
+        app.maybe_append_stalled_bar(t0 + Duration::from_millis(1900));
+        assert_eq!(app.throughput_history.len(), 2);
+
+        // Threshold reached: one bar with the feedback delta (+500 received,
+        // +100 lost since the last rendered cumulative) and repeated mbps.
+        app.maybe_append_stalled_bar(t0 + Duration::from_secs(2));
+        assert_eq!(app.throughput_history.len(), 3);
+        let bar = app.throughput_history.back().copied().unwrap();
+        assert_eq!(bar.mbps, 100.0, "stall bars repeat last-known throughput");
+        assert_eq!(bar.lost_packets, 100);
+        assert_eq!(bar.interval_packets, 600);
+
+        // Sustained stall holds the 1 Hz rhythm: nothing mid-window, then
+        // the next bar carries only the loss accrued since the previous one.
+        app.on_progress(make_feedback(3000, 150));
+        app.maybe_append_stalled_bar(t0 + Duration::from_millis(2500));
+        assert_eq!(app.throughput_history.len(), 3, "no bar mid-window");
+        app.maybe_append_stalled_bar(t0 + Duration::from_secs(3));
+        assert_eq!(app.throughput_history.len(), 4);
+        let bar = app.throughput_history.back().copied().unwrap();
+        assert_eq!(bar.lost_packets, 50);
+        assert_eq!(bar.interval_packets, 550);
+    }
+
+    #[test]
+    fn resumed_interval_does_not_recount_loss_from_stall_bars() {
+        // When full Intervals resume after feedback-derived bars, the
+        // resuming bar's delta must start from the last cumulative already
+        // rendered — not from the last full Interval — or loss shown during
+        // the stall would be double-counted.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1000,
+                packets_lost: 0,
+            }),
+        ));
+        let t0 = app.last_bar_at.unwrap();
+
+        // Stall: feedback brings cumulative loss to 100, one bar renders it.
+        app.on_progress(make_feedback(1500, 100));
+        app.maybe_append_stalled_bar(t0 + Duration::from_secs(2));
+        assert_eq!(
+            app.throughput_history.back().unwrap().lost_packets,
+            100,
+            "stall bar shows the feedback-derived loss"
+        );
+
+        // Control channel resumes with cumulative {2000, 150}. Only the 50
+        // not-yet-rendered losses may appear on the new bar.
+        app.on_progress(make_progress(
+            80.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 2000,
+                packets_lost: 150,
+            }),
+        ));
+        let bar = app.throughput_history.back().copied().unwrap();
+        assert_eq!(bar.mbps, 80.0);
+        assert_eq!(bar.lost_packets, 50, "loss from stall bars not re-counted");
+        assert_eq!(bar.interval_packets, 550);
+
+        // Total loss across all bars equals the cumulative total exactly.
+        let rendered: u64 = app.throughput_history.iter().map(|s| s.lost_packets).sum();
+        assert_eq!(rendered, 150);
+    }
+
+    #[test]
+    fn normal_interval_cadence_never_synthesizes_bars() {
+        // The common case: full Intervals arriving at 1 Hz. tick() runs ~20×
+        // a second between them, but must never add a bar of its own — one
+        // bar per Interval, exactly as before issue #93.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+
+        for i in 1..=3u64 {
+            app.on_progress(make_progress(
+                100.0,
+                Some(crate::protocol::UdpIntervalProgress {
+                    packets_received: i * 1000,
+                    packets_lost: 0,
+                }),
+            ));
+            // Simulate ticks across the full window up to (but not at) the
+            // next Interval, including one arriving late at +1.9s.
+            let last = app.last_bar_at.unwrap();
+            app.maybe_append_stalled_bar(last + Duration::from_millis(50));
+            app.maybe_append_stalled_bar(last + Duration::from_millis(999));
+            app.maybe_append_stalled_bar(last + Duration::from_millis(1900));
+            assert_eq!(
+                app.throughput_history.len(),
+                i as usize,
+                "exactly one bar per Interval, none synthesized"
+            );
+        }
+    }
+
+    #[test]
+    fn stall_before_first_interval_still_advances_bars() {
+        // The control channel can stall before the first full Interval ever
+        // lands (saturation from t=0). start_time seeds the cadence so the
+        // graph advances on feedback alone; the first bar baselines silently
+        // (magnitude unknown), real deltas start from the second.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        let t0 = Instant::now();
+        app.start_time = Some(t0);
+
+        app.on_progress(make_feedback(1000, 200));
+        app.maybe_append_stalled_bar(t0 + Duration::from_secs(2));
+        assert_eq!(app.throughput_history.len(), 1);
+        let baseline = app.throughput_history.back().copied().unwrap();
+        assert_eq!(baseline.interval_packets, 0);
+        assert_eq!(baseline.loss_rate_percent(), None);
+
+        app.on_progress(make_feedback(2000, 400));
+        app.maybe_append_stalled_bar(t0 + Duration::from_secs(3));
+        assert_eq!(app.throughput_history.len(), 2);
+        let bar = app.throughput_history.back().copied().unwrap();
+        assert_eq!(bar.lost_packets, 200);
+        assert_eq!(bar.interval_packets, 1200);
     }
 }
