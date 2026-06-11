@@ -323,6 +323,182 @@ pub async fn create_udp_socket_for_remote(remote: SocketAddr) -> io::Result<UdpS
     UdpSocket::from_std(std_socket)
 }
 
+/// Create the shared UDP socket for the single-port data plane (issue
+/// #63) when no QUIC endpoint owns the main port: SO_REUSEADDR +
+/// SO_REUSEPORT set before bind so per-stream connected sockets can join
+/// the same address later. `v6only` follows the server's address-family
+/// mode (`None` for IPv4 sockets).
+///
+/// Unix-only: SO_REUSEPORT doesn't exist on Windows, and the capability
+/// is never advertised there (the self-test below fails closed).
+#[cfg(unix)]
+pub async fn create_shared_udp_socket(
+    addr: SocketAddr,
+    v6only: Option<bool>,
+) -> io::Result<UdpSocket> {
+    let socket = new_reuseport_udp_socket(addr, v6only)?;
+    socket.bind(&SockAddr::from(addr))?;
+    socket.set_nonblocking(true)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
+}
+
+/// Create a per-stream data socket for single-port UDP (issue #63):
+/// bound to the same local address as the shared socket (SO_REUSEPORT)
+/// and `connect()`ed to the client's source address. Once connected, the
+/// kernel's UDP lookup scores it above the shared wildcard socket, so
+/// line-rate data flows here and never touches the shared-socket tee.
+#[cfg(unix)]
+pub async fn create_connected_udp_same_port(
+    local: SocketAddr,
+    v6only: Option<bool>,
+    peer: SocketAddr,
+) -> io::Result<UdpSocket> {
+    let socket = new_reuseport_udp_socket(local, v6only)?;
+    socket.bind(&SockAddr::from(local))?;
+    socket.set_nonblocking(true)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    let udp = UdpSocket::from_std(std_socket)?;
+    udp.connect(peer).await?;
+    Ok(udp)
+}
+
+#[cfg(unix)]
+fn new_reuseport_udp_socket(addr: SocketAddr, v6only: Option<bool>) -> io::Result<Socket> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    // Plain SO_REUSEPORT everywhere — never SO_REUSEPORT_LB (FreeBSD),
+    // whose load-balancing group semantics would defeat the
+    // connected-socket-wins routing this feature depends on.
+    socket.set_reuse_port(true)?;
+    if let Some(v6only) = v6only {
+        socket.set_only_v6(v6only)?;
+    }
+    Ok(socket)
+}
+
+#[cfg(not(unix))]
+pub async fn create_shared_udp_socket(
+    _addr: SocketAddr,
+    _v6only: Option<bool>,
+) -> io::Result<UdpSocket> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "single-port UDP requires SO_REUSEPORT, which this platform lacks",
+    ))
+}
+
+#[cfg(not(unix))]
+pub async fn create_connected_udp_same_port(
+    _local: SocketAddr,
+    _v6only: Option<bool>,
+    _peer: SocketAddr,
+) -> io::Result<UdpSocket> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "single-port UDP requires SO_REUSEPORT, which this platform lacks",
+    ))
+}
+
+/// Startup self-test gating the `single_port_udp_v1` capability (issue
+/// #63): replicate the exact production socket arrangement on a
+/// loopback ephemeral port — shared wildcard-style socket bound first,
+/// same-port connected socket second — and verify a datagram from the
+/// connected peer lands on the connected socket, not the shared one.
+/// Kernel UDP lookup is supposed to score connected sockets above
+/// wildcards, but SO_REUSEPORT group semantics vary across kernels and
+/// platforms, so we prove it on the running system instead of assuming.
+/// Sub-millisecond when it passes; runs once at server start. Any
+/// failure means the server simply doesn't advertise the capability and
+/// clients fall back to legacy per-stream ports.
+pub async fn single_port_udp_self_test(family: AddressFamily) -> bool {
+    match single_port_udp_self_test_inner(family).await {
+        Ok(()) => true,
+        Err(e) => {
+            debug!(
+                "single-port UDP self-test failed ({}); not advertising {}: {}",
+                family,
+                crate::protocol::SINGLE_PORT_UDP_CAPABILITY,
+                e
+            );
+            false
+        }
+    }
+}
+
+async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()> {
+    use std::time::Duration;
+
+    let loopback: IpAddr = match family {
+        AddressFamily::V4Only => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        AddressFamily::V6Only | AddressFamily::DualStack => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    };
+    let v6only = match family {
+        AddressFamily::V4Only => None,
+        AddressFamily::V6Only => Some(true),
+        AddressFamily::DualStack => Some(false),
+    };
+
+    let shared = create_shared_udp_socket(SocketAddr::new(loopback, 0), v6only).await?;
+    let shared_addr = shared.local_addr()?;
+    let peer = UdpSocket::bind(SocketAddr::new(loopback, 0)).await?;
+    let peer_addr = peer.local_addr()?;
+    let connected = create_connected_udp_same_port(shared_addr, v6only, peer_addr).await?;
+
+    const PROBE: &[u8] = b"xfr-single-port-self-test";
+    peer.send_to(PROBE, shared_addr).await?;
+
+    let mut connected_buf = [0u8; 64];
+    let mut shared_buf = [0u8; 64];
+    tokio::select! {
+        result = connected.recv(&mut connected_buf) => {
+            let n = result?;
+            if &connected_buf[..n] != PROBE {
+                return Err(io::Error::other("connected socket received unexpected data"));
+            }
+        }
+        _ = shared.recv_from(&mut shared_buf) => return Err(io::Error::other(
+            "kernel delivered the datagram to the shared wildcard socket \
+             instead of the connected socket",
+        )),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "datagram reached neither socket",
+        )),
+    }
+
+    // Second half: traffic from an UNRELATED source must still reach the
+    // shared socket while the connected one is in the group. Guards
+    // against reuseport semantics where the last-bound socket captures
+    // all unicast — that would pass the check above while silently
+    // starving QUIC and new-client hellos in production.
+    let stranger = UdpSocket::bind(SocketAddr::new(loopback, 0)).await?;
+    stranger.send_to(PROBE, shared_addr).await?;
+    tokio::select! {
+        result = shared.recv_from(&mut shared_buf) => {
+            let (n, _) = result?;
+            if &shared_buf[..n] == PROBE {
+                Ok(())
+            } else {
+                Err(io::Error::other("shared socket received unexpected data"))
+            }
+        }
+        _ = connected.recv(&mut connected_buf) => Err(io::Error::other(
+            "kernel delivered an unrelated source's datagram to the \
+             connected socket",
+        )),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "unrelated-source datagram reached neither socket",
+        )),
+    }
+}
+
 /// Resolve a hostname to addresses, filtered by address family preference
 pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<Vec<SocketAddr>> {
     // Handle zone IDs for link-local IPv6 (e.g., fe80::1%eth0)
@@ -942,6 +1118,28 @@ mod tests {
         );
 
         let _ = accept_task.await;
+    }
+
+    /// The self-test must pass for real on Linux (CI and dev machines) —
+    /// it is what turns single-port UDP on, so a regression here silently
+    /// downgrades every client to legacy ephemeral ports.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn single_port_udp_self_test_passes_on_linux() {
+        assert!(single_port_udp_self_test(AddressFamily::V4Only).await);
+        assert!(single_port_udp_self_test(AddressFamily::DualStack).await);
+    }
+
+    /// On every platform the self-test must come back with a verdict
+    /// rather than hang or panic — failure just means legacy fallback.
+    #[tokio::test]
+    async fn single_port_udp_self_test_returns_verdict() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            single_port_udp_self_test(AddressFamily::V4Only),
+        )
+        .await
+        .expect("self-test must complete promptly");
     }
 
     #[test]

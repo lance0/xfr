@@ -134,6 +134,257 @@ impl UdpFeedbackPacket {
     }
 }
 
+/// Magic prefix on single-port UDP hello/ack packets (issue #63). These
+/// are the only xfr packets that ever cross the server's shared wildcard
+/// socket, where QUIC traffic is demuxed by header bits: the first byte
+/// must have the top two bits clear so it can never look like a QUIC
+/// long header (0x80, RFC 8999) or short header (0x40 fixed bit). The
+/// legacy `XFRF`/`XFRP` magics start with 'X' (0x58 = 0b0101_1000) and
+/// stay off the shared socket entirely — they ride connected sockets
+/// where the existing demux is unchanged.
+pub const UDP_HELLO_MAGIC: [u8; 4] = *b"\x00XFR";
+/// Fixed on-wire size of a hello/ack packet.
+pub const UDP_HELLO_SIZE: usize = 24;
+/// Currently-supported hello packet protocol version.
+pub const UDP_HELLO_VERSION: u8 = 1;
+/// `kind` byte for the client→server stream hello.
+pub const UDP_HELLO_KIND_HELLO: u8 = 1;
+/// `kind` byte for the server→client ack, sent from the per-stream
+/// connected socket so the client learns the connected path is live.
+pub const UDP_HELLO_KIND_ACK: u8 = 2;
+/// Length of the per-test routing token carried in every hello/ack.
+pub const UDP_HELLO_TOKEN_LEN: usize = 16;
+/// How often the client re-sends an unacknowledged hello.
+pub const UDP_HELLO_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// Total hello attempts before the handshake fails loudly (~5 s budget).
+pub const UDP_HELLO_MAX_ATTEMPTS: u32 = 50;
+
+/// Single-port UDP hello/ack packet (issue #63).
+///
+/// The client sends a hello per stream to the server's main port; the
+/// server answers with an ack from a freshly connected same-port socket.
+/// The token (server-generated, carried back in `TestAck.udp_token`) is
+/// what routes the hello to the right test — source address alone would
+/// break under NAT or multiple concurrent clients.
+///
+/// Wire layout, all multi-byte fields big-endian:
+/// ```text
+/// offset  size  field
+///   0      4    magic = b"\x00XFR"
+///   4      1    version = 1
+///   5      1    kind (1 = hello, 2 = ack)
+///   6      2    stream_index (u16)
+///   8     16    token
+/// total: 24 bytes, fixed
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpHelloPacket {
+    pub kind: u8,
+    pub stream_index: u16,
+    pub token: [u8; UDP_HELLO_TOKEN_LEN],
+}
+
+impl UdpHelloPacket {
+    /// Encode the packet into a fixed 24-byte buffer.
+    pub fn encode(&self) -> [u8; UDP_HELLO_SIZE] {
+        let mut buffer = [0u8; UDP_HELLO_SIZE];
+        buffer[0..4].copy_from_slice(&UDP_HELLO_MAGIC);
+        buffer[4] = UDP_HELLO_VERSION;
+        buffer[5] = self.kind;
+        buffer[6..8].copy_from_slice(&self.stream_index.to_be_bytes());
+        buffer[8..24].copy_from_slice(&self.token);
+        buffer
+    }
+
+    /// Decode a hello/ack packet. Returns `None` if length, magic,
+    /// version, or kind don't match the v1 schema — fixed-size like the
+    /// feedback packet, forward-compatible only via new `kind` values.
+    pub fn decode(buffer: &[u8]) -> Option<Self> {
+        if buffer.len() != UDP_HELLO_SIZE {
+            return None;
+        }
+        if buffer[0..4] != UDP_HELLO_MAGIC {
+            return None;
+        }
+        if buffer[4] != UDP_HELLO_VERSION {
+            return None;
+        }
+        let kind = buffer[5];
+        if !matches!(kind, UDP_HELLO_KIND_HELLO | UDP_HELLO_KIND_ACK) {
+            return None;
+        }
+        let stream_index = u16::from_be_bytes(buffer[6..8].try_into().ok()?);
+        let token = buffer[8..24].try_into().ok()?;
+        Some(Self {
+            kind,
+            stream_index,
+            token,
+        })
+    }
+}
+
+/// Hex-encode a routing token for the `TestAck.udp_token` wire field.
+pub fn encode_hello_token(token: &[u8; UDP_HELLO_TOKEN_LEN]) -> String {
+    token.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Parse a `TestAck.udp_token` hex string back into raw token bytes.
+/// Returns `None` for anything that isn't exactly 32 hex digits.
+pub fn parse_hello_token(s: &str) -> Option<[u8; UDP_HELLO_TOKEN_LEN]> {
+    if s.len() != UDP_HELLO_TOKEN_LEN * 2 || !s.is_ascii() {
+        return None;
+    }
+    let mut token = [0u8; UDP_HELLO_TOKEN_LEN];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        token[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(token)
+}
+
+/// Which lane a datagram on the shared server socket belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedSocketLane {
+    /// Single-port UDP hello — divert to the hello dispatcher.
+    XfrHello,
+    /// QUIC — pass through to quinn untouched.
+    Quic,
+    /// Neither: shouldn't normally happen, since once a stream's
+    /// connected socket exists the kernel routes its data there and the
+    /// shared socket never sees it. Logged at debug and dropped.
+    XfrStray,
+}
+
+/// Classify a datagram arriving on the shared (QUIC + xfr hello) socket.
+///
+/// Order matters and matches the design for issue #63:
+/// 1. exact match on the single-port hello framing → xfr hello lane;
+/// 2. first byte with 0x80 set → QUIC long header (version-independent
+///    per RFC 8999);
+/// 3. first byte with 0x40 set → QUIC short header. Sound only because
+///    the server endpoint sets `grease_quic_bit(false)`: RFC 9287
+///    greasing is permission-based, so a server that doesn't advertise
+///    the grease transport parameter stops compliant peers from clearing
+///    the fixed bit toward it;
+/// 4. anything else → stray xfr lane.
+pub fn classify_shared_datagram(datagram: &[u8]) -> SharedSocketLane {
+    if datagram.len() == UDP_HELLO_SIZE && datagram[0..4] == UDP_HELLO_MAGIC {
+        return SharedSocketLane::XfrHello;
+    }
+    match datagram.first() {
+        Some(b) if b & 0x80 != 0 => SharedSocketLane::Quic,
+        Some(b) if b & 0x40 != 0 => SharedSocketLane::Quic,
+        _ => SharedSocketLane::XfrStray,
+    }
+}
+
+/// Client side of the single-port UDP stream handshake (issue #63).
+///
+/// Sends a hello datagram on the connected `socket` every
+/// [`UDP_HELLO_RETRY_INTERVAL`] until the server's ack arrives, up to
+/// [`UDP_HELLO_MAX_ATTEMPTS`]. Inbound datagrams are `peek`ed, not
+/// consumed: a matching ack is consumed and completes the handshake; a
+/// foreign hello-lane packet is consumed and dropped; anything else
+/// (test data in download mode, where the server starts sending as soon
+/// as the hello routes) is treated as an implicit ack and left queued
+/// for the data path so it isn't lost from the receiver's accounting.
+///
+/// The caller must not start sending data until this returns Ok — that
+/// ordering is what eliminates the race where data reaches the server's
+/// shared socket before the per-stream connected socket exists.
+pub async fn single_port_udp_handshake(
+    socket: &UdpSocket,
+    token: &[u8; UDP_HELLO_TOKEN_LEN],
+    stream_index: u16,
+) -> anyhow::Result<()> {
+    let hello = UdpHelloPacket {
+        kind: UDP_HELLO_KIND_HELLO,
+        stream_index,
+        token: *token,
+    }
+    .encode();
+    // Full-size buffer: Windows fails peek/recv with WSAEMSGSIZE when the
+    // buffer is smaller than the datagram, and download-mode data packets
+    // can arrive here.
+    let mut buf = [0u8; UDP_PAYLOAD_SIZE + 100];
+
+    for _ in 0..UDP_HELLO_MAX_ATTEMPTS {
+        socket.send(&hello).await?;
+        let retry_at = tokio::time::Instant::now() + UDP_HELLO_RETRY_INTERVAL;
+        loop {
+            let n = tokio::select! {
+                result = socket.peek(&mut buf) => result?,
+                _ = tokio::time::sleep_until(retry_at) => break,
+            };
+            if n == UDP_HELLO_SIZE && buf[0..4] == UDP_HELLO_MAGIC {
+                let matched = UdpHelloPacket::decode(&buf[..n]).is_some_and(|pkt| {
+                    pkt.kind == UDP_HELLO_KIND_ACK
+                        && pkt.token == *token
+                        && pkt.stream_index == stream_index
+                });
+                // Consume the hello-lane packet either way; only a full
+                // match completes the handshake.
+                let _ = socket.recv(&mut buf).await;
+                if matched {
+                    return Ok(());
+                }
+                continue;
+            }
+            // Non-hello-lane traffic from the server means our hello was
+            // already routed (data only flows after that). Leave it queued.
+            return Ok(());
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "single-port UDP handshake timed out for stream {}: no ack from the server \
+         after {} attempts over {:?}. The server's UDP port may be reachable while \
+         replies are filtered, or the server dropped the test.",
+        stream_index,
+        UDP_HELLO_MAX_ATTEMPTS,
+        UDP_HELLO_RETRY_INTERVAL * UDP_HELLO_MAX_ATTEMPTS
+    ))
+}
+
+/// Server-side ack responder for directions where no receive loop runs
+/// on the connected socket (download mode). The first ack from the
+/// dispatcher can be lost; the client's retried hellos then arrive on
+/// the connected socket (the kernel routes them past the shared
+/// wildcard), so someone must keep answering until one ack lands. Runs
+/// until `cancel` fires; idles on recv once the client stops retrying.
+pub async fn respond_single_port_hellos(
+    socket: Arc<UdpSocket>,
+    ack: [u8; UDP_HELLO_SIZE],
+    mut cancel: watch::Receiver<bool>,
+) {
+    let mut buf = [0u8; UDP_PAYLOAD_SIZE + 100];
+
+    let cancel_changed = async move {
+        loop {
+            if *cancel.borrow() {
+                return;
+            }
+            if cancel.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(cancel_changed);
+
+    loop {
+        tokio::select! {
+            result = socket.recv(&mut buf) => {
+                if let Ok(n) = result
+                    && let Some(pkt) = UdpHelloPacket::decode(&buf[..n])
+                    && pkt.kind == UDP_HELLO_KIND_HELLO
+                {
+                    let _ = socket.send(&ack).await;
+                }
+            }
+            _ = &mut cancel_changed => break,
+        }
+    }
+}
+
 /// UDP packet header
 /// [seq: u64][timestamp_us: u64][payload...]
 ///
@@ -505,12 +756,21 @@ async fn send_udp_unlimited(
 }
 
 /// Receive UDP data and track statistics
+///
+/// `single_port_ack` is `Some` only on the server side of a single-port
+/// UDP test (issue #63), where the socket is connected to the client:
+/// retried stream hellos arriving here (the kernel routes them past the
+/// shared wildcard once the connected socket exists) are answered with
+/// the precomputed ack instead of being counted, and feedback packets
+/// use `send()` rather than `send_to()` — macOS rejects `send_to` on a
+/// connected UDP socket with EISCONN.
 pub async fn receive_udp(
     socket: Arc<UdpSocket>,
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
     feedback_enabled: bool,
+    single_port_ack: Option<[u8; UDP_HELLO_SIZE]>,
 ) -> anyhow::Result<(UdpStats, u64)> {
     let mut buffer = vec![0u8; UDP_PAYLOAD_SIZE + 100];
     let mut jitter_calc = JitterCalculator::new();
@@ -589,6 +849,22 @@ pub async fn receive_udp(
                         if is_feedback {
                             continue;
                         }
+                        // Single-port hello lane (issue #63): skipped from all
+                        // accounting on both ends for the same reasons as
+                        // feedback — a 24-byte hello/ack would otherwise decode
+                        // as a data header with a wild sequence number. On the
+                        // server (ack configured), a retried hello also gets
+                        // re-acked here in case the dispatcher's ack was lost.
+                        if n == UDP_HELLO_SIZE && buffer[0..4] == UDP_HELLO_MAGIC {
+                            if let Some(ack) = single_port_ack
+                                && UdpHelloPacket::decode(&buffer[..n])
+                                    .is_some_and(|pkt| pkt.kind == UDP_HELLO_KIND_HELLO)
+                                && let Err(e) = socket.send(&ack).await
+                            {
+                                debug!("single-port hello re-ack failed: {}", e);
+                            }
+                            continue;
+                        }
                         stats.add_bytes_received(n as u64);
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
@@ -642,16 +918,24 @@ pub async fn receive_udp(
                         packets_lost: snap.packets_lost,
                     };
                     let mut buf = [0u8; UDP_FEEDBACK_SIZE];
-                    if pkt.encode(&mut buf)
-                        && let Err(e) = socket.send_to(&buf, addr).await
-                    {
-                        // Non-fatal: ICMP port-unreachable from a
-                        // closed peer surfaces as ConnectionRefused
-                        // here. Log at debug; next tick retries.
-                        debug!(
-                            "UDP feedback send_to({}) failed: {}",
-                            addr, e
-                        );
+                    if pkt.encode(&mut buf) {
+                        // Connected single-port sockets must use send():
+                        // the address equals the connected peer anyway,
+                        // and macOS rejects send_to with EISCONN.
+                        let result = if single_port_ack.is_some() {
+                            socket.send(&buf).await
+                        } else {
+                            socket.send_to(&buf, addr).await
+                        };
+                        if let Err(e) = result {
+                            // Non-fatal: ICMP port-unreachable from a
+                            // closed peer surfaces as ConnectionRefused
+                            // here. Log at debug; next tick retries.
+                            debug!(
+                                "UDP feedback send to {} failed: {}",
+                                addr, e
+                            );
+                        }
                     }
                 }
             }
@@ -788,9 +1072,16 @@ pub async fn receive_udp_feedback_only(
 /// the server's own interface MTU is the reverse-path limit — that's a
 /// legitimate probe outcome, not an error, so it's logged at debug and
 /// the ack still goes out.
+///
+/// `single_port_ack` is `Some` when the probe runs in single-port mode
+/// (issue #63): the socket is connected, so replies use `send()` (macOS
+/// rejects `send_to` on connected sockets), and retried stream hellos
+/// that land here after the dispatcher's ack was lost get re-acked so
+/// the client's handshake can complete.
 pub async fn respond_mtu_probes(
     socket: Arc<UdpSocket>,
     mut cancel: watch::Receiver<bool>,
+    single_port_ack: Option<[u8; UDP_HELLO_SIZE]>,
 ) -> anyhow::Result<()> {
     use crate::probe::{PROBE_KIND_ACK, PROBE_KIND_ECHO, PROBE_KIND_PROBE, ProbePacket};
 
@@ -819,32 +1110,55 @@ pub async fn respond_mtu_probes(
                         continue;
                     }
                 };
+                if let Some(hello_ack) = single_port_ack
+                    && UdpHelloPacket::decode(&recv_buf[..n])
+                        .is_some_and(|pkt| pkt.kind == UDP_HELLO_KIND_HELLO)
+                {
+                    if let Err(e) = socket.send(&hello_ack).await {
+                        debug!("single-port hello re-ack failed during probe: {}", e);
+                    }
+                    continue;
+                }
                 let Some(pkt) = ProbePacket::decode(&recv_buf[..n]) else {
                     continue;
                 };
                 if pkt.kind != PROBE_KIND_PROBE {
                     continue;
                 }
+                // Connected single-port sockets must reply with send():
+                // `from` equals the connected peer, and macOS rejects
+                // send_to on a connected socket with EISCONN.
+                let connected = single_port_ack.is_some();
                 let ack = ProbePacket {
                     kind: PROBE_KIND_ACK,
                     seq: pkt.seq,
                     declared_size: pkt.declared_size,
                 };
-                if let Some(len) = ack.encode(&mut send_buf)
-                    && let Err(e) = socket.send_to(&send_buf[..len], from).await
-                {
-                    debug!("MTU probe ack send failed (seq {}): {}", pkt.seq, e);
+                if let Some(len) = ack.encode(&mut send_buf) {
+                    let result = if connected {
+                        socket.send(&send_buf[..len]).await
+                    } else {
+                        socket.send_to(&send_buf[..len], from).await
+                    };
+                    if let Err(e) = result {
+                        debug!("MTU probe ack send failed (seq {}): {}", pkt.seq, e);
+                    }
                 }
                 let echo = ProbePacket {
                     kind: PROBE_KIND_ECHO,
                     seq: pkt.seq,
                     declared_size: pkt.declared_size,
                 };
-                if let Some(len) = echo.encode(&mut send_buf)
-                    && let Err(e) = socket.send_to(&send_buf[..len], from).await
-                {
-                    // EMSGSIZE here is the reverse path speaking, not a bug.
-                    debug!("MTU probe echo send failed (seq {}, {}B): {}", pkt.seq, len, e);
+                if let Some(len) = echo.encode(&mut send_buf) {
+                    let result = if connected {
+                        socket.send(&send_buf[..len]).await
+                    } else {
+                        socket.send_to(&send_buf[..len], from).await
+                    };
+                    if let Err(e) = result {
+                        // EMSGSIZE here is the reverse path speaking, not a bug.
+                        debug!("MTU probe echo send failed (seq {}, {}B): {}", pkt.seq, len, e);
+                    }
                 }
             }
             _ = &mut cancel_changed => break,
@@ -1033,6 +1347,163 @@ mod tests {
             peak,
             "jitter_max must retain the prior peak, not track the current value"
         );
+    }
+
+    #[test]
+    fn hello_packet_roundtrip() {
+        let pkt = UdpHelloPacket {
+            kind: UDP_HELLO_KIND_HELLO,
+            stream_index: 17,
+            token: [0xAB; UDP_HELLO_TOKEN_LEN],
+        };
+        let buffer = pkt.encode();
+        assert_eq!(UdpHelloPacket::decode(&buffer), Some(pkt));
+
+        let ack = UdpHelloPacket {
+            kind: UDP_HELLO_KIND_ACK,
+            stream_index: 0,
+            token: [0; UDP_HELLO_TOKEN_LEN],
+        };
+        let buffer = ack.encode();
+        assert_eq!(UdpHelloPacket::decode(&buffer), Some(ack));
+    }
+
+    #[test]
+    fn hello_packet_rejects_foreign() {
+        let pkt = UdpHelloPacket {
+            kind: UDP_HELLO_KIND_HELLO,
+            stream_index: 1,
+            token: [7; UDP_HELLO_TOKEN_LEN],
+        };
+        let good = pkt.encode();
+
+        // Wrong magic
+        let mut bad = good;
+        bad[0..4].copy_from_slice(b"XFRF");
+        assert!(UdpHelloPacket::decode(&bad).is_none());
+
+        // Unknown version
+        let mut bad = good;
+        bad[4] = 2;
+        assert!(UdpHelloPacket::decode(&bad).is_none());
+
+        // Unknown kind
+        let mut bad = good;
+        bad[5] = 99;
+        assert!(UdpHelloPacket::decode(&bad).is_none());
+
+        // Wrong length, both directions — fixed-size framing
+        assert!(UdpHelloPacket::decode(&good[..UDP_HELLO_SIZE - 1]).is_none());
+        let mut oversize = [0u8; UDP_HELLO_SIZE + 1];
+        oversize[..UDP_HELLO_SIZE].copy_from_slice(&good);
+        assert!(UdpHelloPacket::decode(&oversize).is_none());
+    }
+
+    #[test]
+    fn hello_token_hex_roundtrip() {
+        let token: [u8; UDP_HELLO_TOKEN_LEN] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
+        ];
+        let hex = encode_hello_token(&token);
+        assert_eq!(hex, "00112233445566778899aabbccddeeff");
+        assert_eq!(parse_hello_token(&hex), Some(token));
+
+        assert!(parse_hello_token("").is_none());
+        assert!(parse_hello_token("0011").is_none()); // too short
+        assert!(parse_hello_token("zz112233445566778899aabbccddeeff").is_none()); // non-hex
+        assert!(parse_hello_token("00112233445566778899aabbccddeeff00").is_none()); // too long
+    }
+
+    #[test]
+    fn classify_shared_datagram_all_lanes() {
+        // 1. Exact hello framing → xfr hello lane.
+        let hello = UdpHelloPacket {
+            kind: UDP_HELLO_KIND_HELLO,
+            stream_index: 0,
+            token: [1; UDP_HELLO_TOKEN_LEN],
+        }
+        .encode();
+        assert_eq!(classify_shared_datagram(&hello), SharedSocketLane::XfrHello);
+
+        // 2. QUIC long header: 0x80 set (RFC 8999, version-independent).
+        let long_header = [0xC3u8, 0, 0, 0, 1];
+        assert_eq!(
+            classify_shared_datagram(&long_header),
+            SharedSocketLane::Quic
+        );
+
+        // 3. QUIC short header: 0x40 fixed bit set, 0x80 clear.
+        let short_header = [0x41u8, 9, 9, 9];
+        assert_eq!(
+            classify_shared_datagram(&short_header),
+            SharedSocketLane::Quic
+        );
+
+        // 4. Top two bits clear and not a hello → stray xfr lane. This is
+        // what a *greased* short header (fixed bit cleared, RFC 9287)
+        // would look like — it must never be possible toward this server
+        // because the endpoint sets grease_quic_bit(false), so routing it
+        // away from quinn is correct rather than lossy.
+        let greased_looking = [0x05u8, 1, 2, 3];
+        assert_eq!(
+            classify_shared_datagram(&greased_looking),
+            SharedSocketLane::XfrStray
+        );
+        assert_eq!(classify_shared_datagram(&[]), SharedSocketLane::XfrStray);
+
+        // Hello magic with the wrong length is not the hello lane (fixed
+        // size is part of the match), and its first byte is 0x00 → stray.
+        let truncated_hello = &hello[..UDP_HELLO_SIZE - 4];
+        assert_eq!(
+            classify_shared_datagram(truncated_hello),
+            SharedSocketLane::XfrStray
+        );
+    }
+
+    /// The client handshake must skip an ack carrying the wrong token or
+    /// stream index (token is the route key — a mismatched ack proves
+    /// nothing about our stream) and complete on the matching one.
+    #[tokio::test]
+    async fn handshake_ignores_mismatched_ack() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+
+        let token = [0x42u8; UDP_HELLO_TOKEN_LEN];
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let (_, from) = server.recv_from(&mut buf).await.unwrap();
+            // Wrong token first, then wrong stream, then the real ack.
+            let wrong_token = UdpHelloPacket {
+                kind: UDP_HELLO_KIND_ACK,
+                stream_index: 3,
+                token: [0xFFu8; UDP_HELLO_TOKEN_LEN],
+            };
+            let wrong_stream = UdpHelloPacket {
+                kind: UDP_HELLO_KIND_ACK,
+                stream_index: 4,
+                token,
+            };
+            let good = UdpHelloPacket {
+                kind: UDP_HELLO_KIND_ACK,
+                stream_index: 3,
+                token,
+            };
+            for pkt in [wrong_token, wrong_stream, good] {
+                server.send_to(&pkt.encode(), from).await.unwrap();
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            single_port_udp_handshake(&client, &token, 3),
+        )
+        .await
+        .expect("handshake should not hit the retry budget")
+        .expect("handshake should succeed on the matching ack");
+        responder.await.unwrap();
     }
 
     #[test]

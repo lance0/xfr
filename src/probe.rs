@@ -628,7 +628,11 @@ mod tests {
         );
         let server_addr = server.local_addr().unwrap();
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let responder = tokio::spawn(crate::udp::respond_mtu_probes(server.clone(), cancel_rx));
+        let responder = tokio::spawn(crate::udp::respond_mtu_probes(
+            server.clone(),
+            cancel_rx,
+            None,
+        ));
 
         let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await

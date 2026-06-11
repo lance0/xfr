@@ -695,10 +695,14 @@ impl Client {
         read_bounded_line(&mut reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
-        let data_ports = match msg {
-            ControlMessage::TestAck { data_ports, .. } => {
+        let (data_ports, udp_token) = match msg {
+            ControlMessage::TestAck {
+                data_ports,
+                udp_token,
+                ..
+            } => {
                 debug!("Server allocated ports: {:?}", data_ports);
-                data_ports
+                (data_ports, udp_token)
             }
             ControlMessage::Error { message } => {
                 return Err(anyhow::anyhow!("Server error: {}", message));
@@ -723,12 +727,43 @@ impl Client {
             }
         }
 
+        // Single-port UDP (issue #63): the server signals the mode with an
+        // empty port list plus a routing token, and must have advertised
+        // the capability. Anything else with empty ports is a broken peer.
+        let single_port_udp_token: Option<[u8; udp::UDP_HELLO_TOKEN_LEN]> =
+            if self.config.protocol == Protocol::Udp && data_ports.is_empty() {
+                let server_supports = crate::protocol::capability_advertised(
+                    &server_capabilities,
+                    crate::protocol::SINGLE_PORT_UDP_CAPABILITY,
+                );
+                match udp_token.as_deref().and_then(udp::parse_hello_token) {
+                    Some(token) if server_supports => Some(token),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Server returned no UDP data ports but single-port UDP was not \
+                             negotiated (missing {} capability or routing token). The server \
+                             may be an incompatible version.",
+                            crate::protocol::SINGLE_PORT_UDP_CAPABILITY
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+
         // --probe-mtu: the handshake above is shared with throughput
         // tests, but from here probe mode runs its own exchange on the
         // data socket instead of bulk streams, then cancels the test.
         if self.config.mtu_probe {
             return self
-                .run_mtu_probe_exchange(&mut reader, &mut writer, &test_id, server_ip, &data_ports)
+                .run_mtu_probe_exchange(
+                    &mut reader,
+                    &mut writer,
+                    &test_id,
+                    server_ip,
+                    &data_ports,
+                    single_port_udp_token,
+                )
                 .await;
         }
 
@@ -794,6 +829,7 @@ impl Client {
                     cancel_rx.clone(),
                     pause_rx.clone(),
                     feedback_aggregator,
+                    single_port_udp_token,
                 )
                 .await?
             }
@@ -1377,6 +1413,7 @@ impl Client {
     /// socket, then cancel the test on the control channel and wait for
     /// the server's Result so the connection closes out the normal way.
     /// The probe report rides home on the result's `mtu_probe` field.
+    #[allow(clippy::too_many_arguments)]
     async fn run_mtu_probe_exchange(
         &self,
         reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
@@ -1384,11 +1421,17 @@ impl Client {
         test_id: &str,
         server_ip: SocketAddr,
         data_ports: &[u16],
+        single_port_token: Option<[u8; udp::UDP_HELLO_TOKEN_LEN]>,
     ) -> anyhow::Result<TestResult> {
-        let port = data_ports
-            .first()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("Server allocated no UDP port for the MTU probe"))?;
+        // Single-port mode probes the main port after a hello/ack
+        // handshake; legacy mode uses the allocated ephemeral port.
+        let port = match single_port_token {
+            Some(_) => self.config.port,
+            None => data_ports
+                .first()
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("Server allocated no UDP port for the MTU probe"))?,
+        };
         let server_addr = SocketAddr::new(server_ip.ip(), port);
 
         let socket = net::create_udp_socket_for_remote(server_addr).await?;
@@ -1404,6 +1447,12 @@ impl Client {
                  (client-to-server results may overstate the path)",
                 e
             );
+        }
+
+        // Hello/ack first so the server's connected socket and probe
+        // responder exist before the first probe flies (issue #63).
+        if let Some(token) = single_port_token {
+            udp::single_port_udp_handshake(&socket, &token, 0).await?;
         }
 
         let report = crate::probe::run_probe(&socket, ipv6).await?;
@@ -1453,11 +1502,14 @@ impl Client {
         cancel: watch::Receiver<bool>,
         pause: watch::Receiver<bool>,
         feedback_aggregator: Option<UdpFeedbackAggregator>,
+        single_port_token: Option<[u8; udp::UDP_HELLO_TOKEN_LEN]>,
     ) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
+        let single_port = single_port_token.is_some();
+        let stream_count = self.config.streams as usize;
         let base_bind_addr = sequential_bind_base(
             self.config.bind_addr,
             self.config.sequential_ports,
-            data_ports.len(),
+            stream_count,
         )?;
 
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
@@ -1471,12 +1523,55 @@ impl Client {
             (bitrate / self.config.streams as u64).max(1)
         };
 
-        if data_ports.len() != self.config.streams as usize {
+        if !single_port && data_ports.len() != stream_count {
             return Err(anyhow::anyhow!(
                 "Server returned {} data ports but {} streams were requested",
                 data_ports.len(),
                 self.config.streams
             ));
+        }
+
+        // Single-port mode (issue #63): set up every socket and complete
+        // every hello/ack handshake BEFORE any data task starts. The ack
+        // proves the server's connected same-port socket exists, which is
+        // what keeps line-rate data off the shared QUIC socket; a missing
+        // ack fails the whole test loudly instead of degrading quietly.
+        if let Some(token) = single_port_token {
+            let server_port = SocketAddr::new(server_addr.ip(), self.config.port);
+            let mut sockets = Vec::with_capacity(stream_count);
+            for i in 0..stream_count {
+                let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
+                let socket = self
+                    .create_udp_stream_socket(bind_addr, server_port)
+                    .await?;
+                sockets.push(socket);
+            }
+            futures::future::try_join_all(
+                sockets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, socket)| udp::single_port_udp_handshake(socket, &token, i as u16)),
+            )
+            .await?;
+
+            let mut handles = Vec::with_capacity(stream_count);
+            for (i, socket) in sockets.into_iter().enumerate() {
+                handles.push(tokio::spawn(run_udp_stream_io(
+                    socket,
+                    self.config.direction,
+                    self.config.duration,
+                    stream_bitrate,
+                    self.config.random_payload,
+                    stats.streams[i].clone(),
+                    stats.clone(),
+                    cancel.clone(),
+                    pause.clone(),
+                    feedback_aggregator.clone(),
+                    i,
+                    true,
+                )));
+            }
+            return Ok(handles);
         }
 
         let mut handles = Vec::new();
@@ -1543,140 +1638,64 @@ impl Client {
                     warn!("Failed to set UDP buffer size to {}: {}", size, e);
                 }
 
-                match direction {
-                    Direction::Upload => {
-                        if let Some(aggregator) = feedback_aggregator {
-                            // Server advertised udp_feedback_v1: spawn the
-                            // feedback recv task alongside the sender so
-                            // live UDP loss can be reported back without
-                            // riding the TCP control channel that competes
-                            // with the saturated upload.
-                            let send_socket = socket.clone();
-                            let recv_socket = socket;
-                            let send_cancel = cancel.clone();
-                            let recv_cancel = cancel;
-                            let send_handle = tokio::spawn(async move {
-                                if let Err(e) = udp::send_udp_paced(
-                                    send_socket,
-                                    None,
-                                    stream_bitrate,
-                                    duration,
-                                    stream_stats,
-                                    send_cancel,
-                                    pause,
-                                    random_payload,
-                                )
-                                .await
-                                {
-                                    error!("UDP send error: {}", e);
-                                }
-                            });
-                            let recv_handle = tokio::spawn(async move {
-                                if let Err(e) = udp::receive_udp_feedback_only(
-                                    recv_socket,
-                                    aggregator,
-                                    stream_index,
-                                    recv_cancel,
-                                )
-                                .await
-                                {
-                                    debug!(
-                                        "UDP feedback recv error on stream {}: {}",
-                                        stream_index, e
-                                    );
-                                }
-                            });
-                            let _ = tokio::join!(send_handle, recv_handle);
-                        } else if let Err(e) = udp::send_udp_paced(
-                            socket,
-                            None, // Connected socket, no target needed
-                            stream_bitrate,
-                            duration,
-                            stream_stats,
-                            cancel,
-                            pause,
-                            random_payload,
-                        )
-                        .await
-                        {
-                            error!("UDP send error: {}", e);
-                        }
-                    }
-                    Direction::Download => {
-                        // Send hello packets concurrently with receiving
-                        // This ensures server learns our address even if first packets are missed
-                        let hello_socket = socket.clone();
-                        let hello_cancel = cancel.clone();
-                        let hello_handle = tokio::spawn(async move {
-                            // Send hello packets every 100ms until cancelled or 5 seconds
-                            for _ in 0..50 {
-                                if *hello_cancel.borrow() {
-                                    break;
-                                }
-                                let _ = hello_socket.send(&[0u8; 1]).await;
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                        });
-
-                        // Keep the receiver-side UdpStats (loss/jitter):
-                        // run_test overlays them onto the server's
-                        // sender-side Result (issue #81).
-                        match udp::receive_udp(socket, stream_stats, cancel, pause, false).await {
-                            Ok((udp_stats, _bytes)) => test_stats.add_udp_stats(udp_stats),
-                            Err(e) => error!("UDP receive error: {}", e),
-                        }
-                        hello_handle.abort();
-                    }
-                    Direction::Bidir => {
-                        // UDP can send/receive concurrently on same socket
-                        let send_socket = socket.clone();
-                        let recv_socket = socket;
-                        let send_stats = stream_stats.clone();
-                        let recv_stats = stream_stats;
-                        let send_cancel = cancel.clone();
-                        let recv_cancel = cancel;
-                        let send_pause = pause.clone();
-                        let recv_pause = pause;
-
-                        let send_handle = tokio::spawn(async move {
-                            if let Err(e) = udp::send_udp_paced(
-                                send_socket,
-                                None, // Connected socket, no target needed
-                                stream_bitrate,
-                                duration,
-                                send_stats,
-                                send_cancel,
-                                send_pause,
-                                random_payload,
-                            )
-                            .await
-                            {
-                                error!("UDP bidir send error: {}", e);
-                            }
-                        });
-
-                        let recv_handle = tokio::spawn(async move {
-                            if let Err(e) = udp::receive_udp(
-                                recv_socket,
-                                recv_stats,
-                                recv_cancel,
-                                recv_pause,
-                                false,
-                            )
-                            .await
-                            {
-                                error!("UDP bidir receive error: {}", e);
-                            }
-                        });
-
-                        let _ = tokio::join!(send_handle, recv_handle);
-                    }
-                }
+                run_udp_stream_io(
+                    socket,
+                    direction,
+                    duration,
+                    stream_bitrate,
+                    random_payload,
+                    stream_stats,
+                    test_stats,
+                    cancel,
+                    pause,
+                    feedback_aggregator,
+                    stream_index,
+                    false,
+                )
+                .await;
             }));
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(handles)
+    }
+
+    /// Create, connect, and configure one client-side UDP data socket
+    /// (single-port mode, where socket setup happens before the spawned
+    /// task so handshake failures can fail the test loudly).
+    async fn create_udp_stream_socket(
+        &self,
+        bind_addr: Option<SocketAddr>,
+        server_port: SocketAddr,
+    ) -> anyhow::Result<Arc<tokio::net::UdpSocket>> {
+        let socket = if let Some(local) = bind_addr {
+            let local = net::match_bind_family(local, server_port);
+            net::create_udp_socket_bound(local)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to bind UDP socket to {}: {}", local, e))?
+        } else {
+            net::create_udp_socket_for_remote(server_port)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create UDP socket: {}", e))?
+        };
+        socket
+            .connect(server_port)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect UDP socket: {}", e))?;
+        debug!("UDP connected to {}", server_port);
+
+        if let Some(tos) = self.config.dscp
+            && let Err(e) = net::set_tos_on_udp(&socket, tos)
+        {
+            warn!("Failed to set IP_TOS on UDP socket: {}", e);
+        }
+        // See spawn_udp_streams for why both buffers are set.
+        if let Some(size) = self.config.window_size
+            && let Err(e) = net::set_udp_buffer_size(&socket, size)
+        {
+            warn!("Failed to set UDP buffer size to {}: {}", size, e);
+        }
+        Ok(Arc::new(socket))
     }
 
     /// Run a test using QUIC transport
@@ -2069,6 +2088,162 @@ impl Client {
             }
         }
         PauseResult::NotReady
+    }
+}
+
+/// Per-direction client-side UDP stream IO on an already-connected,
+/// already-configured socket. Shared by the legacy per-port path and the
+/// single-port path (issue #63); `single_port` only suppresses the
+/// legacy 1-byte address-discovery hellos in download mode — the
+/// token-bearing handshake has already told the server where we are.
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_stream_io(
+    socket: Arc<tokio::net::UdpSocket>,
+    direction: Direction,
+    duration: Duration,
+    stream_bitrate: u64,
+    random_payload: bool,
+    stream_stats: Arc<crate::stats::StreamStats>,
+    test_stats: Arc<TestStats>,
+    cancel: watch::Receiver<bool>,
+    pause: watch::Receiver<bool>,
+    feedback_aggregator: Option<UdpFeedbackAggregator>,
+    stream_index: usize,
+    single_port: bool,
+) {
+    match direction {
+        Direction::Upload => {
+            if let Some(aggregator) = feedback_aggregator {
+                // Server advertised udp_feedback_v1: spawn the
+                // feedback recv task alongside the sender so
+                // live UDP loss can be reported back without
+                // riding the TCP control channel that competes
+                // with the saturated upload.
+                let send_socket = socket.clone();
+                let recv_socket = socket;
+                let send_cancel = cancel.clone();
+                let recv_cancel = cancel;
+                let send_handle = tokio::spawn(async move {
+                    if let Err(e) = udp::send_udp_paced(
+                        send_socket,
+                        None,
+                        stream_bitrate,
+                        duration,
+                        stream_stats,
+                        send_cancel,
+                        pause,
+                        random_payload,
+                    )
+                    .await
+                    {
+                        error!("UDP send error: {}", e);
+                    }
+                });
+                let recv_handle = tokio::spawn(async move {
+                    if let Err(e) = udp::receive_udp_feedback_only(
+                        recv_socket,
+                        aggregator,
+                        stream_index,
+                        recv_cancel,
+                    )
+                    .await
+                    {
+                        debug!("UDP feedback recv error on stream {}: {}", stream_index, e);
+                    }
+                });
+                let _ = tokio::join!(send_handle, recv_handle);
+            } else if let Err(e) = udp::send_udp_paced(
+                socket,
+                None, // Connected socket, no target needed
+                stream_bitrate,
+                duration,
+                stream_stats,
+                cancel,
+                pause,
+                random_payload,
+            )
+            .await
+            {
+                error!("UDP send error: {}", e);
+            }
+        }
+        Direction::Download => {
+            // Legacy mode: send hello packets concurrently with receiving
+            // so the server learns our address even if first packets are
+            // missed. Single-port mode already did a token handshake.
+            let hello_handle = if single_port {
+                None
+            } else {
+                let hello_socket = socket.clone();
+                let hello_cancel = cancel.clone();
+                Some(tokio::spawn(async move {
+                    // Send hello packets every 100ms until cancelled or 5 seconds
+                    for _ in 0..50 {
+                        if *hello_cancel.borrow() {
+                            break;
+                        }
+                        let _ = hello_socket.send(&[0u8; 1]).await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }))
+            };
+
+            // Keep the receiver-side UdpStats (loss/jitter):
+            // run_test overlays them onto the server's
+            // sender-side Result (issue #81).
+            match udp::receive_udp(socket, stream_stats, cancel, pause, false, None).await {
+                Ok((udp_stats, _bytes)) => test_stats.add_udp_stats(udp_stats),
+                Err(e) => error!("UDP receive error: {}", e),
+            }
+            if let Some(handle) = hello_handle {
+                handle.abort();
+            }
+        }
+        Direction::Bidir => {
+            // UDP can send/receive concurrently on same socket
+            let send_socket = socket.clone();
+            let recv_socket = socket;
+            let send_stats = stream_stats.clone();
+            let recv_stats = stream_stats;
+            let send_cancel = cancel.clone();
+            let recv_cancel = cancel;
+            let send_pause = pause.clone();
+            let recv_pause = pause;
+
+            let send_handle = tokio::spawn(async move {
+                if let Err(e) = udp::send_udp_paced(
+                    send_socket,
+                    None, // Connected socket, no target needed
+                    stream_bitrate,
+                    duration,
+                    send_stats,
+                    send_cancel,
+                    send_pause,
+                    random_payload,
+                )
+                .await
+                {
+                    error!("UDP bidir send error: {}", e);
+                }
+            });
+
+            let recv_handle = tokio::spawn(async move {
+                if let Err(e) = udp::receive_udp(
+                    recv_socket,
+                    recv_stats,
+                    recv_cancel,
+                    recv_pause,
+                    false,
+                    None,
+                )
+                .await
+                {
+                    error!("UDP bidir receive error: {}", e);
+                }
+            });
+
+            let _ = tokio::join!(send_handle, recv_handle);
+        }
     }
 }
 
