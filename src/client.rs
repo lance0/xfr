@@ -232,6 +232,11 @@ pub struct ClientConfig {
     /// `--probe-mtu`). UDP only; requires a server advertising
     /// `mtu_probe_v1`.
     pub mtu_probe: bool,
+    /// Bound on establishing the control connection (TCP connect or
+    /// QUIC handshake). `None` leaves the OS defaults, which against a
+    /// dead or filtered server can mean minutes — CI and scripted runs
+    /// set this for a fast, clear failure instead.
+    pub connect_timeout: Option<Duration>,
 }
 
 impl Default for ClientConfig {
@@ -256,6 +261,7 @@ impl Default for ClientConfig {
             zerocopy: ZerocopyMode::Auto,
             dscp: None,
             mtu_probe: false,
+            connect_timeout: None,
         }
     }
 }
@@ -510,14 +516,24 @@ impl Client {
         }
 
         let control_bind_addr = control_bind_addr(&self.config);
-        let (stream, peer_addr) = net::connect_tcp(
+        let connect = net::connect_tcp(
             &self.config.host,
             self.config.port,
             self.config.address_family,
             control_bind_addr,
             self.config.mptcp,
-        )
-        .await?;
+        );
+        let (stream, peer_addr) = match self.config.connect_timeout {
+            Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
+                anyhow::anyhow!(
+                    "Timed out connecting to {}:{} after {:?} (--connect-timeout)",
+                    self.config.host,
+                    self.config.port,
+                    limit
+                )
+            })??,
+            None => connect.await?,
+        };
 
         if self.config.protocol == Protocol::Tcp {
             validate_tcp_control_port(stream.local_addr()?, &self.config)?;
@@ -1728,7 +1744,18 @@ impl Client {
         let endpoint = quic::create_client_endpoint(addr, self.config.bind_addr)?;
 
         info!("Connecting via QUIC to {}...", addr);
-        let connection = quic::connect(&endpoint, addr).await?;
+        let connection = match self.config.connect_timeout {
+            Some(limit) => tokio::time::timeout(limit, quic::connect(&endpoint, addr))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timed out connecting to {} after {:?} (--connect-timeout)",
+                        addr,
+                        limit
+                    )
+                })??,
+            None => quic::connect(&endpoint, addr).await?,
+        };
 
         // Open control stream (bidirectional)
         let (mut ctrl_send, ctrl_recv) = connection.open_bi().await?;

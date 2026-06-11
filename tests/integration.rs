@@ -62,6 +62,7 @@ async fn test_tcp_single_stream() {
         zerocopy: ZerocopyMode::Auto,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -115,6 +116,7 @@ async fn test_tcp_multi_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -150,6 +152,7 @@ async fn test_connection_refused() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -185,6 +188,7 @@ async fn test_tcp_download() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -225,6 +229,7 @@ async fn test_tcp_bidir() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -283,6 +288,7 @@ async fn test_udp_upload() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -327,6 +333,7 @@ async fn test_mtu_probe() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: true,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -377,6 +384,7 @@ async fn test_udp_download() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -415,6 +423,7 @@ async fn test_udp_bidir() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -455,6 +464,7 @@ async fn test_udp_multi_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -500,6 +510,7 @@ async fn test_multi_client_concurrent() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let config2 = ClientConfig {
@@ -522,6 +533,7 @@ async fn test_multi_client_concurrent() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client1 = Client::new(config1);
@@ -610,6 +622,7 @@ async fn test_psk_auth_success() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -654,6 +667,7 @@ async fn test_psk_auth_failure() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -698,6 +712,7 @@ async fn test_psk_auth_missing_client_key() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -740,6 +755,7 @@ async fn test_acl_allow() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -779,6 +795,7 @@ async fn test_rate_limit() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client1 = Client::new(config1.clone());
@@ -808,6 +825,7 @@ async fn test_rate_limit() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client2 = Client::new(config2);
@@ -858,6 +876,7 @@ async fn test_quic_upload() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -899,6 +918,7 @@ async fn test_quic_download() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -939,6 +959,7 @@ async fn test_quic_multi_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -983,6 +1004,7 @@ async fn test_quic_bidir() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1024,6 +1046,7 @@ async fn test_quic_with_psk() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1067,6 +1090,7 @@ async fn test_acl_deny() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1125,6 +1149,7 @@ async fn test_ipv6_localhost() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1170,6 +1195,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1223,6 +1249,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1272,6 +1299,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1343,6 +1371,7 @@ async fn test_udp_ipv4_explicit() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1401,6 +1430,7 @@ async fn test_udp_ipv6_explicit() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1459,6 +1489,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1501,6 +1532,7 @@ async fn test_tcp_cport_single_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1546,6 +1578,7 @@ async fn test_tcp_cport_multi_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1607,6 +1640,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1664,6 +1698,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1706,6 +1741,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1755,6 +1791,7 @@ async fn test_udp_bitrate_underflow_regression() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1827,6 +1864,7 @@ async fn test_quic_ipv6() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1885,6 +1923,7 @@ async fn test_tcp_one_off_multi_stream() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1952,6 +1991,7 @@ async fn test_quic_one_off() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
@@ -1998,6 +2038,7 @@ fn test_pause_not_ready_before_test_run() {
         zerocopy: ZerocopyMode::Off,
         dscp: None,
         mtu_probe: false,
+        connect_timeout: None,
     };
 
     let client = Client::new(config);
