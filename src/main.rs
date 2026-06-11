@@ -1359,6 +1359,10 @@ async fn run_client_plain(
                     lost,
                     rtt_us,
                     cwnd,
+                    progress.bytes_sent,
+                    progress.bytes_received,
+                    progress.throughput_send_mbps,
+                    progress.throughput_recv_mbps,
                 )
             } else {
                 xfr::output::plain::output_interval_plain(

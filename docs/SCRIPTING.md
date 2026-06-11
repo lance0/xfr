@@ -141,16 +141,22 @@ xfr <host> --csv --no-tui > results.csv
 
 Interval output format (one line per reporting interval):
 ```
-timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd
-1.000,1.00,118775000,950.20,0,0,0,1200,65535
-2.000,2.00,122562500,980.50,2,0,0,1150,65535
+timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps
+1.000,1.00,118775000,950.20,0,0,0,1200,65535,,,,
+2.000,2.00,122562500,980.50,2,0,0,1150,65535,,,,
 ```
 
 After intervals, a summary line is printed:
 ```
-test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent
-550e8400-...,10.00,1234567890,987.65,42,0.00,0,0.00
+test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps
+550e8400-...,10.00,1234567890,987.65,42,0.00,0,0.00,,,,
 ```
+
+The trailing `bytes_sent` / `bytes_received` / `throughput_send_mbps` /
+`throughput_recv_mbps` columns carry the per-direction split for
+`--bidir` tests; unidirectional tests leave them empty. New columns are
+appended at the end of both row types, so parsers that index columns by
+position keep working across versions.
 
 ## CI/CD Examples
 
