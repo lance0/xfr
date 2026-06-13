@@ -237,7 +237,7 @@ impl App {
             theme,
             theme_index: 0,
 
-            settings: SettingsState::new(0, streams, protocol, duration, direction),
+            settings: SettingsState::new(0, streams, protocol, duration, direction, bitrate),
 
             history: VecDeque::with_capacity(LOG_HISTORY),
             average_throughput_mbps: 0.0,
@@ -344,6 +344,35 @@ impl App {
         self.state = AppState::Running;
         self.start_time = Some(Instant::now());
         self.log("Connected to server.");
+    }
+
+    /// Apply new test parameters chosen in the settings modal. Updates the
+    /// displayed configuration and rebuilds the per-stream table to match the
+    /// new stream count. The caller is responsible for rebuilding the client
+    /// and re-spawning the test; this only refreshes UI-facing state.
+    pub fn apply_test_params(
+        &mut self,
+        protocol: crate::protocol::Protocol,
+        direction: crate::protocol::Direction,
+        streams: u8,
+        duration: Duration,
+        bitrate: Option<u64>,
+    ) {
+        self.protocol = protocol;
+        self.direction = direction;
+        self.streams_count = streams;
+        self.duration = duration;
+        self.bitrate = bitrate;
+        self.streams = (0..streams)
+            .map(|id| StreamData {
+                id,
+                bytes: 0,
+                throughput_mbps: 0.0,
+                retransmits: 0,
+                jitter_ms: None,
+            })
+            .collect();
+        self.settings.mark_applied();
     }
 
     /// Reset the app state for a new test run, clearing all results and metrics

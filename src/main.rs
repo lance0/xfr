@@ -1527,7 +1527,7 @@ async fn run_client_tui(
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    config: ClientConfig,
+    mut config: ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
 ) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
@@ -1554,7 +1554,7 @@ async fn run_tui_loop(
     // Track if we've received the update check result
     let mut update_check_done = false;
 
-    let client = Arc::new(Client::new(config));
+    let mut client = Arc::new(Client::new(config.clone()));
     let (progress_tx, mut progress_rx) = mpsc::channel::<TestProgress>(100);
 
     // Create a macro to spawn the test so it can be reused on restart
@@ -1657,12 +1657,31 @@ async fn run_tui_loop(
                             let action = app.settings.on_enter();
                             match action {
                                 SettingsAction::Restart => {
-                                    // Cancel current test and signal restart
+                                    // Cancel the in-flight test, rebuild the
+                                    // client with the freshly chosen params,
+                                    // and restart the run loop.
                                     let _ = client.cancel();
                                     prefs.theme = Some(app.theme_name().to_string());
-                                    // TODO: Return restart signal with new params
-                                    // For now, just close - restart requires refactoring
-                                    app.log("Settings changed. Restart not yet implemented.");
+
+                                    config.streams = app.settings.streams;
+                                    config.protocol = app.settings.protocol;
+                                    config.duration =
+                                        Duration::from_secs(app.settings.duration_secs);
+                                    config.direction = app.settings.direction;
+                                    config.bitrate = app.settings.bitrate;
+
+                                    client = Arc::new(Client::new(config.clone()));
+
+                                    app.apply_test_params(
+                                        config.protocol,
+                                        config.direction,
+                                        config.streams,
+                                        config.duration,
+                                        config.bitrate,
+                                    );
+                                    app.reset();
+                                    cancel_deadline = None;
+                                    continue 'test_restart_loop;
                                 }
                                 SettingsAction::Close => {}
                                 SettingsAction::None => {}
@@ -1819,7 +1838,32 @@ async fn run_tui_loop(
                                             app.settings.switch_tab();
                                         }
                                         KeyCode::Enter => {
-                                            let _ = app.settings.on_enter();
+                                            let action = app.settings.on_enter();
+                                            if let SettingsAction::Restart = action {
+                                                // Rebuild the client with the
+                                                // newly chosen params and restart.
+                                                prefs.theme = Some(app.theme_name().to_string());
+
+                                                config.streams = app.settings.streams;
+                                                config.protocol = app.settings.protocol;
+                                                config.duration =
+                                                    Duration::from_secs(app.settings.duration_secs);
+                                                config.direction = app.settings.direction;
+                                                config.bitrate = app.settings.bitrate;
+
+                                                client = Arc::new(Client::new(config.clone()));
+
+                                                app.apply_test_params(
+                                                    config.protocol,
+                                                    config.direction,
+                                                    config.streams,
+                                                    config.duration,
+                                                    config.bitrate,
+                                                );
+                                                app.reset();
+                                                cancel_deadline = None;
+                                                continue 'test_restart_loop;
+                                            }
                                         }
                                         _ => {}
                                     }

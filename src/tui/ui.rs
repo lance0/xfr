@@ -697,7 +697,7 @@ fn draw_settings_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
 
     // Modal dimensions
     let modal_width = 58u16;
-    let modal_height = 18u16;
+    let modal_height = 19u16;
     let modal_area = Rect {
         x: area.width.saturating_sub(modal_width) / 2,
         y: area.height.saturating_sub(modal_height) / 2,
@@ -840,6 +840,10 @@ fn draw_test_settings(
         ("Protocol:", format!("{}", settings.protocol)),
         ("Duration:", format!("{}s", settings.duration_secs)),
         ("Direction:", format!("{:?}", settings.direction)),
+        (
+            "Bitrate:",
+            super::settings::bitrate_display(settings.bitrate),
+        ),
     ];
 
     draw_setting_items(
