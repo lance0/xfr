@@ -346,6 +346,57 @@ impl App {
         self.log("Connected to server.");
     }
 
+    /// Reset the app state for a new test run, clearing all results and metrics
+    /// but preserving configuration (host, port, protocol, etc.)
+    pub fn reset(&mut self) {
+        self.state = AppState::Connecting;
+        self.elapsed = Duration::ZERO;
+        self.total_bytes = 0;
+        self.current_throughput_mbps = 0.0;
+        self.throughput_history.clear();
+        self.jitter_history.clear();
+        self.streams.iter_mut().for_each(|s| {
+            s.bytes = 0;
+            s.throughput_mbps = 0.0;
+            s.retransmits = 0;
+            s.jitter_ms = None;
+        });
+
+        self.bidir_bytes_sent = 0;
+        self.bidir_bytes_received = 0;
+        self.throughput_send_mbps = 0.0;
+        self.throughput_recv_mbps = 0.0;
+
+        self.total_retransmits = 0;
+        self.rtt_us = 0;
+        self.cwnd = 0;
+
+        self.udp_jitter_ms = 0.0;
+        self.udp_lost_percent = None;
+        self.udp_packets_sent = 0;
+        self.udp_packets_lost = 0;
+
+        self.result = None;
+        self.error = None;
+
+        self.start_time = None;
+        self.show_help = false;
+        self.show_streams = false;
+        self.peak_throughput_mbps = 0.0;
+        self.prev_retransmits = 0;
+        self.prev_udp_lost = 0;
+        self.prev_udp_progress = None;
+        self.latest_udp_progress = None;
+        self.last_bar_at = None;
+        self.pause_started_at = None;
+
+        self.average_throughput_mbps = 0.0;
+        self.throughput_sum = 0.0;
+        self.throughput_count = 0;
+
+        self.log("Test restarting...");
+    }
+
     /// Refresh `elapsed` from the local wall clock. Called from the TUI loop
     /// once per iteration so the counter stays live even when server
     /// `Interval` progress messages are delayed (e.g. packet-drop bursts on
@@ -672,9 +723,10 @@ impl App {
             self.throughput_recv_mbps = tr;
         }
         self.result = Some(result);
+        let wall_clock = chrono::Local::now().format("%I:%M:%S %p");
         self.log(format!(
-            "Test completed. Avg: {:.0} Mbps.",
-            self.average_throughput_mbps
+            "Test completed. Avg: {:.0} Mbps. [{}]",
+            self.average_throughput_mbps, wall_clock
         ));
     }
 

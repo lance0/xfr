@@ -1555,335 +1555,355 @@ async fn run_tui_loop(
     let mut update_check_done = false;
 
     let client = Arc::new(Client::new(config));
-    let client_for_task = client.clone();
     let (progress_tx, mut progress_rx) = mpsc::channel::<TestProgress>(100);
 
-    // Start the test
-    let test_handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
-
-    app.on_connected();
+    // Create a macro to spawn the test so it can be reused on restart
+    macro_rules! spawn_test {
+        () => {{
+            let client_for_task = client.clone();
+            let progress_tx = progress_tx.clone();
+            tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await })
+        }};
+    }
 
     // Track cancel state: when user presses 'q' or Ctrl+C during a running test,
     // we cancel and wait briefly for the server Result before exiting.
     let mut cancel_deadline: Option<std::time::Instant> = None;
 
-    loop {
-        // If we're waiting for cancel result and deadline expired, exit now
-        if let Some(deadline) = cancel_deadline
-            && deadline.elapsed() > Duration::ZERO
-        {
-            return Ok((app.result, prefs, print_json_on_exit));
-        }
+    'test_restart_loop: loop {
+        let test_handle = spawn_test!();
 
-        // Check for update result if not already received
-        if !update_check_done {
-            match update_rx.try_recv() {
-                Ok(Some(version)) => {
-                    app.update_available = Some(version);
-                    update_check_done = true;
-                }
-                Ok(None) => {
-                    // No update available
-                    update_check_done = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still checking, will try again next loop
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Channel closed, stop checking
-                    update_check_done = true;
+        app.on_connected();
+
+        loop {
+            // If we're waiting for cancel result and deadline expired, exit now
+            if let Some(deadline) = cancel_deadline
+                && deadline.elapsed() > Duration::ZERO
+            {
+                return Ok((app.result, prefs, print_json_on_exit));
+            }
+
+            // Check for update result if not already received
+            if !update_check_done {
+                match update_rx.try_recv() {
+                    Ok(Some(version)) => {
+                        app.update_available = Some(version);
+                        update_check_done = true;
+                    }
+                    Ok(None) => {
+                        // No update available
+                        update_check_done = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still checking, will try again next loop
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Channel closed, stop checking
+                        update_check_done = true;
+                    }
                 }
             }
-        }
 
-        // Refresh the wall-clock-driven parts of app state (elapsed counter) so
-        // the UI stays live even when the server's Interval progress messages
-        // are delayed by packet loss. Fixes issue #62.
-        app.tick();
+            // Refresh the wall-clock-driven parts of app state (elapsed counter) so
+            // the UI stays live even when the server's Interval progress messages
+            // are delayed by packet loss. Fixes issue #62.
+            app.tick();
 
-        // Capture the server's advertised version once it shows up. The
-        // ServerHello races the TUI loop start; we poll rather than add a new
-        // channel since this is a one-time one-line copy.
-        if app.server_version.is_none()
-            && let Some(v) = client.server_version()
-        {
-            // Route through `set_server_version` so the string is sanitized —
-            // it comes from the peer and lands in the terminal.
-            app.set_server_version(v);
-        }
+            // Capture the server's advertised version once it shows up. The
+            // ServerHello races the TUI loop start; we poll rather than add a new
+            // channel since this is a one-time one-line copy.
+            if app.server_version.is_none()
+                && let Some(v) = client.server_version()
+            {
+                // Route through `set_server_version` so the string is sanitized —
+                // it comes from the peer and lands in the terminal.
+                app.set_server_version(v);
+            }
 
-        // Draw UI
-        terminal.draw(|f| draw(f, &app))?;
+            // Draw UI
+            terminal.draw(|f| draw(f, &app))?;
 
-        // Handle events with timeout
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            // Settings modal takes priority when visible
-            if app.settings.visible {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('s') => {
-                        app.settings.close();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.settings.move_up();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.settings.move_down();
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        app.settings.value_prev();
-                        // Apply theme change immediately
-                        app.set_theme_index(app.settings.theme_index);
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        app.settings.value_next();
-                        // Apply theme change immediately
-                        app.set_theme_index(app.settings.theme_index);
-                    }
-                    KeyCode::Tab => {
-                        app.settings.switch_tab();
-                    }
-                    KeyCode::Enter => {
-                        let action = app.settings.on_enter();
-                        match action {
-                            SettingsAction::Restart => {
-                                // Cancel current test and signal restart
-                                let _ = client.cancel();
-                                prefs.theme = Some(app.theme_name().to_string());
-                                // TODO: Return restart signal with new params
-                                // For now, just close - restart requires refactoring
-                                app.log("Settings changed. Restart not yet implemented.");
-                            }
-                            SettingsAction::Close => {}
-                            SettingsAction::None => {}
+            // Handle events with timeout
+            if event::poll(Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                // Settings modal takes priority when visible
+                if app.settings.visible {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('s') => {
+                            app.settings.close();
                         }
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // Ctrl+C or 'q': cancel and wait for server Result
-            let is_quit = key.code == KeyCode::Char('q')
-                || (key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL));
-            if is_quit {
-                if app.state == AppState::Completed || cancel_deadline.is_some() {
-                    // Already completed or already cancelling — exit immediately
-                    prefs.theme = Some(app.theme_name().to_string());
-                    return Ok((app.result, prefs, print_json_on_exit));
-                }
-                let _ = client.cancel();
-                cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
-                app.log("Cancelling, waiting for summary...");
-                continue;
-            }
-
-            match key.code {
-                KeyCode::Char('p') => {
-                    match client.pause() {
-                        PauseResult::Applied => {
-                            app.toggle_pause();
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.settings.move_up();
                         }
-                        PauseResult::Unsupported => {
-                            // UI-only: server doesn't support pause/resume
-                            match app.state {
-                                AppState::Running => {
-                                    app.state = AppState::Paused;
-                                    app.log(
-                                        "Display paused (server does not support pause/resume)",
-                                    );
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.settings.move_down();
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            app.settings.value_prev();
+                            // Apply theme change immediately
+                            app.set_theme_index(app.settings.theme_index);
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            app.settings.value_next();
+                            // Apply theme change immediately
+                            app.set_theme_index(app.settings.theme_index);
+                        }
+                        KeyCode::Tab => {
+                            app.settings.switch_tab();
+                        }
+                        KeyCode::Enter => {
+                            let action = app.settings.on_enter();
+                            match action {
+                                SettingsAction::Restart => {
+                                    // Cancel current test and signal restart
+                                    let _ = client.cancel();
+                                    prefs.theme = Some(app.theme_name().to_string());
+                                    // TODO: Return restart signal with new params
+                                    // For now, just close - restart requires refactoring
+                                    app.log("Settings changed. Restart not yet implemented.");
                                 }
-                                AppState::Paused => {
-                                    app.state = AppState::Running;
-                                    app.log(
-                                        "Display resumed (server does not support pause/resume)",
-                                    );
-                                }
-                                _ => {}
+                                SettingsAction::Close => {}
+                                SettingsAction::None => {}
                             }
                         }
-                        PauseResult::NotReady => {
-                            // Test not running yet or already finished — ignore
-                        }
+                        _ => {}
                     }
+                    continue;
                 }
-                KeyCode::Char('t') => {
-                    app.cycle_theme();
-                }
-                KeyCode::Char('s') => {
-                    app.settings.toggle();
-                }
-                KeyCode::Char('?') | KeyCode::F(1) => {
-                    app.toggle_help();
-                }
-                KeyCode::Char('d') => {
-                    app.toggle_streams();
-                }
-                KeyCode::Esc if app.show_help => {
-                    app.show_help = false;
-                }
-                KeyCode::Char('j') if app.result.is_some() => {
-                    // Set flag to print JSON after TUI closes
-                    print_json_on_exit = true;
-                    app.log("JSON output queued for display on exit.");
-                }
-                KeyCode::Char('u') if app.update_available.is_some() => {
-                    // Dismiss update notification
-                    app.update_available = None;
-                }
-                _ => {}
-            }
-        }
 
-        // Check for progress updates
-        while let Ok(progress) = progress_rx.try_recv() {
-            app.on_progress(progress);
-        }
-
-        // Check if test completed
-        if test_handle.is_finished() {
-            match test_handle.await? {
-                Ok(result) => {
-                    app.on_result(result);
-
-                    // If we were waiting for cancel to complete, exit now with result
-                    if cancel_deadline.is_some() {
+                // Ctrl+C or 'q': cancel and wait for server Result
+                let is_quit = key.code == KeyCode::Char('q')
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL));
+                if is_quit {
+                    if app.state == AppState::Completed || cancel_deadline.is_some() {
+                        // Already completed or already cancelling — exit immediately
                         prefs.theme = Some(app.theme_name().to_string());
                         return Ok((app.result, prefs, print_json_on_exit));
                     }
+                    let _ = client.cancel();
+                    cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
+                    app.log("Cancelling, waiting for summary...");
+                    continue;
+                }
 
-                    // Show final result for a moment
-                    terminal.draw(|f| draw(f, &app))?;
-
-                    // Wait for quit
-                    loop {
-                        // Check for update result if not already received
-                        if !update_check_done {
-                            match update_rx.try_recv() {
-                                Ok(Some(version)) => {
-                                    app.update_available = Some(version);
-                                    update_check_done = true;
-                                }
-                                Ok(None) => update_check_done = true,
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    update_check_done = true;
-                                }
+                match key.code {
+                    KeyCode::Char('p') => {
+                        match client.pause() {
+                            PauseResult::Applied => {
+                                app.toggle_pause();
                             }
-                        }
-
-                        terminal.draw(|f| draw(f, &app))?;
-
-                        if event::poll(Duration::from_millis(100))?
-                            && let Event::Key(key) = event::read()?
-                            && key.kind == KeyEventKind::Press
-                        {
-                            // Settings modal handling
-                            if app.settings.visible {
-                                match key.code {
-                                    KeyCode::Esc | KeyCode::Char('s') => {
-                                        app.settings.close();
+                            PauseResult::Unsupported => {
+                                // UI-only: server doesn't support pause/resume
+                                match app.state {
+                                    AppState::Running => {
+                                        app.state = AppState::Paused;
+                                        app.log(
+                                            "Display paused (server does not support pause/resume)",
+                                        );
                                     }
-                                    KeyCode::Up | KeyCode::Char('k') => {
-                                        app.settings.move_up();
-                                    }
-                                    KeyCode::Down | KeyCode::Char('j') => {
-                                        app.settings.move_down();
-                                    }
-                                    KeyCode::Left | KeyCode::Char('h') => {
-                                        app.settings.value_prev();
-                                        app.set_theme_index(app.settings.theme_index);
-                                    }
-                                    KeyCode::Right | KeyCode::Char('l') => {
-                                        app.settings.value_next();
-                                        app.set_theme_index(app.settings.theme_index);
-                                    }
-                                    KeyCode::Tab => {
-                                        app.settings.switch_tab();
-                                    }
-                                    KeyCode::Enter => {
-                                        let _ = app.settings.on_enter();
+                                    AppState::Paused => {
+                                        app.state = AppState::Running;
+                                        app.log(
+                                        "Display resumed (server does not support pause/resume)",
+                                    );
                                     }
                                     _ => {}
                                 }
-                                continue;
                             }
-
-                            // Ctrl+C in completed state: exit
-                            if key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                prefs.theme = Some(app.theme_name().to_string());
-                                return Ok((app.result, prefs, print_json_on_exit));
-                            }
-
-                            match key.code {
-                                KeyCode::Char('q') => {
-                                    prefs.theme = Some(app.theme_name().to_string());
-                                    return Ok((app.result, prefs, print_json_on_exit));
-                                }
-                                KeyCode::Esc => {
-                                    if app.show_help {
-                                        app.show_help = false;
-                                    } else {
-                                        prefs.theme = Some(app.theme_name().to_string());
-                                        return Ok((app.result, prefs, print_json_on_exit));
-                                    }
-                                }
-                                KeyCode::Char('t') => {
-                                    app.cycle_theme();
-                                }
-                                KeyCode::Char('s') => {
-                                    app.settings.toggle();
-                                }
-                                KeyCode::Char('?') | KeyCode::F(1) => {
-                                    app.toggle_help();
-                                }
-                                KeyCode::Char('d') => {
-                                    app.toggle_streams();
-                                }
-                                KeyCode::Char('j') => {
-                                    print_json_on_exit = true;
-                                    app.log("JSON output queued for display on exit.");
-                                }
-                                KeyCode::Char('u') if app.update_available.is_some() => {
-                                    app.update_available = None;
-                                }
-                                _ => {}
+                            PauseResult::NotReady => {
+                                // Test not running yet or already finished — ignore
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    // If we were waiting for cancel to complete, just exit
-                    if cancel_deadline.is_some() {
-                        prefs.theme = Some(app.theme_name().to_string());
-                        return Ok((app.result, prefs, print_json_on_exit));
+                    KeyCode::Char('t') => {
+                        app.cycle_theme();
                     }
+                    KeyCode::Char('s') => {
+                        app.settings.toggle();
+                    }
+                    KeyCode::Char('?') | KeyCode::F(1) => {
+                        app.toggle_help();
+                    }
+                    KeyCode::Char('d') => {
+                        app.toggle_streams();
+                    }
+                    KeyCode::Esc if app.show_help => {
+                        app.show_help = false;
+                    }
+                    KeyCode::Char('j') if app.result.is_some() => {
+                        // Set flag to print JSON after TUI closes
+                        print_json_on_exit = true;
+                        app.log("JSON output queued for display on exit.");
+                    }
+                    KeyCode::Char('u') if app.update_available.is_some() => {
+                        // Dismiss update notification
+                        app.update_available = None;
+                    }
+                    KeyCode::Char('r') => {
+                        // 'r' key during running test: cancel and restart
+                        let _ = client.cancel();
+                        app.reset();
+                        continue 'test_restart_loop;
+                    }
+                    _ => {}
+                }
+            }
 
-                    app.on_error(e.to_string());
-                    terminal.draw(|f| draw(f, &app))?;
+            // Check for progress updates
+            while let Ok(progress) = progress_rx.try_recv() {
+                app.on_progress(progress);
+            }
 
-                    // Wait for quit
-                    loop {
-                        if event::poll(Duration::from_millis(100))?
-                            && let Event::Key(key) = event::read()?
-                            && key.kind == KeyEventKind::Press
-                            && (key.code == KeyCode::Char('q')
-                                || (key.code == KeyCode::Char('c')
-                                    && key.modifiers.contains(KeyModifiers::CONTROL)))
-                        {
+            // Check if test completed
+            if test_handle.is_finished() {
+                match test_handle.await? {
+                    Ok(result) => {
+                        app.on_result(result);
+
+                        // If we were waiting for cancel to complete, exit now with result
+                        if cancel_deadline.is_some() {
                             prefs.theme = Some(app.theme_name().to_string());
-                            return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
+                            return Ok((app.result, prefs, print_json_on_exit));
+                        }
+
+                        // Show final result for a moment
+                        terminal.draw(|f| draw(f, &app))?;
+
+                        // Wait for quit or restart command
+                        loop {
+                            // Check for update result if not already received
+                            if !update_check_done {
+                                match update_rx.try_recv() {
+                                    Ok(Some(version)) => {
+                                        app.update_available = Some(version);
+                                        update_check_done = true;
+                                    }
+                                    Ok(None) => update_check_done = true,
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        update_check_done = true;
+                                    }
+                                }
+                            }
+
+                            terminal.draw(|f| draw(f, &app))?;
+
+                            if event::poll(Duration::from_millis(100))?
+                                && let Event::Key(key) = event::read()?
+                                && key.kind == KeyEventKind::Press
+                            {
+                                // Settings modal handling
+                                if app.settings.visible {
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Char('s') => {
+                                            app.settings.close();
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.settings.move_up();
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            app.settings.move_down();
+                                        }
+                                        KeyCode::Left | KeyCode::Char('h') => {
+                                            app.settings.value_prev();
+                                            app.set_theme_index(app.settings.theme_index);
+                                        }
+                                        KeyCode::Right | KeyCode::Char('l') => {
+                                            app.settings.value_next();
+                                            app.set_theme_index(app.settings.theme_index);
+                                        }
+                                        KeyCode::Tab => {
+                                            app.settings.switch_tab();
+                                        }
+                                        KeyCode::Enter => {
+                                            let _ = app.settings.on_enter();
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+
+                                // Ctrl+C in completed state: exit
+                                if key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                                {
+                                    prefs.theme = Some(app.theme_name().to_string());
+                                    return Ok((app.result, prefs, print_json_on_exit));
+                                }
+
+                                match key.code {
+                                    KeyCode::Char('q') => {
+                                        prefs.theme = Some(app.theme_name().to_string());
+                                        return Ok((app.result, prefs, print_json_on_exit));
+                                    }
+                                    KeyCode::Char('r') => {
+                                        // Reset app state and restart
+                                        app.reset();
+                                        continue 'test_restart_loop;
+                                    }
+                                    KeyCode::Esc => {
+                                        if app.show_help {
+                                            app.show_help = false;
+                                        } else {
+                                            prefs.theme = Some(app.theme_name().to_string());
+                                            return Ok((app.result, prefs, print_json_on_exit));
+                                        }
+                                    }
+                                    KeyCode::Char('t') => {
+                                        app.cycle_theme();
+                                    }
+                                    KeyCode::Char('s') => {
+                                        app.settings.toggle();
+                                    }
+                                    KeyCode::Char('?') | KeyCode::F(1) => {
+                                        app.toggle_help();
+                                    }
+                                    KeyCode::Char('d') => {
+                                        app.toggle_streams();
+                                    }
+                                    KeyCode::Char('j') => {
+                                        print_json_on_exit = true;
+                                        app.log("JSON output queued for display on exit.");
+                                    }
+                                    KeyCode::Char('u') if app.update_available.is_some() => {
+                                        app.update_available = None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // If we were waiting for cancel to complete, just exit
+                        if cancel_deadline.is_some() {
+                            prefs.theme = Some(app.theme_name().to_string());
+                            return Ok((app.result, prefs, print_json_on_exit));
+                        }
+
+                        app.on_error(e.to_string());
+                        terminal.draw(|f| draw(f, &app))?;
+
+                        // Wait for quit
+                        loop {
+                            if event::poll(Duration::from_millis(100))?
+                                && let Event::Key(key) = event::read()?
+                                && key.kind == KeyEventKind::Press
+                                && (key.code == KeyCode::Char('q')
+                                    || (key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+                            {
+                                prefs.theme = Some(app.theme_name().to_string());
+                                return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
+                            }
                         }
                     }
                 }
             }
-        }
-    }
+        } // close test_running_loop
+    } // close test_restart_loop
 }
 
 async fn run_server_tui(mut config: ServerConfig) -> Result<()> {

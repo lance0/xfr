@@ -552,6 +552,8 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("] Quit | [", Style::default().fg(theme.text_dim)),
         Span::styled("p", Style::default().fg(theme.accent)),
         Span::styled("] Pause | [", Style::default().fg(theme.text_dim)),
+        Span::styled("r", Style::default().fg(theme.accent)),
+        Span::styled("] Restart | [", Style::default().fg(theme.text_dim)),
         Span::styled("s", Style::default().fg(theme.accent)),
         Span::styled("] Settings | [", Style::default().fg(theme.text_dim)),
         Span::styled("?", Style::default().fg(theme.accent)),
@@ -592,8 +594,8 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let help_width = 36;
-    let help_height = 14;
+    let help_width = 40;
+    let help_height = 16;
     let help_area = Rect {
         x: (area.width.saturating_sub(help_width)) / 2,
         y: (area.height.saturating_sub(help_height)) / 2,
@@ -606,6 +608,10 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(vec![
             Span::styled("  q", Style::default().fg(theme.accent)),
             Span::styled("  quit", Style::default().fg(theme.text_dim)),
+        ]),
+        Line::from(vec![
+            Span::styled("  r", Style::default().fg(theme.accent)),
+            Span::styled("  restart/cancel", Style::default().fg(theme.text_dim)),
         ]),
         Line::from(vec![
             Span::styled("  p", Style::default().fg(theme.accent)),
