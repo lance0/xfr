@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.18] - 2026-06-11
+## [0.9.19] - 2026-06-14
+
+### Added
+- **Restart a test from the TUI** (issue #100) — the `r` key, and Settings → Test → *Apply & Restart*, now cancel and drain the current run before spawning a fresh one in place, instead of requiring a full client restart. Each restarted run gets its own client task and progress channel, so stale progress from the prior run cannot bleed into the next. A settings restart applies stream count, protocol, duration, direction, and bitrate; QUIC-incompatible knobs (`-b`/`-w`/`--congestion`/`--tcp-nodelay`/`--dscp`) are surfaced in the TUI history the same way the CLI warns about them. The settings modal gains a Bitrate row (stepping through unlimited / 1M / 10M / 100M / 1G / 10G), and the footer and help overlay list the `r` key. Based on the contribution in #101/#102 by @flotpg.
+
+### Fixed
+- **Repeated `q` no longer skips the test summary** — while a cancel was already in flight, a second `q` (or key-repeat from a held key) was treated as "exit now" and could leave before the server's final Result arrived. Now `q` stays graceful while cancelling (the existing 3-second deadline still bounds the wait), and a second Ctrl+C remains the explicit force-exit, matching the documented signal behavior.
 
 ### Added
 - **CSV interval rows carry the bidirectional split** (issue #56 follow-up) — `--csv` interval output gains `bytes_sent`, `bytes_received`, `throughput_send_mbps`, and `throughput_recv_mbps` columns, matching the fields the CSV summary row and final JSON already expose. The new columns are appended at the end of the row so existing parsers that index columns by position keep working; unidirectional tests leave them empty, like the summary row already does.
