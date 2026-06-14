@@ -7,6 +7,6 @@ pub mod widgets;
 
 pub use app::App;
 pub use server::{ActiveTestInfo, ServerApp};
-pub use settings::{SettingsAction, SettingsState, TuiLoopResult};
+pub use settings::{SettingsAction, SettingsState};
 pub use theme::Theme;
 pub use ui::draw;

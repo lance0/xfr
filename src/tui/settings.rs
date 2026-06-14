@@ -117,12 +117,15 @@ pub struct SettingsState {
     pub protocol: Protocol,
     pub duration_secs: u64,
     pub direction: Direction,
+    /// Target bitrate in bits/sec (`None` = unlimited).
+    pub bitrate: Option<u64>,
 
     // Original values to detect changes
     original_streams: u8,
     original_protocol: Protocol,
     original_duration_secs: u64,
     original_direction: Direction,
+    original_bitrate: Option<u64>,
 }
 
 impl Default for SettingsState {
@@ -142,11 +145,13 @@ impl Default for SettingsState {
             protocol: Protocol::Tcp,
             duration_secs: 10,
             direction: Direction::Upload,
+            bitrate: None,
 
             original_streams: 1,
             original_protocol: Protocol::Tcp,
             original_duration_secs: 10,
             original_direction: Direction::Upload,
+            original_bitrate: None,
         }
     }
 }
@@ -159,6 +164,7 @@ impl SettingsState {
         protocol: Protocol,
         duration: Duration,
         direction: Direction,
+        bitrate: Option<u64>,
     ) -> Self {
         let duration_secs = duration.as_secs();
         Self {
@@ -176,12 +182,23 @@ impl SettingsState {
             protocol,
             duration_secs,
             direction,
+            bitrate,
 
             original_streams: streams,
             original_protocol: protocol,
             original_duration_secs: duration_secs,
             original_direction: direction,
+            original_bitrate: bitrate,
         }
+    }
+
+    /// Commit the current test parameters as the new clean baseline.
+    pub fn mark_applied(&mut self) {
+        self.original_streams = self.streams;
+        self.original_protocol = self.protocol;
+        self.original_duration_secs = self.duration_secs;
+        self.original_direction = self.direction;
+        self.original_bitrate = self.bitrate;
     }
 
     /// Toggle visibility
@@ -205,13 +222,14 @@ impl SettingsState {
             || self.protocol != self.original_protocol
             || self.duration_secs != self.original_duration_secs
             || self.direction != self.original_direction
+            || self.bitrate != self.original_bitrate
     }
 
     /// Number of items in current category
     fn items_in_category(&self) -> usize {
         match self.category {
             SettingsCategory::Display => 3, // Theme, Timestamp, Units
-            SettingsCategory::Test => 4,    // Streams, Protocol, Duration, Direction
+            SettingsCategory::Test => 5,    // Streams, Protocol, Duration, Direction, Bitrate
         }
     }
 
@@ -274,8 +292,9 @@ impl SettingsState {
             SettingsCategory::Test => match self.selected_index {
                 0 => self.streams = self.streams.saturating_add(1).min(128),
                 1 => self.protocol = self.protocol.next(),
-                2 => self.duration_secs = self.duration_secs.saturating_add(5).min(3600),
+                2 => self.duration_secs = duration_next(self.duration_secs),
                 3 => self.direction = self.direction.next(),
+                4 => self.bitrate = bitrate_next(self.bitrate),
                 _ => {}
             },
         }
@@ -309,8 +328,9 @@ impl SettingsState {
             SettingsCategory::Test => match self.selected_index {
                 0 => self.streams = self.streams.saturating_sub(1).max(1),
                 1 => self.protocol = self.protocol.prev(),
-                2 => self.duration_secs = self.duration_secs.saturating_sub(5).max(1),
+                2 => self.duration_secs = duration_prev(self.duration_secs),
                 3 => self.direction = self.direction.prev(),
+                4 => self.bitrate = bitrate_prev(self.bitrate),
                 _ => {}
             },
         }
@@ -361,22 +381,57 @@ pub enum SettingsAction {
     Restart,
 }
 
-/// Result of TUI loop - either exit or restart with new params
-#[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)] // Exit carries the full TestResult; Restart is rare.
-pub enum TuiLoopResult {
-    Exit {
-        result: Option<crate::protocol::TestResult>,
-        prefs: crate::prefs::Prefs,
-        print_json: bool,
-    },
-    Restart {
-        streams: u8,
-        protocol: Protocol,
-        duration: Duration,
-        direction: Direction,
-        prefs: crate::prefs::Prefs,
-    },
+/// Step duration up by 5s, snapping to a clean multiple of 5 (min 5s, max 3600s).
+fn duration_next(secs: u64) -> u64 {
+    ((secs / 5 + 1) * 5).min(3600)
+}
+
+/// Step duration down by 5s, snapping to a clean multiple of 5 (min 5s).
+fn duration_prev(secs: u64) -> u64 {
+    (secs.saturating_sub(1) / 5 * 5).max(5)
+}
+
+/// Discrete bitrate steps cycled in the settings modal (bits/sec). `None`
+/// means unlimited.
+const BITRATE_STEPS: [Option<u64>; 6] = [
+    None,
+    Some(1_000_000),
+    Some(10_000_000),
+    Some(100_000_000),
+    Some(1_000_000_000),
+    Some(10_000_000_000),
+];
+
+fn bitrate_index(current: Option<u64>) -> usize {
+    BITRATE_STEPS
+        .iter()
+        .position(|&step| step == current)
+        .unwrap_or(0)
+}
+
+pub fn bitrate_next(current: Option<u64>) -> Option<u64> {
+    let i = bitrate_index(current);
+    BITRATE_STEPS[(i + 1) % BITRATE_STEPS.len()]
+}
+
+pub fn bitrate_prev(current: Option<u64>) -> Option<u64> {
+    let i = bitrate_index(current);
+    let prev = if i == 0 {
+        BITRATE_STEPS.len() - 1
+    } else {
+        i - 1
+    };
+    BITRATE_STEPS[prev]
+}
+
+pub fn bitrate_display(bitrate: Option<u64>) -> String {
+    match bitrate {
+        None => "unlimited".to_string(),
+        Some(bps) if bps % 1_000_000_000 == 0 => format!("{} Gbps", bps / 1_000_000_000),
+        Some(bps) if bps % 1_000_000 == 0 => format!("{} Mbps", bps / 1_000_000),
+        Some(bps) if bps % 1_000 == 0 => format!("{} Kbps", bps / 1_000),
+        Some(bps) => format!("{} bps", bps),
+    }
 }
 
 // Add helper methods to Protocol and Direction for cycling
@@ -413,5 +468,57 @@ impl Direction {
             Self::Download => Self::Upload,
             Self::Bidir => Self::Download,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_steps_snap_to_clean_five_second_boundaries() {
+        assert_eq!(duration_next(1), 5);
+        assert_eq!(duration_next(5), 10);
+        assert_eq!(duration_next(11), 15);
+        assert_eq!(duration_next(3599), 3600);
+        assert_eq!(duration_next(3600), 3600);
+
+        assert_eq!(duration_prev(1), 5);
+        assert_eq!(duration_prev(6), 5);
+        assert_eq!(duration_prev(11), 10);
+    }
+
+    #[test]
+    fn bitrate_steps_cycle_and_display() {
+        assert_eq!(bitrate_next(None), Some(1_000_000));
+        assert_eq!(bitrate_next(Some(1_000_000)), Some(10_000_000));
+        assert_eq!(bitrate_prev(None), Some(10_000_000_000));
+        assert_eq!(bitrate_prev(Some(10_000_000)), Some(1_000_000));
+
+        assert_eq!(bitrate_display(None), "unlimited");
+        assert_eq!(bitrate_display(Some(1_000_000)), "1 Mbps");
+        assert_eq!(bitrate_display(Some(10_000_000_000)), "10 Gbps");
+    }
+
+    #[test]
+    fn mark_applied_commits_test_settings_baseline() {
+        let mut settings = SettingsState::new(
+            0,
+            1,
+            Protocol::Tcp,
+            Duration::from_secs(10),
+            Direction::Upload,
+            None,
+        );
+
+        settings.streams = 4;
+        settings.protocol = Protocol::Udp;
+        settings.duration_secs = 15;
+        settings.direction = Direction::Download;
+        settings.bitrate = Some(100_000_000);
+        assert!(settings.test_params_dirty());
+
+        settings.mark_applied();
+        assert!(!settings.test_params_dirty());
     }
 }

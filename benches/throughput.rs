@@ -126,6 +126,8 @@ fn bench_protocol_serialize_test_start(c: &mut Criterion) {
         dscp: None,
         window_size: None,
         zerocopy: false,
+        mtu_probe: false,
+        tcp_nodelay: false,
     };
 
     c.bench_function("protocol_serialize_test_start", |b| {
@@ -229,6 +231,7 @@ fn bench_protocol_serialize_result(c: &mut Criterion) {
         bytes_received: None,
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
+        mtu_probe: None,
     };
     let msg = ControlMessage::Result(result);
 
