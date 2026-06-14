@@ -73,6 +73,8 @@ pub struct LogEntry {
 }
 
 pub struct App {
+    // `reset_for_restart` reuses one App across multiple TUI test runs. When
+    // adding run-specific fields, update that reset path as well.
     pub state: AppState,
     pub host: String,
     pub port: u16,
@@ -237,7 +239,7 @@ impl App {
             theme,
             theme_index: 0,
 
-            settings: SettingsState::new(0, streams, protocol, duration, direction),
+            settings: SettingsState::new(0, streams, protocol, duration, direction, bitrate),
 
             history: VecDeque::with_capacity(LOG_HISTORY),
             average_throughput_mbps: 0.0,
@@ -344,6 +346,84 @@ impl App {
         self.state = AppState::Running;
         self.start_time = Some(Instant::now());
         self.log("Connected to server.");
+    }
+
+    /// Apply new test parameters chosen in the settings modal. The caller is
+    /// responsible for rebuilding the client and spawning the replacement run.
+    pub fn apply_test_params(
+        &mut self,
+        protocol: Protocol,
+        direction: Direction,
+        streams: u8,
+        duration: Duration,
+        bitrate: Option<u64>,
+    ) {
+        self.protocol = protocol;
+        self.direction = direction;
+        self.streams_count = streams;
+        self.duration = duration;
+        self.bitrate = bitrate;
+        self.streams = (0..streams)
+            .map(|id| StreamData {
+                id,
+                bytes: 0,
+                throughput_mbps: 0.0,
+                retransmits: 0,
+                jitter_ms: None,
+            })
+            .collect();
+        self.settings.mark_applied();
+    }
+
+    /// Reset run-specific metrics before spawning a new test, preserving user
+    /// preferences, settings, update notifications, and history.
+    pub fn reset_for_restart(&mut self) {
+        self.state = AppState::Connecting;
+        self.elapsed = Duration::ZERO;
+        self.total_bytes = 0;
+        self.current_throughput_mbps = 0.0;
+        self.throughput_history.clear();
+        self.jitter_history.clear();
+        for stream in &mut self.streams {
+            stream.bytes = 0;
+            stream.throughput_mbps = 0.0;
+            stream.retransmits = 0;
+            stream.jitter_ms = None;
+        }
+
+        self.bidir_bytes_sent = 0;
+        self.bidir_bytes_received = 0;
+        self.throughput_send_mbps = 0.0;
+        self.throughput_recv_mbps = 0.0;
+
+        self.total_retransmits = 0;
+        self.rtt_us = 0;
+        self.cwnd = 0;
+
+        self.udp_jitter_ms = 0.0;
+        self.udp_lost_percent = None;
+        self.udp_packets_sent = 0;
+        self.udp_packets_lost = 0;
+
+        self.result = None;
+        self.error = None;
+        self.start_time = None;
+        self.show_help = false;
+        self.show_streams = false;
+        self.peak_throughput_mbps = 0.0;
+        self.prev_retransmits = 0;
+        self.prev_udp_lost = 0;
+        self.prev_udp_progress = None;
+        self.latest_udp_progress = None;
+        self.last_bar_at = None;
+        self.pause_started_at = None;
+        self.server_version = None;
+
+        self.average_throughput_mbps = 0.0;
+        self.throughput_sum = 0.0;
+        self.throughput_count = 0;
+
+        self.log("Test restarting...");
     }
 
     /// Refresh `elapsed` from the local wall clock. Called from the TUI loop
@@ -948,6 +1028,77 @@ mod tests {
         assert!(app.server_version.is_none());
         app.set_server_version("xfr/0.9.8".to_string());
         assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.8"));
+    }
+
+    #[test]
+    fn apply_test_params_refreshes_displayed_config_and_settings_baseline() {
+        let mut app = App::default();
+        app.settings.streams = 4;
+        app.settings.protocol = Protocol::Udp;
+        app.settings.duration_secs = 15;
+        app.settings.direction = Direction::Download;
+        app.settings.bitrate = Some(100_000_000);
+        assert!(app.settings.test_params_dirty());
+
+        app.apply_test_params(
+            Protocol::Udp,
+            Direction::Download,
+            4,
+            Duration::from_secs(15),
+            Some(100_000_000),
+        );
+
+        assert_eq!(app.protocol, Protocol::Udp);
+        assert_eq!(app.direction, Direction::Download);
+        assert_eq!(app.streams_count, 4);
+        assert_eq!(app.duration, Duration::from_secs(15));
+        assert_eq!(app.bitrate, Some(100_000_000));
+        assert_eq!(app.streams.len(), 4);
+        assert!(!app.settings.test_params_dirty());
+    }
+
+    #[test]
+    fn reset_for_restart_clears_run_state_but_preserves_user_context() {
+        let mut app = App::default();
+        app.on_connected();
+        app.total_bytes = 1234;
+        app.current_throughput_mbps = 42.0;
+        app.throughput_history.push_back(ThroughputSample {
+            mbps: 42.0,
+            lost_packets: 1,
+            interval_packets: 10,
+        });
+        app.streams[0].bytes = 1234;
+        app.result = Some(TestResult {
+            id: "test".to_string(),
+            duration_ms: 1000,
+            bytes_total: 1234,
+            throughput_mbps: 42.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+        });
+        app.set_server_version("xfr/0.9.18".to_string());
+        app.update_available = Some("xfr/0.9.19".to_string());
+        let history_len = app.history.len();
+
+        app.reset_for_restart();
+
+        assert_eq!(app.state, AppState::Connecting);
+        assert_eq!(app.total_bytes, 0);
+        assert_eq!(app.current_throughput_mbps, 0.0);
+        assert!(app.throughput_history.is_empty());
+        assert_eq!(app.streams[0].bytes, 0);
+        assert!(app.result.is_none());
+        assert!(app.error.is_none());
+        assert!(app.server_version.is_none());
+        assert_eq!(app.update_available.as_deref(), Some("xfr/0.9.19"));
+        assert_eq!(app.history.len(), history_len + 1);
     }
 
     #[test]

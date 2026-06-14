@@ -1525,9 +1525,229 @@ async fn run_client_tui(
     }
 }
 
+struct TuiRun {
+    client: Arc<Client>,
+    handle: tokio::task::JoinHandle<Result<xfr::protocol::TestResult>>,
+    progress_rx: mpsc::Receiver<TestProgress>,
+}
+
+fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
+    let client = Arc::new(Client::new(config.clone()));
+    let client_for_task = client.clone();
+    let (progress_tx, progress_rx) = mpsc::channel::<TestProgress>(100);
+    let handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
+    TuiRun {
+        client,
+        handle,
+        progress_rx,
+    }
+}
+
+async fn finish_tui_run(run: TuiRun) -> Result<xfr::protocol::TestResult> {
+    let TuiRun { handle, .. } = run;
+    handle.await?
+}
+
+async fn cancel_tui_run(
+    run: TuiRun,
+    timeout: Duration,
+) -> Option<Result<xfr::protocol::TestResult>> {
+    let _ = run.client.cancel();
+    let TuiRun { mut handle, .. } = run;
+    match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(joined) => Some(joined.map_err(anyhow::Error::from).and_then(|inner| inner)),
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            None
+        }
+    }
+}
+
+async fn abort_tui_run(run: TuiRun) {
+    let TuiRun { handle, .. } = run;
+    handle.abort();
+    let _ = handle.await;
+}
+
+fn poll_update_check(
+    app: &mut App,
+    update_rx: &std::sync::mpsc::Receiver<Option<String>>,
+    update_check_done: &mut bool,
+) {
+    if *update_check_done {
+        return;
+    }
+
+    match update_rx.try_recv() {
+        Ok(Some(version)) => {
+            app.update_available = Some(version);
+            *update_check_done = true;
+        }
+        Ok(None) => {
+            *update_check_done = true;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            *update_check_done = true;
+        }
+    }
+}
+
+fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> SettingsAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('s') => {
+            app.settings.close();
+            SettingsAction::Close
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings.move_up();
+            SettingsAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings.move_down();
+            SettingsAction::None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.settings.value_prev();
+            app.set_theme_index(app.settings.theme_index);
+            SettingsAction::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.settings.value_next();
+            app.set_theme_index(app.settings.theme_index);
+            SettingsAction::None
+        }
+        KeyCode::Tab => {
+            app.settings.switch_tab();
+            SettingsAction::None
+        }
+        KeyCode::Enter => app.settings.on_enter(),
+        _ => SettingsAction::None,
+    }
+}
+
+fn apply_tui_settings(config: &mut ClientConfig, app: &mut App) {
+    config.streams = app.settings.streams;
+    config.protocol = app.settings.protocol;
+    config.duration = Duration::from_secs(app.settings.duration_secs);
+    config.direction = app.settings.direction;
+    config.bitrate = app.settings.bitrate;
+
+    app.apply_test_params(
+        config.protocol,
+        config.direction,
+        config.streams,
+        config.duration,
+        config.bitrate,
+    );
+}
+
+fn log_tui_quic_ignored_options(app: &mut App, config: &ClientConfig) {
+    if config.protocol != Protocol::Quic {
+        return;
+    }
+
+    for (set, msg) in [
+        (
+            config.bitrate.is_some(),
+            "-b/--bitrate is ignored with QUIC (pacing is not implemented for QUIC)",
+        ),
+        (
+            config.window_size.is_some(),
+            "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
+        ),
+        (
+            config.tcp_congestion.is_some(),
+            "--congestion is ignored with QUIC (kernel TCP CC does not apply)",
+        ),
+        (
+            config.tcp_nodelay,
+            "--tcp-nodelay is ignored with QUIC (no Nagle on UDP transport)",
+        ),
+        (
+            config.dscp.is_some(),
+            "--dscp is ignored with QUIC (QUIC manages its own socket)",
+        ),
+    ] {
+        if set {
+            app.log(format!("Warning: {msg}"));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiQuitAction {
+    Noop,
+    ExitOk,
+    ExitError,
+    StartCancel,
+    ForceExit,
+    Ignore,
+}
+
+fn tui_quit_action(
+    key: &crossterm::event::KeyEvent,
+    state: AppState,
+    cancel_pending: bool,
+    run_active: bool,
+) -> TuiQuitAction {
+    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+    let is_quit = key.code == KeyCode::Char('q') || is_ctrl_c;
+
+    if !is_quit {
+        return TuiQuitAction::Noop;
+    }
+
+    if state == AppState::Error {
+        return TuiQuitAction::ExitError;
+    }
+
+    if state == AppState::Completed || !run_active {
+        return TuiQuitAction::ExitOk;
+    }
+
+    if cancel_pending {
+        if is_ctrl_c {
+            TuiQuitAction::ForceExit
+        } else {
+            TuiQuitAction::Ignore
+        }
+    } else {
+        TuiQuitAction::StartCancel
+    }
+}
+
+async fn restart_tui_run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    run: &mut Option<TuiRun>,
+    config: &ClientConfig,
+) -> Result<()> {
+    if let Some(current) = run.take() {
+        app.log("Restarting, waiting for current test to stop...");
+        terminal.draw(|f| draw(f, app))?;
+        match cancel_tui_run(current, Duration::from_secs(3)).await {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                app.log(format!("Previous test ended while restarting: {}", e));
+            }
+            None => {
+                app.log("Previous test did not stop in time; aborted.");
+            }
+        }
+    }
+
+    app.reset_for_restart();
+    log_tui_quic_ignored_options(app, config);
+    *run = Some(spawn_tui_run(config));
+    app.on_connected();
+    Ok(())
+}
+
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    config: ClientConfig,
+    mut config: ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
 ) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
@@ -1554,13 +1774,7 @@ async fn run_tui_loop(
     // Track if we've received the update check result
     let mut update_check_done = false;
 
-    let client = Arc::new(Client::new(config));
-    let client_for_task = client.clone();
-    let (progress_tx, mut progress_rx) = mpsc::channel::<TestProgress>(100);
-
-    // Start the test
-    let test_handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
-
+    let mut run = Some(spawn_tui_run(&config));
     app.on_connected();
 
     // Track cancel state: when user presses 'q' or Ctrl+C during a running test,
@@ -1572,29 +1786,13 @@ async fn run_tui_loop(
         if let Some(deadline) = cancel_deadline
             && deadline.elapsed() > Duration::ZERO
         {
+            if let Some(current) = run.take() {
+                abort_tui_run(current).await;
+            }
             return Ok((app.result, prefs, print_json_on_exit));
         }
 
-        // Check for update result if not already received
-        if !update_check_done {
-            match update_rx.try_recv() {
-                Ok(Some(version)) => {
-                    app.update_available = Some(version);
-                    update_check_done = true;
-                }
-                Ok(None) => {
-                    // No update available
-                    update_check_done = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still checking, will try again next loop
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Channel closed, stop checking
-                    update_check_done = true;
-                }
-            }
-        }
+        poll_update_check(&mut app, &update_rx, &mut update_check_done);
 
         // Refresh the wall-clock-driven parts of app state (elapsed counter) so
         // the UI stays live even when the server's Interval progress messages
@@ -1605,7 +1803,8 @@ async fn run_tui_loop(
         // ServerHello races the TUI loop start; we poll rather than add a new
         // channel since this is a one-time one-line copy.
         if app.server_version.is_none()
-            && let Some(v) = client.server_version()
+            && let Some(active) = run.as_ref()
+            && let Some(v) = active.client.server_version()
         {
             // Route through `set_server_version` so the string is sanitized —
             // it comes from the peer and lands in the terminal.
@@ -1622,93 +1821,81 @@ async fn run_tui_loop(
         {
             // Settings modal takes priority when visible
             if app.settings.visible {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('s') => {
-                        app.settings.close();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.settings.move_up();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.settings.move_down();
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        app.settings.value_prev();
-                        // Apply theme change immediately
-                        app.set_theme_index(app.settings.theme_index);
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        app.settings.value_next();
-                        // Apply theme change immediately
-                        app.set_theme_index(app.settings.theme_index);
-                    }
-                    KeyCode::Tab => {
-                        app.settings.switch_tab();
-                    }
-                    KeyCode::Enter => {
-                        let action = app.settings.on_enter();
-                        match action {
-                            SettingsAction::Restart => {
-                                // Cancel current test and signal restart
-                                let _ = client.cancel();
-                                prefs.theme = Some(app.theme_name().to_string());
-                                // TODO: Return restart signal with new params
-                                // For now, just close - restart requires refactoring
-                                app.log("Settings changed. Restart not yet implemented.");
-                            }
-                            SettingsAction::Close => {}
-                            SettingsAction::None => {}
-                        }
-                    }
-                    _ => {}
+                if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
+                    prefs.theme = Some(app.theme_name().to_string());
+                    apply_tui_settings(&mut config, &mut app);
+                    cancel_deadline = None;
+                    print_json_on_exit = false;
+                    restart_tui_run(terminal, &mut app, &mut run, &config).await?;
                 }
                 continue;
             }
 
-            // Ctrl+C or 'q': cancel and wait for server Result
-            let is_quit = key.code == KeyCode::Char('q')
-                || (key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL));
-            if is_quit {
-                if app.state == AppState::Completed || cancel_deadline.is_some() {
-                    // Already completed or already cancelling — exit immediately
+            match tui_quit_action(&key, app.state, cancel_deadline.is_some(), run.is_some()) {
+                TuiQuitAction::Noop => {}
+                TuiQuitAction::ExitError => {
+                    prefs.theme = Some(app.theme_name().to_string());
+                    return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
+                }
+                TuiQuitAction::ExitOk => {
                     prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit));
                 }
-                let _ = client.cancel();
-                cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
-                app.log("Cancelling, waiting for summary...");
-                continue;
+                TuiQuitAction::ForceExit => {
+                    if let Some(current) = run.take() {
+                        abort_tui_run(current).await;
+                    }
+                    prefs.theme = Some(app.theme_name().to_string());
+                    return Ok((app.result, prefs, print_json_on_exit));
+                }
+                TuiQuitAction::Ignore => {
+                    continue;
+                }
+                TuiQuitAction::StartCancel => {
+                    if let Some(active) = run.as_ref() {
+                        let _ = active.client.cancel();
+                    }
+                    cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
+                    app.log("Cancelling, waiting for summary...");
+                    continue;
+                }
             }
 
             match key.code {
                 KeyCode::Char('p') => {
-                    match client.pause() {
-                        PauseResult::Applied => {
-                            app.toggle_pause();
-                        }
-                        PauseResult::Unsupported => {
-                            // UI-only: server doesn't support pause/resume
-                            match app.state {
-                                AppState::Running => {
-                                    app.state = AppState::Paused;
-                                    app.log(
-                                        "Display paused (server does not support pause/resume)",
-                                    );
+                    if let Some(active) = run.as_ref() {
+                        match active.client.pause() {
+                            PauseResult::Applied => {
+                                app.toggle_pause();
+                            }
+                            PauseResult::Unsupported => {
+                                // UI-only: server doesn't support pause/resume
+                                match app.state {
+                                    AppState::Running => {
+                                        app.state = AppState::Paused;
+                                        app.log(
+                                            "Display paused (server does not support pause/resume)",
+                                        );
+                                    }
+                                    AppState::Paused => {
+                                        app.state = AppState::Running;
+                                        app.log(
+                                            "Display resumed (server does not support pause/resume)",
+                                        );
+                                    }
+                                    _ => {}
                                 }
-                                AppState::Paused => {
-                                    app.state = AppState::Running;
-                                    app.log(
-                                        "Display resumed (server does not support pause/resume)",
-                                    );
-                                }
-                                _ => {}
+                            }
+                            PauseResult::NotReady => {
+                                // Test not running yet or already finished — ignore
                             }
                         }
-                        PauseResult::NotReady => {
-                            // Test not running yet or already finished — ignore
-                        }
                     }
+                }
+                KeyCode::Char('r') => {
+                    cancel_deadline = None;
+                    print_json_on_exit = false;
+                    restart_tui_run(terminal, &mut app, &mut run, &config).await?;
                 }
                 KeyCode::Char('t') => {
                     app.cycle_theme();
@@ -1725,6 +1912,14 @@ async fn run_tui_loop(
                 KeyCode::Esc if app.show_help => {
                     app.show_help = false;
                 }
+                KeyCode::Esc if matches!(app.state, AppState::Completed) => {
+                    prefs.theme = Some(app.theme_name().to_string());
+                    return Ok((app.result, prefs, print_json_on_exit));
+                }
+                KeyCode::Esc if matches!(app.state, AppState::Error) => {
+                    prefs.theme = Some(app.theme_name().to_string());
+                    return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
+                }
                 KeyCode::Char('j') if app.result.is_some() => {
                     // Set flag to print JSON after TUI closes
                     print_json_on_exit = true;
@@ -1739,13 +1934,19 @@ async fn run_tui_loop(
         }
 
         // Check for progress updates
-        while let Ok(progress) = progress_rx.try_recv() {
-            app.on_progress(progress);
+        if let Some(active) = run.as_mut() {
+            while let Ok(progress) = active.progress_rx.try_recv() {
+                app.on_progress(progress);
+            }
         }
 
         // Check if test completed
-        if test_handle.is_finished() {
-            match test_handle.await? {
+        if run
+            .as_ref()
+            .is_some_and(|active| active.handle.is_finished())
+        {
+            let finished_run = run.take().expect("run exists after is_finished check");
+            match finish_tui_run(finished_run).await {
                 Ok(result) => {
                     app.on_result(result);
 
@@ -1757,105 +1958,6 @@ async fn run_tui_loop(
 
                     // Show final result for a moment
                     terminal.draw(|f| draw(f, &app))?;
-
-                    // Wait for quit
-                    loop {
-                        // Check for update result if not already received
-                        if !update_check_done {
-                            match update_rx.try_recv() {
-                                Ok(Some(version)) => {
-                                    app.update_available = Some(version);
-                                    update_check_done = true;
-                                }
-                                Ok(None) => update_check_done = true,
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    update_check_done = true;
-                                }
-                            }
-                        }
-
-                        terminal.draw(|f| draw(f, &app))?;
-
-                        if event::poll(Duration::from_millis(100))?
-                            && let Event::Key(key) = event::read()?
-                            && key.kind == KeyEventKind::Press
-                        {
-                            // Settings modal handling
-                            if app.settings.visible {
-                                match key.code {
-                                    KeyCode::Esc | KeyCode::Char('s') => {
-                                        app.settings.close();
-                                    }
-                                    KeyCode::Up | KeyCode::Char('k') => {
-                                        app.settings.move_up();
-                                    }
-                                    KeyCode::Down | KeyCode::Char('j') => {
-                                        app.settings.move_down();
-                                    }
-                                    KeyCode::Left | KeyCode::Char('h') => {
-                                        app.settings.value_prev();
-                                        app.set_theme_index(app.settings.theme_index);
-                                    }
-                                    KeyCode::Right | KeyCode::Char('l') => {
-                                        app.settings.value_next();
-                                        app.set_theme_index(app.settings.theme_index);
-                                    }
-                                    KeyCode::Tab => {
-                                        app.settings.switch_tab();
-                                    }
-                                    KeyCode::Enter => {
-                                        let _ = app.settings.on_enter();
-                                    }
-                                    _ => {}
-                                }
-                                continue;
-                            }
-
-                            // Ctrl+C in completed state: exit
-                            if key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                prefs.theme = Some(app.theme_name().to_string());
-                                return Ok((app.result, prefs, print_json_on_exit));
-                            }
-
-                            match key.code {
-                                KeyCode::Char('q') => {
-                                    prefs.theme = Some(app.theme_name().to_string());
-                                    return Ok((app.result, prefs, print_json_on_exit));
-                                }
-                                KeyCode::Esc => {
-                                    if app.show_help {
-                                        app.show_help = false;
-                                    } else {
-                                        prefs.theme = Some(app.theme_name().to_string());
-                                        return Ok((app.result, prefs, print_json_on_exit));
-                                    }
-                                }
-                                KeyCode::Char('t') => {
-                                    app.cycle_theme();
-                                }
-                                KeyCode::Char('s') => {
-                                    app.settings.toggle();
-                                }
-                                KeyCode::Char('?') | KeyCode::F(1) => {
-                                    app.toggle_help();
-                                }
-                                KeyCode::Char('d') => {
-                                    app.toggle_streams();
-                                }
-                                KeyCode::Char('j') => {
-                                    print_json_on_exit = true;
-                                    app.log("JSON output queued for display on exit.");
-                                }
-                                KeyCode::Char('u') if app.update_available.is_some() => {
-                                    app.update_available = None;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
                 }
                 Err(e) => {
                     // If we were waiting for cancel to complete, just exit
@@ -1866,20 +1968,6 @@ async fn run_tui_loop(
 
                     app.on_error(e.to_string());
                     terminal.draw(|f| draw(f, &app))?;
-
-                    // Wait for quit
-                    loop {
-                        if event::poll(Duration::from_millis(100))?
-                            && let Event::Key(key) = event::read()?
-                            && key.kind == KeyEventKind::Press
-                            && (key.code == KeyCode::Char('q')
-                                || (key.code == KeyCode::Char('c')
-                                    && key.modifiers.contains(KeyModifiers::CONTROL)))
-                        {
-                            prefs.theme = Some(app.theme_name().to_string());
-                            return Err(anyhow::anyhow!(app.error.unwrap_or_default()));
-                        }
-                    }
                 }
             }
         }
@@ -1970,6 +2058,86 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c_key() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn tui_quit_action_ignores_non_quit_keys() {
+        assert_eq!(
+            tui_quit_action(
+                &test_key(KeyCode::Char('r')),
+                AppState::Running,
+                false,
+                true
+            ),
+            TuiQuitAction::Noop
+        );
+    }
+
+    #[test]
+    fn tui_quit_action_starts_graceful_cancel_for_running_test() {
+        assert_eq!(
+            tui_quit_action(
+                &test_key(KeyCode::Char('q')),
+                AppState::Running,
+                false,
+                true
+            ),
+            TuiQuitAction::StartCancel
+        );
+        assert_eq!(
+            tui_quit_action(&ctrl_c_key(), AppState::Running, false, true),
+            TuiQuitAction::StartCancel
+        );
+    }
+
+    #[test]
+    fn tui_quit_action_keeps_repeated_q_graceful_while_cancel_pending() {
+        assert_eq!(
+            tui_quit_action(&test_key(KeyCode::Char('q')), AppState::Running, true, true),
+            TuiQuitAction::Ignore
+        );
+        assert_eq!(
+            tui_quit_action(&ctrl_c_key(), AppState::Running, true, true),
+            TuiQuitAction::ForceExit
+        );
+    }
+
+    #[test]
+    fn tui_quit_action_exits_when_run_is_done_or_missing() {
+        assert_eq!(
+            tui_quit_action(
+                &test_key(KeyCode::Char('q')),
+                AppState::Completed,
+                false,
+                true
+            ),
+            TuiQuitAction::ExitOk
+        );
+        assert_eq!(
+            tui_quit_action(
+                &test_key(KeyCode::Char('q')),
+                AppState::Running,
+                false,
+                false
+            ),
+            TuiQuitAction::ExitOk
+        );
+    }
+
+    #[test]
+    fn tui_quit_action_preserves_error_exit() {
+        assert_eq!(
+            tui_quit_action(&test_key(KeyCode::Char('q')), AppState::Error, false, true),
+            TuiQuitAction::ExitError
+        );
+    }
 
     #[test]
     fn test_parse_bitrate_basic() {
