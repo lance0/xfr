@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.20] - 2026-06-23
+
+### Security
+- **Updated `quinn-proto` to 0.11.15** to address [RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185) (High, 7.5) — a remote memory-exhaustion denial of service in QUIC stream reassembly, where unbounded buffering of out-of-order stream data could let a peer drive a server's memory usage without bound. This affects xfr's QUIC server path (any host running `xfr -s` reachable by an untrusted QUIC client). Lockfile-only update — no source or API changes, and no configuration change is required.
+
+### Maintenance
+- **CI: bumped the Docker publish actions** used by the GHCR release job — `setup-buildx-action` v3→v4, `login-action` v3→v4, `setup-qemu-action` v3→v4, `build-push-action` v6→v7, and `metadata-action` v5→v6. These track the actions' Node 24 runtimes; the published multi-arch image is unchanged.
+
 ## [0.9.19] - 2026-06-14
 
 ### Added

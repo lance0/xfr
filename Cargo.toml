@@ -1,6 +1,6 @@
 [package]
 name = "xfr"
-version = "0.9.19"
+version = "0.9.20"
 edition = "2024"
 rust-version = "1.88"
 description = "Modern network bandwidth testing with TUI"
