@@ -376,7 +376,9 @@ enum Commands {
         /// Use a named server preset from the config file.
         ///
         /// Preset `allowed_clients` (if any) become an additional allowlist
-        /// enforced with the normal ACL. Unknown presets are rejected.
+        /// enforced with the normal ACL. Preset `max_duration_secs` (if any)
+        /// is applied only when `--max-duration` is not provided.
+        /// Unknown presets are rejected.
         #[arg(long)]
         preset: Option<String>,
 
@@ -468,6 +470,16 @@ fn parse_test_duration(s: &str) -> Result<Duration, String> {
         return Err("Minimum test duration is 1 second (use 0 for infinite)".to_string());
     }
     Ok(duration)
+}
+
+/// Resolve the effective server-side max test duration.
+/// CLI `--max-duration` always wins; otherwise a preset's
+/// `max_duration_secs` (if present) supplies the default.
+fn resolve_server_max_duration(
+    cli_max_duration: Option<Duration>,
+    preset: Option<&xfr::config::ServerPreset>,
+) -> Option<Duration> {
+    cli_max_duration.or_else(|| preset.and_then(|p| p.max_duration_secs.map(Duration::from_secs)))
 }
 
 fn parse_bitrate(s: &str) -> Result<u64, String> {
@@ -781,7 +793,7 @@ async fn main() -> Result<()> {
             port,
             one_off,
             tui: server_tui,
-            max_duration,
+            mut max_duration,
             #[cfg(feature = "prometheus")]
             prometheus,
             push_gateway,
@@ -905,6 +917,8 @@ async fn main() -> Result<()> {
             };
 
             let server_no_mdns = no_mdns || file_config.server.no_mdns.unwrap_or(false);
+
+            max_duration = resolve_server_max_duration(max_duration, preset.as_ref());
 
             let config = ServerConfig {
                 port: server_port,
@@ -2111,6 +2125,39 @@ mod tests {
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn resolve_server_max_duration_cli_overrides_preset() {
+        let preset = xfr::config::ServerPreset {
+            name: "limited".into(),
+            bandwidth_limit: None,
+            allowed_clients: None,
+            max_duration_secs: Some(60),
+        };
+        assert_eq!(
+            resolve_server_max_duration(Some(Duration::from_secs(120)), Some(&preset)),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn resolve_server_max_duration_uses_preset_when_cli_unset() {
+        let preset = xfr::config::ServerPreset {
+            name: "limited".into(),
+            bandwidth_limit: None,
+            allowed_clients: None,
+            max_duration_secs: Some(300),
+        };
+        assert_eq!(
+            resolve_server_max_duration(None, Some(&preset)),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn resolve_server_max_duration_none_when_both_unset() {
+        assert_eq!(resolve_server_max_duration(None, None), None);
     }
 
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
