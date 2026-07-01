@@ -15,6 +15,8 @@
 //! `ErrorKind::Unsupported` and callers fall back to regular writes.
 
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
 use tokio::net::TcpStream;
 
 /// A fixed payload backed by a memfd, sent repeatedly with `sendfile(2)`.
@@ -91,15 +93,28 @@ impl ZerocopyPayload {
         self.len == 0
     }
 
-    /// One non-blocking `sendfile(2)` of the payload from offset 0.
-    /// Partial sends are fine — the caller counts whatever was queued,
-    /// matching `write(2)` semantics on the regular path.
+    /// One non-blocking `sendfile(2)` starting from `offset`. Returns the
+    /// number of bytes queued by this call (not the new absolute offset).
+    /// `offset` is updated by the kernel to the next byte position.
     #[cfg(target_os = "linux")]
-    fn sendfile_once(&self, socket_fd: std::os::unix::io::RawFd) -> io::Result<usize> {
-        use std::os::unix::io::AsRawFd;
-
-        let mut offset: libc::off_t = 0;
-        let n = unsafe { libc::sendfile(socket_fd, self.file.as_raw_fd(), &mut offset, self.len) };
+    fn sendfile_once(
+        &self,
+        socket_fd: std::os::unix::io::RawFd,
+        offset: &mut libc::off_t,
+    ) -> io::Result<usize> {
+        let start = *offset as usize;
+        let remaining = self.len.saturating_sub(start);
+        if remaining == 0 {
+            return Ok(0);
+        }
+        let n = unsafe {
+            libc::sendfile(
+                socket_fd,
+                self.file.as_raw_fd(),
+                offset,
+                remaining,
+            )
+        };
         if n < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -107,19 +122,32 @@ impl ZerocopyPayload {
         }
     }
 
-    /// Send one payload chunk on `stream` via sendfile, awaiting socket
-    /// writability. Cancel-safe: dropping the future mid-await sends
-    /// nothing; a completed sendfile returns synchronously.
+    /// Send one whole payload chunk on `stream` via sendfile, awaiting socket
+    /// writability and resuming from partial sends so the caller always
+    /// transmits the full payload. Each call resets to offset 0, so repeated
+    /// calls send the same bytes — matching the regular path's reused buffer.
     #[cfg(target_os = "linux")]
     pub async fn send_chunk(&self, stream: &TcpStream) -> io::Result<usize> {
-        use std::os::unix::io::AsRawFd;
         use tokio::io::Interest;
 
         let socket_fd = stream.as_raw_fd();
+        let mut offset: libc::off_t = 0;
         loop {
             stream.writable().await?;
-            match stream.try_io(Interest::WRITABLE, || self.sendfile_once(socket_fd)) {
-                Ok(n) => return Ok(n),
+            match stream.try_io(Interest::WRITABLE, || {
+                let n = self.sendfile_once(socket_fd, &mut offset)?;
+                if n == 0 && (offset as usize) < self.len {
+                    // sendfile returned zero bytes while payload remains;
+                    // treat it as spurious readiness rather than spinning.
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "sendfile returned zero bytes with payload remaining",
+                    ));
+                }
+                Ok(n)
+            }) {
+                Ok(_) if offset as usize >= self.len => return Ok(offset as usize),
+                Ok(_) => continue,
                 // Spurious readiness or send buffer refilled between
                 // writable() and sendfile — wait again.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
