@@ -113,7 +113,6 @@ impl Default for TcpConfig {
 #[cfg(unix)]
 fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
-    use tracing::debug;
 
     // setsockopt SO_SNDBUF/SO_RCVBUF takes a `c_int`. On 64-bit Unix that's i32,
     // so reject out-of-range requests up front — otherwise `as c_int` would wrap
@@ -150,11 +149,9 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         if ret != 0 {
-            debug!(
-                "Failed to set SO_SNDBUF to {}: {}",
-                buffer_size,
-                std::io::Error::last_os_error()
-            );
+            let err = std::io::Error::last_os_error();
+            warn!("Failed to set SO_SNDBUF to {}: {}", buffer_size, err);
+            return Err(err);
         }
 
         let ret = libc::setsockopt(
@@ -165,11 +162,9 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         if ret != 0 {
-            debug!(
-                "Failed to set SO_RCVBUF to {}: {}",
-                buffer_size,
-                std::io::Error::last_os_error()
-            );
+            let err = std::io::Error::last_os_error();
+            warn!("Failed to set SO_RCVBUF to {}: {}", buffer_size, err);
+            return Err(err);
         }
     }
 
@@ -348,18 +343,25 @@ pub fn configure_control_stream(stream: &TcpStream) -> std::io::Result<()> {
 async fn write_chunk(
     stream: &TcpStream,
     buffer: &[u8],
+    offset: usize,
     zerocopy: Option<&ZerocopyPayload>,
 ) -> io::Result<usize> {
     if let Some(payload) = zerocopy {
-        return payload.send_chunk(stream).await;
+        return payload.send_chunk(stream, offset).await;
     }
-    loop {
-        stream.writable().await?;
-        match stream.try_write(buffer) {
-            Ok(n) => return Ok(n),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
+    stream.writable().await?;
+    match stream.try_write(buffer) {
+        Ok(0) if !buffer.is_empty() => Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "TcpStream::try_write returned 0 for a non-empty buffer",
+        )),
+        Ok(n) => Ok(n),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            // writable() signaled readiness but try_write returned WouldBlock;
+            // treat it as 0 bytes to let the caller retry the same slice.
+            Ok(0)
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -442,6 +444,7 @@ pub async fn send_data(
     let is_infinite = duration == Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
+    let mut chunk_offset: usize = 0;
     let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
@@ -493,12 +496,16 @@ pub async fn send_data(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = write_chunk(&stream, &buffer, zerocopy.as_ref()) => r,
+            r = write_chunk(&stream, &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
+                chunk_offset += n;
+                if chunk_offset >= buffer.len() {
+                    chunk_offset = 0;
+                }
                 // Pace sends to target bitrate using byte-budget approach
                 // Skip userspace pacing when kernel pacing is active
                 if !kernel_pacing
@@ -578,7 +585,7 @@ pub async fn send_data(
 
     // Capture final TCP_INFO for retransmit count and RTT
     let tcp_info = get_stream_tcp_info(&stream);
-    if let Some(ref info) = tcp_info {
+    if let Some(info) = &tcp_info {
         stats.add_retransmits(info.retransmits);
         clamp_bytes_sent_to_acked(&stats, info);
     }
@@ -754,6 +761,7 @@ pub async fn send_data_half(
     let is_infinite = duration == Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
+    let mut chunk_offset: usize = 0;
     let mut suppressed_teardown_errors: u32 = 0;
 
     loop {
@@ -799,12 +807,16 @@ pub async fn send_data_half(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = write_chunk(write_half.as_ref(), &buffer, zerocopy.as_ref()) => r,
+            r = write_chunk(write_half.as_ref(), &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
             Ok(n) => {
                 stats.add_bytes_sent(n as u64);
+                chunk_offset += n;
+                if chunk_offset >= buffer.len() {
+                    chunk_offset = 0;
+                }
                 // Pace sends to target bitrate using byte-budget approach
                 // Skip userspace pacing when kernel pacing is active
                 if !kernel_pacing
@@ -877,11 +889,13 @@ pub async fn send_data_half(
         }
     }
 
-    // Clamp bytes_sent to bytes_acked before abortive close (see send_data for rationale).
+    // Capture final TCP_INFO for retransmit count and clamp bytes_sent to
+    // bytes_acked before abortive close (see send_data for rationale).
     // Capture the snapshot so the caller can store it directly — a second post-reunite
     // read would see a later, larger bytes_acked that could exceed the clamped bytes_sent.
     let tcp_info = get_tcp_info(write_half.as_ref()).ok();
-    if let Some(ref info) = tcp_info {
+    if let Some(info) = &tcp_info {
+        stats.add_retransmits(info.retransmits);
         clamp_bytes_sent_to_acked(&stats, info);
     }
 
@@ -1357,5 +1371,90 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("not available"), "unexpected error: {}", msg);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_chunk_resumes_short_writes_without_buffer_replay() {
+        // Regression test for the regular-write path: write_chunk returns short
+        // counts, so callers must offset into the buffer. Without that offset,
+        // a short write would cause the next call to replay the prefix and
+        // corrupt the byte stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut sender = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (receiver, _) = listener.accept().await.unwrap();
+        let (mut recv_read, _) = receiver.into_split();
+
+        // Force small send buffers so try_write can only queue a few bytes at a
+        // time; this reliably produces short writes on loopback.
+        #[cfg(unix)]
+        configure_socket_buffers(&sender, 512).unwrap();
+
+        const BUF: usize = 4096;
+        const HALF: usize = BUF / 2;
+        const COUNT: usize = 4;
+
+        // Two-tone pattern: first half zeros, second half 0xFF. Any replay of
+        // the zero-prefix would extend the first-half run beyond HALF bytes.
+        let pattern: Vec<u8> = (0..BUF)
+            .map(|i| if i < HALF { 0x00 } else { 0xFF })
+            .collect();
+
+        let recv_task = tokio::spawn(async move {
+            let mut received = Vec::with_capacity(COUNT * BUF);
+            let mut tmp = [0u8; 1024];
+            loop {
+                match recv_read.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => received.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            received
+        });
+
+        let mut sent_total = 0;
+        for _ in 0..COUNT {
+            let mut chunk_offset = 0;
+            while chunk_offset < BUF {
+                let n = write_chunk(&sender, &pattern[chunk_offset..], chunk_offset, None)
+                    .await
+                    .expect("write_chunk should not error");
+                chunk_offset += n;
+                assert!(chunk_offset <= BUF);
+            }
+            sent_total += BUF;
+        }
+
+        tokio::io::AsyncWriteExt::shutdown(&mut sender)
+            .await
+            .unwrap();
+
+        let received = recv_task.await.expect("receiver task panicked");
+        assert_eq!(
+            received.len(),
+            sent_total,
+            "received {} bytes but sent {}",
+            received.len(),
+            sent_total
+        );
+
+        // Verify each chunk is exactly the pattern, with no prefix replay.
+        for (i, chunk) in received.chunks_exact(BUF).enumerate() {
+            assert_eq!(
+                chunk,
+                pattern.as_slice(),
+                "chunk {} does not match pattern; short writes were not resumed correctly",
+                i
+            );
+        }
+
+        // Also ensure every byte boundary is a multiple of BUF.
+        assert_eq!(
+            received.len() % BUF,
+            0,
+            "received length is not a multiple of the buffer size"
+        );
     }
 }
