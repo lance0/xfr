@@ -223,16 +223,6 @@ pub fn on_test_start() {
     METRICS.active_tests.inc();
 }
 
-/// Called when a test aborts or errors before completion.
-/// Only decrements the active test gauge and updates live stats;
-/// does NOT increment `tests_total` or counters.
-#[cfg(feature = "prometheus")]
-pub fn on_test_aborted(stats: &TestStats) {
-    let m = &*METRICS;
-    m.active_tests.dec();
-    update_metrics(stats);
-}
-
 /// Called when a test completes. Updates all relevant metrics.
 #[cfg(feature = "prometheus")]
 pub fn on_test_complete(stats: &TestStats) {
