@@ -39,6 +39,7 @@ no_mdns = false
 # Server presets - use with: xfr serve --preset limited
 [[presets]]
 name = "limited"
+# bandwidth_limit is reserved for future use and is not enforced today.
 bandwidth_limit = "100M"
 max_duration_secs = 60
 

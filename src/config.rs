@@ -116,7 +116,8 @@ pub struct ServerPreset {
     /// Preset name (used with --preset flag)
     pub name: String,
 
-    /// Bandwidth limit (e.g., "100M", "1G")
+    /// Reserved bandwidth limit string (e.g., "100M", "1G").
+    /// Currently unused; present for forward/backward compatibility with config files.
     pub bandwidth_limit: Option<String>,
 
     /// Allowed client IP addresses/ranges
@@ -178,6 +179,7 @@ prometheus_port = 9090
 
 [[presets]]
 name = "limited"
+# Reserved for future use; not enforced today.
 bandwidth_limit = "100M"
 max_duration_secs = 60
 
@@ -238,5 +240,23 @@ bandwidth_limit = "10M"
         assert_eq!(slow.bandwidth_limit, Some("10M".to_string()));
 
         assert!(config.get_preset("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_preset_max_duration_secs_is_parsed() {
+        // `max_duration_secs` must round-trip through the config file so the
+        // server command can apply it as the default when `--max-duration` is
+        // not provided.
+        let toml = r#"
+[[presets]]
+name = "limited"
+bandwidth_limit = "100M"
+max_duration_secs = 300
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let preset = config.get_preset("limited").unwrap();
+        assert_eq!(preset.max_duration_secs, Some(300));
+        // `bandwidth_limit` is accepted for compatibility but not enforced.
+        assert_eq!(preset.bandwidth_limit, Some("100M".to_string()));
     }
 }

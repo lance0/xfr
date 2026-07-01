@@ -163,7 +163,7 @@ Pre-shared key for authentication. Environment: XFR_PSK. Values supplied via \fB
 Read PSK from file
 .TP
 .BI \-\-preset " NAME"
-Use a named server preset from the config file. Preset \fBallowed_clients\fR entries, if present, are enforced as an additional allowlist together with the normal ACL.
+Use a named server preset from the config file. Preset \fBallowed_clients\fR entries, if present, are enforced as an additional allowlist together with the normal ACL. Preset \fBmax_duration_secs\fR, if present, is used only when \fB\-\-max-duration\fR is not also supplied on the command line. The \fBbandwidth_limit\fR field is reserved for future use and is not enforced today.
 .TP
 .BI \-\-rate\-limit " N"
 Max concurrent tests per IP

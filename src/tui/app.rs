@@ -639,11 +639,19 @@ impl App {
         // `tick()` doesn't synthesize a second bar for the same window.
         self.last_bar_at = Some(Instant::now());
 
-        // Use local TCP_INFO retransmits when available (sender-side), otherwise sum from server
+        // Use local TCP_INFO retransmits when available (sender-side).
+        // Otherwise accumulate per-stream interval deltas ourselves so the
+        // fallback stays cumulative instead of resetting to the last
+        // interval's value.
         if let Some(total) = progress.total_retransmits {
             self.total_retransmits = total;
         } else {
-            self.total_retransmits = self.streams.iter().map(|s| s.retransmits).sum();
+            let interval_total: u64 = progress
+                .streams
+                .iter()
+                .map(|s| s.retransmits.unwrap_or(0))
+                .sum();
+            self.total_retransmits = self.total_retransmits.saturating_add(interval_total);
         }
 
         // Update live TCP_INFO from interval data
@@ -679,12 +687,12 @@ impl App {
             self.udp_lost_percent = Some(p);
         }
 
-        // Track average throughput
-        if progress.throughput_mbps > 0.0 {
-            self.throughput_sum += progress.throughput_mbps;
-            self.throughput_count += 1;
-            self.average_throughput_mbps = self.throughput_sum / self.throughput_count as f64;
-        }
+        // Track average throughput across every full interval, including
+        // zero-throughput intervals so stalls and lossy periods reduce the
+        // average just like they do in the final result.
+        self.throughput_sum += progress.throughput_mbps;
+        self.throughput_count += 1;
+        self.average_throughput_mbps = self.throughput_sum / self.throughput_count as f64;
 
         // Log significant events
         self.detect_events(progress.throughput_mbps);
@@ -1554,5 +1562,82 @@ mod tests {
         let bar = app.throughput_history.back().copied().unwrap();
         assert_eq!(bar.lost_packets, 200);
         assert_eq!(bar.interval_packets, 1200);
+    }
+
+    #[test]
+    fn average_throughput_includes_zero_throughput_intervals() {
+        // Regression: zero-throughput intervals were previously skipped,
+        // inflating the average in lossy/stall periods.
+        let mut app = App::default();
+        app.state = AppState::Running;
+
+        app.on_progress(make_progress(100.0, None));
+        assert!((app.average_throughput_mbps - 100.0).abs() < f64::EPSILON);
+
+        app.on_progress(make_progress(0.0, None));
+        assert!((app.average_throughput_mbps - 50.0).abs() < f64::EPSILON);
+
+        app.on_progress(make_progress(100.0, None));
+        assert!((app.average_throughput_mbps - (200.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn retransmit_fallback_is_cumulative_across_intervals() {
+        // When the server omits progress.total_retransmits, the TUI must
+        // accumulate per-stream interval deltas instead of resetting the
+        // display to each interval's value.
+        let mut app = App::default();
+        app.state = AppState::Running;
+
+        let mut p1 = make_progress(1.0, None);
+        p1.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 0,
+            retransmits: Some(5),
+            jitter_ms: None,
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+        }];
+        app.on_progress(p1);
+        assert_eq!(app.total_retransmits, 5);
+
+        let mut p2 = make_progress(1.0, None);
+        p2.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 0,
+            retransmits: Some(3),
+            jitter_ms: None,
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+        }];
+        app.on_progress(p2);
+        assert_eq!(app.total_retransmits, 8);
+    }
+
+    #[test]
+    fn total_retransmits_overrides_cumulative_fallback() {
+        // Servers that ship progress.total_retransmits use the authoritative
+        // cumulative count directly.
+        let mut app = App::default();
+        app.state = AppState::Running;
+
+        let mut p = make_progress(1.0, None);
+        p.total_retransmits = Some(42);
+        p.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 0,
+            retransmits: Some(5),
+            jitter_ms: None,
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+        }];
+        app.on_progress(p);
+        assert_eq!(app.total_retransmits, 42);
     }
 }
