@@ -32,10 +32,11 @@ pub const PROBE_VERSION: u8 = 1;
 /// Header bytes preceding the padding in `Probe`/`Echo` packets; also
 /// the full size of an `Ack`. Must stay below `MIN_PROBE_PAYLOAD`.
 pub const PROBE_HEADER_SIZE: usize = 16;
-/// Smallest trial payload. 576 is the classic IPv4 minimum-reassembly
-/// datagram; nothing real blocks below this, and the header has to fit.
+/// Smallest IPv4 trial payload. 576 is the classic IPv4 minimum-reassembly
+/// datagram; IPv6 uses its 1280-byte minimum MTU in [`size_ladder`].
 pub const MIN_PROBE_PAYLOAD: usize = 548; // 576 wire - 28 IPv4/UDP overhead
-/// Largest trial payload: 9216-byte jumbo wire MTU minus IPv4 overhead.
+/// Largest IPv4 trial payload: 9216-byte jumbo wire MTU minus IPv4 overhead.
+/// IPv6 subtracts its larger overhead in [`size_ladder`].
 pub const MAX_PROBE_PAYLOAD: usize = 9188;
 
 /// Packet kinds on the probe lane.
@@ -47,6 +48,14 @@ pub const PROBE_KIND_ECHO: u8 = 3;
 /// 20 (IPv4) or 40 (IPv6) IP header + 8 UDP header.
 pub fn ip_overhead(is_ipv6: bool) -> usize {
     if is_ipv6 { 48 } else { 28 }
+}
+
+fn min_probe_payload(is_ipv6: bool) -> usize {
+    if is_ipv6 {
+        1280usize - ip_overhead(true)
+    } else {
+        MIN_PROBE_PAYLOAD
+    }
 }
 
 /// A probe-lane packet.
@@ -183,19 +192,22 @@ pub struct MtuProbeReport {
 /// from wire MTUs seen in the wild: IPv4 minimum (576), IPv6 minimum
 /// (1280), PPPoE (1492), Ethernet (1500), FDDI (4352), jumbo (9000,
 /// 9216). Clamped to the valid probe range and deduplicated; always
-/// ends at `MAX_PROBE_PAYLOAD` so the search space is fully bracketed.
+/// ends at a family-aware max payload so the search space is fully bracketed.
 pub fn size_ladder(is_ipv6: bool) -> Vec<usize> {
     let overhead = ip_overhead(is_ipv6);
+    let min_payload = min_probe_payload(is_ipv6);
+    // Largest payload that still fits in a 9216-byte jumbo datagram.
+    let max_payload = 9216usize.saturating_sub(overhead);
     let mut ladder: Vec<usize> = [576usize, 1280, 1492, 1500, 4352, 9000, 9216]
         .iter()
         .map(|wire| wire.saturating_sub(overhead))
-        .filter(|&p| (MIN_PROBE_PAYLOAD..=MAX_PROBE_PAYLOAD).contains(&p))
+        .filter(|&p| (min_payload..=max_payload).contains(&p))
         .collect();
-    if ladder.first() != Some(&MIN_PROBE_PAYLOAD) {
-        ladder.insert(0, MIN_PROBE_PAYLOAD);
+    if ladder.first() != Some(&min_payload) {
+        ladder.insert(0, min_payload);
     }
-    if ladder.last() != Some(&MAX_PROBE_PAYLOAD) {
-        ladder.push(MAX_PROBE_PAYLOAD);
+    if ladder.last() != Some(&max_payload) {
+        ladder.push(max_payload);
     }
     ladder.dedup();
     ladder
@@ -619,10 +631,42 @@ mod tests {
     fn ladder_is_sorted_dedup_and_bracketed() {
         for ipv6 in [false, true] {
             let ladder = size_ladder(ipv6);
+            let overhead = ip_overhead(ipv6);
+            let expected_min = if ipv6 {
+                1280usize - overhead
+            } else {
+                576usize - overhead
+            };
+            let expected_max = 9216usize - overhead;
             assert!(ladder.windows(2).all(|w| w[0] < w[1]), "sorted+dedup");
-            assert_eq!(*ladder.first().unwrap(), MIN_PROBE_PAYLOAD);
-            assert_eq!(*ladder.last().unwrap(), MAX_PROBE_PAYLOAD);
+            assert_eq!(*ladder.first().unwrap(), expected_min);
+            assert_eq!(*ladder.last().unwrap(), expected_max);
         }
+    }
+
+    #[test]
+    fn ladder_bounds_account_for_ip_version_overhead() {
+        let v4 = size_ladder(false);
+        let v6 = size_ladder(true);
+        assert_eq!(*v4.first().unwrap(), 548);
+        assert_eq!(*v4.last().unwrap(), 9188);
+        assert_eq!(*v6.first().unwrap(), 1232);
+        assert_eq!(*v6.last().unwrap(), 9168);
+    }
+
+    #[test]
+    fn search_brackets_ipv6_max() {
+        let path_max = 9000usize; // below IPv6 jumbo payload max
+        let mut search = SizeSearch::new(true);
+        while let Some(size) = search.next_size() {
+            let verdict = if size <= path_max {
+                SizeVerdict::Pass
+            } else {
+                SizeVerdict::Fail
+            };
+            search.record(size, verdict);
+        }
+        assert_eq!(search.forward_max(), Some(path_max));
     }
 
     /// Simulate a path with a given max payload and verify the search
