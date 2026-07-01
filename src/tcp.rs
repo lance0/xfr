@@ -39,6 +39,11 @@ fn is_peer_closed_error(err: &io::Error) -> bool {
     )
 }
 
+#[inline]
+fn should_end_receive_after_error(err: &io::Error, cancel_requested: bool) -> bool {
+    cancel_requested || is_peer_closed_error(err)
+}
+
 /// Drain readable bytes briefly after cancel to give the peer's own cancel
 /// signal time to propagate before we drop the socket (which would RST).
 /// Drained bytes are not added to stats — this is purely for teardown hygiene.
@@ -654,11 +659,11 @@ pub async fn receive_data(
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
                         }
-                        // Receive-side reset/pipe before cancel is unexpected and should
-                        // still be surfaced as an error.
-                        if *cancel.borrow() {
-                            cancelled = true;
-                            if is_peer_closed_error(&e) {
+                        let cancel_requested = *cancel.borrow();
+                        let peer_closed = is_peer_closed_error(&e);
+                        if should_end_receive_after_error(&e, cancel_requested) {
+                            cancelled = cancel_requested;
+                            if peer_closed {
                                 suppressed_teardown_errors += 1;
                             }
                             break;
@@ -948,9 +953,11 @@ pub async fn receive_data_half(
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             continue;
                         }
-                        if *cancel.borrow() {
-                            cancelled = true;
-                            if is_peer_closed_error(&e) {
+                        let cancel_requested = *cancel.borrow();
+                        let peer_closed = is_peer_closed_error(&e);
+                        if should_end_receive_after_error(&e, cancel_requested) {
+                            cancelled = cancel_requested;
+                            if peer_closed {
                                 suppressed_teardown_errors += 1;
                             }
                             break;
@@ -1006,6 +1013,65 @@ mod tests {
             "default must not force SO_SNDBUF/SO_RCVBUF — leave it to the kernel"
         );
         assert!(!config.zerocopy, "zero-copy must be opt-in");
+    }
+
+    #[test]
+    fn receive_error_policy_treats_sender_close_as_eof_without_cancel() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionAborted,
+        ] {
+            let err = io::Error::from(kind);
+            assert!(
+                should_end_receive_after_error(&err, false),
+                "{kind:?} should end receive as graceful EOF"
+            );
+        }
+    }
+
+    #[test]
+    fn receive_error_policy_keeps_unrelated_errors_fatal_until_cancel() {
+        let err = io::Error::from(io::ErrorKind::InvalidData);
+        assert!(
+            !should_end_receive_after_error(&err, false),
+            "unrelated read errors should remain fatal before cancel"
+        );
+        assert!(
+            should_end_receive_after_error(&err, true),
+            "after cancel, receive errors should only end teardown"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn receive_data_treats_abortive_sender_close_as_eof() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (sender, receiver) = tokio::join!(connect, accept);
+        let sender = sender.unwrap();
+        let (receiver, _) = receiver.unwrap();
+
+        socket2::SockRef::from(&sender)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        drop(sender);
+
+        let stats = Arc::new(StreamStats::new(0));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            receive_data(receiver, stats, cancel_rx, TcpConfig::default()),
+        )
+        .await
+        .expect("receive_data should not hang after abortive peer close");
+
+        assert!(
+            result.is_ok(),
+            "abortive sender close should be treated as EOF: {result:?}"
+        );
     }
 
     /// End-to-end: send_data with zerocopy enabled pushes real bytes through

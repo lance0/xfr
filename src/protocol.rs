@@ -58,14 +58,27 @@ pub const DEFAULT_PORT: u16 = 5201;
 /// Compatibility rules:
 /// - Major versions must match exactly
 /// - Minor version differences are allowed (backwards compatible)
+/// - Malformed versions are incompatible
 pub fn versions_compatible(version_a: &str, version_b: &str) -> bool {
-    let parse_major = |v: &str| -> u32 {
-        v.split('.')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
-    };
-    parse_major(version_a) == parse_major(version_b)
+    match (
+        parse_protocol_major(version_a),
+        parse_protocol_major(version_b),
+    ) {
+        (Some(major_a), Some(major_b)) => major_a == major_b,
+        _ => false,
+    }
+}
+
+fn parse_protocol_major(version: &str) -> Option<u32> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    parts.next()?.parse::<u32>().ok()?;
+
+    for part in parts {
+        part.parse::<u32>().ok()?;
+    }
+
+    Some(major)
 }
 
 /// Authentication challenge sent by server
@@ -628,6 +641,28 @@ mod tests {
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"type\":\"hello\""));
         assert!(json.contains("\"version\":\"1.1\""));
+    }
+
+    #[test]
+    fn test_versions_compatible_matches_major_versions() {
+        assert!(versions_compatible("1.1", "1.0"));
+        assert!(versions_compatible("1.1", "1.99"));
+        assert!(versions_compatible("1.1.2", "1.0.0"));
+        assert!(!versions_compatible("1.1", "2.0"));
+    }
+
+    #[test]
+    fn test_versions_compatible_rejects_malformed_versions() {
+        for bad in ["", ".", "1", "x.1", "1.x", ".1", "1.", "1.1.x"] {
+            assert!(
+                !versions_compatible(bad, PROTOCOL_VERSION),
+                "{bad:?} must not be compatible as the peer version"
+            );
+            assert!(
+                !versions_compatible(PROTOCOL_VERSION, bad),
+                "{bad:?} must not be compatible as the local version"
+            );
+        }
     }
 
     #[test]
