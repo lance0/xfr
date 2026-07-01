@@ -862,8 +862,8 @@ async fn test_rate_limit() {
     let result2 = timeout(Duration::from_secs(5), client2.run(None)).await;
 
     // Second connection should be rejected (rate limited - connection dropped).
-    // The server drops the connection before hello, so the client either gets
-    // an error result or (if we waited too long) the outer timeout fires.
+    // The server drops the connection before hello, so the client should get
+    // an error result back promptly.
     assert!(
         matches!(result2, Ok(Err(_))),
         "second concurrent connection should be rejected: {result2:?}"
