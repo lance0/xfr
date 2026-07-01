@@ -2637,7 +2637,7 @@ async fn run_test(
         duration_ms,
         throughput_mbps,
         streams: stream_results,
-        tcp_info: stats.get_tcp_info(),
+        tcp_info: stats.final_local_tcp_info(),
         udp_stats: stats.aggregate_udp_stats(),
         bytes_sent,
         bytes_received,
@@ -2799,7 +2799,10 @@ async fn spawn_tcp_handlers(
                 Direction::Upload => {
                     // Server receives data
                     match tcp::receive_data(stream, stream_stats.clone(), cancel, config).await {
-                        Ok(Some(info)) => test_stats.add_tcp_info(info),
+                        Ok(Some(info)) => {
+                            stream_stats.set_final_tcp_info(info.clone());
+                            test_stats.add_tcp_info(info);
+                        }
                         Ok(None) => {}
                         Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
                     }
@@ -2817,7 +2820,10 @@ async fn spawn_tcp_handlers(
                     )
                     .await
                     {
-                        Ok(Some(info)) => test_stats.add_tcp_info(info),
+                        Ok(Some(info)) => {
+                            stream_stats.set_final_tcp_info(info.clone());
+                            test_stats.add_tcp_info(info);
+                        }
                         Ok(None) => {}
                         Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
                     }
@@ -2876,6 +2882,7 @@ async fn spawn_tcp_handlers(
                     {
                         if let Some(info) = send_tcp_info {
                             final_stats.add_retransmits(info.retransmits);
+                            stream_stats.set_final_tcp_info(info.clone());
                             test_stats.add_tcp_info(info);
                         }
                         let _ = read_half.reunite(write_half);
@@ -3007,7 +3014,10 @@ async fn spawn_tcp_stream_handlers(
                             match tcp::receive_data(stream, stream_stats.clone(), cancel, config)
                                 .await
                             {
-                                Ok(Some(info)) => test_stats.add_tcp_info(info),
+                                Ok(Some(info)) => {
+                                    stream_stats.set_final_tcp_info(info.clone());
+                                    test_stats.add_tcp_info(info);
+                                }
                                 Ok(None) => {}
                                 Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
                             }
@@ -3024,7 +3034,10 @@ async fn spawn_tcp_stream_handlers(
                             )
                             .await
                             {
-                                Ok(Some(info)) => test_stats.add_tcp_info(info),
+                                Ok(Some(info)) => {
+                                    stream_stats.set_final_tcp_info(info.clone());
+                                    test_stats.add_tcp_info(info);
+                                }
                                 Ok(None) => {}
                                 Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
                             }
@@ -3075,6 +3088,7 @@ async fn spawn_tcp_stream_handlers(
                             {
                                 if let Some(info) = send_tcp_info {
                                     final_stats.add_retransmits(info.retransmits);
+                                    stream_stats.set_final_tcp_info(info.clone());
                                     test_stats.add_tcp_info(info);
                                 }
                                 let _ = read_half.reunite(write_half);

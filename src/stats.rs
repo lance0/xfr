@@ -483,10 +483,8 @@ impl TestStats {
         let avg_rtt = if rtt_values.is_empty() {
             None
         } else {
-            Some(
-                (rtt_values.iter().map(|&r| r as u64).sum::<u64>() / rtt_values.len() as u64)
-                    as u32,
-            )
+            let rtt_sum = rtt_values.iter().map(|&r| r as u64).sum::<u64>();
+            Some((rtt_sum as f64 / rtt_values.len() as f64).round() as u32)
         };
 
         // Sum cwnd across streams (total sending capacity)
@@ -563,7 +561,10 @@ impl TestStats {
                 count += 1;
             }
         }
-        (rtt_sum.checked_div(count)).map(|avg_rtt| (avg_rtt as u32, retransmits, cwnd))
+        (count > 0).then(|| {
+            let avg_rtt = (rtt_sum as f64 / count as f64).round() as u32;
+            (avg_rtt, retransmits, cwnd)
+        })
     }
 
     /// Get final TCP_INFO across all streams, using saved snapshots from completed tasks.
@@ -589,12 +590,15 @@ impl TestStats {
                 count += 1;
             }
         }
-        rtt_sum.checked_div(count).map(|avg_rtt| {
-            let avg_rtt_var = rtt_var_sum / count; // safe: checked_div confirmed count > 0
+        rtt_sum.checked_div(count).map(|_| {
+            // Use float division and round so fractional microseconds are not
+            // silently truncated by integer division (e.g. avg of 100 and 101).
+            let avg_rtt = (rtt_sum as f64 / count as f64).round() as u32;
+            let avg_rtt_var = (rtt_var_sum as f64 / count as f64).round() as u32;
             TcpInfoSnapshot {
                 retransmits,
-                rtt_us: avg_rtt as u32,
-                rtt_var_us: avg_rtt_var as u32,
+                rtt_us: avg_rtt,
+                rtt_var_us: avg_rtt_var,
                 cwnd,
                 bytes_acked: if any_bytes_acked {
                     Some(bytes_acked_sum)
@@ -722,6 +726,100 @@ mod tests {
         assert_eq!(info.rtt_us, 2000);
         assert_eq!(info.rtt_var_us, 400);
         assert_eq!(info.cwnd, 96 * 1024);
+    }
+
+    #[test]
+    fn test_final_local_tcp_info_uses_all_streams_not_last() {
+        let stats = TestStats::new("test".to_string(), 2);
+
+        stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 3,
+            rtt_us: 1000,
+            rtt_var_us: 200,
+            cwnd: 32 * 1024,
+            bytes_acked: None,
+        });
+        // Last stream has zero RTT/no retransmits - make sure the aggregate is not
+        // driven by this last snapshot.
+        stats.streams[1].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 0,
+            rtt_var_us: 0,
+            cwnd: 64 * 1024,
+            bytes_acked: None,
+        });
+
+        let info = stats
+            .final_local_tcp_info()
+            .expect("missing aggregated final tcp info");
+        assert_eq!(info.retransmits, 3);
+        assert_eq!(info.rtt_us, 500);
+        assert_eq!(info.rtt_var_us, 100);
+    }
+
+    #[test]
+    fn test_final_local_tcp_info_rounds_fractional_averages() {
+        let stats = TestStats::new("test".to_string(), 2);
+
+        stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 100,
+            rtt_var_us: 201,
+            cwnd: 32 * 1024,
+            bytes_acked: None,
+        });
+        stats.streams[1].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 0,
+            rtt_us: 101,
+            rtt_var_us: 201,
+            cwnd: 64 * 1024,
+            bytes_acked: None,
+        });
+
+        let info = stats
+            .final_local_tcp_info()
+            .expect("missing aggregated final tcp info");
+        assert_eq!(info.rtt_us, 101);
+        assert_eq!(info.rtt_var_us, 201);
+    }
+
+    #[test]
+    fn test_aggregate_interval_rtt_rounds_fractional_average() {
+        let stats = TestStats::new("test".to_string(), 2);
+        let now = Instant::now();
+        let intervals = vec![
+            IntervalStats {
+                timestamp: now,
+                bytes: 0,
+                throughput_mbps: 0.0,
+                retransmits: 0,
+                jitter_ms: 0.0,
+                lost: 0,
+                rtt_us: Some(100),
+                cwnd: Some(32 * 1024),
+                bytes_sent: 0,
+                bytes_received: 0,
+                cumulative_packets_received: 0,
+                cumulative_packets_lost: 0,
+            },
+            IntervalStats {
+                timestamp: now,
+                bytes: 0,
+                throughput_mbps: 0.0,
+                retransmits: 0,
+                jitter_ms: 0.0,
+                lost: 0,
+                rtt_us: Some(101),
+                cwnd: Some(64 * 1024),
+                bytes_sent: 0,
+                bytes_received: 0,
+                cumulative_packets_received: 0,
+                cumulative_packets_lost: 0,
+            },
+        ];
+
+        let aggregate = stats.to_aggregate(&intervals);
+        assert_eq!(aggregate.rtt_us, Some(101));
     }
 
     #[test]
