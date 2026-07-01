@@ -1963,17 +1963,21 @@ async fn run_quic_test(
         handles.push(handle);
     }
 
-    // Send interval updates
-    let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
-    // Skip stale ticks rather than bursting them on unblock: if write_all stalls
-    // under back-pressure, Burst would emit several stale interval samples with
-    // fresh client-side arrival timestamps once the writer unblocks — both the
-    // timestamps and the throughput numbers attached to those samples are
-    // misleading. Skip drops them; cumulative state in StreamStats atomics still
-    // surfaces correctly on the next live tick and at end-of-test.
-    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let start = std::time::Instant::now();
-    let mut line = String::new();
+    // Run the data-plane and interval loop. The body is wrapped so we can
+    // always remove the active test entry and tear down live metrics, even if
+    // an error or cancellation exits early.
+    let run_result: anyhow::Result<(u64, f64)> = async {
+        // Send interval updates
+        let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+        // Skip stale ticks rather than bursting them on unblock: if write_all stalls
+        // under back-pressure, Burst would emit several stale interval samples with
+        // fresh client-side arrival timestamps once the writer unblocks — both the
+        // timestamps and the throughput numbers attached to those samples are
+        // misleading. Skip drops them; cumulative state in StreamStats atomics still
+        // surfaces correctly on the next live tick and at end-of-test.
+        interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let start = std::time::Instant::now();
+        let mut line = String::new();
 
     loop {
         tokio::select! {
@@ -2113,26 +2117,50 @@ async fn run_quic_test(
     // Give client time to receive the result before connection closes
     tokio::time::sleep(RESULT_FLUSH_DELAY).await;
 
-    #[cfg(feature = "prometheus")]
-    crate::output::prometheus::on_test_complete(&stats);
+    Ok((bytes_total, throughput_mbps))
+}
+.await;
 
-    // Push metrics to gateway if configured
-    crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+    // Always remove the active entry and stop data handlers.
+    remove_active_test(&active_tests, id).await;
 
-    if let Some(tx) = &tui_tx {
-        let _ = tx.try_send(ServerEvent::TestCompleted {
-            id: id.to_string(),
-            bytes: bytes_total,
-        });
+    match run_result {
+        Ok((bytes_total, throughput_mbps)) => {
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_complete(&stats);
+
+            // Push metrics to gateway if configured
+            crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+
+            if let Some(tx) = &tui_tx {
+                let _ = tx.try_send(ServerEvent::TestCompleted {
+                    id: id.to_string(),
+                    bytes: bytes_total,
+                });
+            }
+
+            info!(
+                "QUIC test {} complete: {:.2} Mbps, {} bytes",
+                id, throughput_mbps, bytes_total
+            );
+
+            Ok(())
+        }
+        Err(e) => {
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_aborted(&stats);
+
+            if let Some(tx) = &tui_tx {
+                let _ = tx.try_send(ServerEvent::TestCompleted {
+                    id: id.to_string(),
+                    bytes: stats.total_bytes(),
+                });
+            }
+
+            error!("QUIC test {} ended with error: {}", id, e);
+            Err(e)
+        }
     }
-
-    active_tests.lock().await.remove(id);
-    info!(
-        "QUIC test {} complete: {:.2} Mbps, {} bytes",
-        id, throughput_mbps, bytes_total
-    );
-
-    Ok(())
 }
 
 /// Run the actual bandwidth test
@@ -2347,7 +2375,11 @@ async fn run_test(
     #[cfg(feature = "prometheus")]
     crate::output::prometheus::on_test_start();
 
-    // Spawn data stream handlers
+    // Run the data-plane and interval loop. The body is wrapped so we can
+    // always remove the active test entry and tear down live metrics, even if
+    // an error or cancellation exits early.
+    let run_result: anyhow::Result<(u64, u64, f64)> = async {
+        // Spawn data stream handlers
     // For TCP and single-port UDP: spawn stream collection in background
     // to not block the interval loop
     // For legacy UDP: handlers are spawned immediately
@@ -2622,27 +2654,49 @@ async fn run_test(
         .write_all(format!("{}\n", result.serialize()?).as_bytes())
         .await?;
 
-    // Cleanup and post-processing after client has the result
-    active_tests.lock().await.remove(id);
-
-    #[cfg(feature = "prometheus")]
-    crate::output::prometheus::on_test_complete(&stats);
-
-    crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
-
-    if let Some(tx) = &tui_tx {
-        let _ = tx.try_send(ServerEvent::TestCompleted {
-            id: id.to_string(),
-            bytes: bytes_total,
-        });
-    }
-
-    info!(
-        "Test {} complete: {:.2} Mbps, {} bytes",
-        id, throughput_mbps, bytes_total
-    );
-
     Ok((bytes_total, duration_ms, throughput_mbps))
+}
+.await;
+
+    // Always remove the active entry and stop data handlers.
+    remove_active_test(&active_tests, id).await;
+
+    match run_result {
+        Ok((bytes_total, duration_ms, throughput_mbps)) => {
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_complete(&stats);
+
+            crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+
+            if let Some(tx) = &tui_tx {
+                let _ = tx.try_send(ServerEvent::TestCompleted {
+                    id: id.to_string(),
+                    bytes: bytes_total,
+                });
+            }
+
+            info!(
+                "Test {} complete: {:.2} Mbps, {} bytes",
+                id, throughput_mbps, bytes_total
+            );
+
+            Ok((bytes_total, duration_ms, throughput_mbps))
+        }
+        Err(e) => {
+            #[cfg(feature = "prometheus")]
+            crate::output::prometheus::on_test_aborted(&stats);
+
+            if let Some(tx) = &tui_tx {
+                let _ = tx.try_send(ServerEvent::TestCompleted {
+                    id: id.to_string(),
+                    bytes: stats.total_bytes(),
+                });
+            }
+
+            error!("Test {} ended with error: {}", id, e);
+            Err(e)
+        }
+    }
 }
 
 /// Read a line with bounded length to prevent memory DoS
@@ -3421,9 +3475,42 @@ fn register_mdns_service(port: u16) -> Option<mdns_sd::ServiceDaemon> {
     }
 }
 
+/// Remove an active test entry and signal any running data handlers to stop.
+/// This is the cleanup path used after both normal completion and early errors.
+async fn remove_active_test(active_tests: &Mutex<HashMap<String, ActiveTest>>, id: &str) {
+    if let Some(test) = active_tests.lock().await.remove(id) {
+        let _ = test.cancel_tx.send(true);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_remove_active_test_cleans_entry_and_sends_cancel() {
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let id = "leak-test";
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (pause_tx, _) = watch::channel(false);
+        active_tests.lock().await.insert(
+            id.to_string(),
+            ActiveTest {
+                stats: Arc::new(TestStats::new(id.to_string(), 1)),
+                cancel_tx,
+                pause_tx,
+                data_ports: vec![],
+                data_stream_tx: None,
+                control_peer_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                expected_streams: 1,
+            },
+        );
+
+        remove_active_test(active_tests.as_ref(), id).await;
+
+        assert!(!active_tests.lock().await.contains_key(id));
+        assert!(*cancel_rx.borrow(), "cleanup must send cancel signal");
+    }
 
     fn make_active_test(streams: u8, ip: std::net::IpAddr) -> ActiveTest {
         let (cancel_tx, _) = watch::channel(false);
