@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Server final TCP_INFO now aggregates all TCP streams** — previously the server's final `TestResult.tcp_info` was built from the last snapshot stored in the legacy `TestStats.tcp_info` vector, which could reflect a single stream or a pre-test snapshot. The server now saves each data socket's final `TcpInfoSnapshot` on its per-stream `StreamStats` and uses `TestStats::final_local_tcp_info()` for the final result, matching the client path. (LAN-155)
+- **TCP RTT averages no longer truncate fractional microseconds** — `TestStats::poll_local_tcp_info()` and `TestStats::final_local_tcp_info()` computed RTT averages with integer division, silently dropping fractional microseconds. They now use floating-point division with `.round()`, so e.g. averaging 100 µs and 101 µs reports 101 µs instead of 100 µs. (LAN-164)
+- **Diff zero baselines now register as regressions** — when the baseline reported zero retransmits or zero RTT and the current run reported a nonzero value, `xfr --diff` returned a 0.0 % change and `Verdict: OK`, masking a real regression. The change percent is now `+inf%`, `is_regression` now considers retransmit and RTT increases against the configured threshold, and the plain-text summary flags the line as `[FAIL]`/`[WARN]`. (LAN-162)
+
 ## [0.9.20] - 2026-06-23
 
 ### Security

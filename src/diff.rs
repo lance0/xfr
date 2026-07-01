@@ -105,6 +105,7 @@ pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -
         (Some(b), Some(c)) if b.retransmits > 0 => {
             ((c.retransmits as f64 - b.retransmits as f64) / b.retransmits as f64) * 100.0
         }
+        (Some(b), Some(c)) if b.retransmits == 0 && c.retransmits > 0 => f64::INFINITY,
         _ => 0.0,
     };
 
@@ -112,10 +113,13 @@ pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -
         (Some(b), Some(c)) if b.rtt_us > 0 => {
             ((c.rtt_us as f64 - b.rtt_us as f64) / b.rtt_us as f64) * 100.0
         }
+        (Some(b), Some(c)) if b.rtt_us == 0 && c.rtt_us > 0 => f64::INFINITY,
         _ => 0.0,
     };
 
-    let is_regression = throughput_change_percent < -config.threshold_percent;
+    let is_regression = throughput_change_percent < -config.threshold_percent
+        || retransmit_change_percent > config.threshold_percent
+        || rtt_change_percent > config.threshold_percent;
 
     DiffResult {
         baseline,
@@ -201,5 +205,61 @@ mod tests {
         );
         assert!(diff.is_regression);
         assert!(diff.throughput_change_percent < -10.0);
+    }
+
+    #[test]
+    fn test_zero_baseline_retransmits_flagged() {
+        let baseline = make_result(1000.0, 0, 1000);
+        let current = make_result(1000.0, 20, 1000);
+
+        let diff = compare(
+            baseline,
+            current,
+            &DiffConfig {
+                threshold_percent: 5.0,
+            },
+        );
+        assert!(diff.is_regression);
+        assert!(diff.retransmit_change_percent.is_infinite());
+        assert!(diff.retransmit_change_percent.is_sign_positive());
+        let output = diff.format_plain();
+        assert!(
+            output.contains("+inf%"),
+            "expected +inf% output, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[FAIL]"),
+            "expected [FAIL] for retransmits, got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_zero_baseline_rtt_flagged() {
+        let baseline = make_result(1000.0, 10, 0);
+        let current = make_result(1000.0, 10, 500);
+
+        let diff = compare(
+            baseline,
+            current,
+            &DiffConfig {
+                threshold_percent: 5.0,
+            },
+        );
+        assert!(diff.is_regression);
+        assert!(diff.rtt_change_percent.is_infinite());
+        assert!(diff.rtt_change_percent.is_sign_positive());
+        let output = diff.format_plain();
+        assert!(
+            output.contains("+inf%"),
+            "expected +inf% output, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[WARN]"),
+            "expected [WARN] for rtt, got: {}",
+            output
+        );
     }
 }
