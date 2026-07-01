@@ -64,16 +64,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### Settings Modal Doesn't Apply Changes
-
-**Issue:** The TUI settings modal shows options but doesn't apply changes mid-test.
-
-**Impact:** UI shows "restart required" - this is by design for current release.
-
-**Workaround:** Restart test with new settings via CLI flags.
-
----
-
 ### UDP Reverse Mode Error Handling
 
 **Issue:** In UDP reverse (download) mode, send errors on the server side are logged but not reported back to the client.
@@ -146,9 +136,9 @@ A warning is logged when `-b` is used with QUIC.
 
 QUIC transport uses self-signed certificates and does not verify the server's identity. This is intentional for ease of use in trusted environments.
 
-**Impact:** QUIC connections are encrypted but not authenticated without PSK, leaving them vulnerable to man-in-the-middle attacks on untrusted networks.
+**Impact:** QUIC connections are encrypted but do not authenticate the server, leaving them vulnerable to server impersonation or man-in-the-middle attacks on untrusted networks.
 
-**Mitigation:** Always use `--psk` for QUIC on untrusted networks. PSK provides mutual authentication via HMAC-SHA256 challenge-response.
+**Mitigation:** Do not treat QUIC's self-signed certificate as server identity. `--psk` is still useful on untrusted networks because it gates access to the server, but today's PSK handshake authenticates the client to the server; it does not replace server certificate verification.
 
 ### Protocol Extensions Require Major Version Bump
 
@@ -187,6 +177,7 @@ The following issues have been fixed and are listed here for reference.
 - **TCP bitrate limiting** - TCP bitrate pacing (`-b` for TCP) was added in v0.6.1 using a byte-budget sleep approach with interruptible sleeps and buffer auto-capping.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
+- **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 
 ---
 

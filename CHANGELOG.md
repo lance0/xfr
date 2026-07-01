@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Preset allowlists are now enforced by `xfr serve --preset`** — selecting a server preset now applies its `allowed_clients` CIDRs as an additional allowlist, enforced at TCP and QUIC accept time before auth, handshake, or test allocation. The preset allowlist is combined with the normal ACL using AND semantics, so a client must pass both. Unknown preset names fail fast at startup. (LAN-158)
+- **PSK handling is stricter and safer by default** — `constant_time_eq` no longer short-circuits on length mismatch or accepts trailing-zero variants, Unix `--psk-file` inputs with group/other permissions are rejected, and both client and server warn when inline `--psk`/`XFR_PSK` is used because those paths can leak through process listings, shell history, or environment inspection. (LAN-171)
+
 ### Fixed
+- **TCP send paths no longer replay bytes after short writes** — both the regular `try_write` path and zero-copy `sendfile(2)` path now maintain a caller-owned chunk offset, so partial sends resume from the byte after the short write instead of replaying the buffer prefix. Bidirectional send halves also record final retransmits from their TCP_INFO snapshot. (#113)
+- **Server active-test state is cleaned up on abort, cancel, and early error** — TCP and QUIC test handlers now run their data-plane body inside a cleanup wrapper so `active_tests` entries are removed, data handlers receive cancel, the Prometheus active-test gauge is decremented, and the server TUI does not retain stale active rows when a test exits before normal completion. (#114)
 - **Server final TCP_INFO now aggregates all TCP streams** — previously the server's final `TestResult.tcp_info` was built from the last snapshot stored in the legacy `TestStats.tcp_info` vector, which could reflect a single stream or a pre-test snapshot. The server now saves each data socket's final `TcpInfoSnapshot` on its per-stream `StreamStats` and uses `TestStats::final_local_tcp_info()` for the final result, matching the client path. (LAN-155)
 - **TCP RTT averages no longer truncate fractional microseconds** — `TestStats::poll_local_tcp_info()` and `TestStats::final_local_tcp_info()` computed RTT averages with integer division, silently dropping fractional microseconds. They now use floating-point division with `.round()`, so e.g. averaging 100 µs and 101 µs reports 101 µs instead of 100 µs. (LAN-164)
 - **Diff zero baselines now register as regressions** — when the baseline reported zero retransmits or zero RTT and the current run reported a nonzero value, `xfr --diff` returned a 0.0 % change and `Verdict: OK`, masking a real regression. The change percent is now `+inf%`, `is_regression` now considers retransmit and RTT increases against the configured threshold, and the plain-text summary flags the line as `[FAIL]`/`[WARN]`. (LAN-162)
@@ -16,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Push Gateway metrics emit `# HELP`/`# TYPE` once per family** — the text formatter previously wrote `# TYPE xfr_stream_*` before every stream sample, producing invalid Prometheus exposition with repeated headers. Headers are now emitted once per metric family, followed by all samples for that family. (LAN-157)
 - **Release workflow no longer references stale completions artifact path** — the `Generate checksums` step moves every tarball to `artifacts/`, but the release job still listed `artifacts/completions/completions.tar.gz`, which no longer exists after the move. The stale path is removed; `artifacts/*.tar.gz` already covers the completions tarball after the move. (LAN-157)
 - **Installer no longer points Intel Macs to a removed artifact** — `install.sh` still resolved `x86_64-apple-darwin` on Intel Macs, but release builds for that target were removed. The script now prints a clear message directing users to `cargo install xfr`. (LAN-157)
+- **Malformed protocol versions are no longer treated as compatible** — `versions_compatible()` now rejects malformed strings instead of defaulting parse failures to major version `0`. (LAN-166)
+- **Receive-side TCP resets at normal teardown are treated as EOF** — `receive_data()` and `receive_data_half()` now handle peer-close errors such as Linux `SO_LINGER=0` abortive sender teardown as graceful end-of-stream, while preserving unrelated pre-cancel read errors as fatal. (LAN-166)
+- **TestAck and MTU probe packets reject invalid wire shapes** — `TestAck` deserialization now rejects messages that contain both `udp_token` and per-stream `data_ports`, and padded MTU probes now reject declared sizes below the header or beyond the received datagram. (LAN-167)
+- **MTU probing handles echo-only success and IPv6 literals correctly** — an MTU echo now proves forward-path success even when the ack is lost, and literal IPv6 probe targets are bracketed before address resolution. (LAN-168)
+- **TUI average speed and retransmit fallback are no longer biased** — zero-throughput intervals now count toward the live average, and the fallback path for older servers accumulates per-stream retransmit deltas instead of replacing the total with each interval's latest snapshot. (LAN-163)
+- **Server preset max duration is applied with CLI precedence** — `max_duration_secs` from `xfr serve --preset` now applies when `--max-duration` is not supplied on the CLI, and `bandwidth_limit` is documented as reserved/unused rather than implied to be enforced. (LAN-173)
+- **Explicit `--probe-mtu -t 10s` duration is preserved** — `-t`/`--time` is now tracked as optional input, so an explicit 10-second MTU probe is no longer mistaken for the default and replaced with the longer probe default. (LAN-172)
+- **IPv6 MTU probe ladder uses IPv6 overhead for both bounds** — the probe size ladder now brackets IPv6 at 1232..=9168 bytes instead of mixing IPv4-derived payload bounds into IPv6 probes. (LAN-172)
+
+### Maintenance
+- **Rate-limit integration coverage now asserts rejection** — the second concurrent client in `test_rate_limit` must fail promptly, and the long-running first client is aborted so the test remains fast. (LAN-172)
+- **`--no-default-features` no longer warns on the mDNS fallback stub** — the discovery fallback `register_server` stub is explicitly allowed as dead code when discovery support is compiled out. (LAN-172)
+- **Dependency and workflow action updates** — `actions/checkout` v6→v7, `actions/cache` v5→v6, plus Rust lockfile updates for ratatui 0.30.2, mdns-sd 0.20.1, anyhow 1.0.103, uuid 1.23.4, quinn 0.11.11, rustls 0.23.41, and their transitives. (#109, #111, #112)
+- **Local review marker is ignored by git** — `.last_review_sha` is now listed in `.gitignore`.
 
 ## [0.9.20] - 2026-06-23
 

@@ -119,6 +119,8 @@
 - [ ] **QUIC certificate verification** (`--quic-verify`) - optional server cert verification for enterprise use
 - [ ] **Data-plane authentication** - per-test tokens/cookies to prevent port hijacking on untrusted networks
 - [ ] **Rate limiting on data connections** - apply per-IP limits to data connections (currently control-only)
+- [x] **Preset-scoped client allowlists** - `xfr serve --preset` now enforces `ServerPreset.allowed_clients` as an additional AND predicate on top of the regular ACL, at both TCP and QUIC accept time before auth/handshake/test allocation
+- [x] **PSK file hygiene and inline-key warnings** - `--psk-file` rejects Unix files with group/other permissions, constant-time equality no longer leaks length or accepts trailing-zero variants, and inline `--psk`/`XFR_PSK` paths warn users toward `--psk-file`
 - [ ] **HMAC-signed UDP feedback packets** (#70 follow-up) — the `udp_feedback_v1` packet has no auth. An on-path or spoofing attacker who can land a 36-byte packet on the client's connected upload socket can affect the live UDP-loss reading across all output paths (TUI, plain text, JSON-stream, CSV — feedback updates feed the cumulative cache that all of these consume after v0.9.14). Stream_id is not validated against the receive task's slot index (`receive_udp_feedback_only` writes to `aggregator[stream_index]`, ignoring `pkt.stream_id`), so the attacker doesn't need to guess it; landing on the connected socket's tuple is enough. The producer-side filter rejects only stale lower-denominator packets — it does NOT prevent an attacker from inflating `received` (or both `received` and `lost`) to dilute or distort the live loss percentage. The asymmetric "can only push higher" framing was wrong. Defer until someone's threat model needs it
 - [x] **Slow-loris protection** - accept loop spawns per-connection tasks with 5s initial read timeout
 - [x] **DataHello flood protection** - validate test_id exists before processing data connections
@@ -143,7 +145,7 @@
 - [ ] **Per-stream direction splits + download-direction loss/jitter in bidir** (out-of-scope notes from issue #91) — per-stream rows in bidir show the server's combined view, and bidir has one `udp_stats` field for two directions. Both need wire-format additions; batch them with the next protocol-touching feature
 
 ### Code Quality
-- [ ] **Test lifecycle guard** - wrap active_tests entries in a `Drop` guard so cleanup runs regardless of handler panic/error; covers orphaned state on control disconnect, semaphore permit leak, and QUIC handler cleanup. Consider DashMap to reduce lock contention at higher concurrency
+- [ ] **Panic-safe test lifecycle guard** - normal cancel/error/disconnect returns now clean up `active_tests`, cancel data handlers, update the Prometheus active gauge, and clear server-TUI rows. Remaining work is a true Drop/panic guard if handler panics need the same guarantee. Consider DashMap to reduce lock contention at higher concurrency
 - [ ] **Decouple stats sampling from TCP control writes** (#70 follow-up) — server's interval loop currently couples `stats.record_intervals()` to `writer.write_all()`. v0.9.14 mitigates this with `MissedTickBehavior::Skip` (stops bunched-stale output) and `udp_feedback_v1` (sidesteps TCP control for live UDP loss), so further decoupling is no longer urgent. A bounded "latest-only" channel between sampler and writer would still be the durable correctness fix and would generalize to any future stats whose live visibility today rides the same write path. Packet-capture evidence from the v0.9.18 cycle: under the skew test's FIFO-bloat profile the server emits intervals at ~2 s cadence because the write blocks and Skip eats the missed ticks — the coupling is directly observable on the wire
 - [x] **Fix PSK unwrap panics** - serve.rs PSK `.unwrap()` replaced with `.ok_or_else()` error propagation
 - [x] **UDP encode bounds check** - `UdpPacketHeader::encode()` now validates buffer length before indexing
@@ -152,7 +154,7 @@
 - [ ] **Refactor run_test()** - serve.rs (352 lines), run_quic_test (269 lines), client equivalents similarly oversized; split into protocol-specific helpers
 - [ ] **Refactor main.rs** - 340-line main() mixing CLI parsing, config building, PSK handling, dispatch; split into modules
 - [ ] **Deduplicate TUI event loop** - main.rs has ~90 lines copy-pasted between active test loop and result wait loop
-- [ ] **Clean up dead code** - remove unused ProgressBar.style(), complete InstallMethod::update_command
+- [ ] **Clean up remaining dead code** - `TuiLoopResult` is gone; remaining known items include unused ProgressBar.style() and completing InstallMethod::update_command
 - [x] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
 - [ ] **Audit unwrap()/expect() calls** - reduce calls in production code, especially auth.rs HMAC init and serve.rs PSK handling
 - [ ] **Audit swallowed channel sends** - ~15 `let _ =` sites on `try_send`/`send` in serve.rs (TUI event channel, cancel/shutdown signals). Most are benign watch-channel semantics, but the cancel-path ones could mask a test that didn't actually stop; classify each and log the ones that matter
@@ -165,7 +167,7 @@
 - [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
 - [ ] **Fuzz testing** - fuzz control protocol JSON parsing for robustness
 - [ ] **Property-based testing** - packet sequence tracking, rate limiter invariants
-- [ ] **Rate limiting and ACL tests** - allow/deny precedence, IPv4-mapped IPv6
+- [ ] **Expand rate limiting and ACL tests** - explicit rate-limit rejection and preset `allowed_clients` coverage now exist; remaining gaps are allow/deny precedence and IPv4-mapped IPv6 combinations
 - [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 - [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
@@ -231,22 +233,22 @@ Client behind strict firewall → which protocol?
    └─ Strict ingress+egress (both sides pinned)?
       └─ --cport handles the client source side.
          Server control port is configurable via -p.
-         Server data ports are still ephemeral (random).
-         → Use QUIC as workaround (single port, multiplexed).
-         → In progress: UDP single-port mode (issue #63) puts all
-           UDP streams on the server port via connected sockets.
+         Modern peers use `single_port_udp_v1` by default, so all UDP
+         streams target the server port via connected same-port sockets.
+         Legacy peers or kernels that fail the startup self-test fall back
+         to the old per-stream server data ports.
 ```
 
 **TCP `--cport` scope:** only TCP data-stream source ports are pinned. The control connection still uses an ephemeral source port, and xfr fails fast if that ephemeral control port overlaps the requested data-port range.
 
-**Future work:** UDP single-port mode (multiplex all streams through one socket) would be the full solution for environments where even sequential ports aren't acceptable. This is a larger protocol change tracked separately.
+**Remaining legacy fallback work:** a configurable server UDP data-port range still helps older peers or platforms where same-port connected UDP fails its runtime self-test.
 
 ### Medium Effort (moderate effort, high impact)
 - [x] **Pause/resume** (`p` key) - real traffic pause via `Pause`/`Resume` protocol messages and a second `watch` channel to data loops (v0.7.0, issue #19)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring. Could extend to `xfr monitor` with local time-series storage (SQLite/JSON) and percentile tracking (p50/p95/p99)
 - [ ] **Responsiveness / bufferbloat scoring** (`xfr responsiveness`) - saturate the link (upload + download) while measuring latency every 200ms, report RPM (Roundtrips Per Minute) score and bufferbloat letter grade (A-F). Follows IETF `draft-ietf-ippm-responsiveness` methodology. No single-binary CLI tool does both throughput AND responsiveness scoring — Crusader, Flent, and Apple's `networkQuality` each require separate tools or are platform-specific. Highest differentiation opportunity
 - [ ] **Server UDP port range** (`--data-port-range`) - configurable ephemeral port range for server-side UDP data sockets (requested in issue #38 for strict firewall environments on Windows)
-- [ ] **UDP single-port mode** (issue #63) - **design settled, implementation in progress** (see the design comment on the issue): connected per-stream sockets bound to 5201 with `SO_REUSEPORT` (kernel routes established 4-tuples to them, verified on Linux + FreeBSD/XNU source), hello/ack handshake with per-test token, first-byte QUIC demux on the shared socket (requires `EndpointConfig::grease_quic_bit(false)` server-side), `single_port_udp_v1` capability gated by a startup self-test. Legacy per-stream ports remain the fallback
+- [x] **UDP single-port mode** (issue #63) - shipped as `single_port_udp_v1`: modern peers route upload, download, bidir, and MTU-probe UDP streams to the server port via token-bearing hellos and connected same-port sockets. QUIC owns the shared UDP socket when enabled; xfr hellos are demuxed before QUIC, fixed-bit greasing is disabled server-side for sound classification, and a startup self-test gates capability advertisement. Legacy per-stream ports remain the fallback
 - [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
 - [x] **UDP packet-size / MTU probe** (issue #64) - shipped in v0.9.17 as `--probe-mtu`: ladder + binary search with DF set, per-direction attribution via ack + same-size echo (`mtu_probe_v1` capability), netns CI coverage. Follow-up if users hit it: server-driven probe schedule so a reverse path *wider* than the forward one is observable
 
