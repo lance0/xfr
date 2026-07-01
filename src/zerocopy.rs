@@ -93,28 +93,20 @@ impl ZerocopyPayload {
         self.len == 0
     }
 
-    /// One non-blocking `sendfile(2)` starting from `offset`. Returns the
-    /// number of bytes queued by this call (not the new absolute offset).
-    /// `offset` is updated by the kernel to the next byte position.
+    /// One non-blocking `sendfile(2)` call starting from `offset`.
+    /// Returns the number of bytes queued by this call.
     #[cfg(target_os = "linux")]
     fn sendfile_once(
         &self,
         socket_fd: std::os::unix::io::RawFd,
-        offset: &mut libc::off_t,
+        offset: usize,
     ) -> io::Result<usize> {
-        let start = *offset as usize;
-        let remaining = self.len.saturating_sub(start);
+        let remaining = self.len.saturating_sub(offset);
         if remaining == 0 {
             return Ok(0);
         }
-        let n = unsafe {
-            libc::sendfile(
-                socket_fd,
-                self.file.as_raw_fd(),
-                offset,
-                remaining,
-            )
-        };
+        let mut off = offset as libc::off_t;
+        let n = unsafe { libc::sendfile(socket_fd, self.file.as_raw_fd(), &mut off, remaining) };
         if n < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -122,42 +114,25 @@ impl ZerocopyPayload {
         }
     }
 
-    /// Send one whole payload chunk on `stream` via sendfile, awaiting socket
-    /// writability and resuming from partial sends so the caller always
-    /// transmits the full payload. Each call resets to offset 0, so repeated
-    /// calls send the same bytes — matching the regular path's reused buffer.
+    /// Send one payload slice starting from `offset` on `stream` via sendfile,
+    /// awaiting socket writability. Returns the short count queued by the
+    /// kernel; the caller owns the offset and resumes from `offset + n`,
+    /// mirroring the regular `try_send` path.
     #[cfg(target_os = "linux")]
-    pub async fn send_chunk(&self, stream: &TcpStream) -> io::Result<usize> {
+    pub async fn send_chunk(&self, stream: &TcpStream, offset: usize) -> io::Result<usize> {
         use tokio::io::Interest;
 
         let socket_fd = stream.as_raw_fd();
-        let mut offset: libc::off_t = 0;
-        loop {
-            stream.writable().await?;
-            match stream.try_io(Interest::WRITABLE, || {
-                let n = self.sendfile_once(socket_fd, &mut offset)?;
-                if n == 0 && (offset as usize) < self.len {
-                    // sendfile returned zero bytes while payload remains;
-                    // treat it as spurious readiness rather than spinning.
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "sendfile returned zero bytes with payload remaining",
-                    ));
-                }
-                Ok(n)
-            }) {
-                Ok(_) if offset as usize >= self.len => return Ok(offset as usize),
-                Ok(_) => continue,
-                // Spurious readiness or send buffer refilled between
-                // writable() and sendfile — wait again.
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Err(e),
-            }
+        stream.writable().await?;
+        match stream.try_io(Interest::WRITABLE, || self.sendfile_once(socket_fd, offset)) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(e),
         }
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub async fn send_chunk(&self, _stream: &TcpStream) -> io::Result<usize> {
+    pub async fn send_chunk(&self, _stream: &TcpStream, _offset: usize) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "zero-copy sends require Linux sendfile(2)",
@@ -198,8 +173,14 @@ mod tests {
 
         // Send the chunk twice to verify the offset resets per call.
         let mut queued = 0usize;
+        let mut chunk_offset = 0usize;
         while queued < pattern.len() * 2 {
-            queued += payload.send_chunk(&sender).await.unwrap();
+            let n = payload.send_chunk(&sender, chunk_offset).await.unwrap();
+            chunk_offset += n;
+            queued += n;
+            if chunk_offset >= pattern.len() {
+                chunk_offset = 0;
+            }
         }
         drop(sender);
 
@@ -227,8 +208,14 @@ mod tests {
         const TARGET: usize = 8 * 1024 * 1024; // well past any send buffer
         let send_task = tokio::spawn(async move {
             let mut queued = 0usize;
+            let mut chunk_offset = 0usize;
             while queued < TARGET {
-                queued += payload.send_chunk(&sender).await.unwrap();
+                let n = payload.send_chunk(&sender, chunk_offset).await.unwrap();
+                chunk_offset += n;
+                queued += n;
+                if chunk_offset >= pattern.len() {
+                    chunk_offset = 0;
+                }
             }
             queued
         });

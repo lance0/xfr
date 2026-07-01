@@ -150,10 +150,7 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
         );
         if ret != 0 {
             let err = std::io::Error::last_os_error();
-            warn!(
-                "Failed to set SO_SNDBUF to {}: {}",
-                buffer_size, err
-            );
+            warn!("Failed to set SO_SNDBUF to {}: {}", buffer_size, err);
             return Err(err);
         }
 
@@ -166,10 +163,7 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
         );
         if ret != 0 {
             let err = std::io::Error::last_os_error();
-            warn!(
-                "Failed to set SO_RCVBUF to {}: {}",
-                buffer_size, err
-            );
+            warn!("Failed to set SO_RCVBUF to {}: {}", buffer_size, err);
             return Err(err);
         }
     }
@@ -349,10 +343,11 @@ pub fn configure_control_stream(stream: &TcpStream) -> std::io::Result<()> {
 async fn write_chunk(
     stream: &TcpStream,
     buffer: &[u8],
+    offset: usize,
     zerocopy: Option<&ZerocopyPayload>,
 ) -> io::Result<usize> {
     if let Some(payload) = zerocopy {
-        return payload.send_chunk(stream).await;
+        return payload.send_chunk(stream, offset).await;
     }
     stream.writable().await?;
     match stream.try_write(buffer) {
@@ -501,7 +496,7 @@ pub async fn send_data(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = write_chunk(&stream, &buffer[chunk_offset..], zerocopy.as_ref()) => r,
+            r = write_chunk(&stream, &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
@@ -812,7 +807,7 @@ pub async fn send_data_half(
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
                 break;
             }
-            r = write_chunk(write_half.as_ref(), &buffer[chunk_offset..], zerocopy.as_ref()) => r,
+            r = write_chunk(write_half.as_ref(), &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
@@ -1423,7 +1418,7 @@ mod tests {
         for _ in 0..COUNT {
             let mut chunk_offset = 0;
             while chunk_offset < BUF {
-                let n = write_chunk(&sender, &pattern[chunk_offset..], None)
+                let n = write_chunk(&sender, &pattern[chunk_offset..], chunk_offset, None)
                     .await
                     .expect("write_chunk should not error");
                 chunk_offset += n;
@@ -1432,7 +1427,9 @@ mod tests {
             sent_total += BUF;
         }
 
-        tokio::io::AsyncWriteExt::shutdown(&mut sender).await.unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut sender)
+            .await
+            .unwrap();
 
         let received = recv_task.await.expect("receiver task panicked");
         assert_eq!(
@@ -1446,7 +1443,8 @@ mod tests {
         // Verify each chunk is exactly the pattern, with no prefix replay.
         for (i, chunk) in received.chunks_exact(BUF).enumerate() {
             assert_eq!(
-                chunk, pattern.as_slice(),
+                chunk,
+                pattern.as_slice(),
                 "chunk {} does not match pattern; short writes were not resumed correctly",
                 i
             );
