@@ -523,6 +523,11 @@ xfr serve --psk "secretkey"
 xfr <host> -Q --psk "secretkey"
 ```
 
+> **Security note:** `--psk` and the `XFR_PSK` environment variable expose the
+> key through process metadata such as `ps`, shell history, and
+> `/proc/<pid>/environ`. For production deployments, store the key in a file
+> readable only by the owner and use `--psk-file` instead.
+
 ### Network Considerations
 
 - **Single-port TCP**: TCP uses single-port mode by default -- control and data connections share port 5201. Data connections are validated against the control connection's IP address, preventing unauthorized access.

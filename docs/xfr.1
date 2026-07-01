@@ -90,7 +90,7 @@ Log file path (e.g., ~/.config/xfr/xfr.log)
 Log level: error, warn, info, debug, trace
 .TP
 .BI \-\-psk " KEY"
-Pre-shared key for server authentication. Environment: XFR_PSK
+Pre-shared key for server authentication. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
 .TP
 .BI \-\-psk\-file " FILE"
 Read PSK from file
@@ -157,10 +157,13 @@ Log file path
 Log level: error, warn, info, debug, trace
 .TP
 .BI \-\-psk " KEY"
-Pre-shared key for authentication. Environment: XFR_PSK
+Pre-shared key for authentication. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
 .TP
 .BI \-\-psk\-file " FILE"
 Read PSK from file
+.TP
+.BI \-\-preset " NAME"
+Use a named server preset from the config file. Preset \fBallowed_clients\fR entries, if present, are enforced as an additional allowlist together with the normal ACL.
 .TP
 .BI \-\-rate\-limit " N"
 Max concurrent tests per IP

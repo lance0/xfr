@@ -594,6 +594,36 @@ async fn start_secure_server(
     })
 }
 
+async fn start_preset_server(
+    port: u16,
+    preset_allowed_clients: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
+    let config = ServerConfig {
+        port,
+        one_off: false,
+        max_duration: None,
+        #[cfg(feature = "prometheus")]
+        prometheus_port: None,
+        auth: AuthConfig { psk: None },
+        acl: AclConfig {
+            allow: vec![],
+            deny: vec![],
+            file: None,
+        },
+        rate_limit: RateLimitConfig {
+            max_per_ip: None,
+            window_secs: 60,
+        },
+        preset_allowed_clients: Some(preset_allowed_clients),
+        ..Default::default()
+    };
+
+    tokio::spawn(async move {
+        let server = Server::new(config);
+        let _ = server.run().await;
+    })
+}
+
 #[tokio::test]
 async fn test_psk_auth_success() {
     let port = get_test_port();
@@ -1100,6 +1130,96 @@ async fn test_acl_deny() {
     assert!(result.is_ok(), "Test should complete (not timeout)");
     let result = result.unwrap();
     assert!(result.is_err(), "Connection should be denied by ACL");
+}
+
+// ============================================================================
+// Server preset allowed_clients Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_preset_allowed_clients_allows_matching_ip() {
+    let port = get_test_port();
+    // Allow only localhost through the preset allowlist
+    let _server = start_preset_server(port, vec!["127.0.0.1/32".to_string()]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "Localhost should be allowed by preset: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_preset_allowed_clients_denies_non_matching_ip() {
+    let port = get_test_port();
+    // Preset allowlist excludes localhost
+    let _server = start_preset_server(port, vec!["192.168.1.0/24".to_string()]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(5), client.run(None)).await;
+
+    // Connection should be dropped by preset allowlist without hanging
+    assert!(result.is_ok(), "Test should complete (not timeout)");
+    let result = result.unwrap();
+    assert!(
+        result.is_err(),
+        "Localhost should be denied by preset allowlist"
+    );
 }
 
 // ============================================================================

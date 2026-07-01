@@ -35,20 +35,46 @@ pub fn verify_response(nonce: &str, psk: &str, response: &str) -> bool {
     constant_time_eq(expected.as_bytes(), response.as_bytes())
 }
 
-/// Constant-time comparison to prevent timing attacks
+/// Constant-time comparison to prevent timing attacks.
+///
+/// Padding to the length of the longer input avoids the early-return that
+/// would otherwise leak whether the two slices have different lengths. The
+/// length difference is folded into the accumulator so that trailing zero
+/// bytes do not accidentally produce equality.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let len = a.len().max(b.len());
     let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for i in 0..len {
+        let x = a.get(i).unwrap_or(&0);
+        let y = b.get(i).unwrap_or(&0);
         result |= x ^ y;
     }
+    // Fold any length mismatch into the result so `b"x"` and `b"x\0"` are
+    // not reported as equal.
+    result |= (a.len() != b.len()) as u8;
     result == 0
 }
 
-/// Read PSK from file, trimming whitespace
+/// Read PSK from file, trimming whitespace.
+///
+/// On Unix, rejects files that are readable or writable by anyone other than
+/// the owner (mode bits for group/other are set), because such permissions
+/// would let other users on the host read the pre-shared key.
 pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            anyhow::bail!(
+                "PSK file {:?} has overly broad permissions ({:03o}): group/other access is not allowed",
+                path,
+                mode
+            );
+        }
+    }
+
     let content = std::fs::read_to_string(path)?;
     let psk = content.trim().to_string();
     validate_psk(&psk)?;
@@ -133,6 +159,49 @@ mod tests {
         assert!(constant_time_eq(b"hello", b"hello"));
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
+
+        // Same value padded with a zero byte should compare unequal without
+        // short-circuiting on length.
+        let left = b"secret";
+        let mut right = b"secret".to_vec();
+        right.push(0);
+        assert!(!constant_time_eq(left, &right));
+
+        // Comparing an empty slice to a non-empty slice should return false.
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_psk_file_rejects_group_or_other_readable() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leaky.psk");
+        fs::write(&path, "super-secret-key").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = read_psk_file(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overly broad permissions"),
+            "error should flag permissions: {}",
+            msg
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_psk_file_accepts_owner_only_permissions() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secure.psk");
+        fs::write(&path, "owner-only-key\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let psk = read_psk_file(&path).unwrap();
+        assert_eq!(psk, "owner-only-key");
     }
 
     #[test]

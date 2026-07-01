@@ -16,7 +16,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
@@ -254,7 +254,11 @@ struct Cli {
     #[arg(long, env = "XFR_LOG_LEVEL")]
     log_level: Option<String>,
 
-    /// Pre-shared key for server authentication
+    /// Pre-shared key for authentication.
+    ///
+    /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
+    /// variable are visible to other users through process metadata such as
+    /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
     #[arg(long, env = "XFR_PSK")]
     psk: Option<String>,
 
@@ -357,13 +361,24 @@ enum Commands {
         #[arg(long, env = "XFR_LOG_LEVEL")]
         log_level: Option<String>,
 
-        /// Pre-shared key for authentication
+        /// Pre-shared key for authentication.
+        ///
+        /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
+        /// variable are visible to other users through process metadata such as
+        /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
         #[arg(long, env = "XFR_PSK")]
         psk: Option<String>,
 
         /// Read PSK from file
         #[arg(long)]
         psk_file: Option<PathBuf>,
+
+        /// Use a named server preset from the config file.
+        ///
+        /// Preset `allowed_clients` (if any) become an additional allowlist
+        /// enforced with the normal ACL. Unknown presets are rejected.
+        #[arg(long)]
+        preset: Option<String>,
 
         /// Max concurrent tests per IP (rate limiting)
         #[arg(long)]
@@ -774,6 +789,7 @@ async fn main() -> Result<()> {
             log_level: _serve_log_level,
             psk,
             psk_file,
+            preset,
             rate_limit,
             rate_limit_window,
             allow,
@@ -802,13 +818,35 @@ async fn main() -> Result<()> {
             let effective_psk = if let Some(psk_path) = psk_file {
                 Some(xfr::auth::read_psk_file(&psk_path)?)
             } else {
-                psk.or_else(|| file_config.server.psk.clone())
+                psk.as_ref()
+                    .cloned()
+                    .or_else(|| file_config.server.psk.clone())
             };
 
             // Validate PSK if provided
             if let Some(ref psk_value) = effective_psk {
                 xfr::auth::validate_psk(psk_value)?;
             }
+
+            // PSK supplied on the command line or through the environment leaks
+            // through process metadata; warn so users can migrate to --psk-file.
+            if psk.is_some() {
+                warn!(
+                    "Using --psk or XFR_PSK exposes the pre-shared key in process metadata (ps, /proc/<pid>/environ, shell history); prefer --psk-file"
+                );
+            }
+
+            // Resolve server preset
+            let preset = if let Some(name) = preset {
+                Some(
+                    file_config
+                        .get_preset(&name)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown server preset: {name}"))?
+                        .clone(),
+                )
+            } else {
+                None
+            };
 
             // Build security configs
             let auth_config = xfr::auth::AuthConfig { psk: effective_psk };
@@ -883,6 +921,7 @@ async fn main() -> Result<()> {
                 tui_tx: None,
                 enable_quic: true,
                 no_mdns: server_no_mdns,
+                preset_allowed_clients: preset.and_then(|p| p.allowed_clients),
                 ..Default::default()
             };
 
@@ -1054,6 +1093,14 @@ async fn main() -> Result<()> {
             // Validate PSK if provided
             if let Some(ref psk_value) = client_psk {
                 xfr::auth::validate_psk(psk_value)?;
+            }
+
+            // PSK supplied on the command line or through the environment leaks
+            // through process metadata; warn so users can migrate to --psk-file.
+            if cli.psk.is_some() {
+                warn!(
+                    "Using --psk or XFR_PSK exposes the pre-shared key in process metadata (ps, /proc/<pid>/environ, shell history); prefer --psk-file"
+                );
             }
 
             // Determine address family

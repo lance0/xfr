@@ -461,6 +461,10 @@ xfr <host> --psk mysecretkey
 
 Authentication uses HMAC-SHA256 challenge-response.
 
+> **Security note:** Values supplied via `--psk` or the `XFR_PSK` environment
+> variable are visible through process metadata (`ps`, `/proc/<pid>/environ`,
+> shell history). Prefer `--psk-file` with a file readable only by the owner.
+
 ### Duration Limits
 
 Limit maximum test duration server-side:
