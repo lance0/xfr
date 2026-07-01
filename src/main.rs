@@ -1334,20 +1334,23 @@ async fn run_client_plain(
             let timestamp = timestamp_format.format(test_start, now, test_start_system);
 
             let interval_output = if json_stream {
-                format!(
-                    "{}\n",
-                    xfr::output::json::output_interval_json(
-                        &timestamp,
-                        elapsed_secs,
-                        progress.throughput_mbps,
-                        progress.total_bytes,
-                        retransmits,
-                        jitter_ms,
-                        lost,
-                        rtt_us,
-                        cwnd,
-                    )
-                )
+                match xfr::output::json::output_interval_json(
+                    &timestamp,
+                    elapsed_secs,
+                    progress.throughput_mbps,
+                    progress.total_bytes,
+                    retransmits,
+                    jitter_ms,
+                    lost,
+                    rtt_us,
+                    cwnd,
+                ) {
+                    Ok(line) => format!("{}\n", line),
+                    Err(e) => {
+                        tracing::error!("Failed to serialize interval to JSON: {}", e);
+                        continue;
+                    }
+                }
             } else if csv {
                 xfr::output::csv::output_interval_csv(
                     &timestamp,
@@ -1430,7 +1433,7 @@ async fn run_client_plain(
         eprintln!("Warning: partial results (server did not respond to cancel)");
     }
     let output_str = if opts.json || opts.json_stream {
-        output_json(&result)
+        output_json(&result)?
     } else if opts.csv {
         output_csv(&result)
     } else {
@@ -1504,7 +1507,7 @@ async fn run_client_tui(
             if let Some(ref test_result) = test_result {
                 // Print JSON if requested via 'j' key
                 if print_json {
-                    println!("{}", output_json(test_result));
+                    println!("{}", output_json(test_result)?);
                 } else {
                     println!("{}", output_plain(test_result, config.mptcp));
                 }

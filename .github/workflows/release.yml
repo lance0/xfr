@@ -198,7 +198,6 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/SHA256SUMS
-            artifacts/completions/completions.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}

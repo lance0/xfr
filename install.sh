@@ -39,7 +39,11 @@ case "$OS" in
     case "$ARCH" in
       arm64)   TARGET="aarch64-apple-darwin" ;;
       aarch64) TARGET="aarch64-apple-darwin" ;;
-      x86_64)  TARGET="x86_64-apple-darwin" ;;
+      x86_64)
+        echo "Intel macOS (x86_64) release binaries are no longer provided."
+        echo "Install from source with: cargo install xfr"
+        exit 1
+        ;;
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
