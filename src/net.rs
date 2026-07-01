@@ -562,7 +562,17 @@ pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<
         host
     };
 
-    let addr_str = format!("{}:{}", host_for_lookup, port);
+    // Wrap literal IPv6 addresses in brackets so `to_socket_addrs` parses
+    // "[::1]:5201" correctly instead of treating the colons as port separators.
+    let is_ipv6_literal = host_for_lookup
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_ipv6())
+        .unwrap_or(false);
+    let addr_str = if is_ipv6_literal {
+        format!("[{}]:{}", host_for_lookup, port)
+    } else {
+        format!("{}:{}", host_for_lookup, port)
+    };
     let addrs: Vec<SocketAddr> = addr_str.to_socket_addrs()?.collect();
 
     if addrs.is_empty() {
@@ -1133,6 +1143,26 @@ mod tests {
         let bind: SocketAddr = "10.0.0.1:5300".parse().unwrap();
         let remote: SocketAddr = "[::1]:5201".parse().unwrap();
         assert_eq!(match_bind_family(bind, remote), bind);
+    }
+
+    #[test]
+    fn test_resolve_ipv6_literal_uses_brackets() {
+        let addrs = resolve_host("::1", 5201, AddressFamily::V6Only).unwrap();
+        assert!(!addrs.is_empty(), "::1 should resolve");
+        assert!(
+            addrs.iter().all(|a| a.is_ipv6() && a.port() == 5201),
+            "literal IPv6 address must be parsed with [addr]:port syntax"
+        );
+    }
+
+    #[test]
+    fn test_resolve_ipv4_literal_keeps_standard_formatting() {
+        let addrs = resolve_host("127.0.0.1", 5201, AddressFamily::V4Only).unwrap();
+        assert!(!addrs.is_empty(), "127.0.0.1 should resolve");
+        assert!(
+            addrs.iter().all(|a| a.is_ipv4() && a.port() == 5201),
+            "literal IPv4 address must be parsed as addr:port"
+        );
     }
 
     #[tokio::test]

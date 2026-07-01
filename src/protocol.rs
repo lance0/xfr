@@ -592,7 +592,29 @@ impl ControlMessage {
     }
 
     pub fn deserialize(s: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(s)?)
+        let msg: Self = serde_json::from_str(s)?;
+        msg.validate()?;
+        Ok(msg)
+    }
+}
+
+impl ControlMessage {
+    /// Post-deserialization validation for wire messages.
+    fn validate(&self) -> anyhow::Result<()> {
+        if let Self::TestAck {
+            data_ports,
+            udp_token,
+            ..
+        } = self
+        {
+            // Single-port UDP mode and legacy multi-port UDP are
+            // mutually exclusive: a token is only sent when no per-stream
+            // ports are allocated.
+            if udp_token.is_some() && !data_ports.is_empty() {
+                anyhow::bail!("TestAck cannot contain both udp_token and data_ports");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -877,11 +899,41 @@ mod tests {
     }
 
     #[test]
-    fn test_supported_capabilities_without_filters_only_named_entry() {
+    fn test_supported_capabilities_single_port_udp() {
         let full = supported_capabilities();
         assert!(full.iter().any(|c| c == SINGLE_PORT_UDP_CAPABILITY));
         let filtered = supported_capabilities_without(SINGLE_PORT_UDP_CAPABILITY);
         assert!(!filtered.iter().any(|c| c == SINGLE_PORT_UDP_CAPABILITY));
         assert_eq!(filtered.len(), full.len() - 1);
+    }
+
+    #[test]
+    fn test_test_ack_rejects_udp_token_with_data_ports() {
+        let bad = r#"{"type":"test_ack","id":"x","data_ports":[5202],"udp_token":"00112233445566778899aabbccddeeff"}"#;
+        let result = ControlMessage::deserialize(bad);
+        assert!(
+            result.is_err(),
+            "TestAck with both udp_token and data_ports should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("udp_token") && err.contains("data_ports"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_test_ack_accepts_data_ports_without_udp_token() {
+        let good = r#"{"type":"test_ack","id":"x","data_ports":[5202]}"#;
+        let result = ControlMessage::deserialize(good);
+        assert!(result.is_ok(), "legacy multi-port TestAck should parse");
+    }
+
+    #[test]
+    fn test_test_ack_accepts_udp_token_with_empty_data_ports() {
+        let good = r#"{"type":"test_ack","id":"x","data_ports":[],"udp_token":"00112233445566778899aabbccddeeff"}"#;
+        let result = ControlMessage::deserialize(good);
+        assert!(result.is_ok(), "single-port TestAck should parse");
     }
 }

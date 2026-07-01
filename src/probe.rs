@@ -97,8 +97,9 @@ impl ProbePacket {
     }
 
     /// Decode a probe-lane packet. Returns `None` for wrong magic,
-    /// version, unknown kind, or a padded kind whose datagram is
-    /// shorter than its header. Padding content is ignored.
+    /// version, unknown kind, or a malformed padded kind (`Probe`/`Echo`)
+    /// whose declared size is smaller than the header or larger than the
+    /// received datagram. Padding content is ignored.
     pub fn decode(buffer: &[u8]) -> Option<Self> {
         if buffer.len() < PROBE_HEADER_SIZE || buffer[0..4] != PROBE_MAGIC {
             return None;
@@ -112,6 +113,16 @@ impl ProbePacket {
         }
         let seq = u32::from_be_bytes(buffer[8..12].try_into().ok()?);
         let declared_size = u16::from_be_bytes(buffer[12..14].try_into().ok()?);
+
+        // Padded kinds must declare a size that fits the header and the
+        // received datagram; otherwise the packet is malformed.
+        if matches!(kind, PROBE_KIND_PROBE | PROBE_KIND_ECHO) {
+            let declared = usize::from(declared_size);
+            if declared < PROBE_HEADER_SIZE || declared > buffer.len() {
+                return None;
+            }
+        }
+
         Some(Self {
             kind,
             seq,
@@ -357,14 +368,16 @@ pub async fn run_probe(
             }
 
             let (got_ack, got_echo) = collect_replies(socket, &mut recv_buf, seq, size).await;
-            if got_ack {
+            // An echo receipt proves the probe reached the server even when the
+            // ack was lost, so count it as a forward success too.
+            if got_ack || got_echo {
                 forward_ok += 1;
             }
             if got_echo {
                 reverse_ok += 1;
             }
-            // Both directions proven at this size; no need to keep going.
-            if got_ack && got_echo {
+            // Receiving the echo proves both directions; no need to keep going.
+            if got_echo {
                 break;
             }
         }
@@ -408,10 +421,10 @@ pub async fn run_probe(
     })
 }
 
-/// Wait up to [`PROBE_REPLY_TIMEOUT`] for the ack/echo pair belonging to
-/// `seq`, returning early once both arrive. Echo validity requires the
-/// datagram to actually be `size` bytes on the wire — the declared-size
-/// field alone would also match a truncated delivery.
+/// Wait up to [`PROBE_REPLY_TIMEOUT`] for replies belonging to `seq`,
+/// returning early once an echo arrives. Echo validity requires the datagram
+/// to actually be `size` bytes on the wire — the declared-size field alone
+/// would also match a truncated delivery.
 async fn collect_replies(
     socket: &tokio::net::UdpSocket,
     recv_buf: &mut [u8],
@@ -421,7 +434,7 @@ async fn collect_replies(
     let deadline = tokio::time::Instant::now() + PROBE_REPLY_TIMEOUT;
     let mut got_ack = false;
     let mut got_echo = false;
-    while !(got_ack && got_echo) {
+    while !got_echo {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             break;
@@ -515,6 +528,91 @@ mod tests {
             declared_size: (PROBE_HEADER_SIZE - 1) as u16,
         };
         assert!(p.encode(&mut buf).is_none());
+    }
+
+    #[test]
+    fn probe_packet_decode_rejects_malformed_declared_size() {
+        // Declared size below the header size is impossible for padded kinds.
+        let mut short = vec![0u8; 64];
+        let p = ProbePacket {
+            kind: PROBE_KIND_PROBE,
+            seq: 1,
+            declared_size: PROBE_HEADER_SIZE as u16,
+        };
+        let n = p.encode(&mut short).unwrap();
+        // Mutate the declared_size to be below PROBE_HEADER_SIZE.
+        short[12..14].copy_from_slice(&((PROBE_HEADER_SIZE - 1) as u16).to_be_bytes());
+        assert!(ProbePacket::decode(&short[..n]).is_none());
+
+        // Declared size larger than the received datagram is malformed (truncated).
+        let mut long = vec![0u8; 1024];
+        let p = ProbePacket {
+            kind: PROBE_KIND_ECHO,
+            seq: 2,
+            declared_size: 1024,
+        };
+        let n = p.encode(&mut long).unwrap();
+        assert!(ProbePacket::decode(&long[..n - 1]).is_none());
+    }
+
+    #[test]
+    fn probe_packet_decode_accepts_ack_with_large_declared_size() {
+        // Acks carry the original probe size in declared_size but are not padded,
+        // so a declared size larger than the datagram is valid.
+        let mut buf = vec![0u8; PROBE_HEADER_SIZE];
+        let p = ProbePacket {
+            kind: PROBE_KIND_ACK,
+            seq: 3,
+            declared_size: 1500,
+        };
+        let n = p.encode(&mut buf).unwrap();
+        let decoded = ProbePacket::decode(&buf[..n]).expect("ack should decode");
+        assert_eq!(decoded.kind, PROBE_KIND_ACK);
+        assert_eq!(decoded.seq, 3);
+        assert_eq!(decoded.declared_size, 1500);
+    }
+
+    #[tokio::test]
+    async fn echo_only_proves_forward_path_when_ack_lost() {
+        // Fake responder that echoes every probe but never sends an Ack.
+        let responder = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let responder_addr = responder.local_addr().unwrap();
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(responder_addr).await.unwrap();
+
+        let resp_task = tokio::spawn(async move {
+            let mut buf = vec![0u8; MAX_PROBE_PAYLOAD];
+            loop {
+                let (n, from) = match responder.recv_from(&mut buf).await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let Some(pkt) = ProbePacket::decode(&buf[..n]) else {
+                    continue;
+                };
+                if pkt.kind != PROBE_KIND_PROBE {
+                    continue;
+                }
+                let echo = ProbePacket {
+                    kind: PROBE_KIND_ECHO,
+                    seq: pkt.seq,
+                    declared_size: pkt.declared_size,
+                };
+                let mut out = vec![0u8; usize::from(pkt.declared_size)];
+                let len = echo.encode(&mut out).expect("echo encode fits");
+                let _ = responder.send_to(&out[..len], from).await;
+            }
+        });
+
+        let report = run_probe(&client, false).await.unwrap();
+        resp_task.abort();
+        let _ = resp_task.await;
+
+        assert!(
+            report.forward_max_payload.is_some(),
+            "echo must prove forward path even without ack"
+        );
+        assert_eq!(report.forward_max_payload, report.reverse_max_payload);
     }
 
     #[test]
