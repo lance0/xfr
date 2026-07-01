@@ -465,6 +465,11 @@ export XFR_PUSH_GATEWAY=http://pushgateway:9091  # Push gateway URL (serve only)
 export XFR_TIMESTAMP_FORMAT=iso8601  # Timestamp format (--timestamp-format)
 ```
 
+> **Security note:** `XFR_PSK` is exported to the process environment and is
+> visible to other users through `/proc/<pid>/environ` and process listings.
+> Where possible, store the key in a file with owner-only permissions and use
+> `--psk-file` instead.
+
 ## Tips for Automation
 
 1. **Always use `--no-tui`** in scripts -- prevents terminal escape codes in output

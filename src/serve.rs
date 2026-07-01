@@ -81,6 +81,9 @@ pub struct ServerConfig {
     pub max_concurrent: u32,
     /// Disable mDNS service registration
     pub no_mdns: bool,
+    /// Allowed client CIDRs from a selected server preset. The client IP must
+    /// pass both the preset allowlist (if set) and the configured ACL.
+    pub preset_allowed_clients: Option<Vec<String>>,
 }
 
 impl Default for ServerConfig {
@@ -101,7 +104,21 @@ impl Default for ServerConfig {
             enable_quic: true,
             max_concurrent: 100,
             no_mdns: false,
+            preset_allowed_clients: None,
         }
+    }
+}
+
+/// Build the optional preset ACL from configured allowed client CIDRs.
+fn build_preset_acl(allowed_clients: Option<&Vec<String>>) -> anyhow::Result<Option<Acl>> {
+    if let Some(clients) = allowed_clients {
+        if clients.is_empty() {
+            return Ok(None);
+        }
+        let acl = Acl::from_rules(clients.clone(), vec![])?;
+        Ok(Some(acl))
+    } else {
+        Ok(None)
     }
 }
 
@@ -109,6 +126,9 @@ impl Default for ServerConfig {
 struct SecurityContext {
     psk: Option<String>,
     acl: Acl,
+    /// Optional preset allowlist. Clients must satisfy the main ACL *and*
+    /// the preset ACL (if one is configured).
+    preset_acl: Option<Acl>,
     rate_limiter: Option<Arc<RateLimiter>>,
     address_family: AddressFamily,
     bind_addr: Option<IpAddr>,
@@ -534,6 +554,7 @@ impl Server {
 
         // Initialize security context
         let acl = self.config.acl.build()?;
+        let preset_acl = build_preset_acl(self.config.preset_allowed_clients.as_ref())?;
         let rate_limiter = self.config.rate_limit.build();
 
         if self.config.auth.psk.is_some() {
@@ -541,6 +562,9 @@ impl Server {
         }
         if acl.is_configured() {
             info!("ACL configured");
+        }
+        if preset_acl.is_some() {
+            info!("Preset ACL configured");
         }
         if rate_limiter.is_some() {
             info!(
@@ -552,6 +576,7 @@ impl Server {
         let security = Arc::new(SecurityContext {
             psk: self.config.auth.psk.clone(),
             acl,
+            preset_acl,
             rate_limiter: rate_limiter.clone(),
             address_family: self.config.address_family,
             bind_addr: self.config.bind_addr,
@@ -611,6 +636,20 @@ impl Server {
                     // Check ACL
                     if !quic_security.acl.is_allowed(peer_ip) {
                         warn!("QUIC connection rejected by ACL: {}", peer_addr);
+                        if let Some(tx) = &quic_security.tui_tx {
+                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                        }
+                        continue;
+                    }
+
+                    // Preset allowlist is an additional AND predicate
+                    if let Some(ref preset_acl) = quic_security.preset_acl
+                        && !preset_acl.is_allowed(peer_ip)
+                    {
+                        warn!(
+                            "QUIC connection rejected by preset allowlist ({} not in allowed_clients)",
+                            peer_addr
+                        );
                         if let Some(tx) = &quic_security.tui_tx {
                             let _ = tx.try_send(ServerEvent::ConnectionBlocked);
                         }
@@ -728,6 +767,21 @@ impl Server {
             // Check ACL (cheap, no state change)
             if !security.acl.is_allowed(peer_ip) {
                 warn!("Connection rejected by ACL: {}", peer_addr);
+                if let Some(tx) = &security.tui_tx {
+                    let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                }
+                drop(stream);
+                continue;
+            }
+
+            // Preset allowlist is an additional AND predicate
+            if let Some(ref preset_acl) = security.preset_acl
+                && !preset_acl.is_allowed(peer_ip)
+            {
+                warn!(
+                    "Connection rejected by preset allowlist ({} not in allowed_clients)",
+                    peer_addr
+                );
                 if let Some(tx) = &security.tui_tx {
                     let _ = tx.try_send(ServerEvent::ConnectionBlocked);
                 }
