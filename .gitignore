@@ -1,3 +1,4 @@
 /target
 .claude/
 .factory/
+.last_review_sha
