@@ -810,7 +810,7 @@ async fn test_rate_limit() {
         port,
         protocol: Protocol::Tcp,
         streams: 1,
-        duration: Duration::from_secs(3),
+        duration: Duration::from_secs(60),
         direction: Direction::Upload,
         bitrate: None,
         tcp_nodelay: false,
@@ -861,17 +861,18 @@ async fn test_rate_limit() {
     let client2 = Client::new(config2);
     let result2 = timeout(Duration::from_secs(5), client2.run(None)).await;
 
-    // Second connection should fail (rate limited - connection dropped)
-    // The server drops the connection before hello, so client gets connection error
-    if let Ok(inner) = result2 {
-        // Either fails or succeeds if timing allows
-        // We mainly verify we don't panic
-        let _ = inner;
-    }
+    // Second connection should be rejected (rate limited - connection dropped).
+    // The server drops the connection before hello, so the client either gets
+    // an error result or (if we waited too long) the outer timeout fires.
+    assert!(
+        matches!(result2, Ok(Err(_))),
+        "second concurrent connection should be rejected: {result2:?}"
+    );
 
-    // Wait for first client
+    // First client is still running; abort it rather than waiting 60s.
+    handle1.abort();
     let result1 = handle1.await;
-    assert!(result1.is_ok(), "First client task should complete");
+    assert!(result1.is_err(), "First client task should be aborted");
 }
 
 // ============================================================================

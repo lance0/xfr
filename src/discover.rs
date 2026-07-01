@@ -123,6 +123,10 @@ mod fallback {
         ))
     }
 
+    // Stub kept for API parity with the discovery-enabled build.
+    // Serve-mode callers are cfg-gated on the feature, so this is dead
+    // in a --no-default-features build.
+    #[allow(dead_code)]
     pub fn register_server(_port: u16) -> anyhow::Result<()> {
         Ok(())
     }

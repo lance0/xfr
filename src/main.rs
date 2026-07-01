@@ -161,8 +161,9 @@ struct Cli {
     port: u16,
 
     /// Test duration. Bare integers are seconds (`-t 10`), or use unit suffixes (`10s`, `1min`, `500ms`). Use 0 for infinite.
-    #[arg(short = 't', long, default_value = "10s", value_parser = parse_test_duration, env = "XFR_DURATION")]
-    time: Duration,
+    /// Defaults to 10s unless `--probe-mtu` is used without `-t`, in which case it defaults to 60s.
+    #[arg(short = 't', long, value_parser = parse_test_duration, env = "XFR_DURATION")]
+    time: Option<Duration>,
 
     /// UDP mode
     #[arg(short = 'u', long, conflicts_with = "quic")]
@@ -480,6 +481,28 @@ fn resolve_server_max_duration(
     preset: Option<&xfr::config::ServerPreset>,
 ) -> Option<Duration> {
     cli_max_duration.or_else(|| preset.and_then(|p| p.max_duration_secs.map(Duration::from_secs)))
+}
+
+/// Resolve the effective client test duration.
+/// - CLI `-t`/`--time` always wins when present.
+/// - `--probe-mtu` without an explicit duration extends to 60s.
+/// - Otherwise fall back to the config file, then the 10s default.
+fn resolve_client_duration(
+    cli_time: Option<Duration>,
+    probe_mtu: bool,
+    file_config: &xfr::config::Config,
+) -> Duration {
+    if let Some(duration) = cli_time {
+        duration
+    } else if probe_mtu {
+        Duration::from_secs(60)
+    } else {
+        file_config
+            .client
+            .duration_secs
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(10))
+    }
 }
 
 fn parse_bitrate(s: &str) -> Result<u64, String> {
@@ -1055,22 +1078,10 @@ async fn main() -> Result<()> {
                 xfr::net::validate_mptcp().map_err(|e| anyhow::anyhow!("{}", e))?;
             }
 
-            // Apply config file defaults where CLI didn't override
-            let duration = if cli.time != Duration::from_secs(10) {
-                cli.time
-            } else if cli.probe_mtu {
-                // Probe mode: the duration is only a server-side safety
-                // deadline (the client cancels as soon as the search
-                // converges, normally within seconds). The 10s default
-                // could truncate a slow search, so give it headroom.
-                Duration::from_secs(60)
-            } else {
-                file_config
-                    .client
-                    .duration_secs
-                    .map(Duration::from_secs)
-                    .unwrap_or(cli.time)
-            };
+            // Apply config file defaults where CLI didn't override.
+            // `--probe-mtu` without an explicit `-t` uses a longer default
+            // because the duration is only a server-side safety deadline.
+            let duration = resolve_client_duration(cli.time, cli.probe_mtu, &file_config);
 
             let streams = if cli.parallel != 1 {
                 cli.parallel
@@ -2158,6 +2169,59 @@ mod tests {
     #[test]
     fn resolve_server_max_duration_none_when_both_unset() {
         assert_eq!(resolve_server_max_duration(None, None), None);
+    }
+
+    #[test]
+    fn resolve_client_duration_explicit_time_wins() {
+        let cfg = xfr::config::Config::default();
+        assert_eq!(
+            resolve_client_duration(Some(Duration::from_secs(10)), true, &cfg),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn resolve_client_duration_probe_mtu_uses_long_default_when_unset() {
+        let cfg = xfr::config::Config::default();
+        assert_eq!(
+            resolve_client_duration(None, true, &cfg),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn resolve_client_duration_uses_config_file_default() {
+        let mut cfg = xfr::config::Config::default();
+        cfg.client.duration_secs = Some(25);
+        assert_eq!(
+            resolve_client_duration(None, false, &cfg),
+            Duration::from_secs(25)
+        );
+    }
+
+    #[test]
+    fn resolve_client_duration_falls_back_to_10s_default() {
+        let cfg = xfr::config::Config::default();
+        assert_eq!(
+            resolve_client_duration(None, false, &cfg),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn test_cli_probe_mtu_default_time_unset() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["xfr", "host", "--probe-mtu"]).unwrap();
+        assert!(cli.probe_mtu);
+        assert!(cli.time.is_none());
+    }
+
+    #[test]
+    fn test_cli_probe_mtu_explicit_time_is_preserved() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-t", "10s"]).unwrap();
+        assert!(cli.probe_mtu);
+        assert_eq!(cli.time, Some(Duration::from_secs(10)));
     }
 
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
