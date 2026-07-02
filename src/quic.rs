@@ -350,7 +350,7 @@ pub async fn send_quic_data(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }

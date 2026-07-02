@@ -478,7 +478,7 @@ pub async fn send_data(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }
@@ -551,7 +551,7 @@ pub async fn send_data(
                                 debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
                                 break;
                             }
-                            _ = pause.changed() => {} // will check pause at top of next loop
+                            _ = pause.changed(), if pause.has_changed().is_ok() => {}
                             _ = tokio::time::sleep(overshoot) => {}
                         }
                     }
@@ -812,7 +812,7 @@ pub async fn send_data_half(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }

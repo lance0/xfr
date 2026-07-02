@@ -1899,6 +1899,9 @@ impl Client {
         *self.pause_tx.lock() = Some(pause_tx.clone());
         *self.pause_request_tx.lock() = Some(pause_request_tx);
 
+        let mut quic_handles: Vec<tokio::task::JoinHandle<()>> =
+            Vec::with_capacity(self.config.streams as usize);
+
         // Spawn data streams based on direction
         for i in 0..self.config.streams {
             let stream_stats = stats.streams[i as usize].clone();
@@ -1908,7 +1911,7 @@ impl Client {
             let direction = self.config.direction;
             let conn = connection.clone();
 
-            tokio::spawn(async move {
+            quic_handles.push(tokio::spawn(async move {
                 match direction {
                     Direction::Upload => {
                         // Open unidirectional stream for sending
@@ -1980,117 +1983,153 @@ impl Client {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Read interval updates and final result
-        // For infinite duration, use 1 year timeout (effectively no timeout)
-        let timeout_duration = if self.config.duration == Duration::ZERO {
-            Duration::from_secs(365 * 24 * 3600) // 1 year
-        } else {
-            self.config.duration + Duration::from_secs(30)
-        };
-        let mut deadline = tokio::time::Instant::now() + timeout_duration;
+        let test_result: anyhow::Result<TestResult> = 'control: {
+            // For infinite duration, use 1 year timeout (effectively no timeout)
+            let timeout_duration = if self.config.duration == Duration::ZERO {
+                Duration::from_secs(365 * 24 * 3600) // 1 year
+            } else {
+                self.config.duration + Duration::from_secs(30)
+            };
+            let mut deadline = tokio::time::Instant::now() + timeout_duration;
 
-        loop {
-            tokio::select! {
-                read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut ctrl_reader, &mut line)) => {
-                    match read_result {
-                        Ok(Ok(0)) => break,
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
+            loop {
+                tokio::select! {
+                    read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut ctrl_reader, &mut line)) => {
+                        match read_result {
+                            Ok(Ok(0)) => break,
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                let _ = cancel_tx.send(true);
+                                break 'control Err(e);
+                            }
+                            Err(_) => {
+                                let _ = cancel_tx.send(true);
+                                break 'control Err(anyhow::anyhow!("Timeout waiting for server response"));
+                            }
+                        }
+                    }
+                    _ = cancel_request_rx.changed() => {
+                        if *cancel_request_rx.borrow() {
+                            let cancel_msg = ControlMessage::Cancel {
+                                id: test_id.clone(),
+                                reason: "User requested cancellation".to_string(),
+                            };
+                            let _ = ctrl_send.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
                             let _ = cancel_tx.send(true);
-                            return Err(e);
-                        }
-                        Err(_) => {
-                            let _ = cancel_tx.send(true);
-                            return Err(anyhow::anyhow!("Timeout waiting for server response"));
                         }
                     }
-                }
-                _ = cancel_request_rx.changed() => {
-                    if *cancel_request_rx.borrow() {
-                        let cancel_msg = ControlMessage::Cancel {
-                            id: test_id.clone(),
-                            reason: "User requested cancellation".to_string(),
-                        };
-                        let _ = ctrl_send.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
-                        let _ = cancel_tx.send(true);
-                    }
-                }
-                _ = pause_request_rx.changed() => {
-                    let paused = *pause_request_rx.borrow();
-                    let _ = pause_tx.send(paused);
-                    if supports_pause {
-                        let msg = if paused {
-                            ControlMessage::Pause { id: test_id.clone() }
-                        } else {
-                            ControlMessage::Resume { id: test_id.clone() }
-                        };
-                        if ctrl_send.write_all(format!("{}\n", msg.serialize()?).as_bytes()).await.is_err() {
-                            warn!("Failed to send pause/resume to server");
+                    _ = pause_request_rx.changed() => {
+                        let paused = *pause_request_rx.borrow();
+                        let _ = pause_tx.send(paused);
+                        if supports_pause {
+                            let msg = if paused {
+                                ControlMessage::Pause { id: test_id.clone() }
+                            } else {
+                                ControlMessage::Resume { id: test_id.clone() }
+                            };
+                            if ctrl_send.write_all(format!("{}\n", msg.serialize()?).as_bytes()).await.is_err() {
+                                warn!("Failed to send pause/resume to server");
+                            }
                         }
                     }
                 }
-            }
 
-            if line.is_empty() {
-                continue;
-            }
-
-            let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
-
-            match msg {
-                ControlMessage::Interval {
-                    elapsed_ms,
-                    streams,
-                    aggregate,
-                    ..
-                } => {
-                    if let Some(ref tx) = progress_tx {
-                        let _ = tx
-                            .send(TestProgress {
-                                elapsed_ms,
-                                total_bytes: aggregate.bytes,
-                                throughput_mbps: aggregate.throughput_mbps,
-                                rtt_us: aggregate.rtt_us,
-                                cwnd: aggregate.cwnd,
-                                total_retransmits: None,
-                                streams,
-                                bytes_sent: aggregate.bytes_sent,
-                                bytes_received: aggregate.bytes_received,
-                                throughput_send_mbps: aggregate.throughput_send_mbps,
-                                throughput_recv_mbps: aggregate.throughput_recv_mbps,
-                                udp_progress: aggregate.udp_progress,
-                                udp_feedback_only: false,
-                            })
-                            .await;
-                    }
-                }
-                ControlMessage::Result(result) => {
-                    let _ = cancel_tx.send(true);
-                    endpoint.close(0u32.into(), b"done");
-                    return Ok(result);
-                }
-                ControlMessage::Error { message } => {
-                    let _ = cancel_tx.send(true);
-                    return Err(anyhow::anyhow!("Server error: {}", message));
-                }
-                ControlMessage::Cancelled { .. } => {
-                    // Server acknowledged cancel — it will send Result next.
-                    // Tighten deadline to wait briefly for the final result.
-                    let _ = cancel_tx.send(true);
-                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                    line.clear();
+                if line.is_empty() {
                     continue;
                 }
-                _ => {
-                    debug!("Unexpected message: {:?}", msg);
+
+                let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+
+                match msg {
+                    ControlMessage::Interval {
+                        elapsed_ms,
+                        streams,
+                        aggregate,
+                        ..
+                    } => {
+                        if let Some(ref tx) = progress_tx {
+                            let _ = tx
+                                .send(TestProgress {
+                                    elapsed_ms,
+                                    total_bytes: aggregate.bytes,
+                                    throughput_mbps: aggregate.throughput_mbps,
+                                    rtt_us: aggregate.rtt_us,
+                                    cwnd: aggregate.cwnd,
+                                    total_retransmits: None,
+                                    streams,
+                                    bytes_sent: aggregate.bytes_sent,
+                                    bytes_received: aggregate.bytes_received,
+                                    throughput_send_mbps: aggregate.throughput_send_mbps,
+                                    throughput_recv_mbps: aggregate.throughput_recv_mbps,
+                                    udp_progress: aggregate.udp_progress,
+                                    udp_feedback_only: false,
+                                })
+                                .await;
+                        }
+                    }
+                    ControlMessage::Result(result) => {
+                        let _ = cancel_tx.send(true);
+                        endpoint.close(0u32.into(), b"done");
+                        break 'control Ok(result);
+                    }
+                    ControlMessage::Error { message } => {
+                        let _ = cancel_tx.send(true);
+                        break 'control Err(anyhow::anyhow!("Server error: {}", message));
+                    }
+                    ControlMessage::Cancelled { .. } => {
+                        // Server acknowledged cancel — it will send Result next.
+                        // Tighten deadline to wait briefly for the final result.
+                        let _ = cancel_tx.send(true);
+                        deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                        line.clear();
+                        continue;
+                    }
+                    _ => {
+                        debug!("Unexpected message: {:?}", msg);
+                    }
+                }
+            }
+
+            break 'control Err(anyhow::anyhow!("Connection closed without result"));
+        };
+
+        // Cancel any stream work that may still be in flight
+        let _ = cancel_tx.send(true);
+
+        // Wait for QUIC data streams to finish (mirrors TCP/UDP path)
+        let join_timeout = stream_join_timeout(self.config.streams);
+        match tokio::time::timeout(
+            join_timeout,
+            futures::future::join_all(quic_handles.iter_mut()),
+        )
+        .await
+        {
+            Ok(results) => {
+                for result in results {
+                    if let Err(e) = result
+                        && e.is_panic()
+                    {
+                        error!("QUIC stream task panicked: {:?}", e);
+                    }
+                }
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out waiting {:?} for {} QUIC streams to stop; aborting remaining tasks",
+                    join_timeout,
+                    quic_handles.len()
+                );
+                for handle in &quic_handles {
+                    handle.abort();
                 }
             }
         }
 
-        Err(anyhow::anyhow!("Connection closed without result"))
+        test_result
     }
 
     /// Cancel a running test.
