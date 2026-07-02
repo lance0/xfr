@@ -622,7 +622,7 @@ pub async fn send_udp_paced(
                 if *cancel.borrow() { break; }
                 continue;
             }
-            _ = pause.changed(), if pause.has_changed().is_ok() => { continue; } // re-check at top
+            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => { continue; } // re-check at top
             _ = ticker.tick() => {}
         }
 

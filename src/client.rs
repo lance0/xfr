@@ -1997,6 +1997,7 @@ impl Client {
             let mut deadline = tokio::time::Instant::now() + timeout_duration;
 
             loop {
+                line.clear();
                 tokio::select! {
                     read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut ctrl_reader, &mut line)) => {
                         match read_result {
@@ -2018,7 +2019,14 @@ impl Client {
                                 id: test_id.clone(),
                                 reason: "User requested cancellation".to_string(),
                             };
-                            let _ = ctrl_send.write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes()).await;
+                            let serialized = match cancel_msg.serialize() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = cancel_tx.send(true);
+                                    break 'control Err(e);
+                                }
+                            };
+                            let _ = ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await;
                             let _ = cancel_tx.send(true);
                         }
                     }
@@ -2031,7 +2039,14 @@ impl Client {
                             } else {
                                 ControlMessage::Resume { id: test_id.clone() }
                             };
-                            if ctrl_send.write_all(format!("{}\n", msg.serialize()?).as_bytes()).await.is_err() {
+                            let serialized = match msg.serialize() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = cancel_tx.send(true);
+                                    break 'control Err(e);
+                                }
+                            };
+                            if ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await.is_err() {
                                 warn!("Failed to send pause/resume to server");
                             }
                         }
@@ -2042,7 +2057,13 @@ impl Client {
                     continue;
                 }
 
-                let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
+                let msg: ControlMessage = match ControlMessage::deserialize(line.trim()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = cancel_tx.send(true);
+                        break 'control Err(e);
+                    }
+                };
 
                 match msg {
                     ControlMessage::Interval {

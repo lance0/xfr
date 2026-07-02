@@ -551,7 +551,7 @@ pub async fn send_data(
                                 debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
                                 break;
                             }
-                            _ = pause.changed(), if pause.has_changed().is_ok() => {}
+                            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {}
                             _ = tokio::time::sleep(overshoot) => {}
                         }
                     }
@@ -878,7 +878,7 @@ pub async fn send_data_half(
                                 debug!("Send cancelled during pacing sleep for stream {}", stats.stream_id);
                                 break;
                             }
-                            _ = pause.changed() => {}
+                            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {}
                             _ = tokio::time::sleep(overshoot) => {}
                         }
                     }

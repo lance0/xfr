@@ -1,5 +1,13 @@
 use tokio::sync::watch;
 
+/// `watch::Receiver::has_changed` returns `Err(RecvError::Closed)` once all
+/// senders have dropped. It returns `Ok(_)` (either `true` or `false`) while at
+/// least one sender is alive, so callers that only care about channel closure
+/// should ignore the inner boolean and just check `is_ok()`.
+pub(crate) fn channel_is_open(pause: &watch::Receiver<bool>) -> bool {
+    pause.has_changed().is_ok()
+}
+
 /// Returns `true` when the stream is currently paused.
 ///
 /// Once the pause sender has been dropped, the `watch` channel is closed.
@@ -9,7 +17,7 @@ use tokio::sync::watch;
 /// closed pause channel as "not paused" so the stream resumes and is governed
 /// by cancel/deadline instead.
 pub(crate) fn is_paused(pause: &watch::Receiver<bool>) -> bool {
-    *pause.borrow() && pause.has_changed().is_ok()
+    *pause.borrow() && channel_is_open(pause)
 }
 
 /// Wait while paused, returns true if cancelled during wait.
@@ -27,7 +35,7 @@ pub(crate) async fn wait_while_paused(
             result = cancel.changed() => {
                 if result.is_err() || *cancel.borrow() { return true; }
             }
-            result = pause.changed(), if pause.has_changed().is_ok() => {
+            result = pause.changed() => {
                 if result.is_err() { return false; }
             }
         }
@@ -55,7 +63,23 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
+    async fn channel_is_open_ignores_observed_change_state() {
+        let (tx, mut rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        rx.changed().await.unwrap();
+
+        assert!(
+            !rx.has_changed().unwrap(),
+            "test setup should mark the latest value as observed"
+        );
+        assert!(
+            channel_is_open(&rx),
+            "Ok(false) means open with no unseen value, not closed"
+        );
+    }
+
+    #[tokio::test]
     async fn wait_while_paused_returns_when_sender_dropped() {
         let (pause_tx, mut pause_rx) = watch::channel(true);
         let (_cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -65,7 +89,7 @@ mod tests {
 
         // Give the task a chance to start; with a paused=true + open sender
         // it should still be blocked.
-        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(!task.is_finished());
 
         // Dropping the sender must make the wait return promptly and without
