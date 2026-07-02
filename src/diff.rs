@@ -8,6 +8,8 @@ use std::path::Path;
 use crate::protocol::TestResult;
 use crate::stats::normalize_for_display;
 
+pub const DEFAULT_DIFF_THRESHOLD_PERCENT: f64 = 5.0;
+
 #[derive(Debug)]
 pub struct DiffConfig {
     pub threshold_percent: f64,
@@ -16,7 +18,7 @@ pub struct DiffConfig {
 impl Default for DiffConfig {
     fn default() -> Self {
         Self {
-            threshold_percent: 0.0,
+            threshold_percent: DEFAULT_DIFF_THRESHOLD_PERCENT,
         }
     }
 }
@@ -28,6 +30,7 @@ pub struct DiffResult {
     pub throughput_change_percent: f64,
     pub retransmit_change_percent: f64,
     pub rtt_change_percent: f64,
+    pub threshold_percent: f64,
     pub is_regression: bool,
 }
 
@@ -42,7 +45,7 @@ impl DiffResult {
             normalize_for_display(self.throughput_change_percent, 1)
         ));
 
-        if self.throughput_change_percent < -5.0 {
+        if self.throughput_change_percent < -self.threshold_percent {
             output.push_str(" [FAIL]");
         } else if self.throughput_change_percent < 0.0 {
             output.push_str(" [WARN]");
@@ -58,9 +61,9 @@ impl DiffResult {
                 "Retransmits: {} → {} ({:+.1}%)",
                 baseline_tcp.retransmits, current_tcp.retransmits, self.retransmit_change_percent
             ));
-            if self.retransmit_change_percent > 50.0 {
+            if self.retransmit_change_percent > self.threshold_percent {
                 output.push_str(" [FAIL]");
-            } else if self.retransmit_change_percent > 20.0 {
+            } else if self.retransmit_change_percent > 0.0 {
                 output.push_str(" [WARN]");
             }
             output.push('\n');
@@ -71,7 +74,9 @@ impl DiffResult {
                 "RTT: {:.2} ms → {:.2} ms ({:+.1}%)",
                 baseline_rtt_ms, current_rtt_ms, self.rtt_change_percent
             ));
-            if self.rtt_change_percent > 20.0 {
+            if self.rtt_change_percent > self.threshold_percent {
+                output.push_str(" [FAIL]");
+            } else if self.rtt_change_percent > 0.0 {
                 output.push_str(" [WARN]");
             }
             output.push('\n');
@@ -127,6 +132,7 @@ pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -
         throughput_change_percent,
         retransmit_change_percent,
         rtt_change_percent,
+        threshold_percent: config.threshold_percent,
         is_regression,
     }
 }
@@ -177,6 +183,19 @@ mod tests {
         let diff = compare(baseline, current, &DiffConfig::default());
         assert!(!diff.is_regression);
         assert!(diff.throughput_change_percent > 0.0);
+    }
+
+    #[test]
+    fn test_default_threshold_ignores_small_tcp_metric_noise() {
+        let baseline = make_result(1000.0, 100, 1000);
+        let current = make_result(1000.0, 104, 1040);
+
+        let diff = compare(baseline, current, &DiffConfig::default());
+        assert!(!diff.is_regression);
+        let output = diff.format_plain();
+        assert!(output.contains("Retransmits: 100 → 104 (+4.0%) [WARN]"));
+        assert!(output.contains("RTT: 1.00 ms → 1.04 ms (+4.0%) [WARN]"));
+        assert!(output.contains("Verdict: OK"));
     }
 
     #[test]
@@ -257,8 +276,8 @@ mod tests {
             output
         );
         assert!(
-            output.contains("[WARN]"),
-            "expected [WARN] for rtt, got: {}",
+            output.contains("[FAIL]"),
+            "expected [FAIL] for rtt, got: {}",
             output
         );
     }

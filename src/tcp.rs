@@ -40,8 +40,30 @@ fn is_peer_closed_error(err: &io::Error) -> bool {
 }
 
 #[inline]
-fn should_end_receive_after_error(err: &io::Error, cancel_requested: bool) -> bool {
-    cancel_requested || is_peer_closed_error(err)
+fn should_end_receive_after_error(
+    err: &io::Error,
+    cancel_requested: bool,
+    expected_teardown: bool,
+) -> bool {
+    cancel_requested || (expected_teardown && is_peer_closed_error(err))
+}
+
+#[inline]
+fn receive_teardown_window(
+    start: tokio::time::Instant,
+    now: tokio::time::Instant,
+    duration: Duration,
+) -> (bool, bool) {
+    if duration == Duration::ZERO {
+        return (false, false);
+    }
+
+    let deadline = start + duration;
+    let deadline_reached = now >= deadline;
+    let near_deadline = !deadline_reached
+        && duration > SEND_TEARDOWN_GRACE
+        && deadline.saturating_duration_since(now) <= SEND_TEARDOWN_GRACE;
+    (deadline_reached, near_deadline)
 }
 
 /// Drain readable bytes briefly after cancel to give the peer's own cancel
@@ -156,7 +178,6 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             warn!("Failed to set SO_SNDBUF to {}: {}", buffer_size, err);
-            return Err(err);
         }
 
         let ret = libc::setsockopt(
@@ -169,7 +190,6 @@ fn configure_socket_buffers(stream: &TcpStream, buffer_size: usize) -> std::io::
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             warn!("Failed to set SO_RCVBUF to {}: {}", buffer_size, err);
-            return Err(err);
         }
     }
 
@@ -635,6 +655,7 @@ pub async fn send_data(
 pub async fn receive_data(
     mut stream: TcpStream,
     stats: Arc<StreamStats>,
+    duration: Duration,
     mut cancel: watch::Receiver<bool>,
     config: TcpConfig,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
@@ -643,6 +664,7 @@ pub async fn receive_data(
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
     let mut cancelled = false;
+    let start = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -660,16 +682,31 @@ pub async fn receive_data(
                             continue;
                         }
                         let cancel_requested = *cancel.borrow();
+                        let now = tokio::time::Instant::now();
+                        let (deadline_reached, near_deadline) =
+                            receive_teardown_window(start, now, duration);
+                        let expected_teardown = deadline_reached || near_deadline;
                         let peer_closed = is_peer_closed_error(&e);
-                        if should_end_receive_after_error(&e, cancel_requested) {
+                        if should_end_receive_after_error(&e, cancel_requested, expected_teardown) {
                             cancelled = cancel_requested;
                             if peer_closed {
                                 suppressed_teardown_errors += 1;
                             }
                             break;
                         }
-                        // Caller logs via the spawn-level warn!("Stream X receive error: ...");
-                        // don't log here too.
+                        if peer_closed {
+                            warn!(
+                                "Unexpected peer-close on receive stream {} after {:.3}s (cancel={}, deadline_reached={}, near_deadline={}): {}",
+                                stats.stream_id,
+                                now.saturating_duration_since(start).as_secs_f64(),
+                                cancel_requested,
+                                deadline_reached,
+                                near_deadline,
+                                e
+                            );
+                        }
+                        // Peer-close errors get context above; other read failures are logged by
+                        // the spawn-level caller.
                         return Err(e.into());
                     }
                 }
@@ -931,12 +968,14 @@ pub async fn send_data_half(
 pub async fn receive_data_half(
     mut read_half: OwnedReadHalf,
     stats: Arc<StreamStats>,
+    duration: Duration,
     mut cancel: watch::Receiver<bool>,
     config: TcpConfig,
 ) -> anyhow::Result<OwnedReadHalf> {
     let mut buffer = vec![0u8; config.buffer_size];
     let mut suppressed_teardown_errors: u32 = 0;
     let mut cancelled = false;
+    let start = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -954,16 +993,31 @@ pub async fn receive_data_half(
                             continue;
                         }
                         let cancel_requested = *cancel.borrow();
+                        let now = tokio::time::Instant::now();
+                        let (deadline_reached, near_deadline) =
+                            receive_teardown_window(start, now, duration);
+                        let expected_teardown = deadline_reached || near_deadline;
                         let peer_closed = is_peer_closed_error(&e);
-                        if should_end_receive_after_error(&e, cancel_requested) {
+                        if should_end_receive_after_error(&e, cancel_requested, expected_teardown) {
                             cancelled = cancel_requested;
                             if peer_closed {
                                 suppressed_teardown_errors += 1;
                             }
                             break;
                         }
-                        // Caller logs via the spawn-level warn!("Stream X receive error: ...");
-                        // don't log here too.
+                        if peer_closed {
+                            warn!(
+                                "Unexpected peer-close on receive-half stream {} after {:.3}s (cancel={}, deadline_reached={}, near_deadline={}): {}",
+                                stats.stream_id,
+                                now.saturating_duration_since(start).as_secs_f64(),
+                                cancel_requested,
+                                deadline_reached,
+                                near_deadline,
+                                e
+                            );
+                        }
+                        // Peer-close errors get context above; other read failures are logged by
+                        // the spawn-level caller.
                         return Err(e.into());
                     }
                 }
@@ -1016,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn receive_error_policy_treats_sender_close_as_eof_without_cancel() {
+    fn receive_error_policy_rejects_sender_close_before_deadline_without_cancel() {
         for kind in [
             io::ErrorKind::ConnectionReset,
             io::ErrorKind::BrokenPipe,
@@ -1024,8 +1078,12 @@ mod tests {
         ] {
             let err = io::Error::from(kind);
             assert!(
-                should_end_receive_after_error(&err, false),
-                "{kind:?} should end receive as graceful EOF"
+                !should_end_receive_after_error(&err, false, false),
+                "{kind:?} should remain fatal before expected teardown"
+            );
+            assert!(
+                should_end_receive_after_error(&err, false, true),
+                "{kind:?} should end receive as graceful EOF at expected teardown"
             );
         }
     }
@@ -1034,13 +1092,49 @@ mod tests {
     fn receive_error_policy_keeps_unrelated_errors_fatal_until_cancel() {
         let err = io::Error::from(io::ErrorKind::InvalidData);
         assert!(
-            !should_end_receive_after_error(&err, false),
+            !should_end_receive_after_error(&err, false, false),
             "unrelated read errors should remain fatal before cancel"
         );
         assert!(
-            should_end_receive_after_error(&err, true),
+            should_end_receive_after_error(&err, true, false),
             "after cancel, receive errors should only end teardown"
         );
+    }
+
+    #[test]
+    fn receive_teardown_window_does_not_cover_entire_short_test() {
+        let start = tokio::time::Instant::now();
+        let short_duration = SEND_TEARDOWN_GRACE / 2;
+
+        let (deadline_reached, near_deadline) =
+            receive_teardown_window(start, start + Duration::from_millis(1), short_duration);
+        assert!(!deadline_reached);
+        assert!(
+            !near_deadline,
+            "short tests should not be considered near teardown from the start"
+        );
+
+        let (deadline_reached, near_deadline) =
+            receive_teardown_window(start, start + short_duration, short_duration);
+        assert!(deadline_reached);
+        assert!(!near_deadline);
+    }
+
+    #[test]
+    fn receive_teardown_window_applies_grace_to_long_tests() {
+        let start = tokio::time::Instant::now();
+        let long_duration = Duration::from_secs(10);
+
+        let (deadline_reached, near_deadline) =
+            receive_teardown_window(start, start + Duration::from_secs(1), long_duration);
+        assert!(!deadline_reached);
+        assert!(!near_deadline);
+
+        let near_time = start + long_duration - (SEND_TEARDOWN_GRACE / 2);
+        let (deadline_reached, near_deadline) =
+            receive_teardown_window(start, near_time, long_duration);
+        assert!(!deadline_reached);
+        assert!(near_deadline);
     }
 
     #[cfg(target_os = "linux")]
@@ -1054,23 +1148,68 @@ mod tests {
         let sender = sender.unwrap();
         let (receiver, _) = receiver.unwrap();
 
+        let stats = Arc::new(StreamStats::new(0));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let receive = tokio::spawn(receive_data(
+            receiver,
+            stats,
+            Duration::from_millis(20),
+            cancel_rx,
+            TcpConfig::default(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
         socket2::SockRef::from(&sender)
             .set_linger(Some(Duration::ZERO))
             .unwrap();
         drop(sender);
 
-        let stats = Arc::new(StreamStats::new(0));
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            receive_data(receiver, stats, cancel_rx, TcpConfig::default()),
-        )
-        .await
-        .expect("receive_data should not hang after abortive peer close");
+        let result = tokio::time::timeout(Duration::from_secs(1), receive)
+            .await
+            .expect("receive_data should not hang after abortive peer close")
+            .expect("receive task should not panic");
 
         assert!(
             result.is_ok(),
-            "abortive sender close should be treated as EOF: {result:?}"
+            "abortive sender close at expected teardown should be treated as EOF: {result:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn receive_data_treats_mid_test_abortive_sender_close_as_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (sender, receiver) = tokio::join!(connect, accept);
+        let sender = sender.unwrap();
+        let (receiver, _) = receiver.unwrap();
+
+        let stats = Arc::new(StreamStats::new(0));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let receive = tokio::spawn(receive_data(
+            receiver,
+            stats,
+            Duration::from_secs(30),
+            cancel_rx,
+            TcpConfig::default(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        socket2::SockRef::from(&sender)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        drop(sender);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), receive)
+            .await
+            .expect("receive_data should not hang after mid-test abortive peer close")
+            .expect("receive task should not panic");
+
+        assert!(
+            result.is_err(),
+            "mid-test abortive sender close should remain fatal"
         );
     }
 

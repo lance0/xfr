@@ -101,6 +101,7 @@ pub struct App {
     pub throughput_recv_mbps: f64,
 
     pub total_retransmits: u64,
+    retransmits_are_authoritative: bool,
     pub rtt_us: u32,
     pub cwnd: u32,
 
@@ -221,6 +222,7 @@ impl App {
                 .collect(),
 
             total_retransmits: 0,
+            retransmits_are_authoritative: false,
             rtt_us: 0,
             cwnd: 0,
 
@@ -397,6 +399,7 @@ impl App {
         self.throughput_recv_mbps = 0.0;
 
         self.total_retransmits = 0;
+        self.retransmits_are_authoritative = false;
         self.rtt_us = 0;
         self.cwnd = 0;
 
@@ -645,7 +648,8 @@ impl App {
         // interval's value.
         if let Some(total) = progress.total_retransmits {
             self.total_retransmits = total;
-        } else {
+            self.retransmits_are_authoritative = true;
+        } else if !self.retransmits_are_authoritative {
             let interval_total: u64 = progress
                 .streams
                 .iter()
@@ -1639,5 +1643,33 @@ mod tests {
         }];
         app.on_progress(p);
         assert_eq!(app.total_retransmits, 42);
+    }
+
+    #[test]
+    fn retransmit_fallback_does_not_mix_after_authoritative_total() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+
+        let mut authoritative = make_progress(1.0, None);
+        authoritative.total_retransmits = Some(42);
+        app.on_progress(authoritative);
+        assert_eq!(app.total_retransmits, 42);
+
+        let mut fallback = make_progress(1.0, None);
+        fallback.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 0,
+            retransmits: Some(5),
+            jitter_ms: None,
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+        }];
+        app.on_progress(fallback);
+        assert_eq!(
+            app.total_retransmits, 42,
+            "once authoritative cumulative totals arrive, fallback deltas must not be added on top"
+        );
     }
 }

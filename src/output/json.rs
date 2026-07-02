@@ -14,7 +14,6 @@ fn serialize_pretty<T: Serialize + ?Sized>(value: &T) -> anyhow::Result<String> 
 
 pub fn output_json(result: &TestResult) -> anyhow::Result<String> {
     serialize_pretty(result)
-        .map_err(|e| anyhow::anyhow!("failed to serialize test result to JSON: {e}"))
 }
 
 pub fn save_json(result: &TestResult, path: &Path) -> anyhow::Result<()> {

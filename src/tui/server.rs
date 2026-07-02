@@ -19,6 +19,8 @@ pub enum ServerEvent {
     },
     /// Test completed
     TestCompleted { id: String, bytes: u64 },
+    /// Test failed before normal completion
+    TestFailed { id: String, bytes: u64 },
     /// Connection blocked by ACL or rate limit
     ConnectionBlocked,
     /// Authentication failure
@@ -52,6 +54,7 @@ pub struct ActiveTestInfo {
 pub struct ServerApp {
     pub active_tests: Vec<ActiveTestInfo>,
     pub total_tests: u64,
+    pub failed_tests: u64,
     pub total_bytes: u64,
     pub bandwidth_history: VecDeque<f64>,
     pub connections_blocked: u64,
@@ -71,6 +74,7 @@ impl ServerApp {
         Self {
             active_tests: Vec::new(),
             total_tests: 0,
+            failed_tests: 0,
             total_bytes: 0,
             bandwidth_history: VecDeque::with_capacity(BANDWIDTH_HISTORY),
             connections_blocked: 0,
@@ -94,6 +98,12 @@ impl ServerApp {
 
     pub fn remove_test(&mut self, id: &str, bytes: u64) {
         self.active_tests.retain(|t| t.id != id);
+        self.total_bytes += bytes;
+    }
+
+    pub fn fail_test(&mut self, id: &str, bytes: u64) {
+        self.active_tests.retain(|t| t.id != id);
+        self.failed_tests += 1;
         self.total_bytes += bytes;
     }
 
@@ -205,13 +215,20 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     ]);
     frame.render_widget(bw_widget, stats_chunks[1]);
 
-    // Total tests
+    // Total / failed tests
     let total = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Total Tests",
+            "Tests / Failed",
             Style::default().add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!("{}", app.total_tests)),
+        Line::from(Span::styled(
+            format!("{} / {}", app.total_tests, app.failed_tests),
+            Style::default().fg(if app.failed_tests > 0 {
+                Color::Red
+            } else {
+                Color::Gray
+            }),
+        )),
     ]);
     frame.render_widget(total, stats_chunks[2]);
 
@@ -335,4 +352,39 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(ratatui::widgets::Clear, help_area);
     frame.render_widget(help, help_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn active_test(id: &str) -> ActiveTestInfo {
+        ActiveTestInfo {
+            id: id.to_string(),
+            client_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            protocol: "TCP".to_string(),
+            direction: "download".to_string(),
+            streams: 1,
+            started: Instant::now(),
+            duration_secs: 10,
+            bytes: 0,
+            throughput_mbps: 0.0,
+        }
+    }
+
+    #[test]
+    fn failed_tests_are_counted_separately_from_completed_tests() {
+        let mut app = ServerApp::new();
+        app.add_test(active_test("ok"));
+        app.add_test(active_test("fail"));
+
+        app.remove_test("ok", 100);
+        app.fail_test("fail", 50);
+
+        assert!(app.active_tests.is_empty());
+        assert_eq!(app.total_tests, 2);
+        assert_eq!(app.failed_tests, 1);
+        assert_eq!(app.total_bytes, 150);
+    }
 }
