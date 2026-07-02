@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
-use xfr::diff::{DiffConfig, run_diff};
+use xfr::diff::{DEFAULT_DIFF_THRESHOLD_PERCENT, DiffConfig, run_diff};
 use xfr::output::{output_csv, output_json, output_plain};
 
 /// Output format options
@@ -429,7 +429,7 @@ enum Commands {
         current: PathBuf,
 
         /// Regression threshold percentage
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value_t = DEFAULT_DIFF_THRESHOLD_PERCENT)]
         threshold: f64,
     },
 
@@ -2104,6 +2104,9 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
                 }
                 ServerEvent::TestCompleted { id, bytes } => {
                     app.remove_test(&id, bytes);
+                }
+                ServerEvent::TestFailed { id, bytes } => {
+                    app.fail_test(&id, bytes);
                 }
                 ServerEvent::ConnectionBlocked => {
                     app.record_blocked();

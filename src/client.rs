@@ -1338,9 +1338,14 @@ impl Client {
                             }
                             Direction::Download => {
                                 // Client receives data
-                                if let Err(e) =
-                                    tcp::receive_data(stream, stream_stats.clone(), cancel, config)
-                                        .await
+                                if let Err(e) = tcp::receive_data(
+                                    stream,
+                                    stream_stats.clone(),
+                                    duration,
+                                    cancel,
+                                    config,
+                                )
+                                .await
                                 {
                                     error!("Receive error: {}", e);
                                 }
@@ -1385,6 +1390,7 @@ impl Client {
                                     tcp::receive_data_half(
                                         read_half,
                                         recv_stats,
+                                        duration,
                                         recv_cancel,
                                         recv_config,
                                     )

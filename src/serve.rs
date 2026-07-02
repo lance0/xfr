@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::JoinHandle;
@@ -2205,7 +2205,7 @@ async fn run_quic_test(
             crate::output::prometheus::on_test_aborted(&stats);
 
             if let Some(tx) = &tui_tx {
-                let _ = tx.try_send(ServerEvent::TestCompleted {
+                let _ = tx.try_send(ServerEvent::TestFailed {
                     id: id.to_string(),
                     bytes: stats.total_bytes(),
                 });
@@ -2406,7 +2406,8 @@ async fn run_test(
         data_ports: data_ports.clone(),
         udp_token: udp_token.as_ref().map(udp::encode_hello_token),
     };
-    send_test_ack_or_cleanup(writer, active_tests.as_ref(), id, ack).await?;
+    let ack_line = ack.serialize().map(|serialized| format!("{serialized}\n"));
+    write_ack_line_or_cleanup(writer, active_tests.as_ref(), id, ack_line).await?;
 
     // Notify TUI that test started
     if let Some(tx) = &tui_tx {
@@ -2739,7 +2740,7 @@ async fn run_test(
             crate::output::prometheus::on_test_aborted(&stats);
 
             if let Some(tx) = &tui_tx {
-                let _ = tx.try_send(ServerEvent::TestCompleted {
+                let _ = tx.try_send(ServerEvent::TestFailed {
                     id: id.to_string(),
                     bytes: stats.total_bytes(),
                 });
@@ -2852,7 +2853,9 @@ async fn spawn_tcp_handlers(
             match direction {
                 Direction::Upload => {
                     // Server receives data
-                    match tcp::receive_data(stream, stream_stats.clone(), cancel, config).await {
+                    match tcp::receive_data(stream, stream_stats.clone(), duration, cancel, config)
+                        .await
+                    {
                         Ok(Some(info)) => {
                             stream_stats.set_final_tcp_info(info.clone());
                             test_stats.add_tcp_info(info);
@@ -2895,7 +2898,6 @@ async fn spawn_tcp_handlers(
 
                     let send_stats = stream_stats.clone();
                     let recv_stats = stream_stats.clone();
-                    let final_stats = stream_stats.clone();
                     let send_cancel = cancel.clone();
                     let recv_cancel = cancel;
                     let send_pause = pause;
@@ -2924,8 +2926,14 @@ async fn spawn_tcp_handlers(
                     });
 
                     let recv_handle = tokio::spawn(async move {
-                        tcp::receive_data_half(read_half, recv_stats, recv_cancel, recv_config)
-                            .await
+                        tcp::receive_data_half(
+                            read_half,
+                            recv_stats,
+                            duration,
+                            recv_cancel,
+                            recv_config,
+                        )
+                        .await
                     });
 
                     // Wait for both to complete. Use the clamp-time TCP_INFO snapshot
@@ -2935,7 +2943,6 @@ async fn spawn_tcp_handlers(
                         (send_result, recv_result)
                     {
                         if let Some(info) = send_tcp_info {
-                            final_stats.add_retransmits(info.retransmits);
                             stream_stats.set_final_tcp_info(info.clone());
                             test_stats.add_tcp_info(info);
                         }
@@ -3065,8 +3072,14 @@ async fn spawn_tcp_stream_handlers(
 
                     match direction {
                         Direction::Upload => {
-                            match tcp::receive_data(stream, stream_stats.clone(), cancel, config)
-                                .await
+                            match tcp::receive_data(
+                                stream,
+                                stream_stats.clone(),
+                                duration,
+                                cancel,
+                                config,
+                            )
+                            .await
                             {
                                 Ok(Some(info)) => {
                                     stream_stats.set_final_tcp_info(info.clone());
@@ -3106,7 +3119,6 @@ async fn spawn_tcp_stream_handlers(
 
                             let send_stats = stream_stats.clone();
                             let recv_stats = stream_stats.clone();
-                            let final_stats = stream_stats.clone();
                             let send_cancel = cancel.clone();
                             let recv_cancel = cancel;
                             let send_pause = pause;
@@ -3130,6 +3142,7 @@ async fn spawn_tcp_stream_handlers(
                                 tcp::receive_data_half(
                                     read_half,
                                     recv_stats,
+                                    duration,
                                     recv_cancel,
                                     recv_config,
                                 )
@@ -3141,7 +3154,6 @@ async fn spawn_tcp_stream_handlers(
                                 (send_result, recv_result)
                             {
                                 if let Some(info) = send_tcp_info {
-                                    final_stats.add_retransmits(info.retransmits);
                                     stream_stats.set_final_tcp_info(info.clone());
                                     test_stats.add_tcp_info(info);
                                 }
@@ -3549,26 +3561,26 @@ async fn remove_active_test(active_tests: &Mutex<HashMap<String, ActiveTest>>, i
     }
 }
 
-async fn send_test_ack_or_cleanup<W>(
+async fn write_ack_line_or_cleanup<W>(
     writer: &mut W,
     active_tests: &Mutex<HashMap<String, ActiveTest>>,
     id: &str,
-    ack: ControlMessage,
+    ack_line: anyhow::Result<String>,
 ) -> anyhow::Result<()>
 where
-    W: tokio::io::AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    let send_result: anyhow::Result<()> = async {
-        writer
-            .write_all(format!("{}\n", ack.serialize()?).as_bytes())
-            .await?;
-        Ok(())
-    }
-    .await;
+    let ack_line = match ack_line {
+        Ok(line) => line,
+        Err(e) => {
+            remove_active_test(active_tests, id).await;
+            return Err(e);
+        }
+    };
 
-    if let Err(e) = send_result {
+    if let Err(e) = writer.write_all(ack_line.as_bytes()).await {
         remove_active_test(active_tests, id).await;
-        return Err(e);
+        return Err(e.into());
     }
 
     Ok(())
@@ -3577,31 +3589,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    struct FailingWriter;
-
-    impl tokio::io::AsyncWrite for FailingWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "closed",
-            )))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
 
     #[tokio::test]
     async fn test_remove_active_test_cleans_entry_and_sends_cancel() {
@@ -3628,10 +3615,10 @@ mod tests {
         assert!(*cancel_rx.borrow(), "cleanup must send cancel signal");
     }
 
-    #[tokio::test]
-    async fn test_test_ack_failure_cleans_active_test_entry() {
-        let active_tests = Arc::new(Mutex::new(HashMap::new()));
-        let id = "ack-fail";
+    async fn active_test_with_cancel_rx(
+        active_tests: &Mutex<HashMap<String, ActiveTest>>,
+        id: &str,
+    ) -> watch::Receiver<bool> {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (pause_tx, _) = watch::channel(false);
         active_tests.lock().await.insert(
@@ -3646,19 +3633,51 @@ mod tests {
                 expected_streams: 1,
             },
         );
+        cancel_rx
+    }
 
-        let ack = ControlMessage::TestAck {
-            id: id.to_string(),
-            data_ports: vec![12345],
-            udp_token: None,
-        };
-        let mut writer = FailingWriter;
+    #[tokio::test]
+    async fn test_ack_serialization_failure_cleans_active_test_entry() {
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let id = "ack-serialize-fail";
+        let cancel_rx = active_test_with_cancel_rx(active_tests.as_ref(), id).await;
+        let (mut writer, _reader) = tokio::io::duplex(64);
 
-        let err = send_test_ack_or_cleanup(&mut writer, active_tests.as_ref(), id, ack)
-            .await
-            .expect_err("broken control write should fail");
+        let err = write_ack_line_or_cleanup::<_>(
+            &mut writer,
+            active_tests.as_ref(),
+            id,
+            Err(anyhow::anyhow!("serialize failed")),
+        )
+        .await
+        .expect_err("ack serialization failure should fail");
 
-        assert!(err.to_string().contains("closed"));
+        assert!(err.to_string().contains("serialize failed"));
+        assert!(!active_tests.lock().await.contains_key(id));
+        assert!(*cancel_rx.borrow(), "cleanup must send cancel signal");
+    }
+
+    #[tokio::test]
+    async fn test_ack_write_failure_cleans_active_test_entry() {
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let id = "ack-write-fail";
+        let cancel_rx = active_test_with_cancel_rx(active_tests.as_ref(), id).await;
+        let (mut writer, reader) = tokio::io::duplex(1);
+        drop(reader);
+
+        let err = write_ack_line_or_cleanup(
+            &mut writer,
+            active_tests.as_ref(),
+            id,
+            Ok("ack\n".to_string()),
+        )
+        .await
+        .expect_err("broken control write should fail");
+
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
         assert!(!active_tests.lock().await.contains_key(id));
         assert!(*cancel_rx.borrow(), "cleanup must send cancel signal");
     }

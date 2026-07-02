@@ -71,10 +71,16 @@ pub fn versions_compatible(version_a: &str, version_b: &str) -> bool {
 
 fn parse_protocol_major(version: &str) -> Option<u32> {
     let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    parts.next()?.parse::<u32>().ok()?;
+    let first = parts.next()?;
+    if first.is_empty() {
+        return None;
+    }
+    let major = first.parse().ok()?;
 
     for part in parts {
+        if part.is_empty() {
+            return None;
+        }
         part.parse::<u32>().ok()?;
     }
 
@@ -648,12 +654,13 @@ mod tests {
         assert!(versions_compatible("1.1", "1.0"));
         assert!(versions_compatible("1.1", "1.99"));
         assert!(versions_compatible("1.1.2", "1.0.0"));
+        assert!(versions_compatible("1", "1.1"));
         assert!(!versions_compatible("1.1", "2.0"));
     }
 
     #[test]
     fn test_versions_compatible_rejects_malformed_versions() {
-        for bad in ["", ".", "1", "x.1", "1.x", ".1", "1.", "1.1.x"] {
+        for bad in ["", ".", "x.1", "1.x", ".1", "1.", "1.1.x", "1..1"] {
             assert!(
                 !versions_compatible(bad, PROTOCOL_VERSION),
                 "{bad:?} must not be compatible as the peer version"
