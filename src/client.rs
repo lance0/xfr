@@ -957,31 +957,192 @@ impl Client {
         let mut last_recv_bytes: Vec<u64> = vec![0; stats.streams.len()];
         let mut last_recv_instant = tokio::time::Instant::now();
 
+        // Split the transport so a dedicated reader task can own the recv
+        // codec independently of the control loop's select!. This prevents
+        // the LAN-229 desync hazard where cancelling a partial read_message
+        // (inside select!) loses buffered bytes from the AsyncBufRead reader.
+        let (ctrl_reader_half, mut ctrl_writer) = transport.split();
+        let (mut cmd_rx, control_handle) = spawn_client_control_reader(reader, ctrl_reader_half);
+        let mut cancel_request_open = true;
+        let mut pause_request_open = true;
+
         loop {
-            // Check for external cancel request while waiting for server messages
+            // Select on the dedicated reader task's channel (not the raw
+            // reader) so cancel/pause arms can fire without dropping a
+            // partial read_message (LAN-229 desync hazard).
             tokio::select! {
-                read_result = tokio::time::timeout_at(deadline, transport.read_message(&mut reader, &mut line)) => {
-                    match read_result {
-                        Ok(Ok(())) if line.trim().is_empty() => {
-                            // EOF
-                            break;
-                        }
-                        Ok(Ok(())) => {
-                            // Got data, process it below
-                        }
-                        Ok(Err(e)) => {
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(ClientControlEvent::Eof) => break,
+                        Some(ClientControlEvent::Error(e)) => {
                             test_result = Err(e);
                             break;
                         }
-                        Err(_) => {
-                            // Timeout
-                            test_result = Err(anyhow::anyhow!("Timeout waiting for server response"));
-                            break;
+                        Some(ClientControlEvent::Message(msg)) => {
+                            match *msg {
+                                ControlMessage::Interval {
+                                    elapsed_ms,
+                                    streams,
+                                    aggregate,
+                                    ..
+                                } => {
+                                    if let Some(ref tx) = progress_tx {
+                                        // Only overlay local TCP_INFO for sender-side contexts (Upload/Bidir).
+                                        // In Download mode, server is the sender and has the correct metrics.
+                                        let is_sender =
+                                            matches!(self.config.direction, Direction::Upload | Direction::Bidir);
+                                        let (rtt_us, cwnd, total_retransmits) = if is_sender {
+                                            if let Some((rtt, retrans, cw)) = stats.poll_local_tcp_info() {
+                                                (Some(rtt), Some(cw), Some(retrans))
+                                            } else {
+                                                (aggregate.rtt_us, aggregate.cwnd, None)
+                                            }
+                                        } else {
+                                            (aggregate.rtt_us, aggregate.cwnd, None)
+                                        };
+                                        // Issue #81: in download mode the server is the UDP
+                                        // sender, so aggregate.bytes counts send_to() calls
+                                        // the kernel accepted — over a constrained link that
+                                        // tracks the requested -b rate, not what arrived.
+                                        // We are the receiver; report our own counters.
+                                        let (total_bytes, throughput_mbps, streams) = if udp_download {
+                                            let now = tokio::time::Instant::now();
+                                            let dt = now.duration_since(last_recv_instant).as_secs_f64();
+                                            last_recv_instant = now;
+                                            let (interval_total, deltas) =
+                                                udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
+                                            let mbps = if dt > 0.0 {
+                                                (interval_total as f64 * 8.0) / dt / 1_000_000.0
+                                            } else {
+                                                0.0
+                                            };
+                                            let streams: Vec<StreamInterval> = streams
+                                                .into_iter()
+                                                .map(|mut s| {
+                                                    if let Some(delta) = deltas.get(s.id as usize) {
+                                                        s.bytes = *delta;
+                                                    }
+                                                    s
+                                                })
+                                                .collect();
+                                            (interval_total, mbps, streams)
+                                        } else {
+                                            (aggregate.bytes, aggregate.throughput_mbps, streams)
+                                        };
+                                        // Bidir UDP: the download half of the server's split
+                                        // (`bytes_received` from our view) is its send-side
+                                        // counter — same inflation as above. Substitute our
+                                        // own receive deltas; the upload half is already
+                                        // receiver-truth (the server counts what arrived).
+                                        // The combined totals are recomputed from the two
+                                        // corrected halves when the server reported a split.
+                                        let (bytes_received, throughput_recv_mbps, total_bytes, throughput_mbps) =
+                                            if udp_bidir {
+                                                let now = tokio::time::Instant::now();
+                                                let dt = now.duration_since(last_recv_instant).as_secs_f64();
+                                                last_recv_instant = now;
+                                                let (interval_recv, _) =
+                                                    udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
+                                                let recv_mbps = if dt > 0.0 {
+                                                    (interval_recv as f64 * 8.0) / dt / 1_000_000.0
+                                                } else {
+                                                    0.0
+                                                };
+                                                let (total, total_mbps) =
+                                                    match (aggregate.bytes_sent, aggregate.throughput_send_mbps) {
+                                                        (Some(sent), Some(send_mbps)) => {
+                                                            (sent + interval_recv, send_mbps + recv_mbps)
+                                                        }
+                                                        _ => (total_bytes, throughput_mbps),
+                                                    };
+                                                (Some(interval_recv), Some(recv_mbps), total, total_mbps)
+                                            } else {
+                                                (
+                                                    aggregate.bytes_received,
+                                                    aggregate.throughput_recv_mbps,
+                                                    total_bytes,
+                                                    throughput_mbps,
+                                                )
+                                            };
+                                        // Apply the producer-side monotonic-denominator
+                                        // filter so a delayed TCP `Interval` cannot clobber
+                                        // a fresher reading we already saw via UDP feedback.
+                                        // Both paths feed the same filter; older-or-same
+                                        // counts are silently rejected (None -> consumers
+                                        // preserve their previous loss state).
+                                        // In download mode our own receive trackers are the
+                                        // authoritative source; the server has no
+                                        // receiver-side counters to report there.
+                                        let filtered_udp_progress = if udp_download {
+                                            udp_progress_filter.apply(udp_local_progress(&stats))
+                                        } else {
+                                            aggregate
+                                                .udp_progress
+                                                .and_then(|p| udp_progress_filter.apply(p))
+                                        };
+                                        let _ = tx
+                                            .send(TestProgress {
+                                                elapsed_ms,
+                                                total_bytes,
+                                                throughput_mbps,
+                                                rtt_us,
+                                                cwnd,
+                                                total_retransmits,
+                                                streams,
+                                                bytes_sent: aggregate.bytes_sent,
+                                                bytes_received,
+                                                throughput_send_mbps: aggregate.throughput_send_mbps,
+                                                throughput_recv_mbps,
+                                                udp_progress: filtered_udp_progress,
+                                                udp_feedback_only: false,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                ControlMessage::Result(mut result) => {
+                                    // Server (receiver) can't report sender-side TCP_INFO metrics
+                                    // (retransmits, RTT, cwnd are all 0 on receiver side).
+                                    // Overlay client-side snapshots when we're the sender.
+                                    let is_sender =
+                                        matches!(self.config.direction, Direction::Upload | Direction::Bidir);
+                                    if is_sender {
+                                        for (i, stream_result) in result.streams.iter_mut().enumerate() {
+                                            if let Some(info) =
+                                                stats.streams.get(i).and_then(|s| s.final_tcp_info())
+                                            {
+                                                stream_result.retransmits = Some(info.retransmits);
+                                            }
+                                        }
+                                        if let Some(info) = stats.final_local_tcp_info() {
+                                            result.tcp_info = Some(info);
+                                        }
+                                    }
+                                    test_result = Ok(result);
+                                    break;
+                                }
+                                ControlMessage::Error { message } => {
+                                    test_result = Err(anyhow::anyhow!("Server error: {}", message));
+                                    break;
+                                }
+                                ControlMessage::Cancelled { .. } => {
+                                    // Server acknowledged cancel — it will send Result next.
+                                    // Tighten deadline to wait briefly for the final result.
+                                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                                    continue;
+                                }
+                                _ => {
+                                    debug!("Unexpected message: {:?}", msg);
+                                }
+                            }
                         }
+                        None => break, // Reader task exited
                     }
                 }
-                _ = cancel_request_rx.changed() => {
-                    if *cancel_request_rx.borrow() {
+                res = cancel_request_rx.changed(), if cancel_request_open => {
+                    if res.is_err() {
+                        // Sender dropped — disable this arm to avoid busy-loop
+                        cancel_request_open = false;
+                    } else if *cancel_request_rx.borrow() {
                         // Send cancel message to server
                         let cancel_msg = ControlMessage::Cancel {
                             id: test_id.clone(),
@@ -990,41 +1151,52 @@ impl Client {
                         let serialized = match cancel_msg.serialize() {
                             Ok(s) => s,
                             Err(e) => {
-                                test_result = Err(anyhow::anyhow!("Failed to serialize cancel message: {}", e));
+                                test_result = Err(anyhow::anyhow!(
+                                    "Failed to serialize cancel message: {}",
+                                    e
+                                ));
                                 break;
                             }
                         };
-                        let _ = transport
+                        let _ = ctrl_writer
                             .write_message(&mut writer, &serialized)
                             .await;
                         let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
                     }
                 }
-                _ = pause_request_rx.changed() => {
-                    let paused = *pause_request_rx.borrow();
-                    // Always pause local data loops
-                    let _ = pause_tx.send(paused);
-                    // Send protocol message only if server supports it
-                    if supports_pause {
-                        let msg = if paused {
-                            ControlMessage::Pause { id: test_id.clone() }
-                        } else {
-                            ControlMessage::Resume { id: test_id.clone() }
-                        };
-                        let serialized = match msg.serialize() {
-                            Ok(s) => s,
-                            Err(e) => {
-                                test_result = Err(anyhow::anyhow!("Failed to serialize pause/resume message: {}", e));
-                                break;
+                res = pause_request_rx.changed(), if pause_request_open => {
+                    if res.is_err() {
+                        // Sender dropped — disable this arm to avoid busy-loop
+                        pause_request_open = false;
+                    } else {
+                        let paused = *pause_request_rx.borrow();
+                        // Always pause local data loops
+                        let _ = pause_tx.send(paused);
+                        // Send protocol message only if server supports it
+                        if supports_pause {
+                            let msg = if paused {
+                                ControlMessage::Pause { id: test_id.clone() }
+                            } else {
+                                ControlMessage::Resume { id: test_id.clone() }
+                            };
+                            let serialized = match msg.serialize() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    test_result = Err(anyhow::anyhow!(
+                                        "Failed to serialize pause/resume message: {}",
+                                        e
+                                    ));
+                                    break;
+                                }
+                            };
+                            if ctrl_writer
+                                .write_message(&mut writer, &serialized)
+                                .await
+                                .is_err()
+                            {
+                                warn!("Failed to send pause/resume to server");
                             }
-                        };
-                        if transport
-                            .write_message(&mut writer, &serialized)
-                            .await
-                            .is_err()
-                        {
-                            warn!("Failed to send pause/resume to server");
                         }
                     }
                 }
@@ -1040,177 +1212,19 @@ impl Client {
                     let _ = cancel_tx.send(true);
                     debug!("Local test duration reached; stopping data streams while awaiting final control message");
                 }
-            }
-
-            if line.is_empty() {
-                continue;
-            }
-
-            let msg: ControlMessage = match ControlMessage::deserialize(line.trim()) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    test_result = Err(anyhow::anyhow!("Failed to parse server message: {}", e));
+                _ = tokio::time::sleep_until(deadline) => {
+                    // Overall response timeout — the old loop wrapped
+                    // read_message in timeout_at(deadline, ...).  Now that
+                    // the reader task owns the read, we enforce the deadline
+                    // here so the loop cannot hang waiting for the channel.
+                    test_result = Err(anyhow::anyhow!(
+                        "Timeout waiting for server response"
+                    ));
                     break;
-                }
-            };
-
-            match msg {
-                ControlMessage::Interval {
-                    elapsed_ms,
-                    streams,
-                    aggregate,
-                    ..
-                } => {
-                    if let Some(ref tx) = progress_tx {
-                        // Only overlay local TCP_INFO for sender-side contexts (Upload/Bidir).
-                        // In Download mode, server is the sender and has the correct metrics.
-                        let is_sender =
-                            matches!(self.config.direction, Direction::Upload | Direction::Bidir);
-                        let (rtt_us, cwnd, total_retransmits) = if is_sender {
-                            if let Some((rtt, retrans, cw)) = stats.poll_local_tcp_info() {
-                                (Some(rtt), Some(cw), Some(retrans))
-                            } else {
-                                (aggregate.rtt_us, aggregate.cwnd, None)
-                            }
-                        } else {
-                            (aggregate.rtt_us, aggregate.cwnd, None)
-                        };
-                        // Issue #81: in download mode the server is the UDP
-                        // sender, so aggregate.bytes counts send_to() calls
-                        // the kernel accepted — over a constrained link that
-                        // tracks the requested -b rate, not what arrived.
-                        // We are the receiver; report our own counters.
-                        let (total_bytes, throughput_mbps, streams) = if udp_download {
-                            let now = tokio::time::Instant::now();
-                            let dt = now.duration_since(last_recv_instant).as_secs_f64();
-                            last_recv_instant = now;
-                            let (interval_total, deltas) =
-                                udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
-                            let mbps = if dt > 0.0 {
-                                (interval_total as f64 * 8.0) / dt / 1_000_000.0
-                            } else {
-                                0.0
-                            };
-                            let streams: Vec<StreamInterval> = streams
-                                .into_iter()
-                                .map(|mut s| {
-                                    if let Some(delta) = deltas.get(s.id as usize) {
-                                        s.bytes = *delta;
-                                    }
-                                    s
-                                })
-                                .collect();
-                            (interval_total, mbps, streams)
-                        } else {
-                            (aggregate.bytes, aggregate.throughput_mbps, streams)
-                        };
-                        // Bidir UDP: the download half of the server's split
-                        // (`bytes_received` from our view) is its send-side
-                        // counter — same inflation as above. Substitute our
-                        // own receive deltas; the upload half is already
-                        // receiver-truth (the server counts what arrived).
-                        // The combined totals are recomputed from the two
-                        // corrected halves when the server reported a split.
-                        let (bytes_received, throughput_recv_mbps, total_bytes, throughput_mbps) =
-                            if udp_bidir {
-                                let now = tokio::time::Instant::now();
-                                let dt = now.duration_since(last_recv_instant).as_secs_f64();
-                                last_recv_instant = now;
-                                let (interval_recv, _) =
-                                    udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
-                                let recv_mbps = if dt > 0.0 {
-                                    (interval_recv as f64 * 8.0) / dt / 1_000_000.0
-                                } else {
-                                    0.0
-                                };
-                                let (total, total_mbps) =
-                                    match (aggregate.bytes_sent, aggregate.throughput_send_mbps) {
-                                        (Some(sent), Some(send_mbps)) => {
-                                            (sent + interval_recv, send_mbps + recv_mbps)
-                                        }
-                                        _ => (total_bytes, throughput_mbps),
-                                    };
-                                (Some(interval_recv), Some(recv_mbps), total, total_mbps)
-                            } else {
-                                (
-                                    aggregate.bytes_received,
-                                    aggregate.throughput_recv_mbps,
-                                    total_bytes,
-                                    throughput_mbps,
-                                )
-                            };
-                        // Apply the producer-side monotonic-denominator
-                        // filter so a delayed TCP `Interval` cannot clobber
-                        // a fresher reading we already saw via UDP feedback.
-                        // Both paths feed the same filter; older-or-same
-                        // counts are silently rejected (None -> consumers
-                        // preserve their previous loss state).
-                        // In download mode our own receive trackers are the
-                        // authoritative source; the server has no
-                        // receiver-side counters to report there.
-                        let filtered_udp_progress = if udp_download {
-                            udp_progress_filter.apply(udp_local_progress(&stats))
-                        } else {
-                            aggregate
-                                .udp_progress
-                                .and_then(|p| udp_progress_filter.apply(p))
-                        };
-                        let _ = tx
-                            .send(TestProgress {
-                                elapsed_ms,
-                                total_bytes,
-                                throughput_mbps,
-                                rtt_us,
-                                cwnd,
-                                total_retransmits,
-                                streams,
-                                bytes_sent: aggregate.bytes_sent,
-                                bytes_received,
-                                throughput_send_mbps: aggregate.throughput_send_mbps,
-                                throughput_recv_mbps,
-                                udp_progress: filtered_udp_progress,
-                                udp_feedback_only: false,
-                            })
-                            .await;
-                    }
-                }
-                ControlMessage::Result(mut result) => {
-                    // Server (receiver) can't report sender-side TCP_INFO metrics
-                    // (retransmits, RTT, cwnd are all 0 on receiver side).
-                    // Overlay client-side snapshots when we're the sender.
-                    let is_sender =
-                        matches!(self.config.direction, Direction::Upload | Direction::Bidir);
-                    if is_sender {
-                        for (i, stream_result) in result.streams.iter_mut().enumerate() {
-                            if let Some(info) =
-                                stats.streams.get(i).and_then(|s| s.final_tcp_info())
-                            {
-                                stream_result.retransmits = Some(info.retransmits);
-                            }
-                        }
-                        if let Some(info) = stats.final_local_tcp_info() {
-                            result.tcp_info = Some(info);
-                        }
-                    }
-                    test_result = Ok(result);
-                    break;
-                }
-                ControlMessage::Error { message } => {
-                    test_result = Err(anyhow::anyhow!("Server error: {}", message));
-                    break;
-                }
-                ControlMessage::Cancelled { .. } => {
-                    // Server acknowledged cancel — it will send Result next.
-                    // Tighten deadline to wait briefly for the final result.
-                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                    line.clear();
-                    continue;
-                }
-                _ => {
-                    debug!("Unexpected message: {:?}", msg);
                 }
             }
         }
+        control_handle.abort();
 
         // Signal stream tasks to stop and wait for them to finish cleanly
         let _ = cancel_tx.send(true);
@@ -2121,6 +2135,16 @@ impl Client {
             }));
         }
 
+        // Split the transport so a dedicated reader task can own the recv
+        // codec independently of the control loop's select!. This prevents
+        // the LAN-229 desync hazard where cancelling a partial read_message
+        // (inside select!) loses buffered bytes from the AsyncBufRead reader.
+        let (ctrl_reader_half, mut ctrl_writer) = transport.split();
+        let (mut cmd_rx, control_handle) =
+            spawn_client_control_reader(ctrl_reader, ctrl_reader_half);
+        let mut cancel_request_open = true;
+        let mut pause_request_open = true;
+
         // Read interval updates and final result
         let test_result: anyhow::Result<TestResult> = 'control: {
             // For infinite duration, use 1 year timeout (effectively no timeout)
@@ -2132,24 +2156,81 @@ impl Client {
             let mut deadline = tokio::time::Instant::now() + timeout_duration;
 
             loop {
-                line.clear();
+                // Select on the dedicated reader task's channel (not the raw
+                // reader) so cancel/pause arms can fire without dropping a
+                // partial read_message (LAN-229 desync hazard).
                 tokio::select! {
-                    read_result = tokio::time::timeout_at(deadline, transport.read_message(&mut ctrl_reader, &mut line)) => {
-                        match read_result {
-                            Ok(Ok(())) if line.trim().is_empty() => break,
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => {
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            Some(ClientControlEvent::Eof) => {
+                                let _ = cancel_tx.send(true);
+                                break;
+                            }
+                            Some(ClientControlEvent::Error(e)) => {
                                 let _ = cancel_tx.send(true);
                                 break 'control Err(e);
                             }
-                            Err(_) => {
+                            Some(ClientControlEvent::Message(msg)) => {
+                                match *msg {
+                                    ControlMessage::Interval {
+                                        elapsed_ms,
+                                        streams,
+                                        aggregate,
+                                        ..
+                                    } => {
+                                        if let Some(ref tx) = progress_tx {
+                                            let _ = tx
+                                                .send(TestProgress {
+                                                    elapsed_ms,
+                                                    total_bytes: aggregate.bytes,
+                                                    throughput_mbps: aggregate.throughput_mbps,
+                                                    rtt_us: aggregate.rtt_us,
+                                                    cwnd: aggregate.cwnd,
+                                                    total_retransmits: None,
+                                                    streams,
+                                                    bytes_sent: aggregate.bytes_sent,
+                                                    bytes_received: aggregate.bytes_received,
+                                                    throughput_send_mbps: aggregate.throughput_send_mbps,
+                                                    throughput_recv_mbps: aggregate.throughput_recv_mbps,
+                                                    udp_progress: aggregate.udp_progress,
+                                                    udp_feedback_only: false,
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                    ControlMessage::Result(result) => {
+                                        let _ = cancel_tx.send(true);
+                                        endpoint.close(0u32.into(), b"done");
+                                        break 'control Ok(result);
+                                    }
+                                    ControlMessage::Error { message } => {
+                                        let _ = cancel_tx.send(true);
+                                        break 'control Err(anyhow::anyhow!("Server error: {}", message));
+                                    }
+                                    ControlMessage::Cancelled { .. } => {
+                                        // Server acknowledged cancel — it will send Result next.
+                                        // Tighten deadline to wait briefly for the final result.
+                                        let _ = cancel_tx.send(true);
+                                        deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                                        continue;
+                                    }
+                                    _ => {
+                                        debug!("Unexpected message: {:?}", msg);
+                                    }
+                                }
+                            }
+                            None => {
+                                // Reader task exited
                                 let _ = cancel_tx.send(true);
-                                break 'control Err(anyhow::anyhow!("Timeout waiting for server response"));
+                                break;
                             }
                         }
                     }
-                    _ = cancel_request_rx.changed() => {
-                        if *cancel_request_rx.borrow() {
+                    res = cancel_request_rx.changed(), if cancel_request_open => {
+                        if res.is_err() {
+                            // Sender dropped — disable this arm to avoid busy-loop
+                            cancel_request_open = false;
+                        } else if *cancel_request_rx.borrow() {
                             let cancel_msg = ControlMessage::Cancel {
                                 id: test_id.clone(),
                                 reason: "User requested cancellation".to_string(),
@@ -2161,97 +2242,52 @@ impl Client {
                                     break 'control Err(e);
                                 }
                             };
-                            let _ = transport.write_message(&mut ctrl_send, &serialized).await;
+                            let _ = ctrl_writer.write_message(&mut ctrl_send, &serialized).await;
                             let _ = cancel_tx.send(true);
                         }
                     }
-                    _ = pause_request_rx.changed() => {
-                        let paused = *pause_request_rx.borrow();
-                        let _ = pause_tx.send(paused);
-                        if supports_pause {
-                            let msg = if paused {
-                                ControlMessage::Pause { id: test_id.clone() }
-                            } else {
-                                ControlMessage::Resume { id: test_id.clone() }
-                            };
-                            let serialized = match msg.serialize() {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    let _ = cancel_tx.send(true);
-                                    break 'control Err(e);
+                    res = pause_request_rx.changed(), if pause_request_open => {
+                        if res.is_err() {
+                            // Sender dropped — disable this arm to avoid busy-loop
+                            pause_request_open = false;
+                        } else {
+                            let paused = *pause_request_rx.borrow();
+                            let _ = pause_tx.send(paused);
+                            if supports_pause {
+                                let msg = if paused {
+                                    ControlMessage::Pause { id: test_id.clone() }
+                                } else {
+                                    ControlMessage::Resume { id: test_id.clone() }
+                                };
+                                let serialized = match msg.serialize() {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        let _ = cancel_tx.send(true);
+                                        break 'control Err(e);
+                                    }
+                                };
+                                if ctrl_writer.write_message(&mut ctrl_send, &serialized).await.is_err() {
+                                    warn!("Failed to send pause/resume to server");
                                 }
-                            };
-                            if transport.write_message(&mut ctrl_send, &serialized).await.is_err() {
-                                warn!("Failed to send pause/resume to server");
                             }
                         }
                     }
-                }
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                let msg: ControlMessage = match ControlMessage::deserialize(line.trim()) {
-                    Ok(v) => v,
-                    Err(e) => {
+                    _ = tokio::time::sleep_until(deadline) => {
+                        // Overall response timeout — the old loop wrapped
+                        // read_message in timeout_at(deadline, ...).  Now
+                        // the reader task owns the read, so we enforce the
+                        // deadline here to prevent hanging on the channel.
                         let _ = cancel_tx.send(true);
-                        break 'control Err(e);
-                    }
-                };
-
-                match msg {
-                    ControlMessage::Interval {
-                        elapsed_ms,
-                        streams,
-                        aggregate,
-                        ..
-                    } => {
-                        if let Some(ref tx) = progress_tx {
-                            let _ = tx
-                                .send(TestProgress {
-                                    elapsed_ms,
-                                    total_bytes: aggregate.bytes,
-                                    throughput_mbps: aggregate.throughput_mbps,
-                                    rtt_us: aggregate.rtt_us,
-                                    cwnd: aggregate.cwnd,
-                                    total_retransmits: None,
-                                    streams,
-                                    bytes_sent: aggregate.bytes_sent,
-                                    bytes_received: aggregate.bytes_received,
-                                    throughput_send_mbps: aggregate.throughput_send_mbps,
-                                    throughput_recv_mbps: aggregate.throughput_recv_mbps,
-                                    udp_progress: aggregate.udp_progress,
-                                    udp_feedback_only: false,
-                                })
-                                .await;
-                        }
-                    }
-                    ControlMessage::Result(result) => {
-                        let _ = cancel_tx.send(true);
-                        endpoint.close(0u32.into(), b"done");
-                        break 'control Ok(result);
-                    }
-                    ControlMessage::Error { message } => {
-                        let _ = cancel_tx.send(true);
-                        break 'control Err(anyhow::anyhow!("Server error: {}", message));
-                    }
-                    ControlMessage::Cancelled { .. } => {
-                        // Server acknowledged cancel — it will send Result next.
-                        // Tighten deadline to wait briefly for the final result.
-                        let _ = cancel_tx.send(true);
-                        deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                        line.clear();
-                        continue;
-                    }
-                    _ => {
-                        debug!("Unexpected message: {:?}", msg);
+                        break 'control Err(anyhow::anyhow!(
+                            "Timeout waiting for server response"
+                        ));
                     }
                 }
             }
 
             break 'control Err(anyhow::anyhow!("Connection closed without result"));
         };
+        control_handle.abort();
 
         // Cancel any stream work that may still be in flight
         let _ = cancel_tx.send(true);
@@ -2510,6 +2546,84 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         reader.consume(len);
         total += len;
     }
+}
+
+/// Message from the dedicated control-reader task to the client control loop.
+///
+/// This decouples reading complete control messages from the `select!`
+/// that also polls cancel/pause watch channels, preventing the LAN-229
+/// desync hazard where cancelling a partial `read_message` loses buffered
+/// bytes from the `AsyncBufRead` reader.
+enum ClientControlEvent {
+    /// A complete control message was read and parsed.
+    Message(Box<ControlMessage>),
+    /// EOF — the server closed the control stream cleanly.
+    Eof,
+    /// A read or parse error occurred.
+    Error(anyhow::Error),
+}
+
+/// Spawn a dedicated task that owns the read half of the transport and the
+/// `ControlReader` codec, reads complete control messages, and sends them
+/// over an mpsc channel as [`ClientControlEvent`]s.
+///
+/// The control loop `select!`s on the channel receiver (not the raw
+/// reader), so cancel/pause watch arms can fire without dropping a
+/// partially-consumed read — the reader task keeps reading independently.
+///
+/// The returned `JoinHandle` must be aborted on every exit path.
+fn spawn_client_control_reader<R>(
+    reader: R,
+    mut ctrl_reader: crate::control_crypto::ControlReader,
+) -> (
+    mpsc::Receiver<ClientControlEvent>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<ClientControlEvent>(16);
+    let handle = tokio::spawn(async move {
+        let mut reader = reader;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match ctrl_reader.read_message(&mut reader, &mut line).await {
+                Ok(()) => {
+                    if line.trim().is_empty() {
+                        let _ = tx.send(ClientControlEvent::Eof).await;
+                        break;
+                    }
+                    match ControlMessage::deserialize(line.trim()) {
+                        Ok(msg) => {
+                            if tx
+                                .send(ClientControlEvent::Message(Box::new(msg)))
+                                .await
+                                .is_err()
+                            {
+                                // Control loop dropped the receiver — exit.
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(ClientControlEvent::Error(anyhow::anyhow!(
+                                    "Failed to parse server message: {}",
+                                    e
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(ClientControlEvent::Error(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+    (rx, handle)
 }
 
 fn control_bind_addr(config: &ClientConfig) -> Option<SocketAddr> {
