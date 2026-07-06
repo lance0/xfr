@@ -96,34 +96,64 @@ jobs:
       - name: Build + compile tests on MSRV
         run: cargo test --all-features --no-run --locked
 
-  # Cross-compile every shippable Linux/Android target on each PR (debug, no
-  # packaging). release.yml builds these with an old-glibc cross image; v0.9.15
-  # died at release time on a glibc symbol (memfd_create, glibc 2.27+) that
-  # linked fine on the ubuntu/macos test jobs. Same pinned cross version as
-  # release.yml so the toolchain (and its glibc) match — linking is what catches
-  # missing symbols. aarch64-apple-darwin is already built by the macOS test job.
+  # Build every shippable release target on each PR (debug, no packaging) with
+  # the same toolchains as release.yml, so a target-specific build/link failure
+  # is caught before tag. zigbuild covers the Linux gnu/musl targets (Zig bundles
+  # musl and pins a low glibc floor) — it replaces cross 0.2.5, whose stale images
+  # failed build scripts under modern Rust (glibc 2.28+ symbol errors). Android
+  # stays on cross (from git main, current glibc); macOS builds natively.
   cross-smoke:
-    name: Cross build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - aarch64-linux-android
+        include:
+          - target: x86_64-unknown-linux-musl
+            triple: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: zigbuild
+          - target: aarch64-unknown-linux-gnu
+            triple: aarch64-unknown-linux-gnu.2.17
+            os: ubuntu-latest
+            tool: zigbuild
+          - target: aarch64-unknown-linux-musl
+            triple: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: zigbuild
+          - target: aarch64-linux-android
+            triple: aarch64-linux-android
+            os: ubuntu-latest
+            tool: cross
+          - target: aarch64-apple-darwin
+            triple: aarch64-apple-darwin
+            os: macos-latest
+            tool: native
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cross
-        uses: taiki-e/install-action@v2
         with:
-          tool: cross@0.2.5
-      - name: Cross build
-        run: cross build --target ${{ matrix.target }} --features prometheus --locked
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Zig
+        if: matrix.tool == 'zigbuild'
+        uses: goto-bus-stop/setup-zig@v2
+      - name: Install cargo-zigbuild
+        if: matrix.tool == 'zigbuild'
+        run: cargo install cargo-zigbuild --locked
+      - name: Install cross (git main)
+        if: matrix.tool == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build (zigbuild)
+        if: matrix.tool == 'zigbuild'
+        run: cargo zigbuild --target ${{ matrix.triple }} --features prometheus --locked
+      - name: Build (cross)
+        if: matrix.tool == 'cross'
+        run: cross build --target ${{ matrix.triple }} --features prometheus --locked
+      - name: Build (native)
+        if: matrix.tool == 'native'
+        run: cargo build --target ${{ matrix.triple }} --features prometheus --locked
 
   mptcp:
     name: MPTCP (requires kernel MPTCP + netem)
