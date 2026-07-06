@@ -341,8 +341,9 @@ pub async fn send_quic_data(
     mut pause: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
-    let deadline = tokio::time::Instant::now() + duration;
+    let mut deadline = tokio::time::Instant::now() + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut paused_total = Duration::ZERO;
 
     loop {
         if *cancel.borrow() {
@@ -351,9 +352,14 @@ pub async fn send_quic_data(
         }
 
         if crate::pause::is_paused(&pause) {
-            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+            let (cancelled, paused) =
+                crate::pause::wait_while_paused_timed(&mut pause, &mut cancel).await;
+            if cancelled {
                 break;
             }
+            // Extend the deadline by the time spent paused (LAN-230)
+            paused_total += paused;
+            deadline += paused;
             continue;
         }
 
@@ -362,11 +368,33 @@ pub async fn send_quic_data(
             break;
         }
 
-        match send.write(&buffer).await {
-            Ok(n) => stats.add_bytes_sent(n as u64),
-            Err(e) => {
-                error!("QUIC send error: {}", e);
-                return Err(e.into());
+        // Race the write against cancel, deadline, and pause so a blocked
+        // write can be interrupted (LAN-230).
+        tokio::select! {
+            biased;
+            res = cancel.changed() => {
+                if res.is_err() || *cancel.borrow() {
+                    debug!("QUIC send cancelled during write");
+                    break;
+                }
+            }
+            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
+                // Pause toggled during write — loop back to handle it
+                // and extend the deadline (LAN-230).
+                continue;
+            }
+            _ = tokio::time::sleep_until(deadline), if !is_infinite => {
+                debug!("QUIC send deadline reached during write");
+                break;
+            }
+            result = send.write(&buffer) => {
+                match result {
+                    Ok(n) => stats.add_bytes_sent(n as u64),
+                    Err(e) => {
+                        error!("QUIC send error: {}", e);
+                        return Err(e.into());
+                    }
+                }
             }
         }
     }

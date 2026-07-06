@@ -465,8 +465,9 @@ pub async fn send_data(
     }
     let mut zerocopy = setup_zerocopy(&config, &buffer, stats.stream_id);
     let start = tokio::time::Instant::now();
-    let deadline = start + duration;
+    let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut paused_total = Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
     let mut chunk_offset: usize = 0;
@@ -479,9 +480,14 @@ pub async fn send_data(
         }
 
         if crate::pause::is_paused(&pause) {
-            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+            let (cancelled, paused) =
+                crate::pause::wait_while_paused_timed(&mut pause, &mut cancel).await;
+            if cancelled {
                 break;
             }
+            // Extend the deadline by the time spent paused (LAN-230)
+            paused_total += paused;
+            deadline += paused;
             // Reset pacing baseline after resume to prevent catch-up burst
             pace_start = tokio::time::Instant::now();
             pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
@@ -507,8 +513,6 @@ pub async fn send_data(
                         debug!("Send cancelled during write for stream {}", stats.stream_id);
                     }
                     Ok(()) => {
-                        // Value changed but not to true — no-op in practice since
-                        // cancel is one-shot; defensive against future reuse.
                         debug!("Cancel signal toggled for stream {}, stopping", stats.stream_id);
                     }
                     Err(_) => {
@@ -516,6 +520,12 @@ pub async fn send_data(
                     }
                 }
                 break;
+            }
+            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
+                // Pause toggled during write — loop back to handle it,
+                // which calls wait_while_paused_timed and extends the
+                // deadline by the paused duration (LAN-230).
+                continue;
             }
             _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
@@ -799,8 +809,9 @@ pub async fn send_data_half(
     }
     let mut zerocopy = setup_zerocopy(&config, &buffer, stats.stream_id);
     let start = tokio::time::Instant::now();
-    let deadline = start + duration;
+    let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut paused_total = Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
     let mut chunk_offset: usize = 0;
@@ -813,9 +824,14 @@ pub async fn send_data_half(
         }
 
         if crate::pause::is_paused(&pause) {
-            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+            let (cancelled, paused) =
+                crate::pause::wait_while_paused_timed(&mut pause, &mut cancel).await;
+            if cancelled {
                 break;
             }
+            // Extend the deadline by the time spent paused (LAN-230)
+            paused_total += paused;
+            deadline += paused;
             pace_start = tokio::time::Instant::now();
             pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
             continue;
@@ -826,9 +842,9 @@ pub async fn send_data_half(
             break;
         }
 
-        // Race write against cancel + deadline so a blocked write (e.g. under
-        // heavy tc rate limiting with full kernel send buffer) doesn't prevent
-        // the loop from noticing the test is over. See send_data for details.
+        // Race write against cancel + deadline + pause so a blocked write
+        // (e.g. under heavy tc rate limiting with full kernel send buffer)
+        // doesn't prevent the loop from noticing the test is over or paused.
         let write_result = tokio::select! {
             biased;
             res = cancel.changed() => {
@@ -844,6 +860,12 @@ pub async fn send_data_half(
                     }
                 }
                 break;
+            }
+            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
+                // Pause toggled during write — loop back to handle it,
+                // which calls wait_while_paused_timed and extends the
+                // deadline by the paused duration (LAN-230).
+                continue;
             }
             _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);

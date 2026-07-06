@@ -600,8 +600,9 @@ pub async fn send_udp_paced(
         t
     };
     let start = Instant::now();
-    let deadline = start + duration;
+    let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut paused_total = Duration::ZERO;
 
     let mut packet = vec![0u8; packet_size];
     if random_payload {
@@ -613,11 +614,15 @@ pub async fn send_udp_paced(
             debug!("UDP send cancelled");
             break;
         }
-
         if crate::pause::is_paused(&pause) {
-            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+            let (cancelled, paused) =
+                crate::pause::wait_while_paused_timed(&mut pause, &mut cancel).await;
+            if cancelled {
                 break;
             }
+            // Extend the deadline by the time spent paused (LAN-230)
+            paused_total += paused;
+            deadline += paused;
             // Reset the pacing ticker after resume so the first post-pause
             // tick fires a full interval from now, not immediately (the
             // queued tick from before pause would fire instantly and cause
@@ -697,8 +702,9 @@ async fn send_udp_unlimited(
     let packet_size = UDP_PAYLOAD_SIZE;
     let mut sequence: u64 = 0;
     let start = Instant::now();
-    let deadline = start + duration;
+    let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
+    let mut paused_total = Duration::ZERO;
     let mut packet = vec![0u8; packet_size];
     if random_payload {
         rand::RngExt::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
@@ -712,11 +718,15 @@ async fn send_udp_unlimited(
             debug!("UDP send cancelled");
             break;
         }
-
         if crate::pause::is_paused(&pause) {
-            if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
+            let (cancelled, paused) =
+                crate::pause::wait_while_paused_timed(&mut pause, &mut cancel).await;
+            if cancelled {
                 break;
             }
+            // Extend the deadline by the time spent paused (LAN-230)
+            paused_total += paused;
+            deadline += paused;
             continue;
         }
 
