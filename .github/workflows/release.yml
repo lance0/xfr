@@ -89,16 +89,18 @@ jobs:
       - name: Install Zig
         if: matrix.tool == 'zigbuild'
         uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Install cargo-zigbuild
         if: matrix.tool == 'zigbuild'
-        run: cargo install cargo-zigbuild --locked
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
 
       # Android is an NDK target zigbuild does not handle; keep cross, but from
       # git main (images track current glibc) rather than the stale 0.2.5.
-      - name: Install cross (git main)
+      - name: Install cross (pinned main commit)
         if: matrix.tool == 'cross'
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 64b5bb4d --locked
 
       - name: Build (zigbuild)
         if: matrix.tool == 'zigbuild'

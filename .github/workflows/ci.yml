@@ -139,12 +139,14 @@ jobs:
       - name: Install Zig
         if: matrix.tool == 'zigbuild'
         uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0
       - name: Install cargo-zigbuild
         if: matrix.tool == 'zigbuild'
-        run: cargo install cargo-zigbuild --locked
-      - name: Install cross (git main)
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: Install cross (pinned main commit)
         if: matrix.tool == 'cross'
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 64b5bb4d --locked
       - name: Build (zigbuild)
         if: matrix.tool == 'zigbuild'
         run: cargo zigbuild --target ${{ matrix.triple }} --features prometheus --locked
