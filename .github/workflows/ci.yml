@@ -10,30 +10,45 @@ on:
     paths-ignore:
       - '**/*.md'
 
+# Cancel superseded runs on a branch/PR, but never on master — a release-prep
+# push must not be killed by a follow-up commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.os }}, ${{ matrix.features }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            features: --all-features
+          - os: ubuntu-latest
+            features: --no-default-features
+          - os: macos-latest
+            features: --all-features
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests (Linux)
-        if: runner.os == 'Linux'
-        run: cargo test --all-features
-      - name: Run tests (macOS)
-        if: runner.os == 'macOS'
-        run: cargo test --features discovery,prometheus
+      - name: Run tests
+        run: cargo test --locked ${{ matrix.features }}
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.features }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [--all-features, --no-default-features]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -41,11 +56,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --locked ${{ matrix.features }} --all-targets -- -D warnings
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -54,69 +70,99 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-  mptcp:
-    name: MPTCP (requires kernel MPTCP + netem)
+  doc:
+    name: Doc (deny rustdoc warnings)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build release binary
-        run: cargo build --release
-      - name: Run MPTCP namespace tests
-        # The script emits a ::warning:: annotation and exits 0 when
-        # MPTCP or netem is unavailable, making the skip visible in
-        # the PR check UI without failing the job (LAN-174).
-        run: sudo ./test-mptcp-ns.sh --ci
-
-  control-channel-skew:
-    name: Control-channel skew (#70 regression)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build release binary
-        run: cargo build --release
-      - name: Verify TCP_NODELAY on control channel under saturated link
-        run: sudo ./test-control-channel-skew.sh
+      - name: cargo doc
+        run: cargo doc --all-features --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      - name: Check MSRV
-        run: cargo check --all-features
+      # Compile the tests too (--no-run) so a dependency MSRV bump or a test
+      # using an API newer than 1.88 fails here, not only non-test code.
+      - name: Build + compile tests on MSRV
+        run: cargo test --all-features --no-run --locked
 
-  mtu-probe:
-    name: MTU probe (#64 netns)
+  # Cross-compile every shippable Linux/Android target on each PR (debug, no
+  # packaging). release.yml builds these with an old-glibc cross image; v0.9.15
+  # died at release time on a glibc symbol (memfd_create, glibc 2.27+) that
+  # linked fine on the ubuntu/macos test jobs. Same pinned cross version as
+  # release.yml so the toolchain (and its glibc) match — linking is what catches
+  # missing symbols. aarch64-apple-darwin is already built by the macOS test job.
+  cross-smoke:
+    name: Cross build (${{ matrix.target }})
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build release binary
-        run: cargo build --release
-      - name: Probe through a constrained middle hop
-        run: sudo ./test-mtu-probe-ns.sh --ci
-
-  # The release workflow cross-compiles aarch64-unknown-linux-gnu with an
-  # old-glibc toolchain that the ubuntu/macos test jobs never exercise.
-  # v0.9.15 died at release time on a glibc symbol (memfd_create, glibc
-  # 2.27+) that linked fine everywhere else. Same pinned cross version as
-  # release.yml so the Docker image (and its glibc) match; debug profile is
-  # enough — linking is what catches missing symbols.
-  cross-aarch64-gnu:
-    name: Cross build (aarch64-gnu, release-toolchain glibc)
-    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - aarch64-linux-android
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cross
-        run: cargo install cross --version 0.2.5
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross@0.2.5
       - name: Cross build
-        run: cross build --target aarch64-unknown-linux-gnu --features prometheus
+        run: cross build --target ${{ matrix.target }} --features prometheus --locked
+
+  mptcp:
+    name: MPTCP (requires kernel MPTCP + netem)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Run MPTCP namespace tests
+        # The script emits a ::warning:: annotation and exits 0 when MPTCP or
+        # netem is unavailable, making the skip visible in the PR check UI
+        # without failing the job (LAN-174).
+        run: sudo ./test-mptcp-ns.sh --ci
+
+  control-channel-skew:
+    name: Control-channel skew (#70 regression)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Verify TCP_NODELAY on control channel under saturated link
+        run: sudo ./test-control-channel-skew.sh
+
+  mtu-probe:
+    name: MTU probe (#64 netns)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Probe through a constrained middle hop
+        run: sudo ./test-mtu-probe-ns.sh --ci
