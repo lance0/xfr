@@ -43,8 +43,6 @@ const INITIAL_READ_TIMEOUT_PER_STREAM_MS: u64 = 80;
 const INITIAL_READ_TIMEOUT_MAX: Duration = Duration::from_secs(20);
 /// Interval between progress/stats updates sent to the client
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
-/// How often to check for cancellation in send/receive loops
-const CANCEL_CHECK_TIMEOUT: Duration = Duration::from_millis(10);
 /// Brief delay before sending final result to allow buffered writes to flush
 const RESULT_FLUSH_DELAY: Duration = Duration::from_millis(100);
 /// Timeout for accepting a data stream connection on per-stream listeners
@@ -1529,7 +1527,7 @@ async fn handle_client_with_first_message(
 
     // Continue with test handling
     handle_test_request(
-        &mut reader,
+        reader,
         &mut writer,
         peer_addr,
         active_tests,
@@ -1604,7 +1602,7 @@ async fn handle_client_with_auth(
     // Continue with normal test handling
     // Note: dead code path - assumes single-port capable client and UDP feedback support
     handle_test_request(
-        &mut reader,
+        reader,
         &mut writer,
         peer_addr,
         active_tests,
@@ -1678,7 +1676,7 @@ async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
 /// Handle test request after authentication
 #[allow(clippy::too_many_arguments)]
 async fn handle_test_request(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     peer_addr: SocketAddr,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
@@ -1691,7 +1689,7 @@ async fn handle_test_request(
     let mut line = String::new();
 
     // Read test request (with timeout)
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(reader, &mut line))
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
         .await
         .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
@@ -1878,7 +1876,7 @@ fn directional_totals(
 #[allow(clippy::too_many_arguments)]
 async fn run_quic_test(
     connection: &quinn::Connection,
-    mut ctrl_reader: BufReader<quinn::RecvStream>,
+    ctrl_reader: BufReader<quinn::RecvStream>,
     mut ctrl_send: quinn::SendStream,
     id: &str,
     streams: u8,
@@ -2021,96 +2019,102 @@ async fn run_quic_test(
     // always remove the active test entry and tear down live metrics, even if
     // an error or cancellation exits early.
     let run_result: anyhow::Result<(u64, f64)> = async {
-        // Send interval updates
+        // Spawn control-reader task (LAN-160 #13: avoid up to 1s cancel
+        // latency; LAN-229: avoid read_bounded_line desync under select!).
+        let (mut cmd_rx, control_handle) =
+            spawn_control_reader(ctrl_reader, id.to_string());
+
         let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
-        // Skip stale ticks rather than bursting them on unblock: if write_all stalls
-        // under back-pressure, Burst would emit several stale interval samples with
-        // fresh client-side arrival timestamps once the writer unblocks — both the
-        // timestamps and the throughput numbers attached to those samples are
-        // misleading. Skip drops them; cumulative state in StreamStats atomics still
-        // surfaces correctly on the next live tick and at end-of-test.
         interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let start = std::time::Instant::now();
-        let mut line = String::new();
 
-    loop {
-        tokio::select! {
-            _ = interval_timer.tick() => {
-                // Duration::ZERO means infinite - only break if duration is set
-                if duration != Duration::ZERO && start.elapsed() >= duration {
-                    break;
-                }
+        let mut loop_err: Option<anyhow::Error> = None;
+        loop {
+            tokio::select! {
+                _ = interval_timer.tick() => {
+                    if duration != Duration::ZERO && start.elapsed() >= duration {
+                        break;
+                    }
 
-                let intervals = stats.record_intervals();
-                let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
-                    .zip(intervals.iter())
-                    .map(|(s, i)| s.to_interval(i))
-                    .collect();
-                let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
+                    let intervals = stats.record_intervals();
+                    let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
+                        .zip(intervals.iter())
+                        .map(|(s, i)| s.to_interval(i))
+                        .collect();
+                    let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
 
-                let interval_msg = ControlMessage::Interval {
-                    id: id.to_string(),
-                    elapsed_ms: stats.elapsed_ms(),
-                    streams: stream_intervals,
-                    aggregate: aggregate.clone(),
-                };
-
-                if let Some(tx) = &tui_tx {
-                    let _ = tx.try_send(ServerEvent::TestUpdated {
+                    let interval_msg = ControlMessage::Interval {
                         id: id.to_string(),
-                        bytes: aggregate.bytes,
-                        throughput_mbps: aggregate.throughput_mbps,
-                    });
-                }
+                        elapsed_ms: stats.elapsed_ms(),
+                        streams: stream_intervals,
+                        aggregate: aggregate.clone(),
+                    };
 
-                if ctrl_send.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
-                    warn!("Failed to send interval");
-                    break;
+                    if let Some(tx) = &tui_tx {
+                        let _ = tx.try_send(ServerEvent::TestUpdated {
+                            id: id.to_string(),
+                            bytes: aggregate.bytes,
+                            throughput_mbps: aggregate.throughput_mbps,
+                        });
+                    }
+
+                    match interval_msg.serialize() {
+                        Ok(serialized) => {
+                            if ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await.is_err() {
+                                warn!("Failed to send interval");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            loop_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(ControlCommand::Cancel) => {
+                            info!("QUIC test {} cancelled by client", id);
+                            if let Some(test) = active_tests.lock().await.get(id) {
+                                let _ = test.cancel_tx.send(true);
+                            }
+                            let cancelled = ControlMessage::Cancelled { id: id.to_string() };
+                            match cancelled.serialize() {
+                                Ok(serialized) => {
+                                    if let Err(e) = ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await {
+                                        loop_err = Some(e.into());
+                                    }
+                                }
+                                Err(e) => loop_err = Some(e),
+                            }
+                            break;
+                        }
+                        Some(ControlCommand::Pause) => {
+                            info!("QUIC test {} paused", id);
+                            if let Some(test) = active_tests.lock().await.get(id) {
+                                let _ = test.pause_tx.send(true);
+                            }
+                        }
+                        Some(ControlCommand::Resume) => {
+                            info!("QUIC test {} resumed", id);
+                            if let Some(test) = active_tests.lock().await.get(id) {
+                                let _ = test.pause_tx.send(false);
+                            }
+                        }
+                        None => {
+                            debug!("Control reader for QUIC test {} exited", id);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        // Check for cancel message (non-blocking, bounded read)
-        let read_result = tokio::time::timeout(
-            CANCEL_CHECK_TIMEOUT,
-            read_bounded_line(&mut ctrl_reader, &mut line),
-        )
-        .await;
+        control_handle.abort();
 
-        if let Ok(Ok(n)) = read_result
-            && n > 0
-        {
-            match ControlMessage::deserialize(line.trim()) {
-                Ok(ControlMessage::Cancel {
-                    id: cancel_id,
-                    reason,
-                }) if cancel_id == id => {
-                    info!("QUIC test {} cancelled: {}", id, reason);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.cancel_tx.send(true);
-                    }
-                    let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                    ctrl_send
-                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
-                        .await?;
-                    break;
-                }
-                Ok(ControlMessage::Pause { id: pause_id }) if pause_id == id => {
-                    info!("QUIC test {} paused", id);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.pause_tx.send(true);
-                    }
-                }
-                Ok(ControlMessage::Resume { id: resume_id }) if resume_id == id => {
-                    info!("QUIC test {} resumed", id);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.pause_tx.send(false);
-                    }
-                }
-                _ => {}
-            }
+        if let Some(e) = loop_err {
+            return Err(e);
         }
-    }
 
     // Signal handlers to stop
     if let Some(test) = active_tests.lock().await.get(id) {
@@ -2220,7 +2224,7 @@ async fn run_quic_test(
 /// Run the actual bandwidth test
 #[allow(clippy::too_many_arguments)]
 async fn run_test(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     id: &str,
     protocol: Protocol,
@@ -2244,8 +2248,6 @@ async fn run_test(
     mtu_probe: bool,
     tcp_nodelay: bool,
 ) -> anyhow::Result<(u64, u64, f64)> {
-    let mut line = String::new();
-
     // For TCP: single-port mode (data connections come on control port)
     // For UDP: single-port mode (hello-routed connected sockets on the
     // main port, issue #63) or legacy per-stream sockets
@@ -2540,11 +2542,21 @@ async fn run_test(
         }
     };
 
+    // Spawn a dedicated control-reader task that owns the reader.  This
+    // avoids the LAN-229 desync hazard: read_bounded_line must never be
+    // a select! branch because cancelling a partial read loses buffered
+    // bytes.  The reader task sends parsed ControlCommands over an mpsc
+    // channel; the stats loop selects on that channel + the interval
+    // tick, giving sub-millisecond cancel/pause latency instead of up
+    // to 1s (LAN-160 #13).
+    let (mut cmd_rx, control_handle) = spawn_control_reader(reader, id.to_string());
+
     // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
     interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
 
+    let mut loop_err: Option<anyhow::Error> = None;
     loop {
         tokio::select! {
             _ = interval_timer.tick() => {
@@ -2576,51 +2588,67 @@ async fn run_test(
                     });
                 }
 
-                if writer.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
-                    warn!("Failed to send interval, client may have disconnected");
-                    break;
+                match interval_msg.serialize() {
+                    Ok(serialized) => {
+                        if writer.write_all(format!("{}\n", serialized).as_bytes()).await.is_err() {
+                            warn!("Failed to send interval, client may have disconnected");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        loop_err = Some(e);
+                        break;
+                    }
                 }
             }
-        }
-
-        // Check for cancel/pause/resume messages (bounded read)
-        let read_result =
-            tokio::time::timeout(CANCEL_CHECK_TIMEOUT, read_bounded_line(reader, &mut line)).await;
-
-        if let Ok(Ok(n)) = read_result
-            && n > 0
-        {
-            match ControlMessage::deserialize(line.trim()) {
-                Ok(ControlMessage::Cancel {
-                    id: cancel_id,
-                    reason,
-                }) if cancel_id == id => {
-                    info!("Test {} cancelled: {}", id, reason);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.cancel_tx.send(true);
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(ControlCommand::Cancel) => {
+                        info!("Test {} cancelled by client", id);
+                        if let Some(test) = active_tests.lock().await.get(id) {
+                            let _ = test.cancel_tx.send(true);
+                        }
+                        let cancelled = ControlMessage::Cancelled { id: id.to_string() };
+                        match cancelled.serialize() {
+                            Ok(serialized) => {
+                                if let Err(e) = writer.write_all(format!("{}\n", serialized).as_bytes()).await {
+                                    loop_err = Some(e.into());
+                                }
+                            }
+                            Err(e) => loop_err = Some(e),
+                        }
+                        break;
                     }
-                    let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                    writer
-                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
-                        .await?;
-                    break;
-                }
-                Ok(ControlMessage::Pause { id: pause_id }) if pause_id == id => {
-                    info!("Test {} paused", id);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.pause_tx.send(true);
+                    Some(ControlCommand::Pause) => {
+                        info!("Test {} paused", id);
+                        if let Some(test) = active_tests.lock().await.get(id) {
+                            let _ = test.pause_tx.send(true);
+                        }
+                    }
+                    Some(ControlCommand::Resume) => {
+                        info!("Test {} resumed", id);
+                        if let Some(test) = active_tests.lock().await.get(id) {
+                            let _ = test.pause_tx.send(false);
+                        }
+                    }
+                    None => {
+                        // Reader task exited (client disconnected or EOF)
+                        debug!("Control reader for test {} exited", id);
+                        break;
                     }
                 }
-                Ok(ControlMessage::Resume { id: resume_id }) if resume_id == id => {
-                    info!("Test {} resumed", id);
-                    if let Some(test) = active_tests.lock().await.get(id) {
-                        let _ = test.pause_tx.send(false);
-                    }
-                }
-                _ => {}
             }
         }
     }
+
+    // Abort the control-reader task so it doesn't outlive the test
+    // (it may be blocked in read_bounded_line on a slow-disconnecting peer).
+    control_handle.abort();
+
+    if let Some(e) = loop_err {
+        return Err(e);
+    }
+
 
     // Signal handlers to stop
     if let Some(test) = active_tests.lock().await.get(id) {
@@ -2785,6 +2813,62 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
         reader.consume(len);
         total += len;
     }
+}
+
+/// Parsed control message from the client during a test.
+/// Sent over an mpsc channel by the dedicated control-reader task.
+enum ControlCommand {
+    Cancel,
+    Pause,
+    Resume,
+}
+
+/// Spawn a dedicated task that owns the control reader and sends parsed
+/// `ControlCommand`s over an mpsc channel.  This avoids the LAN-229
+/// desync hazard: `read_bounded_line` must never be a `select!` branch
+/// because cancelling a partial read loses buffered bytes.  The reader
+/// task owns the stream for the lifetime of the test, so reads never
+/// get cancelled mid-line.
+///
+/// Only `Cancel`, `Pause`, and `Resume` (matching `id`) are forwarded;
+/// everything else is silently dropped — the post-auth control channel
+/// carries no other valid messages during a test.
+fn spawn_control_reader<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
+    mut reader: R,
+    id: String,
+) -> (mpsc::Receiver<ControlCommand>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel::<ControlCommand>(16);
+    let handle = tokio::spawn(async move {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match read_bounded_line(&mut reader, &mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(msg) = ControlMessage::deserialize(line.trim()) {
+                        let cmd = match msg {
+                            ControlMessage::Cancel { id: cid, .. } if cid == id => {
+                                Some(ControlCommand::Cancel)
+                            }
+                            ControlMessage::Pause { id: pid } if pid == id => {
+                                Some(ControlCommand::Pause)
+                            }
+                            ControlMessage::Resume { id: rid } if rid == id => {
+                                Some(ControlCommand::Resume)
+                            }
+                            _ => None,
+                        };
+                        if let Some(cmd) = cmd
+                            && tx.send(cmd).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (rx, handle)
 }
 
 /// Legacy multi-port TCP handler (kept for potential fallback)

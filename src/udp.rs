@@ -593,6 +593,8 @@ pub async fn send_udp_paced(
 
     let mut sequence: u64 = 0;
     let mut ticker = interval(pacing_interval);
+    // Skip missed ticks during pause so we don't burst on resume (LAN-160 #14).
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
     let deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
@@ -612,6 +614,9 @@ pub async fn send_udp_paced(
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }
+            // Reset the pacing baseline after resume so the first post-pause
+            // tick fires a full interval from now, not immediately (LAN-160 #14).
+            ticker.reset();
             continue;
         }
 
@@ -1523,5 +1528,85 @@ mod tests {
         // Out of order
         tracker.record(3);
         assert_eq!(tracker.out_of_order.load(Ordering::Relaxed), 1);
+    }
+
+    /// Regression for LAN-160 #14: after resume from pause, the paced
+    /// sender must not burst queued ticks.  With `MissedTickBehavior::Burst`
+    /// (the old default), ticks accumulated during pause fire all at once
+    /// on resume.  With `Skip` + `ticker.reset()`, the first post-resume
+    /// tick fires a full interval from resume.
+    ///
+    /// We send at 80 kbps (~7 packets/s, ~140ms interval), receive one
+    /// packet to confirm pacing is live, pause for 500ms (≈3 missed
+    /// ticks), then resume.  We assert no packet arrives in the first
+    /// half-interval (70ms) after resume — with Burst, queued ticks
+    /// would fire immediately.  Then we assert a packet does arrive
+    /// within 2× interval (280ms) — confirming the sender resumed.
+    #[tokio::test]
+    async fn test_udp_paced_no_burst_after_resume() {
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let recv_addr = receiver.local_addr().unwrap();
+        sender.connect(recv_addr).await.unwrap();
+
+        // 80 kbps → ~7.1 packets/s → ~140ms interval (1 packet/tick).
+        let bitrate = 80_000;
+        let interval = Duration::from_millis(140);
+        let duration = Duration::from_secs(10);
+        let stats = Arc::new(StreamStats::new(0));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (pause_tx, pause_rx) = watch::channel(false);
+
+        let send_socket = sender.clone();
+        let send_stats = stats.clone();
+        let send_handle = tokio::spawn(async move {
+            let _ = send_udp_paced(
+                send_socket,
+                None, // connected socket — send uses socket.send()
+                bitrate,
+                duration,
+                send_stats,
+                cancel_rx,
+                pause_rx,
+                false,
+            )
+            .await;
+        });
+
+        let mut buf = vec![0u8; 2048];
+
+        // 1. Receive one packet to confirm the sender is live and pacing.
+        tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
+            .await
+            .expect("should receive first packet within 2s")
+            .expect("recv_from failed");
+
+        // 2. Pause for 500ms (≈3 missed ticks with Burst).
+        let _ = pause_tx.send(true);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = pause_tx.send(false);
+
+        // 3. Assert NO packet arrives in the first half-interval (70ms).
+        //    With Burst, ≥3 queued ticks would fire immediately, sending
+        //    packets that arrive well within 70ms.  With Skip + reset,
+        //    the next tick is a full interval (~140ms) away.
+        match tokio::time::timeout(interval / 2, receiver.recv_from(&mut buf)).await {
+            Ok(Ok(_)) => {
+                panic!("packet arrived within half-interval after resume — burst detected")
+            }
+            Ok(Err(_)) => panic!("recv_from error after resume"),
+            Err(_) => {} // timeout = no burst — expected
+        }
+
+        // 4. Assert a packet DOES arrive within 2× interval (280ms).
+        //    This confirms the sender resumed and pacing continued.
+        tokio::time::timeout(interval * 2, receiver.recv_from(&mut buf))
+            .await
+            .expect("should receive a packet within 2× interval after resume")
+            .expect("recv_from failed");
+
+        // Clean up.
+        let _ = cancel_tx.send(true);
+        let _ = send_handle.await;
     }
 }

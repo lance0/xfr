@@ -2959,3 +2959,173 @@ async fn test_single_port_udp_download_stats() {
         "download summary must carry receiver-side loss/jitter stats"
     );
 }
+
+// ============================================================================
+// LAN-160 regression tests: cancel latency and UDP post-resume burst
+// ============================================================================
+
+/// Regression for LAN-160 #13: cancel must reach the server and produce a
+/// result within sub-second latency, not after the 1s stats tick.  The old
+/// code only polled control messages after each interval tick, so a cancel
+/// sent at t=200ms wouldn't be seen until t>1s.
+///
+/// We cancel at 200ms and assert the client receives a result within 800ms
+/// of the cancel — well under the old worst-case ~2s (1s tick + 10ms read
+/// timeout + propagation).
+#[tokio::test]
+async fn test_tcp_cancel_latency_before_first_tick() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(60), // Long; we cancel early
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+
+    // Drive the test future concurrently with a timer that cancels at
+    // 200ms.  The select! polls both futures, so run_future makes
+    // progress (handshake, data start) while we wait to cancel.
+    let run_future = client.run(None);
+    tokio::pin!(run_future);
+
+    let control = async {
+        // 200ms — before the first 1s stats tick.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll cancel() until the control loop is ready.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if client.cancel().is_ok() {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("cancel() never became ready within 2s");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+
+    // Race: run completes (unexpected for 60s test) vs control fires cancel.
+    tokio::select! {
+        r = &mut run_future => {
+            panic!("60s test should not complete before cancel: {:?}", r);
+        }
+        _ = control => {}
+    }
+
+    // After cancel fires, the server should respond promptly via the
+    // mpsc channel — well under 1s with the fix.  The old serialized
+    // loop would need >1s (waiting for the next interval tick).
+    let result = timeout(Duration::from_millis(800), &mut run_future)
+        .await
+        .expect("cancel should produce a result within 800ms");
+
+    assert!(
+        result.is_ok(),
+        "cancel should produce a prompt result: {:?}",
+        result
+    );
+}
+
+/// Smoke test for LAN-160 #14: verifies the UDP pause/resume path with
+/// `MissedTickBehavior::Skip` + `ticker.reset()` doesn't deadlock, panic,
+/// or produce errors.  The actual burst-prevention assertion is in
+/// `src/udp.rs:test_udp_paced_no_burst_after_resume` which directly
+/// observes packet timing after resume.
+#[tokio::test]
+async fn test_udp_pause_resume_no_burst() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(3),
+        direction: Direction::Upload,
+        bitrate: Some(1_000_000), // 1 Mbps — low rate so burst would be visible
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+
+    // Drive the test concurrently with a pause/resume control sequence.
+    let run_future = client.run(None);
+    tokio::pin!(run_future);
+
+    let control = async {
+        // Wait for pause to become ready (capability negotiation), then
+        // pause, then resume after 500ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if client.pause() == xfr::client::PauseResult::Applied {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("pause() never became ready within 2s");
+            }
+        }
+        // Resume after 500ms of pause.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = client.pause(); // toggle back to resume
+    };
+
+    // Race: run completes (expected at 3s) vs control finishes resume.
+    tokio::select! {
+        r = &mut run_future => {
+            // Test finished before pause/resume — acceptable on fast
+            // machines, but assert it succeeded.
+            assert!(r.is_ok(), "UDP test should succeed: {:?}", r);
+            return;
+        }
+        _ = control => {}
+    }
+
+    // After resume, the test should complete within 10s (3s duration
+    // + pause overhead).  Key assertion: no deadlock, no panic, no
+    // error from the pause/resume + Skip path.
+    let result = timeout(Duration::from_secs(10), &mut run_future)
+        .await
+        .expect("UDP pause/resume test should complete within 10s");
+
+    assert!(
+        result.is_ok(),
+        "UDP test should succeed after pause/resume: {:?}",
+        result
+    );
+}
