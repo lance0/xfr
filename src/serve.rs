@@ -926,6 +926,7 @@ async fn handle_new_connection(
                     max_duration,
                     &security,
                     msg,
+                    line,
                 )
                 .await;
 
@@ -1114,6 +1115,7 @@ async fn route_connection(
                 server_max_duration,
                 security,
                 msg,
+                line,
             )
             .await
         }
@@ -1122,28 +1124,6 @@ async fn route_connection(
             Err(anyhow::anyhow!("Expected Hello or DataHello"))
         }
     }
-}
-
-/// Handle client with security checks (auth)
-/// Note: Currently unused - kept for potential multi-port mode fallback
-#[allow(dead_code)]
-async fn handle_client_secure(
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    base_port: u16,
-    server_max_duration: Option<Duration>,
-    security: &SecurityContext,
-) -> anyhow::Result<()> {
-    handle_client_with_auth(
-        stream,
-        peer_addr,
-        active_tests,
-        base_port,
-        server_max_duration,
-        security,
-    )
-    .await
 }
 
 /// Handle QUIC client connection
@@ -1171,13 +1151,15 @@ async fn handle_quic_client(
     )
     .await
     .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for hello"))??;
+    let raw_client_hello = line.trim().to_string();
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
-    let auth_nonce = match msg {
+    let (auth_nonce, client_nonce) = match msg {
         ControlMessage::Hello {
             version,
             client,
             capabilities,
+            client_nonce,
             ..
         } => {
             log_client_hello(
@@ -1200,22 +1182,39 @@ async fn handle_quic_client(
 
             // Send server hello (with auth challenge if required)
             if security.psk.is_some() {
+                if !crate::protocol::capability_advertised(
+                    &capabilities,
+                    crate::control_crypto::PROTECTED_CONTROL_CAPABILITY,
+                ) {
+                    let error = ControlMessage::error(
+                        "PSK authentication requires protected_control_v1 capability",
+                    );
+                    ctrl_send
+                        .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                        .await?;
+                    return Err(anyhow::anyhow!(
+                        "Client lacks protected_control_v1 — refusing PSK session"
+                    ));
+                }
                 let nonce = auth::generate_nonce();
                 let hello = ControlMessage::server_hello_with_auth_and_capabilities(
                     nonce.clone(),
                     security.capabilities.clone(),
                 );
+                // Capture the exact bytes sent so the transcript proof MACs
+                // the wire bytes, not a re-serialization that could drift.
+                let server_hello_json = hello.serialize()?;
                 ctrl_send
-                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+                    .write_all(format!("{server_hello_json}\n").as_bytes())
                     .await?;
-                Some(nonce)
+                (Some((nonce, server_hello_json)), client_nonce)
             } else {
                 let hello =
                     ControlMessage::server_hello_with_capabilities(security.capabilities.clone());
                 ctrl_send
                     .write_all(format!("{}\n", hello.serialize()?).as_bytes())
                     .await?;
-                None
+                (None, client_nonce)
             }
         }
         _ => {
@@ -1228,7 +1227,9 @@ async fn handle_quic_client(
     };
 
     // Handle authentication if required
-    if let Some(nonce) = auth_nonce {
+    let mut transport = crate::control_crypto::ProtectedControl::plaintext();
+
+    if let Some((nonce, server_hello_json)) = auth_nonce {
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             read_bounded_line(&mut ctrl_reader, &mut line),
@@ -1253,7 +1254,27 @@ async fn handle_quic_client(
                     return Err(anyhow::anyhow!("Authentication failed"));
                 }
 
-                let success = ControlMessage::auth_success();
+                // Install AEAD-protected control channel.
+                let client_nonce = client_nonce.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PSK session requires client_nonce in Hello for protected control"
+                    )
+                })?;
+                let (c2s, s2c) =
+                    crate::control_crypto::ControlCodec::derive_pair(&client_nonce, &nonce, psk)?;
+                transport = crate::control_crypto::ProtectedControl::protected_server(c2s, s2c);
+
+                // Server proof over the exact bytes of both hellos: the
+                // received client hello and the server hello captured at
+                // send time — so the MAC can't drift from the wire bytes.
+                let server_proof = crate::control_crypto::compute_server_proof(
+                    raw_client_hello.as_bytes(),
+                    server_hello_json.as_bytes(),
+                    &client_nonce,
+                    &nonce,
+                    psk,
+                )?;
+                let success = ControlMessage::auth_success_with_proof(server_proof);
                 ctrl_send
                     .write_all(format!("{}\n", success.serialize()?).as_bytes())
                     .await?;
@@ -1271,7 +1292,7 @@ async fn handle_quic_client(
     // Read test start (with timeout)
     tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        read_bounded_line(&mut ctrl_reader, &mut line),
+        transport.read_message(&mut ctrl_reader, &mut line),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
@@ -1288,8 +1309,8 @@ async fn handle_quic_client(
         } => {
             if protocol != Protocol::Quic {
                 let error = ControlMessage::error("Expected QUIC protocol for QUIC connection");
-                ctrl_send
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                transport
+                    .write_message(&mut ctrl_send, &error.serialize()?)
                     .await?;
                 return Err(anyhow::anyhow!("Protocol mismatch"));
             }
@@ -1299,8 +1320,8 @@ async fn handle_quic_client(
                     "Invalid stream count {} (must be 1-{})",
                     streams, MAX_STREAMS
                 ));
-                ctrl_send
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                transport
+                    .write_message(&mut ctrl_send, &error.serialize()?)
                     .await?;
                 return Err(anyhow::anyhow!("Invalid stream count"));
             }
@@ -1343,8 +1364,8 @@ async fn handle_quic_client(
                 data_ports: vec![], // Empty for QUIC
                 udp_token: None,
             };
-            ctrl_send
-                .write_all(format!("{}\n", ack.serialize()?).as_bytes())
+            transport
+                .write_message(&mut ctrl_send, &ack.serialize()?)
                 .await?;
 
             // Run QUIC test
@@ -1360,13 +1381,14 @@ async fn handle_quic_client(
                 peer_addr,
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
+                transport,
             )
             .await?;
         }
         _ => {
             let error = ControlMessage::error("Expected test_start message");
-            ctrl_send
-                .write_all(format!("{}\n", error.serialize()?).as_bytes())
+            transport
+                .write_message(&mut ctrl_send, &error.serialize()?)
                 .await?;
             return Err(anyhow::anyhow!("Expected test_start"));
         }
@@ -1411,6 +1433,7 @@ fn log_client_hello(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Handle client with pre-read first message (Hello already parsed in route_connection)
 async fn handle_client_with_first_message(
     stream: TcpStream,
@@ -1420,6 +1443,8 @@ async fn handle_client_with_first_message(
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
     first_msg: ControlMessage,
+    // Raw client hello line (trimmed of newline) for transcript MAC.
+    raw_client_hello: String,
 ) -> anyhow::Result<()> {
     if let Err(e) = tcp::configure_control_stream(&stream) {
         warn!("Failed to set TCP_NODELAY on control stream: {}", e);
@@ -1429,11 +1454,12 @@ async fn handle_client_with_first_message(
     let mut line = String::new();
 
     // Process pre-read Hello message
-    let (auth_nonce, client_capabilities) = match first_msg {
+    let (auth_nonce, client_capabilities, client_nonce) = match first_msg {
         ControlMessage::Hello {
             version,
             client,
             capabilities,
+            client_nonce,
             ..
         } => {
             log_client_hello(
@@ -1456,22 +1482,41 @@ async fn handle_client_with_first_message(
 
             // Send server hello (with auth challenge if required)
             if security.psk.is_some() {
+                // PSK sessions require protected_control_v1 — fail closed,
+                // no silent downgrade to plaintext.
+                if !crate::protocol::capability_advertised(
+                    &capabilities,
+                    crate::control_crypto::PROTECTED_CONTROL_CAPABILITY,
+                ) {
+                    let error = ControlMessage::error(
+                        "PSK authentication requires protected_control_v1 capability",
+                    );
+                    writer
+                        .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                        .await?;
+                    return Err(anyhow::anyhow!(
+                        "Client lacks protected_control_v1 — refusing PSK session"
+                    ));
+                }
                 let nonce = auth::generate_nonce();
                 let hello = ControlMessage::server_hello_with_auth_and_capabilities(
                     nonce.clone(),
                     security.capabilities.clone(),
                 );
+                // Capture the exact bytes sent so the transcript proof MACs
+                // the wire bytes, not a re-serialization that could drift.
+                let server_hello_json = hello.serialize()?;
                 writer
-                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+                    .write_all(format!("{server_hello_json}\n").as_bytes())
                     .await?;
-                (Some(nonce), capabilities)
+                (Some((nonce, server_hello_json)), capabilities, client_nonce)
             } else {
                 let hello =
                     ControlMessage::server_hello_with_capabilities(security.capabilities.clone());
                 writer
                     .write_all(format!("{}\n", hello.serialize()?).as_bytes())
                     .await?;
-                (None, capabilities)
+                (None, capabilities, client_nonce)
             }
         }
         _ => {
@@ -1480,7 +1525,9 @@ async fn handle_client_with_first_message(
     };
 
     // Handle auth response if needed
-    if let Some(nonce) = auth_nonce {
+    let mut transport = crate::control_crypto::ProtectedControl::plaintext();
+
+    if let Some((nonce, server_hello_json)) = auth_nonce {
         tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
             .await
             .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
@@ -1502,7 +1549,27 @@ async fn handle_client_with_first_message(
                     return Err(anyhow::anyhow!("Authentication failed"));
                 }
 
-                let success = ControlMessage::auth_success();
+                // Install AEAD-protected control channel.
+                let client_nonce = client_nonce.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PSK session requires client_nonce in Hello for protected control"
+                    )
+                })?;
+                let (c2s, s2c) =
+                    crate::control_crypto::ControlCodec::derive_pair(&client_nonce, &nonce, psk)?;
+                transport = crate::control_crypto::ProtectedControl::protected_server(c2s, s2c);
+
+                // Server proof over the exact bytes of both hellos: the
+                // received client hello and the server hello captured at
+                // send time — so the MAC can't drift from the wire bytes.
+                let server_proof = crate::control_crypto::compute_server_proof(
+                    raw_client_hello.as_bytes(),
+                    server_hello_json.as_bytes(),
+                    &client_nonce,
+                    &nonce,
+                    psk,
+                )?;
+                let success = ControlMessage::auth_success_with_proof(server_proof);
                 writer
                     .write_all(format!("{}\n", success.serialize()?).as_bytes())
                     .await?;
@@ -1538,141 +1605,9 @@ async fn handle_client_with_first_message(
         client_supports_single_port,
         client_supports_udp_feedback,
         client_supports_single_port_udp,
+        transport,
     )
     .await
-}
-
-/// Handle client with authentication (for plain TCP)
-#[allow(dead_code)]
-async fn handle_client_with_auth(
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
-    _base_port: u16,
-    server_max_duration: Option<Duration>,
-    security: &SecurityContext,
-) -> anyhow::Result<()> {
-    if let Err(e) = tcp::configure_control_stream(&stream) {
-        warn!("Failed to set TCP_NODELAY on control stream: {}", e);
-    }
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-
-    // Perform authentication handshake
-    let auth_nonce = perform_auth_handshake(&mut reader, &mut writer, security).await?;
-
-    // If auth was required, verify the response
-    if let Some(nonce) = auth_nonce {
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
-            .await
-            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
-        let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
-
-        match msg {
-            ControlMessage::AuthResponse { response } => {
-                let psk = security.psk.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("PSK required for authentication but not configured")
-                })?;
-                if !auth::verify_response(&nonce, psk, &response) {
-                    if let Some(tx) = &security.tui_tx {
-                        let _ = tx.try_send(ServerEvent::AuthFailure);
-                    }
-                    let error = ControlMessage::error("Authentication failed");
-                    writer
-                        .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                        .await?;
-                    return Err(anyhow::anyhow!("Authentication failed"));
-                }
-
-                // Send auth success
-                let success = ControlMessage::auth_success();
-                writer
-                    .write_all(format!("{}\n", success.serialize()?).as_bytes())
-                    .await?;
-            }
-            _ => {
-                let error = ControlMessage::error("Expected auth response");
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
-                return Err(anyhow::anyhow!("Expected auth response"));
-            }
-        }
-    }
-
-    // Continue with normal test handling
-    // Note: dead code path - assumes single-port capable client and UDP feedback support
-    handle_test_request(
-        &mut reader,
-        &mut writer,
-        peer_addr,
-        active_tests,
-        server_max_duration,
-        security,
-        true,
-        true,
-        true,
-    )
-    .await
-}
-
-/// Perform authentication handshake, returns nonce if auth was required
-#[allow(dead_code)]
-async fn perform_auth_handshake<W: tokio::io::AsyncWrite + Unpin>(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-    writer: &mut W,
-    security: &SecurityContext,
-) -> anyhow::Result<Option<String>> {
-    let mut line = String::new();
-
-    // Read client hello (with timeout)
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(reader, &mut line))
-        .await
-        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for hello"))??;
-    let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
-
-    match msg {
-        ControlMessage::Hello { version, .. } => {
-            if !versions_compatible(&version, PROTOCOL_VERSION) {
-                let error = ControlMessage::error(format!(
-                    "Incompatible protocol version: {} (server: {})",
-                    version, PROTOCOL_VERSION
-                ));
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
-                return Err(anyhow::anyhow!("Protocol version mismatch"));
-            }
-
-            // Send server hello (with auth challenge if required)
-            if security.psk.is_some() {
-                let nonce = auth::generate_nonce();
-                let hello = ControlMessage::server_hello_with_auth_and_capabilities(
-                    nonce.clone(),
-                    security.capabilities.clone(),
-                );
-                writer
-                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
-                    .await?;
-                Ok(Some(nonce))
-            } else {
-                let hello =
-                    ControlMessage::server_hello_with_capabilities(security.capabilities.clone());
-                writer
-                    .write_all(format!("{}\n", hello.serialize()?).as_bytes())
-                    .await?;
-                Ok(None)
-            }
-        }
-        _ => {
-            let error = ControlMessage::error("Expected hello message");
-            writer
-                .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                .await?;
-            Err(anyhow::anyhow!("Expected hello message"))
-        }
-    }
 }
 
 /// Handle test request after authentication
@@ -1687,11 +1622,11 @@ async fn handle_test_request(
     client_supports_single_port: bool,
     client_supports_udp_feedback: bool,
     client_supports_single_port_udp: bool,
+    mut transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
-
     // Read test request (with timeout)
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(reader, &mut line))
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, transport.read_message(reader, &mut line))
         .await
         .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
@@ -1718,9 +1653,7 @@ async fn handle_test_request(
                     "Invalid stream count {} (must be 1-{})",
                     streams, MAX_STREAMS
                 ));
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
+                transport.write_message(writer, &error.serialize()?).await?;
                 return Err(anyhow::anyhow!("Invalid stream count"));
             }
 
@@ -1766,9 +1699,7 @@ async fn handle_test_request(
                     "Unsupported congestion control algorithm '{}': {}",
                     algo, e
                 ));
-                writer
-                    .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                    .await?;
+                transport.write_message(writer, &error.serialize()?).await?;
                 return Err(anyhow::anyhow!("Invalid congestion algorithm"));
             }
 
@@ -1823,6 +1754,7 @@ async fn handle_test_request(
                 zerocopy,
                 mtu_probe,
                 tcp_nodelay,
+                transport,
             )
             .await;
 
@@ -1830,9 +1762,7 @@ async fn handle_test_request(
         }
         _ => {
             let error = ControlMessage::error("Expected test_start message");
-            writer
-                .write_all(format!("{}\n", error.serialize()?).as_bytes())
-                .await?;
+            transport.write_message(writer, &error.serialize()?).await?;
             Err(anyhow::anyhow!("Expected test_start"))
         }
     }
@@ -1888,6 +1818,7 @@ async fn run_quic_test(
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
+    mut transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<()> {
     // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
@@ -2063,7 +1994,7 @@ async fn run_quic_test(
                     });
                 }
 
-                if ctrl_send.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
+                if transport.write_message(&mut ctrl_send, &interval_msg.serialize()?).await.is_err() {
                     warn!("Failed to send interval");
                     break;
                 }
@@ -2073,12 +2004,12 @@ async fn run_quic_test(
         // Check for cancel message (non-blocking, bounded read)
         let read_result = tokio::time::timeout(
             CANCEL_CHECK_TIMEOUT,
-            read_bounded_line(&mut ctrl_reader, &mut line),
+            transport.read_message(&mut ctrl_reader, &mut line),
         )
         .await;
 
-        if let Ok(Ok(n)) = read_result
-            && n > 0
+        if let Ok(Ok(())) = read_result
+            && !line.trim().is_empty()
         {
             match ControlMessage::deserialize(line.trim()) {
                 Ok(ControlMessage::Cancel {
@@ -2090,8 +2021,8 @@ async fn run_quic_test(
                         let _ = test.cancel_tx.send(true);
                     }
                     let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                    ctrl_send
-                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                    transport
+                        .write_message(&mut ctrl_send, &cancelled.serialize()?)
                         .await?;
                     break;
                 }
@@ -2161,8 +2092,8 @@ async fn run_quic_test(
         mtu_probe: None,
     });
 
-    ctrl_send
-        .write_all(format!("{}\n", result.serialize()?).as_bytes())
+    transport
+        .write_message(&mut ctrl_send, &result.serialize()?)
         .await?;
 
     // Finish the control stream to ensure result is sent
@@ -2243,6 +2174,7 @@ async fn run_test(
     zerocopy: bool,
     mtu_probe: bool,
     tcp_nodelay: bool,
+    mut transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<(u64, u64, f64)> {
     let mut line = String::new();
 
@@ -2406,8 +2338,8 @@ async fn run_test(
         data_ports: data_ports.clone(),
         udp_token: udp_token.as_ref().map(udp::encode_hello_token),
     };
-    let ack_line = ack.serialize().map(|serialized| format!("{serialized}\n"));
-    write_ack_line_or_cleanup(writer, active_tests.as_ref(), id, ack_line).await?;
+    let ack_line = ack.serialize();
+    write_ack_or_cleanup(writer, active_tests.as_ref(), id, ack_line, &mut transport).await?;
 
     // Notify TUI that test started
     if let Some(tx) = &tui_tx {
@@ -2576,7 +2508,7 @@ async fn run_test(
                     });
                 }
 
-                if writer.write_all(format!("{}\n", interval_msg.serialize()?).as_bytes()).await.is_err() {
+                if transport.write_message(writer, &interval_msg.serialize()?).await.is_err() {
                     warn!("Failed to send interval, client may have disconnected");
                     break;
                 }
@@ -2585,10 +2517,10 @@ async fn run_test(
 
         // Check for cancel/pause/resume messages (bounded read)
         let read_result =
-            tokio::time::timeout(CANCEL_CHECK_TIMEOUT, read_bounded_line(reader, &mut line)).await;
+            tokio::time::timeout(CANCEL_CHECK_TIMEOUT, transport.read_message(reader, &mut line)).await;
 
-        if let Ok(Ok(n)) = read_result
-            && n > 0
+        if let Ok(Ok(())) = read_result
+            && !line.trim().is_empty()
         {
             match ControlMessage::deserialize(line.trim()) {
                 Ok(ControlMessage::Cancel {
@@ -2600,8 +2532,7 @@ async fn run_test(
                         let _ = test.cancel_tx.send(true);
                     }
                     let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                    writer
-                        .write_all(format!("{}\n", cancelled.serialize()?).as_bytes())
+                    transport.write_message(writer, &cancelled.serialize()?)
                         .await?;
                     break;
                 }
@@ -2703,8 +2634,8 @@ async fn run_test(
 
     // Send result FIRST so the client isn't blocked by slow post-processing
     // (push gateway retries, metrics hooks, etc.)
-    writer
-        .write_all(format!("{}\n", result.serialize()?).as_bytes())
+    transport
+        .write_message(writer, &result.serialize()?)
         .await?;
 
     Ok((bytes_total, duration_ms, throughput_mbps))
@@ -3561,24 +3492,25 @@ async fn remove_active_test(active_tests: &Mutex<HashMap<String, ActiveTest>>, i
     }
 }
 
-async fn write_ack_line_or_cleanup<W>(
+async fn write_ack_or_cleanup<W>(
     writer: &mut W,
     active_tests: &Mutex<HashMap<String, ActiveTest>>,
     id: &str,
     ack_line: anyhow::Result<String>,
+    transport: &mut crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let ack_line = match ack_line {
-        Ok(line) => line,
+    let serialized = match ack_line {
+        Ok(s) => s,
         Err(e) => {
             remove_active_test(active_tests, id).await;
             return Err(e);
         }
     };
 
-    if let Err(e) = writer.write_all(ack_line.as_bytes()).await {
+    if let Err(e) = transport.write_message(writer, &serialized).await {
         remove_active_test(active_tests, id).await;
         return Err(e.into());
     }
@@ -3643,11 +3575,12 @@ mod tests {
         let cancel_rx = active_test_with_cancel_rx(active_tests.as_ref(), id).await;
         let (mut writer, _reader) = tokio::io::duplex(64);
 
-        let err = write_ack_line_or_cleanup::<_>(
+        let err = write_ack_or_cleanup::<_>(
             &mut writer,
             active_tests.as_ref(),
             id,
             Err(anyhow::anyhow!("serialize failed")),
+            &mut crate::control_crypto::ProtectedControl::plaintext(),
         )
         .await
         .expect_err("ack serialization failure should fail");
@@ -3664,12 +3597,12 @@ mod tests {
         let cancel_rx = active_test_with_cancel_rx(active_tests.as_ref(), id).await;
         let (mut writer, reader) = tokio::io::duplex(1);
         drop(reader);
-
-        let err = write_ack_line_or_cleanup(
+        let err = write_ack_or_cleanup(
             &mut writer,
             active_tests.as_ref(),
             id,
             Ok("ack\n".to_string()),
+            &mut crate::control_crypto::ProtectedControl::plaintext(),
         )
         .await
         .expect_err("broken control write should fail");

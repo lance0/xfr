@@ -113,11 +113,22 @@ pub enum ControlMessage {
         capabilities: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         auth: Option<AuthChallenge>,
+        /// Client nonce for protected control channel (PSK sessions).
+        /// Present when the client supports `protected_control_v1`; bound
+        /// into the transcript MAC so a MITM cannot strip it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_nonce: Option<String>,
     },
     AuthResponse {
         response: String,
     },
-    AuthSuccess,
+    AuthSuccess {
+        /// Server proof-of-PSK binding both Hello transcripts. Present when
+        /// the session is using `protected_control_v1`. The client verifies
+        /// this before trusting the session.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_proof: Option<String>,
+    },
     TestStart {
         id: String,
         protocol: Protocol,
@@ -509,6 +520,9 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // socket (see net::single_port_udp_self_test). Default when both
     // peers advertise, mirroring single_port_tcp.
     SINGLE_PORT_UDP_CAPABILITY,
+    // v0.9.20: PSK sessions require AEAD-protected control channel.
+    // Mandatory when PSK is configured — not a negotiable fallback.
+    "protected_control_v1",
 ];
 
 /// Capability string for single-port UDP (issue #63). Kept as a named
@@ -553,6 +567,19 @@ impl ControlMessage {
             server: None,
             capabilities: Some(supported_capabilities()),
             auth: None,
+            client_nonce: None,
+        }
+    }
+
+    /// Client hello with a PSK-derived nonce for protected control.
+    pub fn client_hello_with_nonce(client_nonce: String) -> Self {
+        ControlMessage::Hello {
+            version: PROTOCOL_VERSION.to_string(),
+            client: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
+            server: None,
+            capabilities: Some(supported_capabilities()),
+            auth: None,
+            client_nonce: Some(client_nonce),
         }
     }
 
@@ -569,6 +596,7 @@ impl ControlMessage {
             server: Some(format!("xfr/{}", env!("CARGO_PKG_VERSION"))),
             capabilities: Some(capabilities),
             auth: None,
+            client_nonce: None,
         }
     }
 
@@ -589,6 +617,7 @@ impl ControlMessage {
                 method: "psk".to_string(),
                 nonce,
             }),
+            client_nonce: None,
         }
     }
 
@@ -597,7 +626,13 @@ impl ControlMessage {
     }
 
     pub fn auth_success() -> Self {
-        ControlMessage::AuthSuccess
+        ControlMessage::AuthSuccess { server_proof: None }
+    }
+
+    pub fn auth_success_with_proof(server_proof: String) -> Self {
+        ControlMessage::AuthSuccess {
+            server_proof: Some(server_proof),
+        }
     }
 
     pub fn error(message: impl Into<String>) -> Self {

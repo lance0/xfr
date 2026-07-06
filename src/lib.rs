@@ -40,6 +40,7 @@ pub mod acl;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod control_crypto;
 pub mod diff;
 pub mod discover;
 pub mod net;
