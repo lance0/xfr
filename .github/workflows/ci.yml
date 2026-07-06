@@ -55,7 +55,7 @@ jobs:
         run: cargo fmt --check
 
   mptcp:
-    name: MPTCP
+    name: MPTCP (requires kernel MPTCP + netem)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -64,6 +64,9 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Run MPTCP namespace tests
+        # The script emits a ::warning:: annotation and exits 0 when
+        # MPTCP or netem is unavailable, making the skip visible in
+        # the PR check UI without failing the job (LAN-174).
         run: sudo ./test-mptcp-ns.sh --ci
 
   control-channel-skew:

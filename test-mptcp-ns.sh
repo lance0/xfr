@@ -27,18 +27,23 @@ if [[ ! -x "$XFR" ]]; then
 	exit 1
 fi
 
-# Check MPTCP support
+# Check MPTCP support — on runners without MPTCP/netem capability the
+# job is skipped, not failed. GitHub Actions ::warning:: annotation makes
+# the skip visible in the PR check UI (LAN-174).
 if ! sysctl -n net.mptcp.enabled >/dev/null 2>&1; then
+	echo "::warning::MPTCP CI: skipped — net.mptcp.enabled sysctl not available (kernel lacks MPTCP support)"
 	echo "SKIP: MPTCP not available in this kernel"
 	exit 0
 fi
 if [[ "$(sysctl -n net.mptcp.enabled)" != "1" ]]; then
+	echo "::warning::MPTCP CI: skipped — net.mptcp.enabled=0 (MPTCP disabled in kernel config)"
 	echo "SKIP: MPTCP is disabled (sysctl net.mptcp.enabled=0)"
 	exit 0
 fi
 
 # Check netem support
 if ! modprobe sch_netem 2>/dev/null; then
+	echo "::warning::MPTCP CI: skipped — sch_netem kernel module not available"
 	echo "SKIP: sch_netem kernel module not available"
 	exit 0
 fi
