@@ -89,7 +89,7 @@ pub fn generate_self_signed_cert()
 /// data sockets can bind the same port later, and quinn receives a tee
 /// wrapper that diverts xfr hello datagrams to the dispatcher while
 /// passing QUIC through untouched. The endpoint then disables QUIC-bit
-/// greasing — see [`XfrLaneTee`] for why that is load-bearing.
+/// greasing — see the `XfrLaneTee` tee for why that is load-bearing.
 pub fn create_server_endpoint(
     addr: SocketAddr,
     family: AddressFamily,
