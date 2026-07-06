@@ -111,6 +111,13 @@ jobs:
           name: xfr-${{ matrix.target }}
           path: xfr-${{ matrix.target }}.tar.gz
 
+  # Container publish is intentionally NOT a dependency of the `release` job.
+  # Binaries + crates.io are the primary release surface, so a GHCR
+  # registry/auth/action blip must never block the GitHub release. If this
+  # job fails the run still goes red (visible), the release still ships, and
+  # the fix is narrow — treat a missing container tag as a recoverable
+  # publishing incident and backfill by re-running just this job:
+  #   gh run rerun <release-run-id> --job "Publish Container Image (GHCR)"
   docker:
     name: Publish Container Image (GHCR)
     needs: [audit, build]
@@ -166,6 +173,33 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Post-publish verification (NOT a release gate): confirms the just-pushed
+  # multi-arch tag is actually pullable, so a "succeeded but incomplete" push
+  # fails the run visibly. Depends only on `docker`, never blocks `release`.
+  verify-ghcr:
+    name: Verify GHCR image
+    needs: [docker]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify multi-arch image is pullable
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMG="ghcr.io/${{ github.repository }}:${VERSION}"
+          echo "Verifying $IMG"
+          docker buildx imagetools inspect "$IMG" | tee manifest.txt
+          grep -q "linux/amd64" manifest.txt || { echo "::error::$IMG missing linux/amd64"; exit 1; }
+          grep -q "linux/arm64" manifest.txt || { echo "::error::$IMG missing linux/arm64"; exit 1; }
+          echo "OK: $IMG published with linux/amd64 + linux/arm64"
 
   release:
     name: Create Release
