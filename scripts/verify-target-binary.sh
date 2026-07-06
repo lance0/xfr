@@ -9,7 +9,7 @@
 # ABI checks (fail the build if breached):
 #   *-gnu   -> no GLIBC symbol newer than the pinned floor (2.17)
 #   *-musl  -> statically linked (no GLIBC symbols, no dynamic interpreter)
-#   others  -> no ABI check (android NDK, macОS Mach-O)
+#   others  -> no ABI check (android NDK, macOS Mach-O)
 #
 # Usage: verify-target-binary.sh <rustup-target> <build-triple> [profile]
 set -euo pipefail
