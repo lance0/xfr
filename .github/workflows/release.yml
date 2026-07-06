@@ -112,18 +112,15 @@ jobs:
         if: matrix.tool == 'native'
         run: cargo build --release --locked --target ${{ matrix.triple }} --features prometheus
 
+      # Resolve the binary (tolerant of zigbuild's glibc-suffixed dir), verify
+      # its ABI (glibc floor for gnu, static for musl), and fail loudly if the
+      # binary is missing or the floor is breached — then package by base target
+      # so artifact names stay stable (xfr-<target>.tar.gz).
       - name: Package binary
         shell: bash
         run: |
-          # zigbuild may emit into the glibc-suffixed target dir; check both.
-          for d in "target/${{ matrix.triple }}/release" "target/${{ matrix.target }}/release"; do
-            if [[ -f "$d/xfr" ]]; then bindir="$d"; break; fi
-          done
-          if [[ -z "${bindir:-}" ]]; then
-            echo "::error::xfr binary not found under target/*/release"; ls -R target 2>/dev/null | grep -B1 -A3 release | head -40; exit 1
-          fi
-          echo "packaging from $bindir"
-          tar czvf "xfr-${{ matrix.target }}.tar.gz" -C "$bindir" xfr
+          bin="$(bash scripts/verify-target-binary.sh '${{ matrix.target }}' '${{ matrix.triple }}' release)"
+          tar czvf "xfr-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" xfr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

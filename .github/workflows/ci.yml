@@ -154,6 +154,11 @@ jobs:
       - name: Build (native)
         if: matrix.tool == 'native'
         run: cargo build --target ${{ matrix.triple }} --features prometheus --locked
+      # ABI check on the zigbuild targets: glibc floor (2.17) for gnu, static
+      # for musl. Guards against a build that succeeds but links the wrong ABI.
+      - name: Verify binary ABI
+        if: matrix.tool == 'zigbuild'
+        run: bash scripts/verify-target-binary.sh "${{ matrix.target }}" "${{ matrix.triple }}" debug
 
   mptcp:
     name: MPTCP (requires kernel MPTCP + netem)
