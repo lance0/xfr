@@ -635,8 +635,8 @@ pub async fn send_udp_paced(
         // Wait for ticker, interruptible by cancel/pause
         tokio::select! {
             biased;
-            _ = cancel.changed() => {
-                if *cancel.borrow() { break; }
+            res = cancel.changed() => {
+                if res.is_err() || *cancel.borrow() { break; }
                 continue;
             }
             _ = pause.changed(), if crate::pause::channel_is_open(&pause) => { continue; } // re-check at top
