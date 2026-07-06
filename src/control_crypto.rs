@@ -393,10 +393,7 @@ impl ProtectedControl {
     {
         use tokio::io::AsyncWriteExt;
         match self {
-            Self::Plaintext => {
-                writer.write_all(serialized.as_bytes()).await?;
-                writer.write_all(b"\n").await
-            }
+            Self::Plaintext => writer.write_all(format!("{serialized}\n").as_bytes()).await,
             Self::Protected { send, .. } => {
                 let payload = send
                     .seal(serialized.as_bytes())
