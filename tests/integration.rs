@@ -3058,3 +3058,176 @@ async fn test_single_port_udp_download_stats() {
         "download summary must carry receiver-side loss/jitter stats"
     );
 }
+
+/// Cancel latency: cancelling an infinite-duration test must return promptly
+/// even when the stats loop is between 1s interval ticks.  Before LAN-160 the
+/// cancel read was serialized behind the interval tick, so a cancel issued
+/// 200ms into the test would not be observed until the 1s tick — up to 1s of
+/// latency.  With the dedicated control-reader task the cancel is observed
+/// within tens of milliseconds.
+#[tokio::test]
+async fn test_tcp_cancel_latency_before_first_tick() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::ZERO, // infinite — only cancel ends it
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+
+    // Poll the run future so it connects and installs the cancel channel,
+    // then cancel at 200ms — well before the first 1s stats tick.  The run
+    // must resolve within 600ms of the cancel, proving the server's
+    // control-reader task observed it promptly.  The old serialized-behind-
+    // tick behavior would not observe the cancel until the ~1s tick, so
+    // the run would resolve at ~1s+RTT — well outside this 600ms budget.
+    let mut run_future = std::pin::pin!(client.run(None));
+    tokio::select! {
+        res = &mut run_future => panic!("run ended before cancel: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+    assert!(client.cancel().is_ok(), "cancel should be accepted");
+
+    let result = tokio::time::timeout(Duration::from_millis(600), &mut run_future).await;
+    assert!(
+        result.is_ok(),
+        "run should resolve within 600ms of cancel — old serialized behavior would take ~1s"
+    );
+}
+
+/// PSK cancel: the dedicated control-reader task must decrypt AEAD-protected
+/// cancel messages.  This test would have caught the original LAN-160/LAN-159
+/// conflict where `spawn_control_reader` used raw `read_bounded_line` instead
+/// of `ControlReader::read_message`, breaking cancel/pause for PSK sessions.
+#[tokio::test]
+async fn test_tcp_psk_cancel_infinite_duration() {
+    let port = get_test_port();
+    let psk = "psk-cancel-secret".to_string();
+    let _server = start_secure_server(port, Some(psk.clone()), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::ZERO, // infinite — only cancel ends it
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: Some(psk),
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+
+    // Poll the run future so it connects and installs the cancel channel,
+    // then cancel after 500ms.  The run must resolve within 2s of the cancel
+    // — if the server's AEAD control reader is broken, the cancel is never
+    // observed and the infinite test hangs until the timeout fails the test.
+    let mut run_future = std::pin::pin!(client.run(None));
+    tokio::select! {
+        res = &mut run_future => panic!("run ended before cancel: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    let _ = client.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut run_future).await;
+    assert!(
+        result.is_ok(),
+        "PSK cancel should resolve within 2s — if it times out the AEAD control reader is broken"
+    );
+}
+
+/// UDP pause/resume smoke test: pause and resume an infinite-duration UDP
+/// test and confirm it doesn't hang or crash.  The unit test in udp.rs
+/// (`test_udp_paced_no_burst_after_resume`) covers the no-burst invariant.
+#[tokio::test]
+async fn test_udp_pause_resume_no_burst() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::ZERO, // infinite
+        direction: Direction::Upload,
+        bitrate: Some(80_000), // 80kbps — slow enough to observe pacing
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+
+    // Poll the run future so it connects and installs the pause/cancel
+    // channels, then exercise pause/resume/cancel in sequence.  Each sleep
+    // is inside a select! against the run future so it stays polled.
+    let mut run_future = std::pin::pin!(client.run(None));
+    tokio::select! {
+        res = &mut run_future => panic!("run ended before pause: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    let _ = client.pause();
+    tokio::select! {
+        res = &mut run_future => panic!("run ended during pause: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    let _ = client.pause(); // toggle: pause→resume
+    tokio::select! {
+        res = &mut run_future => panic!("run ended after resume: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    let _ = client.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut run_future).await;
+    assert!(
+        result.is_ok(),
+        "UDP pause/resume/cancel should resolve within 3s"
+    );
+}
