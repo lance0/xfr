@@ -796,12 +796,20 @@ fn set_tos_on_fd(fd: std::os::unix::io::RawFd, tos: u8, ipv6: bool) -> io::Resul
             )
         };
         if ret != 0 {
-            // ENOPROTOOPT on some BSDs for IPv6 sockets — ignore, IPV6_TCLASS
-            // already covers native IPv6 traffic.
-            debug!(
-                "IP_TOS on IPv6 socket failed (expected on some platforms): {}",
-                io::Error::last_os_error()
-            );
+            let err = io::Error::last_os_error();
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP)
+            ) {
+                // Some platforms do not expose IP_TOS on IPv6 sockets.
+                // Native IPv6 traffic is still covered by IPV6_TCLASS above.
+                debug!(
+                    "IP_TOS on IPv6 socket unsupported on this platform: {}",
+                    err
+                );
+            } else {
+                return Err(err);
+            }
         }
     } else {
         // IPv4 socket: IP_TOS only
