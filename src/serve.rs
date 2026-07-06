@@ -1805,6 +1805,23 @@ fn directional_totals(
     )
 }
 
+fn active_elapsed(
+    start: std::time::Instant,
+    paused_total: Duration,
+    pause_start: Option<std::time::Instant>,
+) -> Duration {
+    let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
+    start.elapsed().saturating_sub(paused_total + active_pause)
+}
+
+fn active_elapsed_ms(
+    start: std::time::Instant,
+    paused_total: Duration,
+    pause_start: Option<std::time::Instant>,
+) -> u64 {
+    active_elapsed(start, paused_total, pause_start).as_millis() as u64
+}
+
 /// Run a QUIC bandwidth test
 #[allow(clippy::too_many_arguments)]
 async fn run_quic_test(
@@ -1980,9 +1997,9 @@ async fn run_quic_test(
                     // Duration::ZERO means infinite - only break if duration is set.
                     // Subtract paused_total plus any in-progress pause so the
                     // clock doesn't expire while paused (LAN-230).
-                    let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
+                    let active_elapsed = active_elapsed(start, paused_total, pause_start);
                     if duration != Duration::ZERO
-                        && start.elapsed() - paused_total - active_pause >= duration
+                        && active_elapsed >= duration
                     {
                         break;
                     }
@@ -1996,7 +2013,7 @@ async fn run_quic_test(
 
                     let interval_msg = ControlMessage::Interval {
                         id: id.to_string(),
-                        elapsed_ms: stats.elapsed_ms(),
+                        elapsed_ms: active_elapsed.as_millis() as u64,
                         streams: stream_intervals,
                         aggregate: aggregate.clone(),
                     };
@@ -2090,7 +2107,7 @@ async fn run_quic_test(
         }
 
         // Send final result
-        let duration_ms = stats.elapsed_ms();
+        let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
@@ -2523,9 +2540,9 @@ async fn run_test(
                 // Duration::ZERO means infinite - only break if duration is set.
                 // Subtract paused_total plus any in-progress pause so the
                 // clock doesn't expire while paused (LAN-230).
-                let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
+                let active_elapsed = active_elapsed(start, paused_total, pause_start);
                 if duration != Duration::ZERO
-                    && start.elapsed() - paused_total - active_pause >= duration
+                    && active_elapsed >= duration
                 {
                     break;
                 }
@@ -2539,7 +2556,7 @@ async fn run_test(
 
                 let interval_msg = ControlMessage::Interval {
                     id: id.to_string(),
-                    elapsed_ms: stats.elapsed_ms(),
+                    elapsed_ms: active_elapsed.as_millis() as u64,
                     streams: stream_intervals,
                     aggregate: aggregate.clone(),
                 };
@@ -2663,7 +2680,7 @@ async fn run_test(
     }
 
     // Send final result
-    let duration_ms = stats.elapsed_ms();
+    let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
     let bytes_total = stats.total_bytes();
     let throughput_mbps = if duration_ms > 0 {
         (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0

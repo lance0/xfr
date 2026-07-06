@@ -126,9 +126,10 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = watch::channel(false);
 
         // Spawn the wait task while pause is active
-        let task = tokio::spawn(async move {
-            wait_while_paused_timed(&mut pause_rx, &mut cancel_rx).await
-        });
+        let task =
+            tokio::spawn(
+                async move { wait_while_paused_timed(&mut pause_rx, &mut cancel_rx).await },
+            );
 
         // Let it block for ~50ms, then resume
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -144,5 +145,4 @@ mod tests {
             "paused duration {paused:?} should be >= 40ms"
         );
     }
-
 }

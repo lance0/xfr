@@ -938,9 +938,13 @@ impl Client {
             self.config.duration + Duration::from_secs(30)
         };
         let mut deadline = tokio::time::Instant::now() + timeout_duration;
-        let local_end_deadline =
+        let mut local_end_deadline =
             local_stop_deadline(tokio::time::Instant::now(), self.config.duration);
         let mut local_stop_sent = false;
+        // Pause-aware clocks (LAN-230): while paused, freeze the response
+        // timeout and local-end deadline; on resume, extend both by the
+        // paused duration so pause time isn't charged against them.
+        let mut pause_started_at: Option<tokio::time::Instant> = None;
 
         let mut test_result: anyhow::Result<TestResult> =
             Err(anyhow::anyhow!("Connection closed without result"));
@@ -1171,6 +1175,17 @@ impl Client {
                         pause_request_open = false;
                     } else {
                         let paused = *pause_request_rx.borrow();
+                        if paused {
+                            if pause_started_at.is_none() {
+                                pause_started_at = Some(tokio::time::Instant::now());
+                            }
+                        } else if let Some(started) = pause_started_at.take() {
+                            let paused_for = started.elapsed();
+                            deadline += paused_for;
+                            if let Some(local_end) = &mut local_end_deadline {
+                                *local_end += paused_for;
+                            }
+                        }
                         // Always pause local data loops
                         let _ = pause_tx.send(paused);
                         // Send protocol message only if server supports it
@@ -1204,7 +1219,7 @@ impl Client {
                     if let Some(local_end) = local_end_deadline {
                         tokio::time::sleep_until(local_end).await;
                     }
-                }, if !local_stop_sent && local_end_deadline.is_some() => {
+                }, if !local_stop_sent && local_end_deadline.is_some() && pause_started_at.is_none() => {
                     // Stop local data loops at local test end instead of waiting for Result.
                     // This narrows the race where server-side teardown can trigger RSTs while
                     // client send loops are still writing.
@@ -1212,11 +1227,13 @@ impl Client {
                     let _ = cancel_tx.send(true);
                     debug!("Local test duration reached; stopping data streams while awaiting final control message");
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
                     // Overall response timeout — the old loop wrapped
                     // read_message in timeout_at(deadline, ...).  Now that
                     // the reader task owns the read, we enforce the deadline
                     // here so the loop cannot hang waiting for the channel.
+                    // Gated off while paused (LAN-230) so pause time isn't
+                    // charged against the server-response budget.
                     test_result = Err(anyhow::anyhow!(
                         "Timeout waiting for server response"
                     ));
@@ -2155,6 +2172,9 @@ impl Client {
                 self.config.duration + Duration::from_secs(30)
             };
             let mut deadline = tokio::time::Instant::now() + timeout_duration;
+            // Pause-aware response timeout (LAN-230): frozen while paused,
+            // extended by the paused duration on resume.
+            let mut pause_started_at: Option<tokio::time::Instant> = None;
 
             loop {
                 // Select on the dedicated reader task's channel (not the raw
@@ -2253,6 +2273,13 @@ impl Client {
                             pause_request_open = false;
                         } else {
                             let paused = *pause_request_rx.borrow();
+                            if paused {
+                                if pause_started_at.is_none() {
+                                    pause_started_at = Some(tokio::time::Instant::now());
+                                }
+                            } else if let Some(started) = pause_started_at.take() {
+                                deadline += started.elapsed();
+                            }
                             let _ = pause_tx.send(paused);
                             if supports_pause {
                                 let msg = if paused {
@@ -2273,11 +2300,12 @@ impl Client {
                             }
                         }
                     }
-                    _ = tokio::time::sleep_until(deadline) => {
+                    _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
                         // Overall response timeout — the old loop wrapped
                         // read_message in timeout_at(deadline, ...).  Now
                         // the reader task owns the read, so we enforce the
                         // deadline here to prevent hanging on the channel.
+                        // Gated off while paused (LAN-230).
                         let _ = cancel_tx.send(true);
                         break 'control Err(anyhow::anyhow!(
                             "Timeout waiting for server response"
