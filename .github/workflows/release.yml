@@ -37,31 +37,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (static musl for glibc compatibility)
+          # Linux x86_64 — static musl (Zig bundles musl); generic Linux + container amd64
           - target: x86_64-unknown-linux-musl
+            triple: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            cross: false
-            features: prometheus
-          # Linux aarch64
+            tool: zigbuild
+          # Linux aarch64 — glibc, floored at 2.17 for old distros/embedded
           - target: aarch64-unknown-linux-gnu
+            triple: aarch64-unknown-linux-gnu.2.17
             os: ubuntu-latest
-            cross: true
-            features: prometheus
-          # Linux aarch64 (static musl, used by the container image)
+            tool: zigbuild
+          # Linux aarch64 — static musl (container arm64)
           - target: aarch64-unknown-linux-musl
+            triple: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            cross: true
-            features: prometheus
-          # Android aarch64 (Termux)
+            tool: zigbuild
+          # Android aarch64 (Termux) — NDK target, cross from git main
           - target: aarch64-linux-android
+            triple: aarch64-linux-android
             os: ubuntu-latest
-            cross: true
-            features: prometheus
-          # macOS aarch64 (Apple Silicon)
+            tool: cross
+          # macOS aarch64 (Apple Silicon) — native
           - target: aarch64-apple-darwin
+            triple: aarch64-apple-darwin
             os: macos-latest
-            cross: false
-            features: prometheus
+            tool: native
           # Note: Intel Mac (x86_64-apple-darwin) removed - users can build from crate
 
     steps:
@@ -82,30 +82,47 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@v2
+      # zigbuild handles the Linux gnu/musl targets: Zig bundles musl and lets us
+      # pin a low glibc floor (.2.17) without stale cross images. Replaces cross
+      # 0.2.5, whose old images could not run build scripts under modern Rust
+      # (glibc 2.28+ symbol errors on the aarch64 images).
+      - name: Install Zig
+        if: matrix.tool == 'zigbuild'
+        uses: goto-bus-stop/setup-zig@v2
         with:
-          tool: cross@0.2.5
+          version: 0.16.0
 
-      - name: Install musl-tools
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cargo-zigbuild
+        if: matrix.tool == 'zigbuild'
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
 
-      - name: Build (native)
-        if: ${{ !matrix.cross }}
-        run: cargo build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
+      # Android is an NDK target zigbuild does not handle; keep cross, but from
+      # git main (images track current glibc) rather than the stale 0.2.5.
+      - name: Install cross (pinned main commit)
+        if: matrix.tool == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 64b5bb4d --locked
+
+      - name: Build (zigbuild)
+        if: matrix.tool == 'zigbuild'
+        run: cargo zigbuild --release --locked --target ${{ matrix.triple }} --features prometheus
 
       - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
+        if: matrix.tool == 'cross'
+        run: cross build --release --locked --target ${{ matrix.triple }} --features prometheus
 
+      - name: Build (native)
+        if: matrix.tool == 'native'
+        run: cargo build --release --locked --target ${{ matrix.triple }} --features prometheus
+
+      # Resolve the binary (tolerant of zigbuild's glibc-suffixed dir), verify
+      # its ABI (glibc floor for gnu, static for musl), and fail loudly if the
+      # binary is missing or the floor is breached — then package by base target
+      # so artifact names stay stable (xfr-<target>.tar.gz).
       - name: Package binary
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../xfr-${{ matrix.target }}.tar.gz xfr
-          cd -
+          bin="$(bash scripts/verify-target-binary.sh '${{ matrix.target }}' '${{ matrix.triple }}' release)"
+          tar czvf "xfr-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" xfr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
