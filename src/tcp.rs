@@ -721,8 +721,8 @@ pub async fn receive_data(
                     }
                 }
             }
-            _ = cancel.changed() => {
-                if *cancel.borrow() {
+            res = cancel.changed() => {
+                if res.is_err() || *cancel.borrow() {
                     cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;
@@ -1044,8 +1044,8 @@ pub async fn receive_data_half(
                     }
                 }
             }
-            _ = cancel.changed() => {
-                if *cancel.borrow() {
+            res = cancel.changed() => {
+                if res.is_err() || *cancel.borrow() {
                     cancelled = true;
                     debug!("Receive cancelled for stream {}", stats.stream_id);
                     break;

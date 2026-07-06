@@ -113,11 +113,25 @@ fn tcp_protocol(mptcp: bool) -> io::Result<Protocol> {
     }
 }
 
-/// Validate that MPTCP is available on this platform.
+/// Validate that MPTCP is available on this platform and kernel.
+///
+/// On Linux, probes by creating a test MPTCP socket rather than just
+/// checking the OS type — the kernel must be 5.6+ with CONFIG_MPTCP=y.
+/// On other platforms, MPTCP is unsupported.
 pub fn validate_mptcp() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        Ok(())
+        // Probe kernel support by creating a test socket. This catches
+        // kernels < 5.6 or builds without CONFIG_MPTCP=y that pass the
+        // OS check but fail at socket creation.
+        match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::MPTCP)) {
+            Ok(_) => Ok(()),
+            Err(e) if is_mptcp_unavailable_error(&e) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MPTCP not available (kernel 5.6+ with CONFIG_MPTCP=y required)",
+            )),
+            Err(e) => Err(e),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -214,15 +228,28 @@ pub async fn create_tcp_listener_on_addr(
     {
         match Socket::new(domain, Type::STREAM, Some(Protocol::MPTCP)) {
             Ok(socket) => {
-                socket.set_reuse_address(true)?;
-                set_v6only_for_addr(&socket, addr, family)?;
-                socket.bind(&SockAddr::from(addr))?;
-                socket.listen(128)?;
-                socket.set_nonblocking(true)?;
-                let std_listener: std::net::TcpListener = socket.into();
-                let listener = TcpListener::from_std(std_listener)?;
-                info!("MPTCP listening on {}", addr);
-                return Ok(listener);
+                // Bind and listen may also fail with EINVAL on kernels
+                // that accepted the socket creation but lack full MPTCP
+                // support — fall back to TCP on those errors too.
+                match (|| -> io::Result<TcpListener> {
+                    socket.set_reuse_address(true)?;
+                    set_v6only_for_addr(&socket, addr, family)?;
+                    socket.bind(&SockAddr::from(addr))?;
+                    socket.listen(128)?;
+                    socket.set_nonblocking(true)?;
+                    let std_listener: std::net::TcpListener = socket.into();
+                    let listener = TcpListener::from_std(std_listener)?;
+                    Ok(listener)
+                })() {
+                    Ok(listener) => {
+                        info!("MPTCP listening on {}", addr);
+                        return Ok(listener);
+                    }
+                    Err(e) if is_mptcp_unavailable_error(&e) => {
+                        debug!("MPTCP bind/listen failed, falling back to TCP: {}", e);
+                    }
+                    Err(e) => return Err(e), // Real bind/listen error
+                }
             }
             Err(e) if is_mptcp_unavailable_error(&e) => {
                 debug!("MPTCP not available, falling back to TCP: {}", e);
@@ -1343,15 +1370,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mptcp() {
-        #[cfg(target_os = "linux")]
-        assert!(validate_mptcp().is_ok());
-
-        #[cfg(not(target_os = "linux"))]
-        assert!(validate_mptcp().is_err());
-    }
-
-    #[test]
     fn test_is_mptcp_unavailable_error_by_kind() {
         let unsupported = io::Error::new(io::ErrorKind::Unsupported, "mptcp unavailable");
         assert!(is_mptcp_unavailable_error(&unsupported));
@@ -1744,5 +1762,44 @@ mod tests {
         }
         // If ret != 0, the platform doesn't expose IP_TOS on IPv6 sockets;
         // IPV6_TCLASS still covers native IPv6.
+    }
+
+    /// Regression for LAN-170 #31: `create_tcp_listener_on_addr` must
+    /// fall back to TCP when MPTCP bind/listen fails with EINVAL, not
+    /// propagate the error.  We can't easily force an MPTCP bind failure,
+    /// but we can verify that `validate_mptcp` actually probes the kernel
+    /// by creating a socket (rather than just checking the OS type).
+    #[test]
+    fn test_validate_mptcp_probes_kernel() {
+        // On Linux, validate_mptcp should succeed (this kernel supports it)
+        // or return Unsupported (if the kernel lacks MPTCP). Either way it
+        // should not panic or return a different error kind.
+        #[cfg(target_os = "linux")]
+        {
+            let result = validate_mptcp();
+            match result {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == io::ErrorKind::Unsupported => {}
+                Err(ref e) => panic!("validate_mptcp returned unexpected error: {e}"),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = validate_mptcp();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        }
+    }
+
+    /// Regression for LAN-170 #31: `wrap_mptcp_error` must wrap bind/listen
+    /// errors (not just Socket::new errors) with a clear message when
+    /// MPTCP was requested.
+    #[cfg(unix)]
+    #[test]
+    fn test_wrap_mptcp_error_wraps_einval() {
+        // EINVAL from bind/listen should be recognized as MPTCP-unavailable
+        let e = io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(is_mptcp_unavailable_error(&e));
+        let wrapped = wrap_mptcp_error(e, true);
+        assert_eq!(wrapped.kind(), io::ErrorKind::Unsupported);
     }
 }

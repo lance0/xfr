@@ -60,6 +60,10 @@ pub type XfrHelloDatagram = (Vec<u8>, SocketAddr);
 
 /// Default buffer size for QUIC send/receive operations (128 KB)
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
+/// Maximum consecutive divert-only batches in `XfrLaneTee::poll_recv`
+/// before yielding `Ok(0)` to quinn, preventing starvation under heavy
+/// xfr-hello load (LAN-170 #32).
+const MAX_DIVERT_ITERATIONS: u32 = 16;
 
 /// Generate a self-signed certificate for QUIC
 ///
@@ -184,6 +188,11 @@ impl AsyncUdpSocket for XfrLaneTee {
         bufs: &mut [io::IoSliceMut<'_>],
         meta: &mut [quinn::udp::RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        // Bound consecutive divert-only batches to prevent starving quinn
+        // under heavy xfr-hello load. After this many iterations with zero
+        // QUIC packets kept, return Ok(0) to let quinn reschedule.
+        let mut divert_iterations: u32 = 0;
+
         loop {
             let n = match self.inner.poll_recv(cx, bufs, meta) {
                 Poll::Ready(Ok(n)) => n,
@@ -230,6 +239,14 @@ impl AsyncUdpSocket for XfrLaneTee {
             }
             // Every datagram in the batch was diverted; poll the inner
             // socket again instead of handing quinn an empty result.
+            divert_iterations += 1;
+            if divert_iterations >= MAX_DIVERT_ITERATIONS {
+                debug!(
+                    "shared-socket tee: {} consecutive divert-only batches, yielding to quinn",
+                    divert_iterations
+                );
+                return Poll::Ready(Ok(0));
+            }
         }
     }
 
@@ -403,6 +420,34 @@ pub async fn send_quic_data(
     Ok(())
 }
 
+/// Decision returned by [`handle_cancel_change`] — extracted from
+/// `receive_quic_data` so the cancel-sender-drop logic is unit-testable
+/// without a live QUIC stream.
+enum CancelAction {
+    /// Keep receiving
+    Continue,
+    /// Stop — cancelled or sender dropped
+    Stop,
+}
+
+/// Handle a `cancel.changed()` result the way `receive_quic_data` does.
+/// `Err` (sender dropped) → `Stop` to avoid busy-loop (LAN-170 #33).
+/// `Ok` with `true` → `Stop` (cancelled). `Ok` with `false` → `Continue`.
+fn handle_cancel_change(
+    res: Result<(), watch::error::RecvError>,
+    cancel: &watch::Receiver<bool>,
+) -> CancelAction {
+    if res.is_err() {
+        debug!("QUIC receive: cancel sender dropped, stopping");
+        return CancelAction::Stop;
+    }
+    if *cancel.borrow() {
+        debug!("QUIC receive cancelled");
+        return CancelAction::Stop;
+    }
+    CancelAction::Continue
+}
+
 /// Receive data from a QUIC stream
 pub async fn receive_quic_data(
     mut recv: RecvStream,
@@ -419,9 +464,8 @@ pub async fn receive_quic_data(
                     None => break, // Stream finished
                 }
             }
-            _ = cancel.changed() => {
-                if *cancel.borrow() {
-                    debug!("QUIC receive cancelled");
+            res = cancel.changed() => {
+                if matches!(handle_cancel_change(res, &cancel), CancelAction::Stop) {
                     break;
                 }
             }
@@ -436,4 +480,63 @@ pub async fn connect(endpoint: &Endpoint, addr: SocketAddr) -> anyhow::Result<Co
     let connection = endpoint.connect(addr, "xfr")?.await?;
     debug!("QUIC connected to {}", addr);
     Ok(connection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::watch;
+
+    /// Regression for LAN-170 #33: `handle_cancel_change` must return
+    /// `Stop` when the cancel sender drops (RecvError), preventing the
+    /// busy-loop that the old `_ = cancel.changed()` pattern caused.
+    #[test]
+    fn test_handle_cancel_change_sender_dropped() {
+        let (_tx, rx) = watch::channel(false);
+        drop(_tx);
+        // Derive a real RecvError: has_changed() returns Err when closed.
+        let res = rx.has_changed().map(|_| ());
+        assert!(res.is_err(), "has_changed() should Err when sender dropped");
+        let (_tx2, rx2) = watch::channel(false);
+        let action = handle_cancel_change(res, &rx2);
+        assert!(
+            matches!(action, CancelAction::Stop),
+            "sender drop must Stop"
+        );
+    }
+
+    /// Regression for LAN-170 #33: `handle_cancel_change` must return
+    /// `Stop` when cancel is true.
+    #[test]
+    fn test_handle_cancel_change_cancel_true() {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        cancel_tx.send(true).unwrap();
+        let action = handle_cancel_change(Ok(()), &cancel_rx);
+        assert!(
+            matches!(action, CancelAction::Stop),
+            "cancel=true must Stop"
+        );
+    }
+
+    /// `handle_cancel_change` must return `Continue` when cancel is false.
+    #[test]
+    fn test_handle_cancel_change_cancel_false() {
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let action = handle_cancel_change(Ok(()), &cancel_rx);
+        assert!(
+            matches!(action, CancelAction::Continue),
+            "cancel=false must Continue"
+        );
+    }
+
+    /// Regression for LAN-170 #32: the module-level
+    /// `MAX_DIVERT_ITERATIONS` must be reasonable.  Testing the actual
+    /// `poll_recv` would require a mock `AsyncUdpSocket`; here we at
+    /// least verify the real constant the production code uses.
+    #[test]
+    fn test_divert_bound_is_reasonable() {
+        let bound = MAX_DIVERT_ITERATIONS;
+        assert!(bound > 0, "bound must be > 0");
+        assert!(bound <= 64, "bound too high, starvation risk");
+    }
 }
