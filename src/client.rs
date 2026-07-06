@@ -564,18 +564,31 @@ impl Client {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
 
-        // Send client hello
-        let hello = ControlMessage::client_hello();
+        // Send client hello — include client_nonce for PSK sessions so
+        // both sides can derive AEAD keys from PSK + both nonces.
+        let has_psk = self.config.psk.is_some();
+        let client_nonce = if has_psk {
+            Some(auth::generate_nonce())
+        } else {
+            None
+        };
+        let hello = match &client_nonce {
+            Some(n) => ControlMessage::client_hello_with_nonce(n.clone()),
+            None => ControlMessage::client_hello(),
+        };
+        let client_hello_json = hello.serialize()?;
         writer
-            .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+            .write_all(format!("{}\n", client_hello_json).as_bytes())
             .await?;
 
         // Read server hello (bounded to prevent DoS)
         read_bounded_line(&mut reader, &mut line).await?;
+        let raw_server_hello = line.trim().to_string();
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         // Track server capabilities for feature detection
         let server_capabilities;
+        let mut server_nonce_var: Option<String> = None;
 
         match msg {
             ControlMessage::Hello {
@@ -601,11 +614,23 @@ impl Client {
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {
+                    server_nonce_var = Some(challenge.nonce.clone());
                     debug!("Server requires {} authentication", challenge.method);
 
                     let psk = self.config.psk.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Server requires authentication but no PSK configured")
                     })?;
+
+                    // PSK sessions require protected_control_v1 — refuse to
+                    // continue if the server doesn't advertise it.
+                    if !crate::protocol::capability_advertised(
+                        &server_capabilities,
+                        crate::control_crypto::PROTECTED_CONTROL_CAPABILITY,
+                    ) {
+                        return Err(anyhow::anyhow!(
+                            "Server does not support protected_control_v1 — refusing PSK session"
+                        ));
+                    }
 
                     let response = auth::compute_response(&challenge.nonce, psk);
                     let auth_msg = ControlMessage::auth_response(response);
@@ -618,8 +643,34 @@ impl Client {
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
-                        ControlMessage::AuthSuccess => {
+                        ControlMessage::AuthSuccess { server_proof } => {
                             info!("Authentication successful");
+                            // Verify the server proof over the exact JSON
+                            // bytes of both hellos to detect tampering.
+                            let cn = client_nonce.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!("PSK session but client_nonce was not generated")
+                            })?;
+                            match server_proof {
+                                Some(proof) => {
+                                    if !crate::control_crypto::verify_server_proof(
+                                        client_hello_json.as_bytes(),
+                                        raw_server_hello.as_bytes(),
+                                        cn,
+                                        &challenge.nonce,
+                                        psk,
+                                        &proof,
+                                    )? {
+                                        return Err(anyhow::anyhow!(
+                                            "Server proof verification failed — possible MITM"
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    return Err(anyhow::anyhow!(
+                                        "PSK session requires server_proof in AuthSuccess"
+                                    ));
+                                }
+                            }
                         }
                         ControlMessage::Error { message } => {
                             return Err(anyhow::anyhow!("Authentication failed: {}", message));
@@ -636,6 +687,28 @@ impl Client {
             _ => {
                 return Err(anyhow::anyhow!("Unexpected response from server"));
             }
+        }
+
+        // Install AEAD-protected control channel if PSK auth was used.
+        // Both nonces and the PSK were bound into the server proof; now
+        // derive the session keys for post-auth control message protection.
+        let mut transport = crate::control_crypto::ProtectedControl::plaintext();
+        if has_psk {
+            let psk = self
+                .config
+                .psk
+                .as_ref()
+                .expect("has_psk implies PSK configured");
+            let cn = client_nonce
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("PSK session but no client_nonce"))?;
+            // The server_nonce was in the challenge; we stored it in
+            // server_nonce_var during the auth handshake above.
+            let sn = server_nonce_var
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("PSK session but no server nonce"))?;
+            let (c2s, s2c) = crate::control_crypto::ControlCodec::derive_pair(cn, sn, psk)?;
+            transport = crate::control_crypto::ProtectedControl::protected_client(c2s, s2c);
         }
 
         // Check server pause/resume capability
@@ -677,7 +750,6 @@ impl Client {
                  upgrade the server to use --probe-mtu"
             ));
         }
-
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -704,12 +776,12 @@ impl Client {
             mtu_probe: self.config.mtu_probe,
             tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
         };
-        writer
-            .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
+        transport
+            .write_message(&mut writer, &test_start.serialize()?)
             .await?;
 
         // Read test ack
-        read_bounded_line(&mut reader, &mut line).await?;
+        transport.read_message(&mut reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         let (data_ports, udp_token) = match msg {
@@ -888,13 +960,13 @@ impl Client {
         loop {
             // Check for external cancel request while waiting for server messages
             tokio::select! {
-                read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut reader, &mut line)) => {
+                read_result = tokio::time::timeout_at(deadline, transport.read_message(&mut reader, &mut line)) => {
                     match read_result {
-                        Ok(Ok(0)) => {
+                        Ok(Ok(())) if line.trim().is_empty() => {
                             // EOF
                             break;
                         }
-                        Ok(Ok(_)) => {
+                        Ok(Ok(())) => {
                             // Got data, process it below
                         }
                         Ok(Err(e)) => {
@@ -922,8 +994,8 @@ impl Client {
                                 break;
                             }
                         };
-                        let _ = writer
-                            .write_all(format!("{}\n", serialized).as_bytes())
+                        let _ = transport
+                            .write_message(&mut writer, &serialized)
                             .await;
                         let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
@@ -947,8 +1019,8 @@ impl Client {
                                 break;
                             }
                         };
-                        if writer
-                            .write_all(format!("{}\n", serialized).as_bytes())
+                        if transport
+                            .write_message(&mut writer, &serialized)
                             .await
                             .is_err()
                         {
@@ -1769,17 +1841,29 @@ impl Client {
         let mut ctrl_reader = BufReader::new(ctrl_recv);
         let mut line = String::new();
 
-        // Send client hello
-        let hello = ControlMessage::client_hello();
+        // Send client hello — include client_nonce for PSK sessions.
+        let has_psk = self.config.psk.is_some();
+        let client_nonce = if has_psk {
+            Some(auth::generate_nonce())
+        } else {
+            None
+        };
+        let hello = match &client_nonce {
+            Some(n) => ControlMessage::client_hello_with_nonce(n.clone()),
+            None => ControlMessage::client_hello(),
+        };
+        let client_hello_json = hello.serialize()?;
         ctrl_send
-            .write_all(format!("{}\n", hello.serialize()?).as_bytes())
+            .write_all(format!("{}\n", client_hello_json).as_bytes())
             .await?;
 
         // Read server hello (bounded to prevent DoS)
         read_bounded_line(&mut ctrl_reader, &mut line).await?;
+        let raw_server_hello = line.trim().to_string();
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         let server_capabilities;
+        let mut server_nonce_var: Option<String> = None;
         match msg {
             ControlMessage::Hello {
                 version,
@@ -1797,18 +1881,27 @@ impl Client {
                 }
                 debug!("Server capabilities: {:?}", capabilities);
                 server_capabilities = capabilities;
-                // Direct assignment (Option<String> → Option<String>) so that
-                // a handshake with an absent `server` field clears any stale
-                // value left over from a previous peer in the same process.
                 *self.server_version.lock() = server;
 
                 // Handle authentication if server requires it
                 if let Some(challenge) = auth {
+                    server_nonce_var = Some(challenge.nonce.clone());
                     debug!("Server requires {} authentication", challenge.method);
 
                     let psk = self.config.psk.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Server requires authentication but no PSK configured")
                     })?;
+
+                    // PSK sessions require protected_control_v1 — refuse if
+                    // the server doesn't advertise it.
+                    if !crate::protocol::capability_advertised(
+                        &server_capabilities,
+                        crate::control_crypto::PROTECTED_CONTROL_CAPABILITY,
+                    ) {
+                        return Err(anyhow::anyhow!(
+                            "Server does not support protected_control_v1 — refusing PSK session"
+                        ));
+                    }
 
                     let response = auth::compute_response(&challenge.nonce, psk);
                     let auth_msg = ControlMessage::auth_response(response);
@@ -1821,8 +1914,32 @@ impl Client {
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
-                        ControlMessage::AuthSuccess => {
+                        ControlMessage::AuthSuccess { server_proof } => {
                             info!("Authentication successful");
+                            let cn = client_nonce.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!("PSK session but client_nonce was not generated")
+                            })?;
+                            match server_proof {
+                                Some(proof) => {
+                                    if !crate::control_crypto::verify_server_proof(
+                                        client_hello_json.as_bytes(),
+                                        raw_server_hello.as_bytes(),
+                                        cn,
+                                        &challenge.nonce,
+                                        psk,
+                                        &proof,
+                                    )? {
+                                        return Err(anyhow::anyhow!(
+                                            "Server proof verification failed — possible MITM"
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    return Err(anyhow::anyhow!(
+                                        "PSK session requires server_proof in AuthSuccess"
+                                    ));
+                                }
+                            }
                         }
                         ControlMessage::Error { message } => {
                             return Err(anyhow::anyhow!("Authentication failed: {}", message));
@@ -1839,6 +1956,24 @@ impl Client {
             _ => {
                 return Err(anyhow::anyhow!("Unexpected response from server"));
             }
+        }
+
+        // Install AEAD-protected control channel if PSK auth was used.
+        let mut transport = crate::control_crypto::ProtectedControl::plaintext();
+        if has_psk {
+            let psk = self
+                .config
+                .psk
+                .as_ref()
+                .expect("has_psk implies PSK configured");
+            let cn = client_nonce
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("PSK session but no client_nonce"))?;
+            let sn = server_nonce_var
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("PSK session but no server nonce"))?;
+            let (c2s, s2c) = crate::control_crypto::ControlCodec::derive_pair(cn, sn, psk)?;
+            transport = crate::control_crypto::ProtectedControl::protected_client(c2s, s2c);
         }
 
         // Check server pause/resume capability
@@ -1865,12 +2000,12 @@ impl Client {
             mtu_probe: false,   // probe mode is UDP-only
             tcp_nodelay: false, // QUIC manages its own transport; Nagle is a TCP concept
         };
-        ctrl_send
-            .write_all(format!("{}\n", test_start.serialize()?).as_bytes())
+        transport
+            .write_message(&mut ctrl_send, &test_start.serialize()?)
             .await?;
 
         // Read test ack
-        read_bounded_line(&mut ctrl_reader, &mut line).await?;
+        transport.read_message(&mut ctrl_reader, &mut line).await?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -1999,10 +2134,10 @@ impl Client {
             loop {
                 line.clear();
                 tokio::select! {
-                    read_result = tokio::time::timeout_at(deadline, read_bounded_line(&mut ctrl_reader, &mut line)) => {
+                    read_result = tokio::time::timeout_at(deadline, transport.read_message(&mut ctrl_reader, &mut line)) => {
                         match read_result {
-                            Ok(Ok(0)) => break,
-                            Ok(Ok(_)) => {}
+                            Ok(Ok(())) if line.trim().is_empty() => break,
+                            Ok(Ok(())) => {}
                             Ok(Err(e)) => {
                                 let _ = cancel_tx.send(true);
                                 break 'control Err(e);
@@ -2026,7 +2161,7 @@ impl Client {
                                     break 'control Err(e);
                                 }
                             };
-                            let _ = ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await;
+                            let _ = transport.write_message(&mut ctrl_send, &serialized).await;
                             let _ = cancel_tx.send(true);
                         }
                     }
@@ -2046,7 +2181,7 @@ impl Client {
                                     break 'control Err(e);
                                 }
                             };
-                            if ctrl_send.write_all(format!("{}\n", serialized).as_bytes()).await.is_err() {
+                            if transport.write_message(&mut ctrl_send, &serialized).await.is_err() {
                                 warn!("Failed to send pause/resume to server");
                             }
                         }

@@ -62,10 +62,18 @@ quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.14"
 
-# Auth
+# Auth (existing PSK challenge-response)
 hmac = "0.13"
 sha2 = "0.11"
 rand = "0.10"
+
+# Control-channel protection (AEAD + HKDF)
+# Uses the crypto-common 0.1 ecosystem (sha2 0.10 / hmac 0.12 / hkdf 0.12 /
+# chacha20poly1305 0.10), separate from auth's hmac 0.13 / sha2 0.11.
+sha2_010 = { package = "sha2", version = "0.10" }
+hmac_012 = { package = "hmac", version = "0.12" }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
 
 # Rate limiting / ACL
 dashmap = "6"

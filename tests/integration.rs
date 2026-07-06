@@ -1088,6 +1088,104 @@ async fn test_quic_with_psk() {
     assert!(result.is_ok(), "QUIC with PSK should succeed: {:?}", result);
 }
 
+/// Positive TCP PSK round-trip. Unlike QUIC (which is TLS-encrypted regardless),
+/// the TCP control channel is plaintext without LAN-159, so this exercises the
+/// security-critical path end to end: capability negotiation, the server
+/// proof-of-PSK, and the AEAD-framed control channel. If the transcript proof or
+/// the AEAD framing regresses, this test fails.
+#[tokio::test]
+async fn test_tcp_with_psk() {
+    let port = get_test_port();
+    let psk = "tcp-test-secret".to_string();
+    let _server = start_secure_server(port, Some(psk.clone()), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: Some(psk),
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "TCP with PSK should complete");
+    assert!(
+        result.unwrap().is_ok(),
+        "TCP with PSK should succeed (server proof + AEAD control channel)"
+    );
+}
+
+/// Fail-closed downgrade resistance: a PSK-configured server must refuse a
+/// well-formed client that does not advertise `protected_control_v1` (i.e. a
+/// pre-LAN-159 client, or a MITM that stripped the capability), and must say so
+/// with a clear error rather than silently proceeding in plaintext.
+#[tokio::test]
+async fn test_psk_rejects_client_without_protected_control() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use xfr::protocol::ControlMessage;
+
+    let port = get_test_port();
+    let psk = "downgrade-test-secret".to_string();
+    let _server = start_secure_server(port, Some(psk), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A valid, newline-terminated Hello that omits protected_control_v1.
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+
+    let hello = ControlMessage::Hello {
+        version: "1.1".to_string(),
+        client: Some("legacy-client".to_string()),
+        server: None,
+        capabilities: Some(vec![]), // no protected_control_v1
+        auth: None,
+        client_nonce: None,
+    };
+    writer
+        .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+        .await
+        .expect("send hello");
+
+    // The server must respond with an error (not hang, not close silently).
+    let mut line = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .expect("server should respond, not hang")
+        .expect("read response");
+    assert!(n > 0, "server closed without an error response");
+
+    match ControlMessage::deserialize(line.trim()).expect("parse response") {
+        ControlMessage::Error { message } => assert!(
+            message.contains("protected_control_v1"),
+            "expected a downgrade-refusal error, got: {message}"
+        ),
+        other => panic!("expected Error refusing the downgrade, got: {other:?}"),
+    }
+}
+
 // ============================================================================
 // ACL Deny Test
 // ============================================================================
@@ -2699,6 +2797,7 @@ impl RawControl {
             server: None,
             capabilities: Some(capabilities),
             auth: None,
+            client_nonce: None,
         };
         writer
             .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
