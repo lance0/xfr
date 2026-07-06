@@ -43,6 +43,19 @@ pub(crate) async fn wait_while_paused(
     false
 }
 
+/// Like [`wait_while_paused`] but also returns the wall-clock time spent
+/// in the paused state, so callers can accumulate `paused_total` and
+/// extend their deadline accordingly (LAN-230).
+pub(crate) async fn wait_while_paused_timed(
+    pause: &mut watch::Receiver<bool>,
+    cancel: &mut watch::Receiver<bool>,
+) -> (bool, std::time::Duration) {
+    let pause_start = std::time::Instant::now();
+    let cancelled = wait_while_paused(pause, cancel).await;
+    let paused = pause_start.elapsed();
+    (cancelled, paused)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +115,34 @@ mod tests {
         assert!(
             !result,
             "dropped pause sender should be treated as resumed, not cancelled"
+        );
+    }
+
+    /// Regression for LAN-230: `wait_while_paused_timed` must return the
+    /// wall-clock duration spent paused so callers can extend their deadline.
+    #[tokio::test]
+    async fn wait_while_paused_timed_returns_pause_duration() {
+        let (pause_tx, mut pause_rx) = watch::channel(true);
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+
+        // Spawn the wait task while pause is active
+        let task =
+            tokio::spawn(
+                async move { wait_while_paused_timed(&mut pause_rx, &mut cancel_rx).await },
+            );
+
+        // Let it block for ~50ms, then resume
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pause_tx.send(false).unwrap();
+
+        let (cancelled, paused) = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("timed out waiting for task")
+            .expect("task panicked");
+        assert!(!cancelled, "should not be cancelled");
+        assert!(
+            paused >= Duration::from_millis(40),
+            "paused duration {paused:?} should be >= 40ms"
         );
     }
 }

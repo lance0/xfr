@@ -1805,6 +1805,23 @@ fn directional_totals(
     )
 }
 
+fn active_elapsed(
+    start: std::time::Instant,
+    paused_total: Duration,
+    pause_start: Option<std::time::Instant>,
+) -> Duration {
+    let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
+    start.elapsed().saturating_sub(paused_total + active_pause)
+}
+
+fn active_elapsed_ms(
+    start: std::time::Instant,
+    paused_total: Duration,
+    pause_start: Option<std::time::Instant>,
+) -> u64 {
+    active_elapsed(start, paused_total, pause_start).as_millis() as u64
+}
+
 /// Run a QUIC bandwidth test
 #[allow(clippy::too_many_arguments)]
 async fn run_quic_test(
@@ -1970,13 +1987,20 @@ async fn run_quic_test(
         // surfaces correctly on the next live tick and at end-of-test.
         interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let start = std::time::Instant::now();
+        let mut paused_total = Duration::ZERO;
+        let mut pause_start: Option<std::time::Instant> = None;
 
         let mut loop_err: Option<anyhow::Error> = None;
         loop {
             tokio::select! {
                 _ = interval_timer.tick() => {
-                    // Duration::ZERO means infinite - only break if duration is set
-                    if duration != Duration::ZERO && start.elapsed() >= duration {
+                    // Duration::ZERO means infinite - only break if duration is set.
+                    // Subtract paused_total plus any in-progress pause so the
+                    // clock doesn't expire while paused (LAN-230).
+                    let active_elapsed = active_elapsed(start, paused_total, pause_start);
+                    if duration != Duration::ZERO
+                        && active_elapsed >= duration
+                    {
                         break;
                     }
 
@@ -1989,7 +2013,7 @@ async fn run_quic_test(
 
                     let interval_msg = ControlMessage::Interval {
                         id: id.to_string(),
-                        elapsed_ms: stats.elapsed_ms(),
+                        elapsed_ms: active_elapsed.as_millis() as u64,
                         streams: stream_intervals,
                         aggregate: aggregate.clone(),
                     };
@@ -2035,12 +2059,18 @@ async fn run_quic_test(
                         }
                         Some(ControlCommand::Pause) => {
                             info!("QUIC test {} paused", id);
+                            if pause_start.is_none() {
+                                pause_start = Some(std::time::Instant::now());
+                            }
                             if let Some(test) = active_tests.lock().await.get(id) {
                                 let _ = test.pause_tx.send(true);
                             }
                         }
                         Some(ControlCommand::Resume) => {
                             info!("QUIC test {} resumed", id);
+                            if let Some(pause_instant) = pause_start.take() {
+                                paused_total += pause_instant.elapsed();
+                            }
                             if let Some(test) = active_tests.lock().await.get(id) {
                                 let _ = test.pause_tx.send(false);
                             }
@@ -2077,7 +2107,7 @@ async fn run_quic_test(
         }
 
         // Send final result
-        let duration_ms = stats.elapsed_ms();
+        let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
@@ -2491,8 +2521,8 @@ async fn run_test(
     // Split the transport: the reader task owns the recv half + the
     // buffered reader; the stats loop owns the send half.  This gives
     // prompt cancel/pause latency (not serialized behind the 1s stats
-    // tick, LAN-160 #13) while avoiding the LAN-229 desync hazard
-    // (read_message is never cancelled mid-frame).
+    // interval tick) without the LAN-229 desync hazard (read_message is
+    // never cancelled mid-frame).
     let (ctrl_reader, mut ctrl_writer) = transport.split();
     let (mut cmd_rx, control_handle) = spawn_control_reader(reader, ctrl_reader, id.to_string());
 
@@ -2500,13 +2530,20 @@ async fn run_test(
     let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
     interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
+    let mut paused_total = Duration::ZERO;
+    let mut pause_start: Option<std::time::Instant> = None;
 
     let mut loop_err: Option<anyhow::Error> = None;
     loop {
         tokio::select! {
             _ = interval_timer.tick() => {
-                // Duration::ZERO means infinite - only break if duration is set
-                if duration != Duration::ZERO && start.elapsed() >= duration {
+                // Duration::ZERO means infinite - only break if duration is set.
+                // Subtract paused_total plus any in-progress pause so the
+                // clock doesn't expire while paused (LAN-230).
+                let active_elapsed = active_elapsed(start, paused_total, pause_start);
+                if duration != Duration::ZERO
+                    && active_elapsed >= duration
+                {
                     break;
                 }
 
@@ -2519,7 +2556,7 @@ async fn run_test(
 
                 let interval_msg = ControlMessage::Interval {
                     id: id.to_string(),
-                    elapsed_ms: stats.elapsed_ms(),
+                    elapsed_ms: active_elapsed.as_millis() as u64,
                     streams: stream_intervals,
                     aggregate: aggregate.clone(),
                 };
@@ -2566,12 +2603,18 @@ async fn run_test(
                     }
                     Some(ControlCommand::Pause) => {
                         info!("Test {} paused", id);
+                        if pause_start.is_none() {
+                            pause_start = Some(std::time::Instant::now());
+                        }
                         if let Some(test) = active_tests.lock().await.get(id) {
                             let _ = test.pause_tx.send(true);
                         }
                     }
                     Some(ControlCommand::Resume) => {
                         info!("Test {} resumed", id);
+                        if let Some(pause_instant) = pause_start.take() {
+                            paused_total += pause_instant.elapsed();
+                        }
                         if let Some(test) = active_tests.lock().await.get(id) {
                             let _ = test.pause_tx.send(false);
                         }
@@ -2637,7 +2680,7 @@ async fn run_test(
     }
 
     // Send final result
-    let duration_ms = stats.elapsed_ms();
+    let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
     let bytes_total = stats.total_bytes();
     let throughput_mbps = if duration_ms > 0 {
         (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
