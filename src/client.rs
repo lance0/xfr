@@ -1682,6 +1682,7 @@ impl Client {
             let random_payload = self.config.random_payload;
             let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
             let dscp = self.config.dscp;
+            let address_family = self.config.address_family;
             let window_size = self.config.window_size;
             let feedback_aggregator = feedback_aggregator.clone();
             let stream_index = i;
@@ -1691,7 +1692,7 @@ impl Client {
                 // macOS dual-stack sockets behave differently than Linux, so we match the server's family.
                 let socket = if let Some(local) = bind_addr {
                     let local = net::match_bind_family(local, server_port);
-                    match net::create_udp_socket_bound(local).await {
+                    match net::create_udp_socket_bound(local, address_family).await {
                         Ok(s) => Arc::new(s),
                         Err(e) => {
                             error!("Failed to bind UDP socket to {}: {}", local, e);
@@ -1765,7 +1766,7 @@ impl Client {
     ) -> anyhow::Result<Arc<tokio::net::UdpSocket>> {
         let socket = if let Some(local) = bind_addr {
             let local = net::match_bind_family(local, server_port);
-            net::create_udp_socket_bound(local)
+            net::create_udp_socket_bound(local, self.config.address_family)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to bind UDP socket to {}: {}", local, e))?
         } else {

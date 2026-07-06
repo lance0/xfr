@@ -463,7 +463,7 @@ impl Server {
         let listener = if let Some(ip) = self.config.bind_addr {
             let addr = SocketAddr::new(ip, self.config.port);
             info!("Binding to {}", addr);
-            net::create_tcp_listener_on_addr(addr).await?
+            net::create_tcp_listener_on_addr(addr, self.config.address_family).await?
         } else {
             net::create_tcp_listener_auto_mptcp(self.config.port, self.config.address_family)
                 .await?
@@ -2219,7 +2219,7 @@ async fn run_test(
             let expected_ip = net::normalize_ip(peer_addr.ip());
             for i in 0..streams {
                 let listener = if let Some(ip) = bind_addr {
-                    net::create_tcp_listener_on_addr(SocketAddr::new(ip, 0)).await?
+                    net::create_tcp_listener_on_addr(SocketAddr::new(ip, 0), address_family).await?
                 } else {
                     net::create_tcp_listener_auto_mptcp(0, address_family).await?
                 };
@@ -2304,7 +2304,7 @@ async fn run_test(
             let udp_buffer = client_window_to_host(client_window_size);
             for _ in 0..streams {
                 let socket = if let Some(ip) = bind_addr {
-                    net::create_udp_socket_bound(SocketAddr::new(ip, 0)).await?
+                    net::create_udp_socket_bound(SocketAddr::new(ip, 0), address_family).await?
                 } else {
                     net::create_udp_socket(0, address_family).await?
                 };
