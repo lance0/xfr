@@ -467,7 +467,6 @@ pub async fn send_data(
     let start = tokio::time::Instant::now();
     let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
-    let mut paused_total = Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
     let mut chunk_offset: usize = 0;
@@ -486,7 +485,6 @@ pub async fn send_data(
                 break;
             }
             // Extend the deadline by the time spent paused (LAN-230)
-            paused_total += paused;
             deadline += paused;
             // Reset pacing baseline after resume to prevent catch-up burst
             pace_start = tokio::time::Instant::now();
@@ -811,7 +809,6 @@ pub async fn send_data_half(
     let start = tokio::time::Instant::now();
     let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
-    let mut paused_total = Duration::ZERO;
     let mut pace_start = start;
     let mut pace_bytes_offset: u64 = 0;
     let mut chunk_offset: usize = 0;
@@ -830,7 +827,6 @@ pub async fn send_data_half(
                 break;
             }
             // Extend the deadline by the time spent paused (LAN-230)
-            paused_total += paused;
             deadline += paused;
             pace_start = tokio::time::Instant::now();
             pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);

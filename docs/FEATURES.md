@@ -261,7 +261,8 @@ xfr <host> --dscp 184                   # Raw TOS byte value
 
 `--dscp` accepts either a raw TOS byte (`0-255`) or DSCP names such as `EF`, `AF11-AF43`, `CS0-CS7`, and `VA`.
 
-- TCP and UDP apply the marking on client sockets after connect.
+- TCP and UDP apply the marking on client sockets after connect and on server
+  sockets for server-sent download/bidirectional traffic.
 - QUIC ignores `--dscp` because the underlying UDP socket is owned by Quinn.
 - On non-Unix platforms, xfr currently warns instead of applying socket marking.
 

@@ -138,7 +138,7 @@ QUIC transport uses self-signed certificates and does not verify the server's id
 
 **Impact:** QUIC connections are encrypted but do not authenticate the server, leaving them vulnerable to server impersonation or man-in-the-middle attacks on untrusted networks.
 
-**Mitigation:** Do not treat QUIC's self-signed certificate as server identity. `--psk` is still useful on untrusted networks because it gates access to the server, but today's PSK handshake authenticates the client to the server; it does not replace server certificate verification.
+**Mitigation:** Do not treat QUIC's self-signed certificate as server identity on unauthenticated sessions. Use `--psk-file` on untrusted networks: modern PSK sessions require AEAD-protected control channels and verify a server proof bound to the handshake transcript. The self-signed QUIC certificate is still not a public PKI identity.
 
 ### Protocol Extensions Require Major Version Bump
 

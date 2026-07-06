@@ -602,7 +602,6 @@ pub async fn send_udp_paced(
     let start = Instant::now();
     let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
-    let mut paused_total = Duration::ZERO;
 
     let mut packet = vec![0u8; packet_size];
     if random_payload {
@@ -621,7 +620,6 @@ pub async fn send_udp_paced(
                 break;
             }
             // Extend the deadline by the time spent paused (LAN-230)
-            paused_total += paused;
             deadline += paused;
             // Reset the pacing ticker after resume so the first post-pause
             // tick fires a full interval from now, not immediately (the
@@ -704,7 +702,6 @@ async fn send_udp_unlimited(
     let start = Instant::now();
     let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
-    let mut paused_total = Duration::ZERO;
     let mut packet = vec![0u8; packet_size];
     if random_payload {
         rand::RngExt::fill(&mut rand::rng(), &mut packet[UDP_HEADER_SIZE..]);
@@ -725,7 +722,6 @@ async fn send_udp_unlimited(
                 break;
             }
             // Extend the deadline by the time spent paused (LAN-230)
-            paused_total += paused;
             deadline += paused;
             continue;
         }

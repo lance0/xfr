@@ -223,6 +223,7 @@ jobs:
           ./target/release/xfr --completions zsh > completions/_xfr
           ./target/release/xfr --completions fish > completions/xfr.fish
           ./target/release/xfr --completions powershell > completions/_xfr.ps1
+          ./target/release/xfr --completions elvish > completions/xfr.elv
           tar czvf completions.tar.gz completions/
 
       - name: Upload completions

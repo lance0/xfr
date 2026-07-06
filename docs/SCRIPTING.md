@@ -245,8 +245,8 @@ network-test:
 
 xfr doesn't require special capabilities (unlike tools needing raw sockets).
 
-For TCP and QUIC, only port 5201 needs to be exposed. UDP tests require
-additional ephemeral ports for data transfer.
+For current peers, TCP, UDP, and QUIC all use port 5201 by default. Older UDP
+peers fall back to ephemeral server data ports.
 
 ### Run as Server
 
@@ -479,5 +479,5 @@ export XFR_TIMESTAMP_FORMAT=iso8601  # Timestamp format (--timestamp-format)
 5. **Use `--one-off`** for CI servers -- server exits after one test completes
 6. **Check exit codes** -- non-zero means failure
 7. **Log to file** with `--log-file` for debugging -- keeps stdout clean for JSON
-8. **TCP needs only port 5201** -- single-port mode means no ephemeral data ports
-9. **UDP needs extra ports** -- data ports are dynamically allocated on the server
+8. **Current peers need only port 5201** -- TCP, UDP, and QUIC use single-port mode
+9. **Legacy UDP may need extra ports** -- old peers fall back to server-allocated data ports

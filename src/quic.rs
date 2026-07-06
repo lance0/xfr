@@ -362,7 +362,6 @@ pub async fn send_quic_data(
     let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
     let mut deadline = tokio::time::Instant::now() + duration;
     let is_infinite = duration == Duration::ZERO;
-    let mut paused_total = Duration::ZERO;
 
     loop {
         if *cancel.borrow() {
@@ -377,7 +376,6 @@ pub async fn send_quic_data(
                 break;
             }
             // Extend the deadline by the time spent paused (LAN-230)
-            paused_total += paused;
             deadline += paused;
             continue;
         }

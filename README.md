@@ -346,7 +346,7 @@ xfr discover --timeout 10s   # Extended search
 | Key | Action |
 |-----|--------|
 | `q` | Quit (cancels test) |
-| `p` | Pause/Resume display |
+| `p` | Pause/Resume test traffic |
 | `s` | Settings modal |
 | `t` | Cycle color theme |
 | `d` | Toggle per-stream view |
@@ -497,7 +497,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 
 TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
 
-`--dscp` applies to TCP and UDP client sockets. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
+`--dscp` applies to TCP and UDP sockets on both ends when relevant, including server-sent download and bidirectional traffic. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
 
 ## Security Considerations
 

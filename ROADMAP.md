@@ -32,7 +32,7 @@
 
 - [x] Prometheus metrics with Grafana dashboard
 - [x] Config file support (`~/.config/xfr/config.toml`)
-- [x] Server presets (bandwidth limits, allowed clients)
+- [x] Server presets (allowed clients and max duration; bandwidth limit reserved)
 - [x] Man page and contributing guide
 - [x] Dynamic port allocation (multi-client safe)
 - [x] Proper bidir mode with split sockets

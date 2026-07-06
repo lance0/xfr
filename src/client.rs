@@ -17,6 +17,7 @@ const MAX_LINE_LENGTH: usize = 65536;
 const STREAM_JOIN_TIMEOUT_BASE: Duration = Duration::from_secs(2);
 const STREAM_JOIN_TIMEOUT_PER_STREAM_MS: u64 = 50;
 const SINGLE_PORT_HANDSHAKE_FANOUT_MAX: usize = 16;
+const CONTROL_CANCEL_RESULT_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
@@ -41,6 +42,17 @@ fn local_stop_deadline(
     } else {
         Some(start + duration)
     }
+}
+
+fn start_control_cancel_wait(
+    now: tokio::time::Instant,
+    deadline: &mut tokio::time::Instant,
+    pause_started_at: &mut Option<tokio::time::Instant>,
+) {
+    *deadline = now + CONTROL_CANCEL_RESULT_TIMEOUT;
+    // Cancel is no longer pause time: keep the post-cancel response wait
+    // bounded even if the user cancels while the test is paused.
+    *pause_started_at = None;
 }
 
 /// Per-stream and total receive-byte deltas since the previous call,
@@ -1131,7 +1143,11 @@ impl Client {
                                 ControlMessage::Cancelled { .. } => {
                                     // Server acknowledged cancel — it will send Result next.
                                     // Tighten deadline to wait briefly for the final result.
-                                    deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                                    start_control_cancel_wait(
+                                        tokio::time::Instant::now(),
+                                        &mut deadline,
+                                        &mut pause_started_at,
+                                    );
                                     continue;
                                 }
                                 _ => {
@@ -1166,6 +1182,11 @@ impl Client {
                             .write_message(&mut writer, &serialized)
                             .await;
                         let _ = cancel_tx.send(true);
+                        start_control_cancel_wait(
+                            tokio::time::Instant::now(),
+                            &mut deadline,
+                            &mut pause_started_at,
+                        );
                         // Continue loop to receive Cancelled response
                     }
                 }
@@ -2232,7 +2253,11 @@ impl Client {
                                         // Server acknowledged cancel — it will send Result next.
                                         // Tighten deadline to wait briefly for the final result.
                                         let _ = cancel_tx.send(true);
-                                        deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                                        start_control_cancel_wait(
+                                            tokio::time::Instant::now(),
+                                            &mut deadline,
+                                            &mut pause_started_at,
+                                        );
                                         continue;
                                     }
                                     _ => {
@@ -2265,6 +2290,11 @@ impl Client {
                             };
                             let _ = ctrl_writer.write_message(&mut ctrl_send, &serialized).await;
                             let _ = cancel_tx.send(true);
+                            start_control_cancel_wait(
+                                tokio::time::Instant::now(),
+                                &mut deadline,
+                                &mut pause_started_at,
+                            );
                         }
                     }
                     res = pause_request_rx.changed(), if pause_request_open => {
@@ -3089,6 +3119,21 @@ mod tests {
         let start = tokio::time::Instant::now();
         let duration = Duration::from_secs(10);
         assert_eq!(local_stop_deadline(start, duration), Some(start + duration));
+    }
+
+    #[test]
+    fn start_control_cancel_wait_unfreezes_paused_timeout() {
+        let now = tokio::time::Instant::now();
+        let mut deadline = now + Duration::from_secs(60);
+        let mut pause_started_at = Some(now - Duration::from_secs(5));
+
+        start_control_cancel_wait(now, &mut deadline, &mut pause_started_at);
+
+        assert_eq!(deadline, now + CONTROL_CANCEL_RESULT_TIMEOUT);
+        assert!(
+            pause_started_at.is_none(),
+            "cancel wait must not remain frozen by a prior pause"
+        );
     }
 
     #[test]
