@@ -797,10 +797,7 @@ fn set_tos_on_fd(fd: std::os::unix::io::RawFd, tos: u8, ipv6: bool) -> io::Resul
         };
         if ret != 0 {
             let err = io::Error::last_os_error();
-            if matches!(
-                err.raw_os_error(),
-                Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP)
-            ) {
+            if ip_tos_on_ipv6_unsupported(&err) {
                 // Some platforms do not expose IP_TOS on IPv6 sockets.
                 // Native IPv6 traffic is still covered by IPV6_TCLASS above.
                 debug!(
@@ -829,6 +826,26 @@ fn set_tos_on_fd(fd: std::os::unix::io::RawFd, tos: u8, ipv6: bool) -> io::Resul
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn ip_tos_on_ipv6_unsupported(err: &io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP) => true,
+        // macOS reports EINVAL for IP_TOS on an IPv6 socket. Keep EINVAL
+        // fatal on Linux, where it would indicate an unexpected setsockopt
+        // failure rather than a known unsupported dual-stack behavior.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        Some(libc::EINVAL) => true,
+        _ => false,
+    }
 }
 
 /// Set IP_TOS / IPV6_TCLASS on a TCP stream for DSCP/QoS marking.
@@ -1674,9 +1691,8 @@ mod tests {
         assert_eq!(&buf, b"ping");
     }
 
-    /// Regression for LAN-169 #30: `set_tos_on_fd` on an IPv6 (dual-stack)
-    /// socket must set both IPV6_TCLASS and IP_TOS.  We verify by reading
-    /// back both values via getsockopt.
+    /// Regression for LAN-169 #30: `set_tos_on_fd` on an IPv6 socket must set
+    /// IPV6_TCLASS and should also set IP_TOS where the platform allows it.
     #[cfg(unix)]
     #[test]
     fn test_dscp_sets_both_on_dualstack_ipv6() {
@@ -1707,9 +1723,8 @@ mod tests {
             "IPV6_TCLASS should match the requested DSCP"
         );
 
-        // Read back IP_TOS to verify it was also set (the LAN-169 #30 fix).
-        // On some BSDs this getsockopt may fail with ENOPROTOOPT for IPv6
-        // sockets — that's fine, the setsockopt itself was best-effort.
+        // Read back IP_TOS to verify the IPv4-mapped DSCP path when the
+        // platform exposes IP_TOS on IPv6 sockets.
         let mut val: libc::c_int = 0;
         let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         let ret = unsafe {
@@ -1727,7 +1742,7 @@ mod tests {
                 "IP_TOS should match the requested DSCP on dual-stack IPv6 socket"
             );
         }
-        // If ret != 0, the platform doesn't expose IP_TOS on IPv6 sockets —
-        // the setsockopt was best-effort and IPV6_TCLASS covers native IPv6.
+        // If ret != 0, the platform doesn't expose IP_TOS on IPv6 sockets;
+        // IPV6_TCLASS still covers native IPv6.
     }
 }
