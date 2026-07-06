@@ -312,6 +312,21 @@ impl ProtectedControl {
         matches!(self, Self::Protected { .. })
     }
 
+    /// Split the transport into owned reader and writer halves.
+    ///
+    /// The reader half (`ControlReader`) owns the recv codec and can be
+    /// moved into a dedicated control-reader task. The writer half
+    /// (`ControlWriter`) owns the send codec and stays with the stats loop.
+    pub fn split(self) -> (ControlReader, ControlWriter) {
+        match self {
+            Self::Plaintext => (ControlReader::Plaintext, ControlWriter::Plaintext),
+            Self::Protected { send, recv } => (
+                ControlReader::Protected { recv },
+                ControlWriter::Protected { send },
+            ),
+        }
+    }
+
     /// Read one control message from the transport.
     ///
     /// In plaintext mode, reads a newline-delimited line via `read_bounded_line`.
@@ -395,6 +410,118 @@ impl ProtectedControl {
         match self {
             Self::Plaintext => writer.write_all(format!("{serialized}\n").as_bytes()).await,
             Self::Protected { send, .. } => {
+                let payload = send
+                    .seal(serialized.as_bytes())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let len = payload.len() as u32;
+                writer.write_all(&len.to_be_bytes()).await?;
+                writer.write_all(&payload).await
+            }
+        }
+    }
+}
+
+/// Owned reader half of a [`ProtectedControl`] transport.
+///
+/// Split off via [`ProtectedControl::split`] so a dedicated control-reader
+/// task can own the recv codec without borrowing the send half.
+pub enum ControlReader {
+    /// Plaintext fallback.
+    Plaintext,
+    /// AEAD-protected reader.
+    Protected { recv: ControlCodec },
+}
+
+/// Owned writer half of a [`ProtectedControl`] transport.
+///
+/// Split off via [`ProtectedControl::split`] so the stats loop can own the
+/// send codec while the reader task owns the recv codec.
+pub enum ControlWriter {
+    /// Plaintext fallback.
+    Plaintext,
+    /// AEAD-protected writer.
+    Protected { send: ControlCodec },
+}
+
+impl ControlReader {
+    /// Read one control message, storing the decoded line in `line_buf`.
+    ///
+    /// Plaintext: newline-delimited JSON via `fill_buf`/`consume`.
+    /// Protected: 4-byte length prefix + AEAD frame, decrypted via `recv.open`.
+    pub async fn read_message<R>(
+        &mut self,
+        reader: &mut R,
+        line_buf: &mut String,
+    ) -> anyhow::Result<()>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        match self {
+            Self::Plaintext => {
+                use tokio::io::AsyncBufReadExt;
+                line_buf.clear();
+                let mut total = 0;
+                loop {
+                    const MAX_LINE_LENGTH: usize = 1024 * 1024;
+                    let bytes = reader.fill_buf().await?;
+                    if bytes.is_empty() {
+                        return Ok(());
+                    }
+                    if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
+                        let to_read = pos + 1;
+                        if total + to_read > MAX_LINE_LENGTH {
+                            return Err(anyhow!("Line exceeds maximum length"));
+                        }
+                        line_buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
+                        reader.consume(to_read);
+                        return Ok(());
+                    }
+                    let len = bytes.len();
+                    if total + len > MAX_LINE_LENGTH {
+                        return Err(anyhow!("Line exceeds maximum length"));
+                    }
+                    line_buf.push_str(&String::from_utf8_lossy(bytes));
+                    reader.consume(len);
+                    total += len;
+                }
+            }
+            Self::Protected { recv } => {
+                use tokio::io::AsyncReadExt;
+                let mut len_buf = [0u8; 4];
+                reader.read_exact(&mut len_buf).await?;
+                let len = u32::from_be_bytes(len_buf) as usize;
+                const MAX_FRAME: usize = 1024 * 1024;
+                if len > MAX_FRAME {
+                    return Err(anyhow!("protected frame too large: {len} bytes"));
+                }
+                let mut payload = vec![0u8; len];
+                reader.read_exact(&mut payload).await?;
+                let plaintext = recv.open(&payload)?;
+                line_buf.clear();
+                line_buf.push_str(&String::from_utf8_lossy(&plaintext));
+                Ok(())
+            }
+        }
+    }
+}
+
+impl ControlWriter {
+    /// Write a serialized control message.
+    ///
+    /// Plaintext: appends `\n` and writes raw.
+    /// Protected: seals in an AEAD frame with a 4-byte length prefix.
+    pub async fn write_message<W>(
+        &mut self,
+        writer: &mut W,
+        serialized: &str,
+    ) -> std::io::Result<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Plaintext => writer.write_all(format!("{serialized}\n").as_bytes()).await,
+            Self::Protected { send } => {
                 let payload = send
                     .seal(serialized.as_bytes())
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
