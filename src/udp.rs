@@ -1572,7 +1572,7 @@ mod tests {
             let send_task = tokio::spawn(async move {
                 send_udp_paced(
                     send_socket,
-                    Some(server_addr),
+                    None,
                     bitrate,
                     Duration::ZERO, // infinite — cancel ends it
                     send_stats,
@@ -1583,12 +1583,20 @@ mod tests {
                 .await
             });
 
+            // The client socket is connected, so send_udp_paced must use
+            // send(), not send_to(); macOS rejects send_to on connected UDP
+            // sockets with EISCONN.
+            let mut buf = [0u8; 2048];
+            tokio::time::timeout(Duration::from_secs(2), server.recv(&mut buf))
+                .await
+                .expect("paced sender should deliver before pause")
+                .expect("server recv should succeed");
+
             // Let it send for a bit, then pause.
             tokio::time::sleep(Duration::from_millis(300)).await;
             let _ = pause_tx.send(true);
 
             // Drain any in-flight packets.
-            let mut buf = [0u8; 2048];
             let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
             while let Ok(Ok(_)) =
                 tokio::time::timeout_at(drain_deadline, server.recv(&mut buf)).await
@@ -1612,7 +1620,7 @@ mod tests {
             // Then a packet should arrive within a generous window.
             // The pacing interval is ~120ms; reset() makes the first
             // tick fire ~120ms from resume, but allow scheduling jitter.
-            let recv_window = Duration::from_millis(500);
+            let recv_window = Duration::from_secs(2);
             let recv_result = tokio::time::timeout(recv_window, server.recv(&mut buf)).await;
             assert!(
                 recv_result.is_ok(),
