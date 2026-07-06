@@ -608,7 +608,7 @@ pub async fn send_udp_paced(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }
@@ -622,7 +622,7 @@ pub async fn send_udp_paced(
                 if *cancel.borrow() { break; }
                 continue;
             }
-            _ = pause.changed() => { continue; } // re-check at top
+            _ = pause.changed(), if crate::pause::channel_is_open(&pause) => { continue; } // re-check at top
             _ = ticker.tick() => {}
         }
 
@@ -633,7 +633,7 @@ pub async fn send_udp_paced(
 
         // Send packets_per_tick packets in this burst
         for _ in 0..packets_per_tick {
-            if *cancel.borrow() || *pause.borrow() {
+            if *cancel.borrow() || crate::pause::is_paused(&pause) {
                 break;
             }
             if !is_infinite && Instant::now() >= deadline {
@@ -701,7 +701,7 @@ async fn send_udp_unlimited(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }
@@ -715,7 +715,7 @@ async fn send_udp_unlimited(
 
         // Send a burst of packets before yielding
         for _ in 0..BURST_SIZE {
-            if *cancel.borrow() || *pause.borrow() {
+            if *cancel.borrow() || crate::pause::is_paused(&pause) {
                 break;
             }
             if !is_infinite && Instant::now() >= deadline {
@@ -802,7 +802,7 @@ pub async fn receive_udp(
             break;
         }
 
-        if *pause.borrow() {
+        if crate::pause::is_paused(&pause) {
             if crate::pause::wait_while_paused(&mut pause, &mut cancel).await {
                 break;
             }
