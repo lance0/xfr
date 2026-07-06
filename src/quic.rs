@@ -61,7 +61,7 @@ pub type XfrHelloDatagram = (Vec<u8>, SocketAddr);
 /// Default buffer size for QUIC send/receive operations (128 KB)
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
 /// Maximum consecutive divert-only batches in `XfrLaneTee::poll_recv`
-/// before yielding `Ok(0)` to quinn, preventing starvation under heavy
+/// before rescheduling quinn's receive task, preventing starvation under heavy
 /// xfr-hello load (LAN-170 #32).
 const MAX_DIVERT_ITERATIONS: u32 = 16;
 
@@ -190,7 +190,8 @@ impl AsyncUdpSocket for XfrLaneTee {
     ) -> Poll<io::Result<usize>> {
         // Bound consecutive divert-only batches to prevent starving quinn
         // under heavy xfr-hello load. After this many iterations with zero
-        // QUIC packets kept, return Ok(0) to let quinn reschedule.
+        // QUIC packets kept, yield this poll and ask the executor to
+        // reschedule us.
         let mut divert_iterations: u32 = 0;
 
         loop {
@@ -242,10 +243,11 @@ impl AsyncUdpSocket for XfrLaneTee {
             divert_iterations += 1;
             if divert_iterations >= MAX_DIVERT_ITERATIONS {
                 debug!(
-                    "shared-socket tee: {} consecutive divert-only batches, yielding to quinn",
+                    "shared-socket tee: {} consecutive divert-only batches, yielding receive task",
                     divert_iterations
                 );
-                return Poll::Ready(Ok(0));
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
         }
     }
