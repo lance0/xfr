@@ -54,6 +54,34 @@ impl AddressFamily {
         }
     }
 }
+/// Determine whether to set IPV6_V6ONLY on an IPv6 socket, and set it if
+/// needed.
+///
+/// For **concrete IPv6 addresses** (e.g. `::1`, `fd00:...`): V6ONLY=true —
+/// the socket only accepts IPv6 connections, matching the operator's
+/// explicit address choice.
+///
+/// For **unspecified IPv6** (`::`): defer to `AddressFamily` —
+/// `DualStack` leaves V6ONLY=false (accepts IPv4-mapped), `V6Only` sets it
+/// true.  This is the only case where the platform default would otherwise
+/// diverge (Linux=false, macOS/Windows=true).
+///
+/// For **IPv4**: V6ONLY is irrelevant (no-op).
+fn set_v6only_for_addr(socket: &Socket, addr: SocketAddr, family: AddressFamily) -> io::Result<()> {
+    if addr.is_ipv4() {
+        return Ok(());
+    }
+    // Concrete IPv6 address → always V6ONLY.
+    // Unspecified IPv6 (::) → respect the AddressFamily mode.
+    let v6only = if addr.ip().is_unspecified() {
+        family == AddressFamily::V6Only
+    } else {
+        true
+    };
+    socket.set_only_v6(v6only)?;
+    debug!("Set IPV6_V6ONLY={} for {}", v6only, addr);
+    Ok(())
+}
 
 impl std::fmt::Display for AddressFamily {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -167,16 +195,19 @@ pub async fn create_tcp_listener(
 ///
 /// Used when `--bind` is specified to bind to a concrete IP address.
 /// Tries MPTCP first on Linux, falling back to regular TCP.
-pub async fn create_tcp_listener_on_addr(addr: SocketAddr) -> io::Result<TcpListener> {
+///
+/// `family` controls IPV6_V6ONLY behavior when binding to `::` (unspecified
+/// IPv6): `DualStack` leaves V6ONLY=false (accepts IPv4-mapped), `V6Only`
+/// sets it true.  Concrete IPv6 addresses always get V6ONLY=true regardless.
+pub async fn create_tcp_listener_on_addr(
+    addr: SocketAddr,
+    family: AddressFamily,
+) -> io::Result<TcpListener> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
     };
-
-    // Concrete IPv6 addresses are single-family; set V6ONLY explicitly
-    // rather than relying on platform defaults (Linux=false, Windows/macOS=true)
-    let set_v6only = addr.is_ipv6();
 
     // Try MPTCP first on Linux
     #[cfg(target_os = "linux")]
@@ -184,9 +215,7 @@ pub async fn create_tcp_listener_on_addr(addr: SocketAddr) -> io::Result<TcpList
         match Socket::new(domain, Type::STREAM, Some(Protocol::MPTCP)) {
             Ok(socket) => {
                 socket.set_reuse_address(true)?;
-                if set_v6only {
-                    socket.set_only_v6(true)?;
-                }
+                set_v6only_for_addr(&socket, addr, family)?;
                 socket.bind(&SockAddr::from(addr))?;
                 socket.listen(128)?;
                 socket.set_nonblocking(true)?;
@@ -204,9 +233,7 @@ pub async fn create_tcp_listener_on_addr(addr: SocketAddr) -> io::Result<TcpList
 
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
-    if set_v6only {
-        socket.set_only_v6(true)?;
-    }
+    set_v6only_for_addr(&socket, addr, family)?;
     socket.bind(&SockAddr::from(addr))?;
     socket.listen(128)?;
     socket.set_nonblocking(true)?;
@@ -283,8 +310,15 @@ pub fn match_bind_family(bind: SocketAddr, remote: SocketAddr) -> SocketAddr {
     }
 }
 
-/// Create a UDP socket bound to a specific address
-pub async fn create_udp_socket_bound(addr: SocketAddr) -> io::Result<UdpSocket> {
+/// Create a UDP socket bound to a specific address.
+///
+/// `family` controls IPV6_V6ONLY when binding to `::` (unspecified IPv6),
+/// matching the TCP listener behavior.  Concrete IPv6 addresses always get
+/// V6ONLY=true.
+pub async fn create_udp_socket_bound(
+    addr: SocketAddr,
+    family: AddressFamily,
+) -> io::Result<UdpSocket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -292,6 +326,7 @@ pub async fn create_udp_socket_bound(addr: SocketAddr) -> io::Result<UdpSocket> 
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    set_v6only_for_addr(&socket, addr, family)?;
     socket.bind(&SockAddr::from(addr))?;
     socket.set_nonblocking(true)?;
 
@@ -300,7 +335,10 @@ pub async fn create_udp_socket_bound(addr: SocketAddr) -> io::Result<UdpSocket> 
 }
 
 /// Create a UDP socket matching the address family of the remote address.
-/// This ensures cross-platform compatibility (macOS dual-stack differs from Linux).
+///
+/// For IPv6 remotes, binds to `::` with V6ONLY=false (dual-stack) so the
+/// socket can also reach IPv4-mapped destinations.  This ensures
+/// cross-platform compatibility (macOS dual-stack differs from Linux).
 pub async fn create_udp_socket_for_remote(remote: SocketAddr) -> io::Result<UdpSocket> {
     let domain = if remote.is_ipv4() {
         Domain::IPV4
@@ -314,6 +352,8 @@ pub async fn create_udp_socket_for_remote(remote: SocketAddr) -> io::Result<UdpS
     let bind_addr = if remote.is_ipv4() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
     } else {
+        // Dual-stack: allow IPv4-mapped connections on this IPv6 socket
+        socket.set_only_v6(false)?;
         SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
     };
     socket.bind(&SockAddr::from(bind_addr))?;
@@ -666,6 +706,14 @@ pub async fn connect_tcp_with_bind(
             if local.port() != 0 {
                 socket.set_reuse_address(true)?;
             }
+            // Set V6ONLY consistently for IPv6 bind addresses.  For
+            // wildcard `::` use dual-stack (V6ONLY=false) so the socket
+            // can reach IPv4 remotes too; concrete IPv6 → V6ONLY=true.
+            if local.is_ipv6() {
+                let v6only = !local.ip().is_unspecified();
+                socket.set_only_v6(v6only)?;
+                debug!("Set IPV6_V6ONLY={} for bind {}", v6only, local);
+            }
             socket.bind(&SockAddr::from(local))?;
         }
 
@@ -706,28 +754,72 @@ pub async fn connect_tcp_with_bind(
     }
 }
 
-/// Set DSCP/TOS marking on a raw fd. Uses IP_TOS for IPv4, IPV6_TCLASS for IPv6.
+/// Set DSCP/TOS marking on a raw fd.
+///
+/// For **IPv4** sockets: sets `IP_TOS`.
+///
+/// For **IPv6** sockets: sets `IPV6_TCLASS`.  On dual-stack (non-V6ONLY)
+/// IPv6 sockets, also sets `IP_TOS` so IPv4-mapped traffic gets the
+/// requested DSCP value (the kernel applies `IP_TOS` to IPv4 packets and
+/// `IPV6_TCLASS` to IPv6 packets independently — setting both is safe).
 #[cfg(unix)]
 fn set_tos_on_fd(fd: std::os::unix::io::RawFd, tos: u8, ipv6: bool) -> io::Result<()> {
     let tos_val = tos as libc::c_int;
-    let (level, optname) = if ipv6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+
+    if ipv6 {
+        // IPV6_TCLASS applies to IPv6 traffic
+        // SAFETY: fd is a valid file descriptor, tos_val is a valid c_int on the stack.
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TCLASS,
+                &tos_val as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Also set IP_TOS for IPv4-mapped traffic on dual-stack sockets.
+        // On V6ONLY sockets this is a no-op (no IPv4 traffic), but the
+        // setsockopt itself succeeds and is harmless.
+        // SAFETY: same fd, same tos_val.
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &tos_val as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            // ENOPROTOOPT on some BSDs for IPv6 sockets — ignore, IPV6_TCLASS
+            // already covers native IPv6 traffic.
+            debug!(
+                "IP_TOS on IPv6 socket failed (expected on some platforms): {}",
+                io::Error::last_os_error()
+            );
+        }
     } else {
-        (libc::IPPROTO_IP, libc::IP_TOS)
-    };
-    // SAFETY: fd is a valid file descriptor, tos_val is a valid c_int on the stack.
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            level,
-            optname,
-            &tos_val as *const libc::c_int as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
+        // IPv4 socket: IP_TOS only
+        // SAFETY: fd is a valid file descriptor, tos_val is a valid c_int on the stack.
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &tos_val as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
+
     Ok(())
 }
 
@@ -1496,5 +1588,138 @@ mod tests {
         assert_eq!(recorded[1].0, libc::SO_RCVBUF);
         assert_eq!(recorded[0].1, 64 * 1024);
         assert_eq!(recorded[1].1, 64 * 1024);
+    }
+
+    /// Regression for LAN-169 #29: `create_tcp_listener_on_addr` with
+    /// `AddressFamily::DualStack` on `::` (unspecified IPv6) must accept
+    /// IPv4 connections — the platform default (Linux=false, macOS=true)
+    /// must not leak through.
+    #[tokio::test]
+    async fn test_dualstack_listener_accepts_ipv4() {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        let listener = match create_tcp_listener_on_addr(addr, AddressFamily::DualStack).await {
+            Ok(l) => l,
+            Err(_) => return, // IPv6 unsupported on this host
+        };
+        let local = listener.local_addr().unwrap();
+
+        // An IPv4 connect to the dual-stack listener must succeed.
+        let v4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            TcpStream::connect(v4_addr),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Ok(_))),
+            "IPv4 connect to dual-stack [::] listener should succeed, got {result:?}"
+        );
+    }
+
+    /// Regression for LAN-169 #29: `create_tcp_listener_on_addr` with
+    /// `AddressFamily::V6Only` on `::` must reject IPv4 connections.
+    #[tokio::test]
+    async fn test_v6only_listener_rejects_ipv4() {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        let listener = match create_tcp_listener_on_addr(addr, AddressFamily::V6Only).await {
+            Ok(l) => l,
+            Err(_) => return, // IPv6 unsupported on this host
+        };
+        let local = listener.local_addr().unwrap();
+
+        let v4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            TcpStream::connect(v4_addr),
+        )
+        .await;
+        assert!(
+            !matches!(result, Ok(Ok(_))),
+            "IPv4 connect to V6Only [::] listener should fail, got {result:?}"
+        );
+    }
+
+    /// Regression for LAN-169 #29: `create_udp_socket_bound` with
+    /// `AddressFamily::DualStack` on `::` must accept IPv4 packets.
+    #[tokio::test]
+    async fn test_dualstack_udp_accepts_ipv4() {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        let socket = match create_udp_socket_bound(addr, AddressFamily::DualStack).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let local = socket.local_addr().unwrap();
+
+        // Send a packet from an IPv4 socket to the dual-stack listener.
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port());
+        sender.send_to(b"ping", target).await.unwrap();
+
+        let mut buf = [0u8; 4];
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(500), socket.recv(&mut buf))
+                .await;
+        match result {
+            Ok(Ok(n)) => assert_eq!(n, 4, "should receive exactly 4 bytes"),
+            other => panic!("dual-stack UDP socket should receive IPv4 packets, got {other:?}"),
+        }
+        assert_eq!(&buf, b"ping");
+    }
+
+    /// Regression for LAN-169 #30: `set_tos_on_fd` on an IPv6 (dual-stack)
+    /// socket must set both IPV6_TCLASS and IP_TOS.  We verify by reading
+    /// back both values via getsockopt.
+    #[cfg(unix)]
+    #[test]
+    fn test_dscp_sets_both_on_dualstack_ipv6() {
+        use std::os::unix::io::AsRawFd;
+
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket.set_only_v6(false).unwrap(); // dual-stack
+        let fd = socket.as_raw_fd();
+
+        let tos: u8 = 0x46; // EF DSCP
+        set_tos_on_fd(fd, tos, true).unwrap();
+
+        // Read back IPV6_TCLASS to verify it was set.
+        let mut val: libc::c_int = 0;
+        let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TCLASS,
+                &mut val as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(ret, 0, "getsockopt IPV6_TCLASS should succeed");
+        assert_eq!(
+            val as u8, tos,
+            "IPV6_TCLASS should match the requested DSCP"
+        );
+
+        // Read back IP_TOS to verify it was also set (the LAN-169 #30 fix).
+        // On some BSDs this getsockopt may fail with ENOPROTOOPT for IPv6
+        // sockets — that's fine, the setsockopt itself was best-effort.
+        let mut val: libc::c_int = 0;
+        let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &mut val as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret == 0 {
+            assert_eq!(
+                val as u8, tos,
+                "IP_TOS should match the requested DSCP on dual-stack IPv6 socket"
+            );
+        }
+        // If ret != 0, the platform doesn't expose IP_TOS on IPv6 sockets —
+        // the setsockopt was best-effort and IPV6_TCLASS covers native IPv6.
     }
 }
