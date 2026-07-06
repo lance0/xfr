@@ -94,11 +94,11 @@ jobs:
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }} --features "${{ matrix.features }}"
+        run: cargo build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --features "${{ matrix.features }}"
+        run: cross build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
 
       - name: Package binary
         shell: bash
@@ -250,7 +250,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build --release --features prometheus
+        run: cargo build --release --locked --features prometheus
 
       - name: Generate completions
         run: |
