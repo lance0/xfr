@@ -2125,7 +2125,7 @@ impl Client {
         let join_timeout = stream_join_timeout(self.config.streams);
         match tokio::time::timeout(
             join_timeout,
-            futures::future::join_all(quic_handles.iter_mut()),
+            futures::future::join_all(quic_handles.iter_mut()), // iter_mut(), not into_iter() — we need handles for .abort() on timeout
         )
         .await
         {
