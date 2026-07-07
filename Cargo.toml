@@ -80,7 +80,7 @@ dashmap = "6"
 ipnetwork = "0.21"
 
 # Update notifications
-update-informer = { version = "1", features = ["github"] }
+update-informer = { version = "1", features = ["github"], optional = true }
 
 # Socket control (IPv6 dual-stack, flow labels)
 socket2 = { version = "0.6", features = ["all"] }
@@ -90,9 +90,12 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 
 [features]
-default = ["discovery"]
+default = ["discovery", "update-check"]
 prometheus = ["dep:prometheus", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 discovery = ["dep:mdns-sd"]
+# Background check for a newer release via the GitHub API. On by default;
+# package builds can drop the phone-home code with `--no-default-features`.
+update-check = ["dep:update-informer"]
 
 [dev-dependencies]
 tokio-test = "0.4"
