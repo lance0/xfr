@@ -547,6 +547,17 @@ xfr checks GitHub for newer versions in the background. If an update is availabl
 
 Press `u` to dismiss the banner.
 
+### Disabling the update check
+
+The background check can be turned off:
+
+- `--no-update-check` for a single run
+- `DO_NOT_TRACK=1` (cross-tool standard) or `XFR_NO_UPDATE_CHECK=1` in the environment
+- `no_update_check = true` under `[client]` in `config.toml`
+- the **Update check** toggle in the TUI settings (Display tab), persisted to `prefs.toml`
+
+Precedence, highest first: compiled-out > env > `--no-update-check` > `config.toml` > saved TUI toggle. Package builds can compile the checker out entirely with `cargo build --no-default-features` (the `update-check` feature is on by default), which drops the `update-informer` dependency.
+
 The check uses a 1-hour cache to avoid GitHub API rate limits.
 
 ## CLI Reference
