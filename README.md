@@ -29,7 +29,7 @@ See [Installation](#installation) below for setup instructions.
 ## TUI Preview
 
 <p align="center">
-  <img src="xfr-ss.png" alt="xfr TUI interface" width="800">
+  <img src="docs/demo.gif" alt="xfr live TUI: real-time throughput graph, per-second stats, and settings" width="900">
 </p>
 
 ## Features
