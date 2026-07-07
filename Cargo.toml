@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lance0/xfr"
 keywords = ["network", "bandwidth", "iperf", "benchmark", "tui"]
 categories = ["command-line-utilities", "network-programming"]
+# Keep the published crate lean: the demo recording + its cassette are README
+# assets (crates.io resolves the README's image link against the repo), not
+# needed to build or use the crate.
+exclude = ["docs/*.gif", "docs/*.tape"]
 
 [dependencies]
 # Async runtime
