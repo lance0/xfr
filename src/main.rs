@@ -1250,13 +1250,14 @@ async fn main() -> Result<()> {
                 let prefs = xfr::prefs::Prefs::load()
                     .with_overrides(Some(&cli.theme), file_config.client.theme.as_deref());
 
-                // Update check runs unless disabled by any source (compiled
-                // out, env, CLI flag, config.toml, or a saved pref toggle).
-                let update_disabled = !xfr::update::ENABLED
-                    || xfr::update::env_opt_out()
-                    || cli.no_update_check
-                    || file_config.client.no_update_check.unwrap_or(false)
-                    || prefs.disable_update_check.unwrap_or(false);
+                // Update check runs unless disabled. Precedence (higher wins):
+                // compiled-out > env > CLI flag > config.toml > saved pref.
+                let update_disabled = xfr::update::check_disabled(
+                    xfr::update::env_opt_out(),
+                    cli.no_update_check,
+                    file_config.client.no_update_check,
+                    prefs.disable_update_check,
+                );
 
                 let final_prefs = run_client_tui(
                     config,

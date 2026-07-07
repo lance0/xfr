@@ -85,6 +85,28 @@ fn flag_is_truthy(v: &str) -> bool {
     !matches!(v.trim(), "" | "0" | "false")
 }
 
+/// Resolve whether the background update check should be skipped, honoring
+/// precedence (higher layer wins): compiled-out > env opt-out > CLI flag >
+/// `config.toml` > saved pref.
+///
+/// `config` and `pref` are tristate: an explicit `Some(false)` at a higher
+/// layer re-enables the check over a lower layer's opt-out (so editing
+/// `config.toml` can override a stale TUI toggle in `prefs.toml`).
+pub fn check_disabled(
+    env_opt_out: bool,
+    cli_flag: bool,
+    config: Option<bool>,
+    pref: Option<bool>,
+) -> bool {
+    !ENABLED
+        || env_opt_out
+        || cli_flag
+        || match config {
+            Some(explicit) => explicit,
+            None => pref.unwrap_or(false),
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::flag_is_truthy;
@@ -97,5 +119,28 @@ mod tests {
         for off in ["", "  ", "0", "false"] {
             assert!(!flag_is_truthy(off), "{off:?} should not opt out");
         }
+    }
+
+    #[test]
+    fn check_disabled_precedence() {
+        use super::{ENABLED, check_disabled};
+        // These cases exercise the config-vs-pref tristate, which only matters
+        // when the check is compiled in.
+        if !ENABLED {
+            assert!(check_disabled(false, false, Some(false), Some(false)));
+            return;
+        }
+        // config's explicit `false` re-enables over a stale pref opt-out
+        assert!(!check_disabled(false, false, Some(false), Some(true)));
+        // config's explicit `true` disables even if the pref says on
+        assert!(check_disabled(false, false, Some(true), Some(false)));
+        // no config -> the saved pref governs
+        assert!(check_disabled(false, false, None, Some(true)));
+        assert!(!check_disabled(false, false, None, Some(false)));
+        // nothing set -> enabled by default
+        assert!(!check_disabled(false, false, None, None));
+        // env or CLI opt-out wins over an explicit config/pref "on"
+        assert!(check_disabled(true, false, Some(false), Some(false)));
+        assert!(check_disabled(false, true, Some(false), Some(false)));
     }
 }
