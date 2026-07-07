@@ -62,6 +62,10 @@ Save results to file
 .B \-\-no\-tui
 Disable terminal UI, use plain text output
 .TP
+.B \-\-no\-update\-check
+Disable the background check for a newer release. Also honored via the
+DO_NOT_TRACK or XFR_NO_UPDATE_CHECK environment variables.
+.TP
 .BI \-\-theme " THEME"
 Color theme: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized
 .TP
@@ -243,6 +247,12 @@ Log level
 .TP
 .B XFR_TIMESTAMP_FORMAT
 Timestamp format
+.TP
+.B DO_NOT_TRACK
+Set to a non-empty, non-zero value to disable the update check (cross-tool standard)
+.TP
+.B XFR_NO_UPDATE_CHECK
+Set to a non-empty, non-zero value to disable the update check
 .SH EXAMPLES
 .TP
 .B xfr 192.168.1.1

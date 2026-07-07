@@ -25,6 +25,11 @@ pub struct Prefs {
     /// Show help overlay on first run
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_help_on_start: Option<bool>,
+
+    /// User disabled the update check via the TUI settings toggle.
+    /// `None` = never toggled (follows the default / config).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_update_check: Option<bool>,
 }
 
 impl Prefs {
@@ -90,6 +95,7 @@ mod tests {
             last_server: Some("192.168.1.1".to_string()),
             streams: Some(4),
             show_help_on_start: Some(false),
+            disable_update_check: None,
         };
         let toml_str = toml::to_string_pretty(&prefs).unwrap();
         assert!(toml_str.contains("theme = \"dracula\""));
@@ -108,6 +114,7 @@ mod tests {
             last_server: None,
             streams: None,
             show_help_on_start: None,
+            disable_update_check: None,
         };
         let toml_str = toml::to_string_pretty(&prefs).unwrap();
         assert!(toml_str.contains("theme"));

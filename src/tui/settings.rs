@@ -111,6 +111,11 @@ pub struct SettingsState {
     pub theme_index: usize,
     pub timestamp_format: TimestampFormat,
     pub units: Units,
+    /// Whether the background update check is enabled (persisted to prefs).
+    pub update_check: bool,
+    /// Set once the user toggles `update_check`, so only an explicit choice is
+    /// persisted (not the env/config-derived initial state).
+    pub update_check_touched: bool,
 
     // Test settings (require restart)
     pub streams: u8,
@@ -140,6 +145,8 @@ impl Default for SettingsState {
             theme_index: 0,
             timestamp_format: TimestampFormat::Relative,
             units: Units::Auto,
+            update_check: true,
+            update_check_touched: false,
 
             streams: 1,
             protocol: Protocol::Tcp,
@@ -177,6 +184,8 @@ impl SettingsState {
             theme_index,
             timestamp_format: TimestampFormat::Relative,
             units: Units::Auto,
+            update_check: true,
+            update_check_touched: false,
 
             streams,
             protocol,
@@ -228,7 +237,7 @@ impl SettingsState {
     /// Number of items in current category
     fn items_in_category(&self) -> usize {
         match self.category {
-            SettingsCategory::Display => 3, // Theme, Timestamp, Units
+            SettingsCategory::Display => 4, // Theme, Timestamp, Units, Update check
             SettingsCategory::Test => 5,    // Streams, Protocol, Duration, Direction, Bitrate
         }
     }
@@ -268,6 +277,12 @@ impl SettingsState {
         self.button_focused = false;
     }
 
+    /// Toggle the update-check setting and mark it as an explicit user choice.
+    fn toggle_update_check(&mut self) {
+        self.update_check = !self.update_check;
+        self.update_check_touched = true;
+    }
+
     /// Cycle selected value to next
     pub fn value_next(&mut self) {
         if self.button_focused {
@@ -287,6 +302,7 @@ impl SettingsState {
                 }
                 1 => self.timestamp_format = self.timestamp_format.next(),
                 2 => self.units = self.units.next(),
+                3 => self.toggle_update_check(),
                 _ => {}
             },
             SettingsCategory::Test => match self.selected_index {
@@ -323,6 +339,7 @@ impl SettingsState {
                 }
                 1 => self.timestamp_format = self.timestamp_format.prev(),
                 2 => self.units = self.units.prev(),
+                3 => self.toggle_update_check(),
                 _ => {}
             },
             SettingsCategory::Test => match self.selected_index {
@@ -498,6 +515,23 @@ mod tests {
         assert_eq!(bitrate_display(None), "unlimited");
         assert_eq!(bitrate_display(Some(1_000_000)), "1 Mbps");
         assert_eq!(bitrate_display(Some(10_000_000_000)), "10 Gbps");
+    }
+
+    #[test]
+    fn update_check_toggle_flips_and_marks_touched() {
+        let mut s = SettingsState::default();
+        assert!(s.update_check, "enabled by default");
+        assert!(!s.update_check_touched, "untouched until the user acts");
+
+        // Display tab, 4th item is the update-check toggle.
+        s.category = SettingsCategory::Display;
+        s.selected_index = 3;
+        s.value_next();
+        assert!(!s.update_check);
+        assert!(s.update_check_touched);
+
+        s.value_prev();
+        assert!(s.update_check, "toggles back");
     }
 
     #[test]

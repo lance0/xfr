@@ -2,8 +2,14 @@
 //!
 //! Checks GitHub releases for newer versions and notifies the user in the TUI.
 
+#[cfg(feature = "update-check")]
 use std::time::Duration;
+#[cfg(feature = "update-check")]
 use update_informer::{Check, registry::GitHub};
+
+/// Whether update checking was compiled in (the `update-check` feature, on by
+/// default). Package builds can drop it with `--no-default-features`.
+pub const ENABLED: bool = cfg!(feature = "update-check");
 
 /// How the user installed xfr - used to show the appropriate update command
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +52,7 @@ impl InstallMethod {
 ///
 /// Returns Some(version) if a newer version is available, None otherwise.
 /// Uses a 1-hour cache to avoid excessive GitHub API calls.
+#[cfg(feature = "update-check")]
 pub fn check_for_update() -> Option<String> {
     // Cache for 1 hour to avoid GitHub rate limits
     let informer = update_informer::new(GitHub, "lance0/xfr", env!("CARGO_PKG_VERSION"))
@@ -56,4 +63,84 @@ pub fn check_for_update() -> Option<String> {
         .ok()
         .flatten()
         .map(|v| v.to_string())
+}
+
+/// Update checking compiled out (`--no-default-features`): always "no update".
+#[cfg(not(feature = "update-check"))]
+pub fn check_for_update() -> Option<String> {
+    None
+}
+
+/// True when the user opted out of the update check via environment:
+/// `DO_NOT_TRACK` (the cross-tool standard, <https://consoledonottrack.com>)
+/// or `XFR_NO_UPDATE_CHECK`.
+pub fn env_opt_out() -> bool {
+    ["DO_NOT_TRACK", "XFR_NO_UPDATE_CHECK"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| flag_is_truthy(&v.to_string_lossy())))
+}
+
+/// An environment flag counts as "set" unless it is empty, `0`, or `false`.
+fn flag_is_truthy(v: &str) -> bool {
+    !matches!(v.trim(), "" | "0" | "false")
+}
+
+/// Resolve whether the background update check should be skipped, honoring
+/// precedence (higher layer wins): compiled-out > env opt-out > CLI flag >
+/// `config.toml` > saved pref.
+///
+/// `config` and `pref` are tristate: an explicit `Some(false)` at a higher
+/// layer re-enables the check over a lower layer's opt-out (so editing
+/// `config.toml` can override a stale TUI toggle in `prefs.toml`).
+pub fn check_disabled(
+    env_opt_out: bool,
+    cli_flag: bool,
+    config: Option<bool>,
+    pref: Option<bool>,
+) -> bool {
+    !ENABLED
+        || env_opt_out
+        || cli_flag
+        || match config {
+            Some(explicit) => explicit,
+            None => pref.unwrap_or(false),
+        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag_is_truthy;
+
+    #[test]
+    fn env_flag_truthiness() {
+        for on in ["1", "true", "yes", "on"] {
+            assert!(flag_is_truthy(on), "{on:?} should count as opt-out");
+        }
+        for off in ["", "  ", "0", "false"] {
+            assert!(!flag_is_truthy(off), "{off:?} should not opt out");
+        }
+    }
+
+    #[test]
+    fn check_disabled_precedence() {
+        use super::{ENABLED, check_disabled};
+        // These cases exercise the config-vs-pref tristate, which only matters
+        // when the check is compiled in.
+        if !ENABLED {
+            assert!(check_disabled(false, false, Some(false), Some(false)));
+            return;
+        }
+        // config's explicit `false` re-enables over a stale pref opt-out
+        assert!(!check_disabled(false, false, Some(false), Some(true)));
+        // config's explicit `true` disables even if the pref says on
+        assert!(check_disabled(false, false, Some(true), Some(false)));
+        // no config -> the saved pref governs
+        assert!(check_disabled(false, false, None, Some(true)));
+        assert!(!check_disabled(false, false, None, Some(false)));
+        // nothing set -> enabled by default
+        assert!(!check_disabled(false, false, None, None));
+        // env or CLI opt-out wins over an explicit config/pref "on"
+        assert!(check_disabled(true, false, Some(false), Some(false)));
+        assert!(check_disabled(false, true, Some(false), Some(false)));
+    }
 }

@@ -473,6 +473,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--omit` | | 0 | Omit first N seconds |
 | `--output` | `-o` | stdout | Output file |
 | `--no-tui` | | false | Disable TUI |
+| `--no-update-check` | | false | Disable the background update check (also honors `DO_NOT_TRACK` / `XFR_NO_UPDATE_CHECK`) |
 | `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
 | `--window` | `-w` | OS default | Socket buffer size for TCP and UDP (SO_SNDBUF/SO_RCVBUF on both ends); when unset, TCP autotunes and UDP uses the kernel default |

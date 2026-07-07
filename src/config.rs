@@ -41,6 +41,9 @@ pub struct ClientDefaults {
     /// Disable TUI by default
     pub no_tui: Option<bool>,
 
+    /// Disable the background check for a newer xfr release
+    pub no_update_check: Option<bool>,
+
     /// Timestamp format for interval output (relative, iso8601, unix)
     #[serde(default)]
     pub timestamp_format: Option<TimestampFormat>,

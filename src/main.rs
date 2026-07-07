@@ -213,6 +213,11 @@ struct Cli {
     #[arg(long)]
     no_tui: bool,
 
+    /// Disable the background check for a newer xfr release (also honored via
+    /// the DO_NOT_TRACK or XFR_NO_UPDATE_CHECK environment variables)
+    #[arg(long)]
+    no_update_check: bool,
+
     /// Color theme (default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized)
     #[arg(long, default_value = "default")]
     theme: String,
@@ -1245,11 +1250,28 @@ async fn main() -> Result<()> {
                 let prefs = xfr::prefs::Prefs::load()
                     .with_overrides(Some(&cli.theme), file_config.client.theme.as_deref());
 
-                let final_prefs =
-                    run_client_tui(config, cli.output, timestamp_format, prefs.clone()).await?;
+                // Update check runs unless disabled. Precedence (higher wins):
+                // compiled-out > env > CLI flag > config.toml > saved pref.
+                let update_disabled = xfr::update::check_disabled(
+                    xfr::update::env_opt_out(),
+                    cli.no_update_check,
+                    file_config.client.no_update_check,
+                    prefs.disable_update_check,
+                );
+
+                let final_prefs = run_client_tui(
+                    config,
+                    cli.output,
+                    timestamp_format,
+                    prefs.clone(),
+                    update_disabled,
+                )
+                .await?;
 
                 // Save prefs if changed
-                if final_prefs.theme != prefs.theme {
+                if final_prefs.theme != prefs.theme
+                    || final_prefs.disable_update_check != prefs.disable_update_check
+                {
                     let _ = final_prefs.save();
                 }
             }
@@ -1560,6 +1582,7 @@ async fn run_client_tui(
     output: Option<PathBuf>,
     timestamp_format: TimestampFormat,
     prefs: xfr::prefs::Prefs,
+    update_disabled: bool,
 ) -> Result<xfr::prefs::Prefs> {
     // Setup terminal
     enable_raw_mode()?;
@@ -1568,7 +1591,14 @@ async fn run_client_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui_loop(&mut terminal, config.clone(), timestamp_format, prefs).await;
+    let result = run_tui_loop(
+        &mut terminal,
+        config.clone(),
+        timestamp_format,
+        prefs,
+        update_disabled,
+    )
+    .await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -1825,13 +1855,16 @@ async fn run_tui_loop(
     mut config: ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
+    update_disabled: bool,
 ) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
-    // Spawn background update check
+    // Spawn the background update check unless it's disabled (flag/env/config/
+    // pref) or compiled out. `update_rx` still exists so the poller is a no-op.
     let (update_tx, update_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = xfr::update::check_for_update();
-        let _ = update_tx.send(result);
-    });
+    if !update_disabled {
+        std::thread::spawn(move || {
+            let _ = update_tx.send(xfr::update::check_for_update());
+        });
+    }
 
     let mut print_json_on_exit = false;
     let mut app = App::with_theme_name(
@@ -1845,9 +1878,12 @@ async fn run_tui_loop(
         timestamp_format,
         prefs.theme_name(),
     );
+    // Reflect the resolved update-check state in the Settings toggle.
+    app.settings.update_check = !update_disabled;
 
-    // Track if we've received the update check result
-    let mut update_check_done = false;
+    // Track if we've received the update check result (start "done" when the
+    // check is disabled so the poller never blocks on the empty channel).
+    let mut update_check_done = update_disabled;
 
     let mut run = Some(spawn_tui_run(&config));
     app.on_connected();
@@ -1868,6 +1904,11 @@ async fn run_tui_loop(
         }
 
         poll_update_check(&mut app, &update_rx, &mut update_check_done);
+
+        // Persist an explicit update-check toggle from the Settings screen.
+        if app.settings.update_check_touched {
+            prefs.disable_update_check = Some(!app.settings.update_check);
+        }
 
         // Refresh the wall-clock-driven parts of app state (elapsed counter) so
         // the UI stays live even when the server's Interval progress messages

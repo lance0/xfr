@@ -817,6 +817,10 @@ fn draw_display_settings(
         ("Theme:", theme_name.to_string()),
         ("Timestamp:", settings.timestamp_format.as_str().to_string()),
         ("Units:", settings.units.as_str().to_string()),
+        (
+            "Update check:",
+            if settings.update_check { "on" } else { "off" }.to_string(),
+        ),
     ];
 
     draw_setting_items(

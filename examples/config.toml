@@ -20,6 +20,13 @@ json_output = false
 # Disable TUI by default
 no_tui = false
 
+# Disable the background check for a newer xfr release. Also honored via the
+# DO_NOT_TRACK or XFR_NO_UPDATE_CHECK environment variables, the
+# --no-update-check flag, or the Update check toggle in the TUI settings.
+# Leave this unset (commented) so the TUI toggle can govern — setting it here
+# to either true or false overrides the saved TUI preference.
+# no_update_check = true
+
 # Omit first N seconds from interval output (TCP ramp-up)
 # omit_secs = 3
 
