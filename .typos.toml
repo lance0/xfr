@@ -1,0 +1,6 @@
+[default.extend-words]
+ESnet = "ESnet"
+RTO = "RTO"
+Snet = "Snet"
+ratatui = "ratatui"
+rto = "rto"
