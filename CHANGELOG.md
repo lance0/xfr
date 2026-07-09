@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Opt out of the update check** — the background "newer release available" check can now be turned off several ways: the `--no-update-check` flag, the `DO_NOT_TRACK` (cross-tool standard) or `XFR_NO_UPDATE_CHECK` environment variables, `no_update_check = true` under `[client]` in `config.toml`, or the new **Update check** toggle in the TUI settings (Display tab, persisted to `prefs.toml`). It can also be compiled out entirely with `--no-default-features` — the `update-check` cargo feature is on by default, so package builds can drop the phone-home code. (LAN-235)
+- **Client transport defaults in `config.toml`** — `[client]` now supports `bitrate`, `congestion`, `dscp`, `interval_secs`, `bind`, and `cport`, closing the gap with their CLI counterparts. Values use the same forms as the flags (for example, `bitrate = "100M"` and `dscp = "EF"`), and an explicit CLI value takes precedence.
 
 ## [0.9.21] - 2026-07-06
 

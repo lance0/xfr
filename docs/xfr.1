@@ -215,6 +215,12 @@ Example config:
 [client]
 duration_secs = 30
 parallel_streams = 4
+bitrate = "100M"
+congestion = "bbr"
+dscp = "EF"
+interval_secs = 1.0
+bind = "192.168.1.100"
+cport = 5202
 theme = "dracula"
 
 [server]
@@ -225,6 +231,15 @@ no_mdns = false
 allow = ["192.168.0.0/16"]
 .fi
 .RE
+.PP
+These client transport and output configuration values are defaults: an explicit CLI value takes precedence. The
+.B bitrate
+value accepts the same 100M/1G syntax as
+.BR \-\-bitrate ,
+and
+.B dscp
+accepts the same names and numeric values as
+.BR \-\-dscp .
 .SH ENVIRONMENT
 .TP
 .B XFR_PORT

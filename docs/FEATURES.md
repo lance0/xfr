@@ -334,12 +334,18 @@ duration_secs = 10
 parallel_streams = 1
 tcp_nodelay = false
 window_size = "1M"
+# bitrate = "100M"             # same units as --bitrate
+# congestion = "bbr"           # TCP congestion-control algorithm
+# dscp = "EF"                  # DSCP name or raw TOS byte (0-255)
+interval_secs = 1.0            # report interval in seconds
 json_output = false
 no_tui = false
 theme = "default"
 timestamp_format = "relative"  # relative, iso8601, unix
 address_family = "dual"        # ipv4, ipv6, dual
 omit_secs = 0                  # omit first N seconds (TCP ramp-up)
+# bind = "192.168.1.100"       # local address, optionally with :port
+# cport = 5202                  # client source port for firewall traversal
 psk = "my-secret-key"
 log_file = "~/.config/xfr/xfr.log"
 log_level = "info"
@@ -360,7 +366,7 @@ log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 ```
 
-`[client] omit_secs` sets the default for `--omit`. An explicit CLI `--omit` value, including `--omit 0`, overrides the config file.
+The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value overrides them. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` take precedence over the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
 ### Environment Variables
 
