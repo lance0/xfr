@@ -83,6 +83,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  windows-check:
+    name: Windows cargo check
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cargo check
+        run: cargo check --locked --all-features
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
