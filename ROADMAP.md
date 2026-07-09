@@ -141,7 +141,7 @@
 - [ ] **Group CLI help by client/server** (issue #43) — restructure `--help` output into client-only, server-only, and shared sections like iperf3
 - [x] **CSV bidir intervals lack per-direction columns** — `--csv` interval rows now carry `bytes_sent`/`bytes_received`/`throughput_send_mbps`/`throughput_recv_mbps`, matching the summary row. Columns are appended at the end of the schema (position-stable for existing parsers); empty for unidirectional tests (#56 family)
 - [x] **Log client version and capability mismatches server-side** — shipped (PR #97): every control connection logs client software + protocol version, and any server capabilities the client lacks (the features that fall back that session)
-- [ ] **Config-file drift sweep** — `bitrate`, `congestion`, `dscp`, `interval`, `cport`, and `bind` have no `config.toml` equivalents while their siblings do; one pass to close the gap and a test that pins CLI/config parity going forward
+- [x] **Config-file drift sweep** — `[client]` now supports `bitrate`, `congestion`, `dscp`, `interval_secs`, `cport`, and `bind`, with CLI-over-config precedence tests covering the new defaults (PR #139)
 - [ ] **Per-stream direction splits + download-direction loss/jitter in bidir** (out-of-scope notes from issue #91) — per-stream rows in bidir show the server's combined view, and bidir has one `udp_stats` field for two directions. Both need wire-format additions; batch them with the next protocol-touching feature
 
 ### Code Quality
