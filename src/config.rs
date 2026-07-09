@@ -35,6 +35,18 @@ pub struct ClientDefaults {
     /// Default TCP window size (e.g., "1M", "512K")
     pub window_size: Option<String>,
 
+    /// Default target bitrate (e.g., "100M", "1G")
+    pub bitrate: Option<String>,
+
+    /// Default TCP congestion control algorithm (e.g., "cubic", "bbr")
+    pub congestion: Option<String>,
+
+    /// Default DSCP/TOS marking (e.g., "EF", "AF11", "46")
+    pub dscp: Option<String>,
+
+    /// Default interval between reports in seconds
+    pub interval_secs: Option<f64>,
+
     /// Default to JSON output
     pub json_output: Option<bool>,
 
@@ -62,6 +74,12 @@ pub struct ClientDefaults {
 
     /// Address family preference (ipv4, ipv6, dual)
     pub address_family: Option<String>,
+
+    /// Local address to bind to (e.g., "192.168.1.100" or "\[::1\]:0")
+    pub bind: Option<String>,
+
+    /// Client source port for firewall traversal
+    pub cport: Option<u16>,
 
     /// Omit first N seconds from interval output (TCP ramp-up)
     pub omit_secs: Option<u64>,
@@ -210,6 +228,27 @@ omit_secs = 3
 
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.client.omit_secs, Some(3));
+    }
+
+    #[test]
+    fn test_parse_client_transport_defaults() {
+        let toml = r#"
+[client]
+bitrate = "100M"
+congestion = "bbr"
+dscp = "EF"
+interval_secs = 2.5
+bind = "192.168.1.10"
+cport = 5202
+"#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.client.bitrate.as_deref(), Some("100M"));
+        assert_eq!(config.client.congestion.as_deref(), Some("bbr"));
+        assert_eq!(config.client.dscp.as_deref(), Some("EF"));
+        assert_eq!(config.client.interval_secs, Some(2.5));
+        assert_eq!(config.client.bind.as_deref(), Some("192.168.1.10"));
+        assert_eq!(config.client.cport, Some(5202));
     }
 
     #[test]

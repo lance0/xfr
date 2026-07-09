@@ -772,7 +772,7 @@ impl App {
 
     pub fn on_error(&mut self, error: String) {
         self.state = AppState::Error;
-        self.log(format!("Error: {}", &error));
+        self.log(format!("Error: {}", error));
         self.error = Some(error);
     }
 

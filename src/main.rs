@@ -222,9 +222,9 @@ struct Cli {
     #[arg(long, default_value = "default")]
     theme: String,
 
-    /// Report interval in seconds
-    #[arg(short = 'i', long, default_value = "1.0")]
-    interval: f64,
+    /// Report interval in seconds (default: 1.0)
+    #[arg(short = 'i', long)]
+    interval: Option<f64>,
 
     /// Omit first N seconds from interval output (TCP ramp-up)
     #[arg(long)]
@@ -508,6 +508,41 @@ fn resolve_client_duration(
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(10))
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct ResolvedClientNetworkOptions {
+    bitrate: Option<u64>,
+    congestion: Option<String>,
+    dscp: Option<String>,
+    interval_secs: f64,
+    bind: Option<String>,
+    cport: Option<u16>,
+}
+
+/// Resolve client transport and output defaults with CLI values taking precedence.
+fn resolve_client_network_options(
+    cli_bitrate: Option<u64>,
+    cli_congestion: Option<String>,
+    cli_dscp: Option<String>,
+    cli_interval: Option<f64>,
+    cli_bind: Option<String>,
+    cli_cport: Option<u16>,
+    defaults: &xfr::config::ClientDefaults,
+) -> Result<ResolvedClientNetworkOptions, String> {
+    let bitrate = match cli_bitrate {
+        Some(bitrate) => Some(bitrate),
+        None => defaults.bitrate.as_deref().map(parse_bitrate).transpose()?,
+    };
+
+    Ok(ResolvedClientNetworkOptions {
+        bitrate,
+        congestion: cli_congestion.or_else(|| defaults.congestion.clone()),
+        dscp: cli_dscp.or_else(|| defaults.dscp.clone()),
+        interval_secs: cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
+        bind: cli_bind.or_else(|| defaults.bind.clone()),
+        cport: cli_cport.or(defaults.cport),
+    })
 }
 
 fn parse_bitrate(s: &str) -> Result<u64, String> {
@@ -1033,6 +1068,16 @@ async fn main() -> Result<()> {
 
             let random_payload = effective_random_payload(&cli);
             let zerocopy = effective_zerocopy(&cli, protocol);
+            let network_options = resolve_client_network_options(
+                cli.bitrate,
+                cli.congestion.clone(),
+                cli.dscp.clone(),
+                cli.interval,
+                cli.bind.clone(),
+                cli.cport,
+                &file_config.client,
+            )
+            .map_err(|e| anyhow::anyhow!("invalid [client] bitrate: {e}"))?;
 
             if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
                 eprintln!("Warning: {msg}");
@@ -1042,7 +1087,7 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: {msg}");
             }
 
-            if cli.dscp.is_some() && protocol == xfr::protocol::Protocol::Quic {
+            if network_options.dscp.is_some() && protocol == xfr::protocol::Protocol::Quic {
                 eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
             }
 
@@ -1052,7 +1097,7 @@ async fn main() -> Result<()> {
             if protocol == xfr::protocol::Protocol::Quic {
                 for (set, msg) in [
                     (
-                        cli.bitrate.is_some(),
+                        network_options.bitrate.is_some(),
                         "-b/--bitrate is ignored with QUIC (pacing is not implemented for QUIC)",
                     ),
                     (
@@ -1060,7 +1105,7 @@ async fn main() -> Result<()> {
                         "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
                     ),
                     (
-                        cli.congestion.is_some(),
+                        network_options.congestion.is_some(),
                         "--congestion is ignored with QUIC (kernel TCP CC does not apply)",
                     ),
                     (
@@ -1075,7 +1120,7 @@ async fn main() -> Result<()> {
             }
 
             #[cfg(not(unix))]
-            if cli.dscp.is_some() && protocol != xfr::protocol::Protocol::Quic {
+            if network_options.dscp.is_some() && protocol != xfr::protocol::Protocol::Quic {
                 eprintln!("Warning: --dscp is not supported on this platform");
             }
 
@@ -1145,14 +1190,14 @@ async fn main() -> Result<()> {
             };
 
             // Parse bind address (can be "IP" or "IP:port")
-            let mut bind_addr = if let Some(ref bind_str) = cli.bind {
+            let mut bind_addr = if let Some(ref bind_str) = network_options.bind {
                 Some(parse_bind_address(bind_str)?)
             } else {
                 None
             };
 
             // Merge --cport into bind_addr
-            let cport = cli.cport;
+            let cport = network_options.cport;
             if let Some(port) = cport {
                 if port == 0 {
                     anyhow::bail!("--cport must be a non-zero port number");
@@ -1205,9 +1250,9 @@ async fn main() -> Result<()> {
                 streams,
                 duration,
                 direction,
-                bitrate: cli.bitrate,
+                bitrate: network_options.bitrate,
                 tcp_nodelay,
-                tcp_congestion: cli.congestion.clone(),
+                tcp_congestion: network_options.congestion,
                 window_size,
                 psk: client_psk,
                 address_family: client_address_family,
@@ -1218,7 +1263,7 @@ async fn main() -> Result<()> {
                 zerocopy,
                 mtu_probe: cli.probe_mtu,
                 connect_timeout: cli.connect_timeout,
-                dscp: cli
+                dscp: network_options
                     .dscp
                     .as_ref()
                     .map(|s| parse_dscp(s).map_err(|e| anyhow::anyhow!(e)))
@@ -1234,7 +1279,7 @@ async fn main() -> Result<()> {
                 omit_secs: cli
                     .omit
                     .unwrap_or_else(|| file_config.client.omit_secs.unwrap_or(0)),
-                interval_secs: cli.interval,
+                interval_secs: network_options.interval_secs,
                 timestamp_format,
             };
 
@@ -2249,6 +2294,94 @@ mod tests {
         assert_eq!(
             resolve_client_duration(None, false, &cfg),
             Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn resolve_client_network_options_uses_config_defaults() {
+        let defaults = xfr::config::ClientDefaults {
+            bitrate: Some("100M".into()),
+            congestion: Some("bbr".into()),
+            dscp: Some("EF".into()),
+            interval_secs: Some(2.5),
+            bind: Some("192.168.1.10".into()),
+            cport: Some(5202),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_client_network_options(None, None, None, None, None, None, &defaults).unwrap(),
+            ResolvedClientNetworkOptions {
+                bitrate: Some(100_000_000),
+                congestion: Some("bbr".into()),
+                dscp: Some("EF".into()),
+                interval_secs: 2.5,
+                bind: Some("192.168.1.10".into()),
+                cport: Some(5202),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_client_network_options_cli_overrides_config() {
+        let defaults = xfr::config::ClientDefaults {
+            bitrate: Some("100M".into()),
+            congestion: Some("bbr".into()),
+            dscp: Some("EF".into()),
+            interval_secs: Some(2.5),
+            bind: Some("192.168.1.10".into()),
+            cport: Some(5202),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_client_network_options(
+                Some(1_000_000_000),
+                Some("cubic".into()),
+                Some("AF11".into()),
+                Some(1.0),
+                Some("10.0.0.10".into()),
+                Some(5203),
+                &defaults,
+            )
+            .unwrap(),
+            ResolvedClientNetworkOptions {
+                bitrate: Some(1_000_000_000),
+                congestion: Some("cubic".into()),
+                dscp: Some("AF11".into()),
+                interval_secs: 1.0,
+                bind: Some("10.0.0.10".into()),
+                cport: Some(5203),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_client_network_options_rejects_invalid_config_bitrate() {
+        let defaults = xfr::config::ClientDefaults {
+            bitrate: Some("fast".into()),
+            ..Default::default()
+        };
+        assert!(
+            resolve_client_network_options(None, None, None, None, None, None, &defaults).is_err()
+        );
+    }
+
+    #[test]
+    fn test_cli_interval_is_only_set_when_explicit() {
+        use clap::Parser;
+
+        assert!(
+            Cli::try_parse_from(["xfr", "host"])
+                .unwrap()
+                .interval
+                .is_none()
+        );
+        assert_eq!(
+            Cli::try_parse_from(["xfr", "host", "--interval", "2.5"])
+                .unwrap()
+                .interval,
+            Some(2.5)
         );
     }
 
