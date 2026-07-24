@@ -177,9 +177,9 @@
 
 ### CI / Infrastructure
 - [x] **CI hardening (batch 1)** — cross-target smoke matrix on every PR (catches the v0.9.15 glibc-symbol class before tag), `--all-features`/`--no-default-features` test + clippy matrices (catches the LAN-172 dead-code-under-no-default-features class), rustdoc `-D warnings` doc check, `--locked` builds, concurrency cancellation, release-target cross builds via pinned cargo-zigbuild (glibc 2.17 floor) with pinned cross for Android, per-job timeouts, and an `audit.yml` PR path filter
-- [ ] **`cargo-deny`** — license compliance, banned crates, and duplicate-version detection (would surface `windows-sys`-style version fan-out); complements `cargo audit`
-- [ ] **`crate-ci/typos`** — cheap typo check over docs, comments, and user-facing strings
-- [ ] **Windows `cargo check`** — no Windows binary is shipped, but live `#[cfg(windows)]` paths (single-port UDP fail-closed to legacy ports, `windows-sys` deps) go uncompiled by CI; a cheap `windows-latest` check keeps them building
+- [x] **`cargo-deny`** — license compliance (permissive allow-list + scoped MPL-2.0 exception in `deny.toml`), wildcard/source pinning, duplicate-version warnings; advisories deliberately left to `audit.yml`
+- [x] **`crate-ci/typos`** — pinned typo check over docs, comments, and user-facing strings
+- [x] **Windows `cargo check`** — compiles the live `#[cfg(windows)]` paths (single-port UDP fail-closed to legacy ports, `windows-sys` deps) on `windows-latest`, which no other job covered
 - [ ] **Nightly concurrency sanitizer** — ThreadSanitizer over the async unit tests, or `loom` model-checking on the small sync primitives (pause/cancel watch-channel state machines, the control-reader mpsc lifecycle). Highest-rigor option for the class of bug this project keeps hitting — busy-loops, control-stream desync, cancel-while-paused freeze, split-codec races. Finicky (TSAN + tokio is flaky; loom needs loom-wrapped types), so nightly rather than per-PR
 
 ### Documentation

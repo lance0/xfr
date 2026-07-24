@@ -1,0 +1,39 @@
+# cargo-deny configuration (LAN-231).
+#
+# Scope: license compliance + duplicate-version awareness + source pinning.
+# Security advisories are deliberately NOT checked here — audit.yml runs
+# cargo-audit on lockfile changes and nightly, and two advisory gates would
+# just double the noise.
+
+[licenses]
+# Permissive-only. Add to this list deliberately; a new copyleft dependency
+# should be a conscious decision, not a lockfile side effect.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# MPL-2.0 is file-level weak copyleft — acceptable for us, but scoped to the
+# one crate that needs it (via `dirs`) so new MPL deps still get flagged.
+[[licenses.exceptions]]
+name = "option-ext"
+allow = ["MPL-2.0"]
+
+[bans]
+# Duplicate crate versions bloat the binary but are usually transitive fallout;
+# surface them without failing the build.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
