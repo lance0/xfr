@@ -84,6 +84,34 @@ fn udp_recv_interval_deltas(
     (total, deltas)
 }
 
+/// Download-mode per-stream Interval overlay: substitute the client's own
+/// receive-side readings into the server's `StreamInterval`s. The server is
+/// the sender there, so its per-stream bytes track send_to() acceptance
+/// (issue #81) and its `jitter_ms` is always `None` — only the receiver
+/// measures jitter, and without this overlay the TUI's live jitter never
+/// updates in `-u -R` (issue #143).
+fn overlay_udp_recv_intervals(
+    streams: Vec<crate::protocol::StreamInterval>,
+    deltas: &[u64],
+    stats: &crate::stats::TestStats,
+) -> Vec<crate::protocol::StreamInterval> {
+    streams
+        .into_iter()
+        .map(|mut s| {
+            if let Some(delta) = deltas.get(s.id as usize) {
+                s.bytes = *delta;
+            }
+            if let Some(local) = stats.streams.get(s.id as usize) {
+                let jitter_ms = local.udp_jitter_ms();
+                if jitter_ms > 0.0 {
+                    s.jitter_ms = Some(jitter_ms);
+                }
+            }
+            s
+        })
+        .collect()
+}
+
 /// Cumulative UDP receive progress (packets received / lost) summed across
 /// the client's own streams. In download mode the client is the receiver,
 /// so this is the authoritative live-loss source; the server has no
@@ -1032,15 +1060,8 @@ impl Client {
                                             } else {
                                                 0.0
                                             };
-                                            let streams: Vec<StreamInterval> = streams
-                                                .into_iter()
-                                                .map(|mut s| {
-                                                    if let Some(delta) = deltas.get(s.id as usize) {
-                                                        s.bytes = *delta;
-                                                    }
-                                                    s
-                                                })
-                                                .collect();
+                                            let streams =
+                                                overlay_udp_recv_intervals(streams, &deltas, &stats);
                                             (interval_total, mbps, streams)
                                         } else {
                                             (aggregate.bytes, aggregate.throughput_mbps, streams)
@@ -2819,6 +2840,32 @@ mod tests {
         let (total, deltas) = udp_recv_interval_deltas(&stats, &mut last);
         assert_eq!(total, 300);
         assert_eq!(deltas, vec![0, 300]);
+    }
+
+    #[test]
+    fn overlay_udp_recv_intervals_substitutes_bytes_and_jitter() {
+        let stats = test_stats_with_recv_bytes(&[0, 0]);
+        stats.streams[0].set_udp_jitter_us(2500); // 2.5 ms measured locally
+        // stream 1 has no jitter reading yet -> must stay None, not Some(0.0)
+
+        let from_server: Vec<crate::protocol::StreamInterval> = (0..2)
+            .map(|id| crate::protocol::StreamInterval {
+                id,
+                bytes: 999_999, // sender-side count; must be replaced
+                retransmits: None,
+                jitter_ms: None, // server is the sender in -R: never set
+                lost: None,
+                error: None,
+                rtt_us: None,
+                cwnd: None,
+            })
+            .collect();
+
+        let out = overlay_udp_recv_intervals(from_server, &[1000, 500], &stats);
+        assert_eq!(out[0].bytes, 1000);
+        assert_eq!(out[1].bytes, 500);
+        assert_eq!(out[0].jitter_ms, Some(2.5));
+        assert_eq!(out[1].jitter_ms, None);
     }
 
     #[test]
