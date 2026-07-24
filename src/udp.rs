@@ -553,6 +553,7 @@ pub async fn send_udp_paced(
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
     random_payload: bool,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
 
@@ -566,6 +567,7 @@ pub async fn send_udp_paced(
             cancel,
             pause,
             random_payload,
+            budget,
         )
         .await;
     }
@@ -592,6 +594,8 @@ pub async fn send_udp_paced(
     );
 
     let mut sequence: u64 = 0;
+    let mut bytes_sent: u64 = 0;
+    let mut budget_spent = false;
     let mut ticker = {
         let mut t = interval(pacing_interval);
         // Skip stale ticks accumulated during pause so the sender doesn't
@@ -655,6 +659,11 @@ pub async fn send_udp_paced(
                 break;
             }
 
+            let Some(send_len) = claim_datagram(budget.as_ref(), packet_size) else {
+                budget_spent = true;
+                break;
+            };
+
             // Build packet with relative timestamp
             let now_us = start.elapsed().as_micros() as u64;
             let header = UdpPacketHeader {
@@ -664,30 +673,53 @@ pub async fn send_udp_paced(
             header.encode(&mut packet);
 
             let result = match target {
-                Some(addr) => socket.send_to(&packet, addr).await,
-                None => socket.send(&packet).await,
+                Some(addr) => socket.send_to(&packet[..send_len], addr).await,
+                None => socket.send(&packet[..send_len]).await,
             };
 
             match result {
                 Ok(n) => {
                     stats.add_bytes_sent(n as u64);
+                    bytes_sent += n as u64;
                     sequence += 1;
                 }
                 Err(e) => {
                     warn!("UDP send error: {}", e);
+                    crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                     // Continue sending - UDP is best-effort
                 }
             }
+        }
+
+        if budget_spent {
+            debug!("UDP byte budget spent after {} packets", sequence);
+            break;
         }
     }
 
     Ok(UdpSendStats {
         packets_sent: sequence,
-        bytes_sent: sequence * packet_size as u64,
+        bytes_sent,
     })
 }
 
+/// Reserve one datagram's worth of a `-n` budget. `None` means the budget is
+/// spent — including a leftover too small to carry a packet header, which is
+/// dropped rather than refunded so the loop terminates. UDP therefore rounds
+/// the budget down to a datagram boundary, with a short final datagram
+/// carrying whatever remains above one header.
+fn claim_datagram(
+    budget: Option<&Arc<crate::budget::ByteBudget>>,
+    packet_size: usize,
+) -> Option<usize> {
+    match crate::budget::claim_or_full(budget, packet_size) {
+        n if n >= UDP_HEADER_SIZE => Some(n),
+        _ => None,
+    }
+}
+
 /// Send UDP data as fast as possible (unlimited mode)
+#[allow(clippy::too_many_arguments)]
 async fn send_udp_unlimited(
     socket: Arc<UdpSocket>,
     target: Option<SocketAddr>,
@@ -696,9 +728,12 @@ async fn send_udp_unlimited(
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
     random_payload: bool,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<UdpSendStats> {
     let packet_size = UDP_PAYLOAD_SIZE;
     let mut sequence: u64 = 0;
+    let mut bytes_sent: u64 = 0;
+    let mut budget_spent = false;
     let start = Instant::now();
     let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
@@ -740,6 +775,11 @@ async fn send_udp_unlimited(
                 break;
             }
 
+            let Some(send_len) = claim_datagram(budget.as_ref(), packet_size) else {
+                budget_spent = true;
+                break;
+            };
+
             let now_us = start.elapsed().as_micros() as u64;
             let header = UdpPacketHeader {
                 sequence,
@@ -748,19 +788,26 @@ async fn send_udp_unlimited(
             header.encode(&mut packet);
 
             let result = match target {
-                Some(addr) => socket.send_to(&packet, addr).await,
-                None => socket.send(&packet).await,
+                Some(addr) => socket.send_to(&packet[..send_len], addr).await,
+                None => socket.send(&packet[..send_len]).await,
             };
 
             match result {
                 Ok(n) => {
                     stats.add_bytes_sent(n as u64);
+                    bytes_sent += n as u64;
                     sequence += 1;
                 }
                 Err(e) => {
                     warn!("UDP send error: {}", e);
+                    crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                 }
             }
+        }
+
+        if budget_spent {
+            debug!("UDP byte budget spent after {} packets", sequence);
+            break;
         }
 
         // Yield to allow other tasks (cancel checks, etc.)
@@ -769,7 +816,7 @@ async fn send_udp_unlimited(
 
     Ok(UdpSendStats {
         packets_sent: sequence,
-        bytes_sent: sequence * packet_size as u64,
+        bytes_sent,
     })
 }
 
@@ -1585,6 +1632,7 @@ mod tests {
                     cancel_rx,
                     pause_rx,
                     false,
+                    None,
                 )
                 .await
             });

@@ -43,9 +43,6 @@ mdns-sd = { version = "0.20", optional = true }
 toml = "1.1"
 dirs = "6"
 
-# Async traits
-async-trait = "0.1"
-
 # Misc
 anyhow = "1"
 tracing = "0.1"

@@ -43,6 +43,7 @@ fn test_test_start_roundtrip() {
         zerocopy: false,
         mtu_probe: false,
         tcp_nodelay: false,
+        byte_budget: None,
     };
 
     let json = msg.serialize().unwrap();
@@ -107,6 +108,7 @@ fn test_udp_test_start() {
         zerocopy: false,
         mtu_probe: false,
         tcp_nodelay: false,
+        byte_budget: None,
     };
 
     let json = msg.serialize().unwrap();

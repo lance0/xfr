@@ -277,6 +277,12 @@ pub struct ClientConfig {
     /// dead or filtered server can mean minutes — CI and scripted runs
     /// set this for a fast, clear failure instead.
     pub connect_timeout: Option<Duration>,
+    /// Transfer this many payload bytes and stop, instead of running for
+    /// `duration` (`-n`). Shared across all streams of the test, so the
+    /// total is exactly this many bytes however they divide up. `duration`
+    /// stays in force as an upper bound when the user passed an explicit
+    /// `-t`. Requires a server advertising `byte_budget_v1`.
+    pub byte_budget: Option<u64>,
 }
 
 impl Default for ClientConfig {
@@ -302,6 +308,7 @@ impl Default for ClientConfig {
             dscp: None,
             mtu_probe: false,
             connect_timeout: None,
+            byte_budget: None,
         }
     }
 }
@@ -790,6 +797,22 @@ impl Client {
                  upgrade the server to use --probe-mtu"
             ));
         }
+        // A byte budget is only meaningful if the server enforces it too:
+        // it stops its own senders at N in download/bidir, and waits for
+        // our Finish rather than its duration clock. An old server ignores
+        // the field and runs a plain timed test, quietly answering a
+        // different question — refuse instead, as with --probe-mtu.
+        if self.config.byte_budget.is_some()
+            && !crate::protocol::capability_advertised(
+                &server_capabilities,
+                crate::protocol::BYTE_BUDGET_CAPABILITY,
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Server does not support byte-budget tests (byte_budget_v1 capability missing); \
+                 upgrade the server to use -n/--bytes"
+            ));
+        }
         // Validate congestion algorithm before starting test (TCP only)
         if self.config.protocol == Protocol::Tcp
             && let Some(ref algo) = self.config.tcp_congestion
@@ -815,6 +838,7 @@ impl Client {
             zerocopy: self.config.protocol == Protocol::Tcp && self.config.zerocopy.enabled(),
             mtu_probe: self.config.mtu_probe,
             tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
+            byte_budget: self.config.byte_budget,
         };
         transport
             .write_message(&mut writer, &test_start.serialize()?)
@@ -917,6 +941,16 @@ impl Client {
         *self.pause_tx.lock() = Some(pause_tx.clone());
         *self.pause_request_tx.lock() = Some(pause_request_tx);
 
+        // `-n`: our send loops decide when the transfer is over. The channel
+        // closes once the last stream task drops its sender, which is the cue
+        // to tell the server (Finish) rather than waiting out a clock. Download
+        // has no client senders — there the server's own budget ends the test.
+        let finish_on_budget =
+            self.config.byte_budget.is_some() && self.config.direction != Direction::Download;
+        let (sending_done_tx, mut sending_done_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let sending_done_tx = finish_on_budget.then_some(sending_done_tx);
+        let mut finish_sent = false;
+
         // Connect data streams using the resolved IP from control connection
         let stream_handles = match self.config.protocol {
             Protocol::Tcp => {
@@ -927,6 +961,7 @@ impl Client {
                     cancel_rx.clone(),
                     &test_id,
                     pause_rx.clone(),
+                    sending_done_tx.clone(),
                 )
                 .await?
             }
@@ -959,6 +994,7 @@ impl Client {
                     pause_rx.clone(),
                     feedback_aggregator,
                     single_port_udp_token,
+                    sending_done_tx.clone(),
                 )
                 .await?
             }
@@ -969,6 +1005,9 @@ impl Client {
                 ));
             }
         };
+
+        // Our own sender would keep the channel open forever.
+        drop(sending_done_tx);
 
         // Read interval updates and final result with timeout
         // For infinite duration, use 1 year timeout (effectively no timeout)
@@ -1269,6 +1308,22 @@ impl Client {
                     let _ = cancel_tx.send(true);
                     debug!("Local test duration reached; stopping data streams while awaiting final control message");
                 }
+                _ = sending_done_rx.recv(), if finish_on_budget && !finish_sent => {
+                    // Every client send loop has delivered its share of the
+                    // `-n` budget (and, in bidir, its receive half is done
+                    // too). Tell the server so it stops the clock and sends
+                    // the final Result instead of running to its own
+                    // duration cap.
+                    finish_sent = true;
+                    let finish = ControlMessage::Finish { id: test_id.clone() };
+                    match finish.serialize() {
+                        Ok(serialized) => {
+                            debug!("Byte budget delivered; sent Finish to server");
+                            let _ = ctrl_writer.write_message(&mut writer, &serialized).await;
+                        }
+                        Err(e) => warn!("Failed to serialize finish message: {}", e),
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
                     // Overall response timeout — the old loop wrapped
                     // read_message in timeout_at(deadline, ...).  Now that
@@ -1330,6 +1385,7 @@ impl Client {
         test_result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_tcp_streams(
         &self,
         data_ports: &[u16],
@@ -1338,6 +1394,7 @@ impl Client {
         cancel: watch::Receiver<bool>,
         test_id: &str,
         pause: watch::Receiver<bool>,
+        sending_done: Option<tokio::sync::mpsc::Sender<()>>,
     ) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
         // Single-port mode: connect all streams to control port with DataHello
         let single_port_mode = data_ports.is_empty();
@@ -1374,6 +1431,9 @@ impl Client {
         } else {
             None
         };
+        // One budget for the whole test (`-n`): streams claim from it as
+        // they write, so the total is exactly N however the bytes divide.
+        let budget = self.config.byte_budget.map(crate::budget::ByteBudget::new);
 
         #[allow(clippy::needless_range_loop)] // Intentional: single-port mode has empty data_ports
         for i in 0..self.config.streams as usize {
@@ -1394,6 +1454,10 @@ impl Client {
             let test_id = test_id.clone();
             let stream_index = i as u16;
             let handshake_limiter = handshake_limiter.clone();
+            let budget = budget.clone();
+            // Dropped when this task ends; the run loop learns every send
+            // loop is finished once the last clone goes.
+            let sending_done = sending_done.clone();
 
             let config = TcpConfig {
                 nodelay: self.config.tcp_nodelay,
@@ -1405,6 +1469,10 @@ impl Client {
             };
 
             handles.push(tokio::spawn(async move {
+                // Held for the whole task, including the early-return paths:
+                // the run loop watches for the last clone to drop as its
+                // "all send loops finished" signal (`-n`).
+                let _sending_done = sending_done;
                 // In single-port mode, limit concurrent connect+DataHello handshakes
                 // to avoid control-port burst loss under high stream counts.
                 let handshake_permit = if let Some(limiter) = handshake_limiter {
@@ -1473,6 +1541,7 @@ impl Client {
                                     cancel,
                                     per_stream_bitrate,
                                     pause,
+                                    budget,
                                 )
                                 .await
                                 {
@@ -1531,6 +1600,7 @@ impl Client {
                                         send_cancel,
                                         per_stream_bitrate,
                                         send_pause,
+                                        budget,
                                     ),
                                     tcp::receive_data_half(
                                         read_half,
@@ -1671,8 +1741,11 @@ impl Client {
         pause: watch::Receiver<bool>,
         feedback_aggregator: Option<UdpFeedbackAggregator>,
         single_port_token: Option<[u8; udp::UDP_HELLO_TOKEN_LEN]>,
+        sending_done: Option<tokio::sync::mpsc::Sender<()>>,
     ) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
         let single_port = single_port_token.is_some();
+        // One budget shared by every stream of this test — see spawn_tcp_streams.
+        let budget = self.config.byte_budget.map(crate::budget::ByteBudget::new);
         let stream_count = self.config.streams as usize;
         let base_bind_addr = sequential_bind_base(
             self.config.bind_addr,
@@ -1723,21 +1796,36 @@ impl Client {
             .await?;
 
             let mut handles = Vec::with_capacity(stream_count);
+            let direction = self.config.direction;
+            let duration = self.config.duration;
+            let random_payload = self.config.random_payload;
             for (i, socket) in sockets.into_iter().enumerate() {
-                handles.push(tokio::spawn(run_udp_stream_io(
-                    socket,
-                    self.config.direction,
-                    self.config.duration,
-                    stream_bitrate,
-                    self.config.random_payload,
-                    stats.streams[i].clone(),
-                    stats.clone(),
-                    cancel.clone(),
-                    pause.clone(),
-                    feedback_aggregator.clone(),
-                    i,
-                    true,
-                )));
+                let sending_done = sending_done.clone();
+                let stream_stats = stats.streams[i].clone();
+                let test_stats = stats.clone();
+                let cancel = cancel.clone();
+                let pause = pause.clone();
+                let feedback_aggregator = feedback_aggregator.clone();
+                let budget = budget.clone();
+                handles.push(tokio::spawn(async move {
+                    run_udp_stream_io(
+                        socket,
+                        direction,
+                        duration,
+                        stream_bitrate,
+                        random_payload,
+                        stream_stats,
+                        test_stats,
+                        cancel,
+                        pause,
+                        feedback_aggregator,
+                        i,
+                        true,
+                        budget,
+                        sending_done,
+                    )
+                    .await;
+                }));
             }
             return Ok(handles);
         }
@@ -1759,6 +1847,8 @@ impl Client {
             let window_size = self.config.window_size;
             let feedback_aggregator = feedback_aggregator.clone();
             let stream_index = i;
+            let budget = budget.clone();
+            let sending_done = sending_done.clone();
 
             handles.push(tokio::spawn(async move {
                 // Create UDP socket matching the server's address family for cross-platform compatibility.
@@ -1820,6 +1910,8 @@ impl Client {
                     feedback_aggregator,
                     stream_index,
                     false,
+                    budget,
+                    sending_done,
                 )
                 .await;
             }));
@@ -2057,6 +2149,19 @@ impl Client {
             .unwrap_or(false);
         *self.server_supports_pause.lock() = Some(supports_pause);
 
+        // Byte-budget tests need server enforcement; see run_test().
+        if self.config.byte_budget.is_some()
+            && !crate::protocol::capability_advertised(
+                &server_capabilities,
+                crate::protocol::BYTE_BUDGET_CAPABILITY,
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Server does not support byte-budget tests (byte_budget_v1 capability missing); \
+                 upgrade the server to use -n/--bytes"
+            ));
+        }
+
         // Send test start
         let test_id = Uuid::new_v4().to_string();
         let test_start = ControlMessage::TestStart {
@@ -2073,6 +2178,7 @@ impl Client {
             zerocopy: false,    // sendfile is incompatible with QUIC's userspace encryption
             mtu_probe: false,   // probe mode is UDP-only
             tcp_nodelay: false, // QUIC manages its own transport; Nagle is a TCP concept
+            byte_budget: self.config.byte_budget,
         };
         transport
             .write_message(&mut ctrl_send, &test_start.serialize()?)
@@ -2111,6 +2217,16 @@ impl Client {
         let mut quic_handles: Vec<tokio::task::JoinHandle<()>> =
             Vec::with_capacity(self.config.streams as usize);
 
+        // One budget shared by every stream of this test (`-n`), plus the
+        // channel that reports when the client's send loops are done with
+        // it — see run_test() for the full rationale.
+        let budget = self.config.byte_budget.map(crate::budget::ByteBudget::new);
+        let finish_on_budget =
+            self.config.byte_budget.is_some() && self.config.direction != Direction::Download;
+        let (quic_sending_done, mut sending_done_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let quic_sending_done = finish_on_budget.then_some(quic_sending_done);
+        let mut finish_sent = false;
+
         // Spawn data streams based on direction
         for i in 0..self.config.streams {
             let stream_stats = stats.streams[i as usize].clone();
@@ -2119,8 +2235,12 @@ impl Client {
             let duration = self.config.duration;
             let direction = self.config.direction;
             let conn = connection.clone();
+            let budget = budget.clone();
+            let sending_done = quic_sending_done.clone();
 
             quic_handles.push(tokio::spawn(async move {
+                // See spawn_tcp_streams: the "send loops finished" signal.
+                let _sending_done = sending_done;
                 match direction {
                     Direction::Upload => {
                         // Open unidirectional stream for sending
@@ -2132,6 +2252,7 @@ impl Client {
                                     duration,
                                     cancel,
                                     pause,
+                                    budget,
                                 )
                                 .await
                                 {
@@ -2171,6 +2292,7 @@ impl Client {
                                         duration,
                                         send_cancel,
                                         send_pause,
+                                        budget,
                                     )
                                     .await
                                     {
@@ -2194,6 +2316,9 @@ impl Client {
                 }
             }));
         }
+
+        // Our own sender would keep the channel open forever.
+        drop(quic_sending_done);
 
         // Split the transport so a dedicated reader task can own the recv
         // codec independently of the control loop's select!. This prevents
@@ -2351,6 +2476,19 @@ impl Client {
                             }
                         }
                     }
+                    _ = sending_done_rx.recv(), if finish_on_budget && !finish_sent => {
+                        // All client send loops delivered their share of the
+                        // `-n` budget; tell the server to wrap up (see run_test).
+                        finish_sent = true;
+                        let finish = ControlMessage::Finish { id: test_id.clone() };
+                        match finish.serialize() {
+                            Ok(serialized) => {
+                                debug!("Byte budget delivered; sent Finish to server");
+                                let _ = ctrl_writer.write_message(&mut ctrl_send, &serialized).await;
+                            }
+                            Err(e) => warn!("Failed to serialize finish message: {}", e),
+                        }
+                    }
                     _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
                         // Overall response timeout — the old loop wrapped
                         // read_message in timeout_at(deadline, ...).  Now
@@ -2456,7 +2594,13 @@ async fn run_udp_stream_io(
     feedback_aggregator: Option<UdpFeedbackAggregator>,
     stream_index: usize,
     single_port: bool,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
+    sending_done: Option<tokio::sync::mpsc::Sender<()>>,
 ) {
+    // Scoped to the send loops below, never to a receive loop: the UDP
+    // feedback receiver and the bidir receive half both run until the test
+    // ends, so holding the guard across them would mean the budget is never
+    // reported as delivered and the test would never finish.
     match direction {
         Direction::Upload => {
             if let Some(aggregator) = feedback_aggregator {
@@ -2470,6 +2614,7 @@ async fn run_udp_stream_io(
                 let send_cancel = cancel.clone();
                 let recv_cancel = cancel;
                 let send_handle = tokio::spawn(async move {
+                    let _sending_done = sending_done;
                     if let Err(e) = udp::send_udp_paced(
                         send_socket,
                         None,
@@ -2479,6 +2624,7 @@ async fn run_udp_stream_io(
                         send_cancel,
                         pause,
                         random_payload,
+                        budget,
                     )
                     .await
                     {
@@ -2507,6 +2653,7 @@ async fn run_udp_stream_io(
                 cancel,
                 pause,
                 random_payload,
+                budget,
             )
             .await
             {
@@ -2557,6 +2704,7 @@ async fn run_udp_stream_io(
             let recv_pause = pause;
 
             let send_handle = tokio::spawn(async move {
+                let _sending_done = sending_done;
                 if let Err(e) = udp::send_udp_paced(
                     send_socket,
                     None, // Connected socket, no target needed
@@ -2566,6 +2714,7 @@ async fn run_udp_stream_io(
                     send_cancel,
                     send_pause,
                     random_payload,
+                    budget,
                 )
                 .await
                 {

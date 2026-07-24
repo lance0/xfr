@@ -174,6 +174,16 @@ pub enum ControlMessage {
         /// acceptable-degradation call as `window_size`, no capability).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         tcp_nodelay: bool,
+        /// Total payload bytes to transfer before the test ends (`-n`),
+        /// instead of running for a fixed time. Applies to whichever side
+        /// sends: the server enforces it on its own send loops in
+        /// download/bidir, and learns the client half is finished from the
+        /// `Finish` message. `duration_secs` remains an upper bound when
+        /// the client passed an explicit `-t`. Wire-additive, but gated on
+        /// the `byte_budget_v1` capability — an older server would ignore
+        /// the field and silently run a plain timed test instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        byte_budget: Option<u64>,
     },
     TestAck {
         id: String,
@@ -200,6 +210,13 @@ pub enum ControlMessage {
         reason: String,
     },
     Cancelled {
+        id: String,
+    },
+    /// The client's send loops have delivered their whole `-n` byte budget.
+    /// Unlike `Cancel` this is a normal end of test: the server stops the
+    /// clock and replies with the usual `Result`. Only sent for byte-budget
+    /// tests where the client sends (upload and bidir).
+    Finish {
         id: String,
     },
     Pause {
@@ -523,7 +540,17 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // v0.9.20: PSK sessions require AEAD-protected control channel.
     // Mandatory when PSK is configured — not a negotiable fallback.
     "protected_control_v1",
+    // v0.9.23: server honors TestStart.byte_budget and the Finish message
+    // (`-n`, transfer a fixed number of bytes instead of running for a
+    // fixed time). Hard requirement for `-n` — an old server ignores the
+    // field and runs a timed test, which would silently answer a different
+    // question than the one asked.
+    BYTE_BUDGET_CAPABILITY,
 ];
+
+/// Capability string for byte-budget tests (`-n`). Named because both the
+/// client's pre-flight check and the server's hello reference it.
+pub const BYTE_BUDGET_CAPABILITY: &str = "byte_budget_v1";
 
 /// Capability string for single-port UDP (issue #63). Kept as a named
 /// constant because the server filters it out of its hello at runtime
@@ -723,6 +750,7 @@ mod tests {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -773,6 +801,7 @@ mod tests {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"window_size\":262144"));
@@ -804,6 +833,7 @@ mod tests {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -833,6 +863,7 @@ mod tests {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         assert!(
@@ -881,6 +912,7 @@ mod tests {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: true,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"tcp_nodelay\":true"));
@@ -922,6 +954,7 @@ mod tests {
             zerocopy: true,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"zerocopy\":true"));

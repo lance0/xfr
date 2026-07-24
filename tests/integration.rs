@@ -63,6 +63,7 @@ async fn test_tcp_single_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -117,6 +118,7 @@ async fn test_tcp_multi_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -153,6 +155,7 @@ async fn test_connection_refused() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -189,6 +192,7 @@ async fn test_tcp_download() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -230,6 +234,7 @@ async fn test_tcp_bidir() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -289,6 +294,7 @@ async fn test_udp_upload() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -334,6 +340,7 @@ async fn test_mtu_probe() {
         dscp: None,
         mtu_probe: true,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -385,6 +392,7 @@ async fn test_udp_download() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -424,6 +432,7 @@ async fn test_udp_bidir() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -465,6 +474,7 @@ async fn test_udp_multi_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -511,6 +521,7 @@ async fn test_multi_client_concurrent() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let config2 = ClientConfig {
@@ -534,6 +545,7 @@ async fn test_multi_client_concurrent() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client1 = Client::new(config1);
@@ -653,6 +665,7 @@ async fn test_psk_auth_success() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -698,6 +711,7 @@ async fn test_psk_auth_failure() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -743,6 +757,7 @@ async fn test_psk_auth_missing_client_key() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -786,6 +801,7 @@ async fn test_acl_allow() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -826,6 +842,7 @@ async fn test_rate_limit() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client1 = Client::new(config1.clone());
@@ -856,6 +873,7 @@ async fn test_rate_limit() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client2 = Client::new(config2);
@@ -908,6 +926,7 @@ async fn test_quic_upload() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -950,6 +969,7 @@ async fn test_quic_download() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -991,6 +1011,7 @@ async fn test_quic_multi_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1036,6 +1057,7 @@ async fn test_quic_bidir() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1078,6 +1100,7 @@ async fn test_quic_with_psk() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1122,6 +1145,7 @@ async fn test_tcp_with_psk() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1220,6 +1244,7 @@ async fn test_acl_deny() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1264,6 +1289,7 @@ async fn test_preset_allowed_clients_allows_matching_ip() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1307,6 +1333,7 @@ async fn test_preset_allowed_clients_denies_non_matching_ip() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1369,6 +1396,7 @@ async fn test_ipv6_localhost() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1415,6 +1443,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1469,6 +1498,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1519,6 +1549,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1591,6 +1622,7 @@ async fn test_udp_ipv4_explicit() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1650,6 +1682,7 @@ async fn test_udp_ipv6_explicit() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1709,6 +1742,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1752,6 +1786,7 @@ async fn test_tcp_cport_single_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1798,6 +1833,7 @@ async fn test_tcp_cport_multi_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1860,6 +1896,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1918,6 +1955,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -1961,6 +1999,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2011,6 +2050,7 @@ async fn test_udp_bitrate_underflow_regression() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2084,6 +2124,7 @@ async fn test_quic_ipv6() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2143,6 +2184,7 @@ async fn test_tcp_one_off_multi_stream() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2211,6 +2253,7 @@ async fn test_quic_one_off() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2258,6 +2301,7 @@ fn test_pause_not_ready_before_test_run() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -2840,6 +2884,7 @@ impl RawControl {
             zerocopy: false,
             mtu_probe: false,
             tcp_nodelay: false,
+            byte_budget: None,
         };
         self.writer
             .write_all(format!("{}\n", start.serialize().unwrap()).as_bytes())
@@ -3092,6 +3137,7 @@ async fn test_tcp_cancel_latency_before_first_tick() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -3149,6 +3195,7 @@ async fn test_tcp_psk_cancel_infinite_duration() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -3201,6 +3248,7 @@ async fn test_udp_pause_resume_no_burst() {
         dscp: None,
         mtu_probe: false,
         connect_timeout: None,
+        byte_budget: None,
     };
 
     let client = Client::new(config);
@@ -3230,4 +3278,153 @@ async fn test_udp_pause_resume_no_burst() {
         result.is_ok(),
         "UDP pause/resume/cancel should resolve within 3s"
     );
+}
+
+/// `-n`: the transfer must be exactly the requested size, and end when the
+/// bytes are delivered rather than when a clock runs out. Runs each direction
+/// and protocol because the stopping condition is negotiated differently in
+/// each: upload ends on the client's `Finish` plus a drain, download ends when
+/// the server's own send loops spend the budget, bidir needs both.
+mod byte_budget {
+    use super::*;
+
+    const BUDGET: u64 = 4 * 1024 * 1024;
+
+    fn budget_config(
+        port: u16,
+        protocol: Protocol,
+        direction: Direction,
+        streams: u8,
+    ) -> ClientConfig {
+        ClientConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            protocol,
+            streams,
+            // Duration::ZERO is what `-n` without `-t` resolves to: no clock,
+            // the byte count is the only stopping condition.
+            duration: Duration::ZERO,
+            direction,
+            byte_budget: Some(BUDGET),
+            random_payload: false,
+            zerocopy: ZerocopyMode::Auto,
+            ..Default::default()
+        }
+    }
+
+    async fn run_budget_test(config: ClientConfig) -> xfr::protocol::TestResult {
+        let client = Client::new(config);
+        timeout(Duration::from_secs(30), client.run(None))
+            .await
+            .expect("byte-budget test should finish on its own, not hang")
+            .expect("test should succeed")
+    }
+
+    #[tokio::test]
+    async fn tcp_upload_transfers_exactly_the_budget() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let result =
+            run_budget_test(budget_config(port, Protocol::Tcp, Direction::Upload, 1)).await;
+
+        // bytes_total is the receiver's count in upload mode: this asserts the
+        // bytes actually arrived, not merely that we wrote them.
+        assert_eq!(
+            result.bytes_total, BUDGET,
+            "upload should deliver exactly the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_download_transfers_exactly_the_budget() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let result =
+            run_budget_test(budget_config(port, Protocol::Tcp, Direction::Download, 1)).await;
+
+        assert_eq!(
+            result.bytes_total, BUDGET,
+            "download should deliver exactly the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_stream_splits_one_shared_budget() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let result =
+            run_budget_test(budget_config(port, Protocol::Tcp, Direction::Upload, 4)).await;
+
+        // The budget is shared, not per-stream: 4 streams still total N, and
+        // whichever stream gets more socket time simply claims more of it.
+        assert_eq!(
+            result.bytes_total, BUDGET,
+            "4 streams should still total exactly the budget, not 4x it"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_upload_transfers_the_budget_in_whole_datagrams() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut config = budget_config(port, Protocol::Udp, Direction::Upload, 1);
+        // Paced: unlimited UDP on loopback overruns the receive buffer and
+        // drops several percent, which would make the delivered count a test
+        // of kernel buffering rather than of the budget.
+        config.bitrate = Some(50_000_000);
+        let client = Client::new(config);
+        let result = timeout(Duration::from_secs(30), client.run(None))
+            .await
+            .expect("UDP byte-budget test should finish on its own")
+            .expect("test should succeed");
+
+        // UDP promises "send exactly N", not "deliver exactly N" — loss is
+        // real and separately reported. What must hold: the sender stopped at
+        // the budget (never over), the test ended on its own rather than
+        // running forever on a ZERO duration, and the bulk of it arrived.
+        assert!(
+            result.bytes_total <= BUDGET,
+            "UDP must never exceed the budget: got {}",
+            result.bytes_total
+        );
+        assert!(
+            result.bytes_total >= BUDGET / 2,
+            "UDP should deliver most of the budget on loopback: got {}",
+            result.bytes_total
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_duration_caps_a_budget_that_cannot_finish() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 64 MiB at 10 Mbps needs ~50s; -t 2s must cut it short rather than
+        // the budget holding the test open.
+        let mut config = budget_config(port, Protocol::Tcp, Direction::Upload, 1);
+        config.byte_budget = Some(64 * 1024 * 1024);
+        config.duration = Duration::from_secs(2);
+        config.bitrate = Some(10_000_000);
+
+        let result = run_budget_test(config).await;
+
+        assert!(
+            result.bytes_total < 64 * 1024 * 1024,
+            "the duration cap should stop the transfer before the budget is met"
+        );
+        assert!(
+            result.duration_ms < 10_000,
+            "test should end near its 2s cap, took {}ms",
+            result.duration_ms
+        );
+    }
 }
