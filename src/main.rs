@@ -1214,6 +1214,20 @@ async fn main() -> Result<()> {
                 xfr::auth::validate_psk(psk_value)?;
             }
 
+            // UDP transfers whole datagrams, so a `-n` smaller than one packet
+            // header can't be framed at all and the test would move zero bytes
+            // without saying why.
+            if protocol == Protocol::Udp
+                && let Some(budget) = cli.bytes
+                && budget < xfr::udp::UDP_HEADER_SIZE as u64
+            {
+                warn!(
+                    "-n {} is smaller than one UDP packet header ({} bytes); UDP sends whole datagrams, so this test will transfer nothing",
+                    budget,
+                    xfr::udp::UDP_HEADER_SIZE
+                );
+            }
+
             // PSK supplied on the command line or through the environment leaks
             // through process metadata; warn so users can migrate to --psk-file.
             if cli.psk.is_some() {
@@ -1968,6 +1982,8 @@ async fn run_tui_loop(
         timestamp_format,
         prefs.theme_name(),
     );
+    // A `-n` run measures progress in bytes, not seconds.
+    app.byte_budget = config.byte_budget;
     // Reflect the resolved update-check state in the Settings toggle.
     app.settings.update_check = !update_disabled;
 

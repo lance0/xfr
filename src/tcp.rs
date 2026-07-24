@@ -372,7 +372,10 @@ async fn write_chunk(
     zerocopy: Option<&ZerocopyPayload>,
 ) -> io::Result<usize> {
     if let Some(payload) = zerocopy {
-        return payload.send_chunk(stream, offset).await;
+        // Cap at the slice the caller asked for: with `-n` the final write is
+        // a partial chunk, and sendfile would otherwise run to the end of the
+        // payload and overshoot the budget.
+        return payload.send_chunk(stream, offset, buffer.len()).await;
     }
     stream.writable().await?;
     match stream.try_write(buffer) {

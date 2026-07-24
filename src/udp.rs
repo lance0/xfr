@@ -27,7 +27,7 @@ use crate::protocol::{UdpIntervalProgress, UdpStats};
 use crate::stats::StreamStats;
 
 pub const UDP_PAYLOAD_SIZE: usize = 1400; // Leave room for IP + UDP headers
-const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
+pub const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
 const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
 
 /// On-wire size of a v1 receiver-progress feedback packet

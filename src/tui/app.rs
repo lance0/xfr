@@ -83,6 +83,10 @@ pub struct App {
     pub streams_count: u8,
     pub duration: Duration,
     pub bitrate: Option<u64>,
+    /// Byte budget for a `-n` test. When set, progress is measured against
+    /// bytes transferred rather than time — a byte-budget test usually has no
+    /// duration at all, and a full "∞" bar would read as already finished.
+    pub byte_budget: Option<u64>,
 
     pub elapsed: Duration,
     pub total_bytes: u64,
@@ -201,6 +205,7 @@ impl App {
             streams_count: streams,
             duration,
             bitrate,
+            byte_budget: None,
 
             elapsed: Duration::ZERO,
             total_bytes: 0,
@@ -835,6 +840,11 @@ impl App {
     }
 
     pub fn progress_percent(&self) -> f64 {
+        // A `-n` test measures progress in bytes; it usually has no duration
+        // to measure against at all.
+        if let Some(budget) = self.byte_budget.filter(|b| *b > 0) {
+            return (self.total_bytes as f64 / budget as f64 * 100.0).min(100.0);
+        }
         if self.is_infinite() {
             0.0
         } else {
@@ -1767,5 +1777,34 @@ mod tests {
             app.total_retransmits, 42,
             "once authoritative cumulative totals arrive, fallback deltas must not be added on top"
         );
+    }
+    #[test]
+    fn byte_budget_progress_tracks_bytes_not_time() {
+        let mut app = App::default();
+        // A `-n` test normally has no duration at all: with time-based
+        // progress the bar would sit at "infinite", which renders full and
+        // reads as already finished.
+        app.duration = Duration::ZERO;
+        app.byte_budget = Some(1000);
+        assert!(app.is_infinite());
+
+        assert_eq!(app.progress_percent(), 0.0);
+        app.total_bytes = 250;
+        assert_eq!(app.progress_percent(), 25.0);
+        app.total_bytes = 1000;
+        assert_eq!(app.progress_percent(), 100.0);
+        // Overshoot (bidir counts both directions) must not exceed the bar.
+        app.total_bytes = 5000;
+        assert_eq!(app.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn timed_tests_keep_time_based_progress() {
+        let mut app = App::default();
+        app.duration = Duration::from_secs(10);
+        app.byte_budget = None;
+        app.elapsed = Duration::from_secs(3);
+        app.total_bytes = 999_999;
+        assert_eq!(app.progress_percent(), 30.0);
     }
 }
