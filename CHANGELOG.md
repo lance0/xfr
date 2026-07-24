@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Control-channel crypto moved onto one RustCrypto generation** — `chacha20poly1305` 0.10 → 0.11 and `hkdf` 0.12 → 0.13, which lets the protected control channel share `sha2` 0.11 / `hmac` 0.13 with PSK authentication instead of pinning a second copy of the older `crypto-common` 0.1 stack alongside it. Two duplicate dependencies (the renamed `sha2_010` / `hmac_012`) are gone and the build no longer compiles two generations of the same crates. The wire format is unchanged: key derivation, AEAD framing, and the server proof are byte-for-byte identical, verified against fixed vectors captured from the previous release and by running PSK-protected tests in both directions between old and new binaries.
+
 ### Fixed
 - **Sparkline no longer jumps forward with green bars after a loss episode** — when upload saturation clogs the control channel, the queued `Interval` messages flush in a burst once the loss eases; each one appended its own bar (the graph "jumped" several columns) and, because their stale cumulative loss counts were filtered out, those bars rendered primary-colored right after heavy loss. Bar appends are now rate-limited to the report cadence, and the bar that does render takes its loss tint from the freshest feedback state — the same source the stall-synthesized bars already use. (#93)
 

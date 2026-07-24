@@ -48,8 +48,8 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use hkdf::Hkdf;
-use hmac_012::{Hmac, Mac};
-use sha2_010::Sha256;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 /// Capability string for the protected control channel.
 pub const PROTECTED_CONTROL_CAPABILITY: &str = "protected_control_v1";
@@ -128,8 +128,9 @@ pub fn compute_server_proof(
     psk: &str,
 ) -> Result<String> {
     let (_, _, s2c_auth_key) = derive_keys(client_nonce, server_nonce, psk)?;
-    let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&s2c_auth_key).expect("HMAC can take key of any size");
+    // Fully qualified: `chacha20poly1305::KeyInit` is also in scope here.
+    let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&s2c_auth_key)
+        .expect("HMAC can take key of any size");
     mac.update(client_hello_bytes);
     mac.update(server_hello_bytes);
     Ok(hex::encode(mac.finalize().into_bytes().as_slice()))
@@ -557,6 +558,65 @@ mod tests {
 
     fn test_keys() -> ([u8; 32], [u8; 32], [u8; 32]) {
         derive_keys("deadbeef", "cafebabe", "shared-secret").unwrap()
+    }
+
+    /// Known-answer vectors captured from the v0.9.22 release build.
+    ///
+    /// Every value here is visible to a peer, so any change breaks interop
+    /// with an older `xfr` across the protected control channel. The
+    /// roundtrip tests below all encrypt and decrypt with the same code and
+    /// would happily pass on a silently-changed KDF or frame layout — this
+    /// one pins the actual bytes, so a RustCrypto version bump that alters
+    /// them fails loudly instead.
+    #[test]
+    fn wire_bytes_match_v0_9_22_vectors() {
+        const NONCE_C: &str = "client-nonce-kat";
+        const NONCE_S: &str = "server-nonce-kat";
+        const PSK: &str = "correct horse battery";
+
+        let (c2s_key, s2c_key, auth_key) = derive_keys(NONCE_C, NONCE_S, PSK).unwrap();
+        assert_eq!(
+            hex::encode(&c2s_key),
+            "3e61833962ee0b447fc147f1c83afa1daae4768684c4e5b31d199f9ea6f7b18e",
+        );
+        assert_eq!(
+            hex::encode(&s2c_key),
+            "bc87e8f6ad57215649232e7cc1fedb304f9a708fa1b1b0030f48fecf9b56f3e2",
+        );
+        assert_eq!(
+            hex::encode(&auth_key),
+            "6cd7aee3092250493d4213f51c9d6a5f84f2c99dfa910f526ee228ee1be25197",
+        );
+
+        let (mut c2s, mut s2c) = ControlCodec::derive_pair(NONCE_C, NONCE_S, PSK).unwrap();
+        // seq 0 and seq 1 on the same codec: pins nonce and AAD derivation
+        // as well as the ciphertext itself.
+        assert_eq!(
+            hex::encode(&c2s.seal(b"{\"type\":\"ping\"}").unwrap()),
+            "000000000000000023caf9761c0896387ca9f022e5601dd02bc58916daa52e20f61b266ef84de7",
+        );
+        assert_eq!(
+            hex::encode(&c2s.seal(b"second frame").unwrap()),
+            "0100000000000000209ac414bc87110901827d9df057b0073dcbb3d5d4f188cb972f644d",
+        );
+        // Same plaintext, same seq, other direction — must differ (direction
+        // byte in the AAD, different key).
+        assert_eq!(
+            hex::encode(&s2c.seal(b"{\"type\":\"ping\"}").unwrap()),
+            "0000000000000000895afd8fe06575dfeed6bd15d61034a3c12240e3507b8c3733283b064eb593",
+        );
+
+        assert_eq!(
+            compute_server_proof(
+                b"{\"hello\":\"client\"}",
+                b"{\"hello\":\"server\"}",
+                NONCE_C,
+                NONCE_S,
+                PSK,
+            )
+            .unwrap(),
+            "c038a4929ae7dccb6b8ad3799cb00cf544878239e3a10b983b1e9d5458cbd2a3",
+        );
     }
 
     #[test]
