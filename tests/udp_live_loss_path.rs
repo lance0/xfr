@@ -54,6 +54,11 @@ fn live_loss_path_carries_through_to_app_state() {
     let agg_2 = stats.to_aggregate_with_direction(&intervals_2, false);
     let progress_2 = roundtrip_via_wire(&agg_2);
 
+    // Real Intervals arrive ~1s apart; back-to-back delivery is what the
+    // sparkline's backlog-flush guard (issue #93) deliberately suppresses.
+    // Wait out the guard window so this message renders its own bar, as it
+    // would live.
+    std::thread::sleep(std::time::Duration::from_millis(600));
     app.on_progress(progress_2);
 
     // Cumulative loss: 100 / (1000 + 100) = 9.090909…%.

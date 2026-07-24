@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Sparkline no longer jumps forward with green bars after a loss episode** — when upload saturation clogs the control channel, the queued `Interval` messages flush in a burst once the loss eases; each one appended its own bar (the graph "jumped" several columns) and, because their stale cumulative loss counts were filtered out, those bars rendered primary-colored right after heavy loss. Bar appends are now rate-limited to the report cadence, and the bar that does render takes its loss tint from the freshest feedback state — the same source the stall-synthesized bars already use. (#93)
+
 ## [0.9.22] - 2026-07-24
 
 ### Fixed

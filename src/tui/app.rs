@@ -607,40 +607,57 @@ impl App {
         // Update sparkline history. Tag the sample with the per-interval
         // packet/loss delta so the renderer can grade severity (clean,
         // light loss, heavy loss) instead of collapsing all loss to a flat
-        // yellow bar. Deltas come from the cumulative `udp_progress` we
-        // track between intervals; if the server didn't send progress yet
-        // we publish zeros and the renderer treats that as "magnitude
-        // unknown" and stays primary-colored.
-        let (interval_packets, interval_lost) =
-            match (progress.udp_progress, self.prev_udp_progress) {
-                (Some(curr), Some(prev)) => {
-                    let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
-                    let received = curr.packets_received.saturating_sub(prev.packets_received);
-                    (received.saturating_add(lost), lost)
-                }
-                // First udp_progress sample (or no progress at all). Don't
-                // treat cumulative-since-test-start as a single interval's
-                // delta — a delayed first progress (control-channel stall,
-                // or a server that batched several intervals) would
-                // otherwise paint one bar with multi-interval loss.
-                // Baseline silently; real deltas start from sample 2.
-                _ => (0, 0),
-            };
-        self.push_throughput_sample(ThroughputSample {
-            mbps: progress.throughput_mbps,
-            lost_packets: interval_lost,
-            interval_packets,
-        });
+        // yellow bar.
+        //
+        // `progress.udp_progress` passed the producer-side monotonic filter,
+        // so when it is `Some` it is fresher-or-equal to anything we hold;
+        // when the filter swallowed a stale cumulative (delayed Interval) we
+        // still have the freshest state from the 2 Hz feedback path.
         if let Some(curr) = progress.udp_progress {
-            // `curr` passed the producer-side monotonic filter, so it can't
-            // regress below a feedback value a stall-synthesized bar already
-            // rendered — both writes below are safe plain overwrites.
-            self.prev_udp_progress = Some(curr);
             self.latest_udp_progress = Some(curr);
         }
-        // A full Interval just rendered a bar; reset the stall clock so
-        // `tick()` doesn't synthesize a second bar for the same window.
-        self.last_bar_at = Some(Instant::now());
+        // Backlog-flush guard (#93 follow-up): when a stalled control channel
+        // unclogs, the queued Intervals land within milliseconds. Their
+        // windows were already rendered — by tick()'s stall-synthesized bars
+        // or the preceding Interval — so appending one bar per flushed
+        // message made the graph jump forward several bars at once, and
+        // because those stale cumulatives were filtered to `None` the bars
+        // rendered primary-colored ("green") right after a loss episode.
+        // Append only when the last bar is at least half a bar interval old;
+        // skipped messages still update every numeric readout.
+        let now = Instant::now();
+        let bar_due = self
+            .last_bar_at
+            .is_none_or(|last| now.duration_since(last) >= BAR_INTERVAL / 2);
+        if bar_due {
+            // Tint from the freshest cumulative vs the last one already
+            // rendered into a bar — the same source the stall path uses, so
+            // a bar appended right after a loss episode shows the loss that
+            // actually accrued instead of "magnitude unknown" green. First
+            // sample (or no progress at all) baselines silently: real
+            // deltas start from sample 2.
+            let (interval_packets, interval_lost) =
+                match (self.latest_udp_progress, self.prev_udp_progress) {
+                    (Some(curr), Some(prev)) => {
+                        let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
+                        let received = curr.packets_received.saturating_sub(prev.packets_received);
+                        (received.saturating_add(lost), lost)
+                    }
+                    _ => (0, 0),
+                };
+            self.push_throughput_sample(ThroughputSample {
+                mbps: progress.throughput_mbps,
+                lost_packets: interval_lost,
+                interval_packets,
+            });
+            // Advance the rendered-into-a-bar baseline only when a bar was
+            // actually appended, and reset the stall clock so `tick()`
+            // doesn't synthesize a second bar for the same window.
+            if let Some(latest) = self.latest_udp_progress {
+                self.prev_udp_progress = Some(latest);
+            }
+            self.last_bar_at = Some(now);
+        }
 
         // Use local TCP_INFO retransmits when available (sender-side).
         // Otherwise accumulate per-stream interval deltas ourselves so the
@@ -1214,6 +1231,16 @@ mod tests {
         );
     }
 
+    /// Make the last appended bar read as one full interval old, simulating
+    /// the ~1s gap between real Interval messages. Tests fire `on_progress`
+    /// back-to-back, which the backlog-flush guard would otherwise treat as
+    /// a flushed control-channel queue and skip.
+    fn age_last_bar(app: &mut App) {
+        // `checked_sub` only fails within BAR_INTERVAL of the Instant epoch,
+        // where `None` also reads as "bar due" — the intended effect.
+        app.last_bar_at = Instant::now().checked_sub(BAR_INTERVAL);
+    }
+
     fn make_progress(
         throughput_mbps: f64,
         udp_progress: Option<crate::protocol::UdpIntervalProgress>,
@@ -1357,6 +1384,7 @@ mod tests {
         assert_eq!(baseline.loss_rate_percent(), None);
 
         // Second interval: +500 received, 0 lost — clean.
+        age_last_bar(&mut app);
         app.on_progress(make_progress(
             100.0,
             Some(crate::protocol::UdpIntervalProgress {
@@ -1369,6 +1397,7 @@ mod tests {
         assert_eq!(clean.loss_rate_percent(), Some(0.0));
 
         // Third interval: +800 received, +200 lost — heavy loss (20%).
+        age_last_bar(&mut app);
         app.on_progress(make_progress(
             80.0,
             Some(crate::protocol::UdpIntervalProgress {
@@ -1426,6 +1455,7 @@ mod tests {
                 packets_lost: 0,
             }),
         ));
+        age_last_bar(&mut app);
         app.on_progress(make_progress(
             100.0,
             Some(crate::protocol::UdpIntervalProgress {
@@ -1494,6 +1524,7 @@ mod tests {
 
         // Control channel resumes with cumulative {2000, 150}. Only the 50
         // not-yet-rendered losses may appear on the new bar.
+        age_last_bar(&mut app);
         app.on_progress(make_progress(
             80.0,
             Some(crate::protocol::UdpIntervalProgress {
@@ -1512,6 +1543,68 @@ mod tests {
     }
 
     #[test]
+    fn backlog_flush_appends_one_bar_not_one_per_message() {
+        // #93 follow-up (brettowe): when a loss episode ends and the clogged
+        // control channel flushes its queued Intervals within milliseconds,
+        // at most one bar may render for the flush — previously each message
+        // appended its own, jumping the graph forward 4-5 columns at once.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1000,
+                packets_lost: 0,
+            }),
+        ));
+        assert_eq!(app.throughput_history.len(), 1);
+
+        // Flush: four queued Intervals land back-to-back. Their stale
+        // cumulatives were already swallowed by the producer-side monotonic
+        // filter, so udp_progress arrives as None.
+        age_last_bar(&mut app);
+        for _ in 0..4 {
+            app.on_progress(make_progress(90.0, None));
+        }
+        assert_eq!(
+            app.throughput_history.len(),
+            2,
+            "one bar for the whole flush, not one per flushed message"
+        );
+        // Numeric state still tracked the flushed messages.
+        assert_eq!(app.current_throughput_mbps, 90.0);
+    }
+
+    #[test]
+    fn flushed_interval_bar_tints_from_freshest_feedback_not_green() {
+        // The one bar that does render right after a loss episode must carry
+        // the loss accrued since the last rendered bar (known via the 2 Hz
+        // feedback path), not reset to "magnitude unknown" (primary/green)
+        // just because the flushed Interval's own cumulative was
+        // stale-filtered to None.
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.start_time = Some(Instant::now());
+        app.on_progress(make_progress(
+            100.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 1000,
+                packets_lost: 0,
+            }),
+        ));
+        // Loss arrives via feedback while the control channel is clogged.
+        app.on_progress(make_feedback(1400, 100));
+
+        age_last_bar(&mut app);
+        app.on_progress(make_progress(80.0, None));
+        let bar = app.throughput_history.back().copied().unwrap();
+        assert_eq!(bar.lost_packets, 100, "feedback-known loss, not green");
+        assert_eq!(bar.interval_packets, 500);
+        assert_eq!(bar.loss_rate_percent(), Some(20.0));
+    }
+
+    #[test]
     fn normal_interval_cadence_never_synthesizes_bars() {
         // The common case: full Intervals arriving at 1 Hz. tick() runs ~20×
         // a second between them, but must never add a bar of its own — one
@@ -1521,6 +1614,9 @@ mod tests {
         app.start_time = Some(Instant::now());
 
         for i in 1..=3u64 {
+            if i > 1 {
+                age_last_bar(&mut app);
+            }
             app.on_progress(make_progress(
                 100.0,
                 Some(crate::protocol::UdpIntervalProgress {
