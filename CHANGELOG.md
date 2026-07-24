@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-07-24
+
 ### Fixed
 - **Live jitter now updates during UDP download (`-u -R`)** — the TUI's jitter readout averaged the per-stream jitter reported in the server's `Interval` messages, but in download mode the server is the sender and never measures jitter, so the display stayed frozen at 0.00 ms until the final summary (and forever with `-t 0`). Per-stream intervals now overlay the client's own receiver-side jitter, the same receiver-truth substitution already used for byte counts and packet loss. (#143)
 - **`--locked` builds no longer warn about a yanked dependency** — bumped transitive `spin` 0.9.8 → 0.9.9 (0.9.8 was yanked on crates.io; pulled in via `mdns-sd` → `flume`). (#142)
@@ -14,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Opt out of the update check** — the background "newer release available" check can now be turned off several ways: the `--no-update-check` flag, the `DO_NOT_TRACK` (cross-tool standard) or `XFR_NO_UPDATE_CHECK` environment variables, `no_update_check = true` under `[client]` in `config.toml`, or the new **Update check** toggle in the TUI settings (Display tab, persisted to `prefs.toml`). It can also be compiled out entirely with `--no-default-features` — the `update-check` cargo feature is on by default, so package builds can drop the phone-home code. (LAN-235)
 - **Client transport defaults in `config.toml`** — `[client]` now supports `bitrate`, `congestion`, `dscp`, `interval_secs`, `bind`, and `cport`, closing the gap with their CLI counterparts. Values use the same forms as the flags (for example, `bitrate = "100M"` and `dscp = "EF"`), and an explicit CLI value takes precedence.
+
+### Changed
+- **Dependency refresh** — all semver-compatible updates taken (152 packages, including tokio 1.53, clap 4.6.4, rustls 0.23.42, socket2 0.6.5); cleared the crossbeam-epoch RUSTSEC-2026-0204 advisory (dev-dependency only, via criterion). The `chacha20poly1305`/`hkdf` major bumps are deliberately deferred to a dedicated control-crypto port. The published crate also no longer bundles the README demo recording.
 
 ## [0.9.21] - 2026-07-06
 
