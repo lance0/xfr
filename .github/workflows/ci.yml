@@ -115,6 +115,21 @@ jobs:
       - name: Build + compile tests on MSRV
         run: cargo test --all-features --no-run --locked
 
+  cargo-deny:
+    name: cargo-deny (licenses, bans, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.8
+      # Advisories are deliberately excluded — audit.yml owns cargo-audit and
+      # two advisory gates would double the noise. Policy lives in deny.toml.
+      - name: Check licenses / bans / sources
+        run: cargo deny check licenses bans sources
+
   # Build every shippable release target on each PR (debug, no packaging) with
   # the same toolchains as release.yml, so a target-specific build/link failure
   # is caught before tag. zigbuild covers the Linux gnu/musl targets (Zig bundles
