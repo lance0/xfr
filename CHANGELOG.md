@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Test by transfer size, not time (`-n`/`--bytes`)** — `xfr <host> -n 1G` sends exactly 1 GiB and stops, instead of running for a fixed number of seconds. Runs are then comparable across links of different speeds, which is what CI and benchmarking usually want; a timed test moves a different amount of data on every link. Binary suffixes (`K`/`M`/`G` = KiB/MiB/GiB), and the count is the total across all streams rather than per stream — `-P 8 -n 1G` still transfers 1 GiB, with faster streams simply carrying more of it. Without an explicit `-t` there is no clock at all; with one, `-t` becomes an upper bound and the test reports however much it managed. Works for TCP, UDP and QUIC in all three directions, and needs a server advertising the new `byte_budget_v1` capability — against an older server the client refuses to start rather than quietly running a timed test instead. UDP transfers whole datagrams, so its final one may be short — and a budget below one packet header warns rather than silently transferring nothing. Under the TUI the progress bar tracks bytes against the requested size instead of showing an "infinite" bar.
+
 ### Changed
 - **Control-channel crypto moved onto one RustCrypto generation** — `chacha20poly1305` 0.10 → 0.11 and `hkdf` 0.12 → 0.13, which lets the protected control channel share `sha2` 0.11 / `hmac` 0.13 with PSK authentication instead of pinning a second copy of the older `crypto-common` 0.1 stack alongside it. Two duplicate dependencies (the renamed `sha2_010` / `hmac_012`) are gone and the build no longer compiles two generations of the same crates. The wire format is unchanged: key derivation, AEAD framing, and the server proof are byte-for-byte identical, verified against fixed vectors captured from the previous release and by running PSK-protected tests in both directions between old and new binaries.
 
 ### Fixed
+- **Dropped an unused dependency** — `async-trait` was declared in `Cargo.toml` but never referenced in the source.
 - **Sparkline no longer jumps forward with green bars after a loss episode** — when upload saturation clogs the control channel, the queued `Interval` messages flush in a burst once the loss eases; each one appended its own bar (the graph "jumped" several columns) and, because their stale cumulative loss counts were filtered out, those bars rendered primary-colored right after heavy loss. Bar appends are now rate-limited to the report cadence, and the bar that does render takes its loss tint from the freshest feedback state — the same source the stall-synthesized bars already use. (#93)
 
 ## [0.9.22] - 2026-07-24

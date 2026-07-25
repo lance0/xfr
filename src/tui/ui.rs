@@ -325,7 +325,26 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         (inner.width as usize).saturating_sub(prefix_len + suffix_len + transferred_len);
     let bar_width = available_width.max(10);
 
-    let (progress_bar, time_display) = if app.is_infinite() {
+    let (progress_bar, time_display) = if let Some(budget) = app.byte_budget.filter(|b| *b > 0) {
+        // `-n`: fill by bytes against the requested transfer size, and show
+        // that size as the denominator the way a timed test shows its duration.
+        let filled = (progress * bar_width as f64) as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let arrow = if filled > 0 && filled < bar_width {
+            ">"
+        } else {
+            ""
+        };
+        let fill_chars = if arrow.is_empty() {
+            filled
+        } else {
+            filled.saturating_sub(1)
+        };
+        (
+            format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty)),
+            format!(" {}s/{}", elapsed_secs, bytes_to_human(budget)),
+        )
+    } else if app.is_infinite() {
         // Infinite duration: show elapsed time with ∞
         let filled = bar_width; // Full bar since no target
         (

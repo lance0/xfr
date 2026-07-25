@@ -358,6 +358,7 @@ pub async fn send_quic_data(
     duration: Duration,
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<()> {
     let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
     let mut deadline = tokio::time::Instant::now() + duration;
@@ -385,11 +386,19 @@ pub async fn send_quic_data(
             break;
         }
 
+        // Reserve this write's share of the `-n` budget; 0 means done.
+        let claimed = crate::budget::claim_or_full(budget.as_ref(), buffer.len());
+        if claimed == 0 {
+            debug!("QUIC byte budget spent");
+            break;
+        }
+
         // Race the write against cancel, deadline, and pause so a blocked
         // write can be interrupted (LAN-230).
         tokio::select! {
             biased;
             res = cancel.changed() => {
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 if res.is_err() || *cancel.borrow() {
                     debug!("QUIC send cancelled during write");
                     break;
@@ -398,16 +407,22 @@ pub async fn send_quic_data(
             _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
                 // Pause toggled during write — loop back to handle it
                 // and extend the deadline (LAN-230).
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 continue;
             }
             _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("QUIC send deadline reached during write");
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 break;
             }
-            result = send.write(&buffer) => {
+            result = send.write(&buffer[..claimed]) => {
                 match result {
-                    Ok(n) => stats.add_bytes_sent(n as u64),
+                    Ok(n) => {
+                        crate::budget::refund_unwritten(budget.as_ref(), claimed, n);
+                        stats.add_bytes_sent(n as u64);
+                    }
                     Err(e) => {
+                        crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                         error!("QUIC send error: {}", e);
                         return Err(e.into());
                     }

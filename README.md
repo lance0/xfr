@@ -453,6 +453,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 |------|-------|---------|-------------|
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
+| `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
 | `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited. Global across all streams |

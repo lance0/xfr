@@ -165,6 +165,14 @@ struct Cli {
     #[arg(short = 't', long, value_parser = parse_test_duration, env = "XFR_DURATION")]
     time: Option<Duration>,
 
+    /// Transfer this many bytes, then stop, instead of running for a fixed time
+    /// (`-n 1G`). Binary suffixes: K=KiB, M=MiB, G=GiB. The total is shared across
+    /// all streams. Without an explicit `-t` the test runs until the transfer
+    /// finishes; with one, `-t` becomes an upper bound. Requires a server that
+    /// advertises `byte_budget_v1`.
+    #[arg(short = 'n', long = "bytes", value_parser = parse_byte_budget, env = "XFR_BYTES", conflicts_with = "probe_mtu")]
+    bytes: Option<u64>,
+
     /// UDP mode
     #[arg(short = 'u', long, conflicts_with = "quic")]
     udp: bool,
@@ -495,12 +503,19 @@ fn resolve_server_max_duration(
 fn resolve_client_duration(
     cli_time: Option<Duration>,
     probe_mtu: bool,
+    byte_budget: Option<u64>,
     file_config: &xfr::config::Config,
 ) -> Duration {
     if let Some(duration) = cli_time {
         duration
     } else if probe_mtu {
         Duration::from_secs(60)
+    } else if byte_budget.is_some() {
+        // `-n` without `-t`: the transfer size is the stopping condition, so
+        // there is no clock. Falling back to the 10s default would truncate
+        // any transfer that takes longer than that on a slow link — the exact
+        // thing `-n` exists to avoid. An explicit `-t` still caps the run.
+        Duration::ZERO
     } else {
         file_config
             .client
@@ -581,6 +596,34 @@ fn parse_size(s: &str) -> Result<usize, String> {
             n.checked_mul(suffix)
                 .ok_or_else(|| format!("Size overflow: {}", s))
         })
+}
+
+/// Parse a `-n/--bytes` byte count. Binary suffixes (K=KiB, M=MiB, G=GiB),
+/// matching `-w/--window` and iperf3's `-n`. Zero is rejected: a test that
+/// transfers nothing has no meaning, and silently treating it as "unlimited"
+/// (the way `-b 0` works) would be a trap.
+fn parse_byte_budget(s: &str) -> Result<u64, String> {
+    let upper = s.to_uppercase();
+    let (num, suffix) = if let Some(rest) = upper.strip_suffix('G') {
+        (rest, 1024 * 1024 * 1024u64)
+    } else if let Some(rest) = upper.strip_suffix('M') {
+        (rest, 1024 * 1024u64)
+    } else if let Some(rest) = upper.strip_suffix('K') {
+        (rest, 1024u64)
+    } else {
+        (upper.as_str(), 1u64)
+    };
+
+    let n: u64 = num
+        .parse()
+        .map_err(|_| format!("Invalid byte count: {}", s))?;
+    let total = n
+        .checked_mul(suffix)
+        .ok_or_else(|| format!("Byte count overflow: {}", s))?;
+    if total == 0 {
+        return Err("Byte count must be greater than zero".to_string());
+    }
+    Ok(total)
 }
 
 fn parse_timestamp_format(s: &str) -> Result<TimestampFormat, String> {
@@ -1131,7 +1174,8 @@ async fn main() -> Result<()> {
             // Apply config file defaults where CLI didn't override.
             // `--probe-mtu` without an explicit `-t` uses a longer default
             // because the duration is only a server-side safety deadline.
-            let duration = resolve_client_duration(cli.time, cli.probe_mtu, &file_config);
+            let duration =
+                resolve_client_duration(cli.time, cli.probe_mtu, cli.bytes, &file_config);
 
             let streams = if cli.parallel != 1 {
                 cli.parallel
@@ -1168,6 +1212,20 @@ async fn main() -> Result<()> {
             // Validate PSK if provided
             if let Some(ref psk_value) = client_psk {
                 xfr::auth::validate_psk(psk_value)?;
+            }
+
+            // UDP transfers whole datagrams, so a `-n` smaller than one packet
+            // header can't be framed at all and the test would move zero bytes
+            // without saying why.
+            if protocol == Protocol::Udp
+                && let Some(budget) = cli.bytes
+                && budget < xfr::udp::UDP_HEADER_SIZE as u64
+            {
+                warn!(
+                    "-n {} is smaller than one UDP packet header ({} bytes); UDP sends whole datagrams, so this test will transfer nothing",
+                    budget,
+                    xfr::udp::UDP_HEADER_SIZE
+                );
             }
 
             // PSK supplied on the command line or through the environment leaks
@@ -1254,6 +1312,7 @@ async fn main() -> Result<()> {
                 tcp_nodelay,
                 tcp_congestion: network_options.congestion,
                 window_size,
+                byte_budget: cli.bytes,
                 psk: client_psk,
                 address_family: client_address_family,
                 bind_addr,
@@ -1923,6 +1982,8 @@ async fn run_tui_loop(
         timestamp_format,
         prefs.theme_name(),
     );
+    // A `-n` run measures progress in bytes, not seconds.
+    app.byte_budget = config.byte_budget;
     // Reflect the resolved update-check state in the Settings toggle.
     app.settings.update_check = !update_disabled;
 
@@ -2261,10 +2322,65 @@ mod tests {
     }
 
     #[test]
+    fn byte_budget_without_explicit_time_has_no_clock() {
+        // The whole point of `-n` is a size-defined test. Falling back to the
+        // 10s default would truncate any transfer slower than that.
+        let cfg = xfr::config::Config::default();
+        assert_eq!(
+            resolve_client_duration(None, false, Some(1024), &cfg),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn explicit_time_still_caps_a_byte_budget() {
+        let cfg = xfr::config::Config::default();
+        assert_eq!(
+            resolve_client_duration(Some(Duration::from_secs(5)), false, Some(1024), &cfg),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn byte_budget_beats_the_config_file_duration() {
+        // A duration in config.toml is a default for timed tests; it must not
+        // silently cap a size-defined one the user asked for on the CLI.
+        let mut cfg = xfr::config::Config::default();
+        cfg.client.duration_secs = Some(25);
+        assert_eq!(
+            resolve_client_duration(None, false, Some(1024), &cfg),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn parse_byte_budget_accepts_binary_suffixes() {
+        assert_eq!(parse_byte_budget("1024"), Ok(1024));
+        assert_eq!(parse_byte_budget("1K"), Ok(1024));
+        assert_eq!(parse_byte_budget("1k"), Ok(1024));
+        assert_eq!(parse_byte_budget("64M"), Ok(64 * 1024 * 1024));
+        assert_eq!(parse_byte_budget("2G"), Ok(2 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_byte_budget_rejects_nonsense() {
+        // Zero is rejected rather than silently meaning "unlimited" the way
+        // `-b 0` does — a test that transfers nothing is never intended.
+        assert!(parse_byte_budget("0").is_err());
+        assert!(parse_byte_budget("0M").is_err());
+        assert!(parse_byte_budget("5X").is_err());
+        assert!(parse_byte_budget("").is_err());
+        assert!(parse_byte_budget("-1").is_err());
+        // 999999 GiB overflows u64 only after multiplication, so this checks
+        // the checked_mul rather than the parse.
+        assert!(parse_byte_budget("99999999999G").is_err());
+    }
+
+    #[test]
     fn resolve_client_duration_explicit_time_wins() {
         let cfg = xfr::config::Config::default();
         assert_eq!(
-            resolve_client_duration(Some(Duration::from_secs(10)), true, &cfg),
+            resolve_client_duration(Some(Duration::from_secs(10)), true, None, &cfg),
             Duration::from_secs(10)
         );
     }
@@ -2273,7 +2389,7 @@ mod tests {
     fn resolve_client_duration_probe_mtu_uses_long_default_when_unset() {
         let cfg = xfr::config::Config::default();
         assert_eq!(
-            resolve_client_duration(None, true, &cfg),
+            resolve_client_duration(None, true, None, &cfg),
             Duration::from_secs(60)
         );
     }
@@ -2283,7 +2399,7 @@ mod tests {
         let mut cfg = xfr::config::Config::default();
         cfg.client.duration_secs = Some(25);
         assert_eq!(
-            resolve_client_duration(None, false, &cfg),
+            resolve_client_duration(None, false, None, &cfg),
             Duration::from_secs(25)
         );
     }
@@ -2292,7 +2408,7 @@ mod tests {
     fn resolve_client_duration_falls_back_to_10s_default() {
         let cfg = xfr::config::Config::default();
         assert_eq!(
-            resolve_client_duration(None, false, &cfg),
+            resolve_client_duration(None, false, None, &cfg),
             Duration::from_secs(10)
         );
     }

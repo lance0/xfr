@@ -7,9 +7,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
-// Only the non-Linux teardown path calls shutdown(); Linux relies on
-// SO_LINGER=0 + drop. write()/flush() are no longer used — see write_chunk.
-#[cfg(not(target_os = "linux"))]
+// Teardown calls shutdown() on every platform except a Linux *timed* test,
+// which relies on SO_LINGER=0 + drop; byte-budget tests need the graceful
+// close there too. write()/flush() are no longer used — see write_chunk.
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -372,7 +372,10 @@ async fn write_chunk(
     zerocopy: Option<&ZerocopyPayload>,
 ) -> io::Result<usize> {
     if let Some(payload) = zerocopy {
-        return payload.send_chunk(stream, offset).await;
+        // Cap at the slice the caller asked for: with `-n` the final write is
+        // a partial chunk, and sendfile would otherwise run to the end of the
+        // payload and overshoot the budget.
+        return payload.send_chunk(stream, offset, buffer.len()).await;
     }
     stream.writable().await?;
     match stream.try_write(buffer) {
@@ -417,8 +420,10 @@ fn setup_zerocopy(config: &TcpConfig, buffer: &[u8], stream_id: u8) -> Option<Ze
     }
 }
 
-/// Send data as fast as possible for the given duration
+/// Send data as fast as possible for the given duration, or until `budget`
+/// is spent when this is a `-n` byte-budget test.
 /// Returns the final TCP_INFO snapshot (for RTT, retransmits, cwnd)
+#[allow(clippy::too_many_arguments)]
 pub async fn send_data(
     stream: TcpStream,
     stats: Arc<StreamStats>,
@@ -427,14 +432,24 @@ pub async fn send_data(
     mut cancel: watch::Receiver<bool>,
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<Option<crate::protocol::TcpInfoSnapshot>> {
     configure_stream(&stream, &config)?;
     // Force abortive close on Linux only, where `tcpi_bytes_acked` lets us clamp
     // the overcount of discarded send-buffer bytes. On platforms without that
     // counter (macOS, fallback), graceful shutdown is used at end of loop to
     // preserve accuracy. See issue #54.
+    //
+    // Byte-budget tests are the exception: the point of `-n` is that exactly
+    // N bytes arrive, and RST discards whatever is still in the send buffer —
+    // both truncating the transfer and clamping our own count below N. Those
+    // tests end with a graceful shutdown instead (see end of function). They
+    // don't need the abortive close anyway: it exists to stop a bufferbloated
+    // queue from draining past a *deadline*, and a byte budget has none.
     #[cfg(target_os = "linux")]
-    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+    if budget.is_none() {
+        let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+    }
 
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
@@ -497,6 +512,16 @@ pub async fn send_data(
             break;
         }
 
+        // Reserve this write's share of the `-n` budget up front; 0 means the
+        // transfer is complete. Whatever isn't actually written is refunded
+        // after the write so a short write can't shrink the transfer.
+        let claimed = crate::budget::claim_or_full(budget.as_ref(), buffer.len() - chunk_offset);
+        if claimed == 0 {
+            debug!("Byte budget spent for stream {}", stats.stream_id);
+            break;
+        }
+        let chunk_end = chunk_offset + claimed;
+
         // Race the write against cancel and the deadline so we can interrupt
         // a blocked write() when the test ends or is cancelled. Under heavy
         // rate limiting (e.g. tc drops with MPTCP), the kernel send buffer
@@ -517,23 +542,28 @@ pub async fn send_data(
                         debug!("Cancel sender dropped for stream {}, stopping", stats.stream_id);
                     }
                 }
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 break;
             }
             _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
                 // Pause toggled during write — loop back to handle it,
                 // which calls wait_while_paused_timed and extends the
-                // deadline by the paused duration (LAN-230).
+                // deadline by the paused duration (LAN-230). The claim goes
+                // back so the post-resume retry re-reserves it.
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 continue;
             }
             _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 break;
             }
-            r = write_chunk(&stream, &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
+            r = write_chunk(&stream, &buffer[chunk_offset..chunk_end], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
             Ok(n) => {
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, n);
                 stats.add_bytes_sent(n as u64);
                 chunk_offset += n;
                 if chunk_offset >= buffer.len() {
@@ -579,9 +609,11 @@ pub async fn send_data(
                     "Stream {}: sendfile failed ({}); falling back to regular writes",
                     stats.stream_id, e
                 );
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 zerocopy = None;
             }
             Err(e) => {
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 let now = tokio::time::Instant::now();
                 let deadline_reached = !is_infinite && now >= deadline;
                 let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
@@ -620,16 +652,26 @@ pub async fn send_data(
     let tcp_info = get_stream_tcp_info(&stream);
     if let Some(info) = &tcp_info {
         stats.add_retransmits(info.retransmits);
-        clamp_bytes_sent_to_acked(&stats, info);
+        // The clamp corrects for send-buffer bytes that the abortive close
+        // throws away. A byte-budget test closes gracefully, so every byte
+        // written is delivered and clamping to the not-yet-ACKed count here
+        // would under-report a transfer that is about to complete.
+        if budget.is_none() {
+            clamp_bytes_sent_to_acked(&stats, info);
+        }
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST (skipping drain).
     // On other platforms, call shutdown() for graceful FIN — slower but preserves
     // accounting accuracy since we don't have bytes_acked to clamp overcount.
-    #[cfg(not(target_os = "linux"))]
+    // Byte-budget tests take the graceful path everywhere: `-n` promises the
+    // peer receives N bytes, and RST would drop whatever is still queued.
     let mut stream = stream;
+    #[cfg(target_os = "linux")]
+    let needs_shutdown = budget.is_some();
     #[cfg(not(target_os = "linux"))]
-    if let Err(e) = stream.shutdown().await {
+    let needs_shutdown = true;
+    if needs_shutdown && let Err(e) = stream.shutdown().await {
         if *cancel.borrow() || is_peer_closed_error(&e) {
             debug!(
                 "Stream {} shutdown ended during teardown: {}",
@@ -766,6 +808,7 @@ pub fn get_stream_tcp_info(stream: &TcpStream) -> Option<crate::protocol::TcpInf
 /// captured at clamp time — caller should prefer this over re-reading TCP_INFO
 /// post-reunite, since a second read would see a later (larger) `bytes_acked`
 /// that could exceed the clamped `bytes_sent`.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_data_half(
     write_half: OwnedWriteHalf,
     stats: Arc<StreamStats>,
@@ -774,10 +817,14 @@ pub async fn send_data_half(
     mut cancel: watch::Receiver<bool>,
     bitrate: Option<u64>,
     mut pause: watch::Receiver<bool>,
+    budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<(OwnedWriteHalf, Option<crate::protocol::TcpInfoSnapshot>)> {
-    // Linux only: force abortive close. See send_data() for rationale.
+    // Linux only: force abortive close. See send_data() for rationale — and
+    // for why byte-budget tests opt out of it.
     #[cfg(target_os = "linux")]
-    let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
+    if budget.is_none() {
+        let _ = socket2::SockRef::from(write_half.as_ref()).set_linger(Some(Duration::ZERO));
+    }
 
     let kernel_pacing = match bitrate {
         Some(bps) if bps > 0 => {
@@ -838,6 +885,14 @@ pub async fn send_data_half(
             break;
         }
 
+        // Reserve this write's share of the `-n` budget; see send_data().
+        let claimed = crate::budget::claim_or_full(budget.as_ref(), buffer.len() - chunk_offset);
+        if claimed == 0 {
+            debug!("Byte budget spent for stream {}", stats.stream_id);
+            break;
+        }
+        let chunk_end = chunk_offset + claimed;
+
         // Race write against cancel + deadline + pause so a blocked write
         // (e.g. under heavy tc rate limiting with full kernel send buffer)
         // doesn't prevent the loop from noticing the test is over or paused.
@@ -855,23 +910,28 @@ pub async fn send_data_half(
                         debug!("Cancel sender dropped for stream {}, stopping", stats.stream_id);
                     }
                 }
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 break;
             }
             _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {
                 // Pause toggled during write — loop back to handle it,
                 // which calls wait_while_paused_timed and extends the
-                // deadline by the paused duration (LAN-230).
+                // deadline by the paused duration (LAN-230). The claim goes
+                // back so the post-resume retry re-reserves it.
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 continue;
             }
             _ = tokio::time::sleep_until(deadline), if !is_infinite => {
                 debug!("Deadline reached during write for stream {}", stats.stream_id);
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 break;
             }
-            r = write_chunk(write_half.as_ref(), &buffer[chunk_offset..], chunk_offset, zerocopy.as_ref()) => r,
+            r = write_chunk(write_half.as_ref(), &buffer[chunk_offset..chunk_end], chunk_offset, zerocopy.as_ref()) => r,
         };
 
         match write_result {
             Ok(n) => {
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, n);
                 stats.add_bytes_sent(n as u64);
                 chunk_offset += n;
                 if chunk_offset >= buffer.len() {
@@ -915,9 +975,11 @@ pub async fn send_data_half(
                     "Stream {}: sendfile failed ({}); falling back to regular writes",
                     stats.stream_id, e
                 );
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 zerocopy = None;
             }
             Err(e) => {
+                crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
                 let now = tokio::time::Instant::now();
                 let deadline_reached = !is_infinite && now >= deadline;
                 let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
@@ -956,15 +1018,23 @@ pub async fn send_data_half(
     let tcp_info = get_tcp_info(write_half.as_ref()).ok();
     if let Some(info) = &tcp_info {
         stats.add_retransmits(info.retransmits);
-        clamp_bytes_sent_to_acked(&stats, info);
+        // Skipped for byte-budget tests, which close gracefully — see send_data().
+        if budget.is_none() {
+            clamp_bytes_sent_to_acked(&stats, info);
+        }
     }
 
     // On Linux, SO_LINGER=0 was set earlier; drop alone triggers RST.
-    // On other platforms, do graceful shutdown to preserve accounting accuracy.
-    #[cfg(not(target_os = "linux"))]
+    // On other platforms — and for byte-budget tests everywhere — do a
+    // graceful shutdown so the queued bytes are delivered, not reset.
     let mut write_half = write_half;
+    #[cfg(target_os = "linux")]
+    let needs_shutdown = budget.is_some();
     #[cfg(not(target_os = "linux"))]
-    let _ = write_half.shutdown().await;
+    let needs_shutdown = true;
+    if needs_shutdown {
+        let _ = write_half.shutdown().await;
+    }
 
     debug!(
         "Stream {} send complete: {} bytes",
@@ -1277,6 +1347,7 @@ mod tests {
             cancel_rx,
             None,
             pause_rx,
+            None,
         )
         .await
         .expect("zerocopy send_data should succeed on Linux");
@@ -1378,7 +1449,9 @@ mod tests {
         let start = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            send_data(stream, stats, duration, config, cancel_rx, None, pause_rx),
+            send_data(
+                stream, stats, duration, config, cancel_rx, None, pause_rx, None,
+            ),
         )
         .await;
         let elapsed = start.elapsed();
@@ -1433,7 +1506,9 @@ mod tests {
         let start = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            send_data(stream, stats, duration, config, cancel_rx, None, pause_rx),
+            send_data(
+                stream, stats, duration, config, cancel_rx, None, pause_rx, None,
+            ),
         )
         .await;
         let elapsed = start.elapsed();

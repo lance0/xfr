@@ -93,15 +93,20 @@ impl ZerocopyPayload {
         self.len == 0
     }
 
-    /// One non-blocking `sendfile(2)` call starting from `offset`.
-    /// Returns the number of bytes queued by this call.
+    /// One non-blocking `sendfile(2)` call starting from `offset`, sending at
+    /// most `max_len` bytes. Returns the number of bytes queued by this call.
+    ///
+    /// `max_len` matters for `-n` tests: the last write of a byte budget is
+    /// usually a partial chunk, and sending to the end of the payload anyway
+    /// would overshoot the transfer size the user asked for.
     #[cfg(target_os = "linux")]
     fn sendfile_once(
         &self,
         socket_fd: std::os::unix::io::RawFd,
         offset: usize,
+        max_len: usize,
     ) -> io::Result<usize> {
-        let remaining = self.len.saturating_sub(offset);
+        let remaining = self.len.saturating_sub(offset).min(max_len);
         if remaining == 0 {
             return Ok(0);
         }
@@ -115,16 +120,23 @@ impl ZerocopyPayload {
     }
 
     /// Send one payload slice starting from `offset` on `stream` via sendfile,
-    /// awaiting socket writability. Returns the short count queued by the
-    /// kernel; the caller owns the offset and resumes from `offset + n`,
-    /// mirroring the regular `try_send` path.
+    /// capped at `max_len` bytes, awaiting socket writability. Returns the
+    /// short count queued by the kernel; the caller owns the offset and
+    /// resumes from `offset + n`, mirroring the regular `try_send` path.
     #[cfg(target_os = "linux")]
-    pub async fn send_chunk(&self, stream: &TcpStream, offset: usize) -> io::Result<usize> {
+    pub async fn send_chunk(
+        &self,
+        stream: &TcpStream,
+        offset: usize,
+        max_len: usize,
+    ) -> io::Result<usize> {
         use tokio::io::Interest;
 
         let socket_fd = stream.as_raw_fd();
         stream.writable().await?;
-        match stream.try_io(Interest::WRITABLE, || self.sendfile_once(socket_fd, offset)) {
+        match stream.try_io(Interest::WRITABLE, || {
+            self.sendfile_once(socket_fd, offset, max_len)
+        }) {
             Ok(n) => Ok(n),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
             Err(e) => Err(e),
@@ -132,7 +144,12 @@ impl ZerocopyPayload {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub async fn send_chunk(&self, _stream: &TcpStream, _offset: usize) -> io::Result<usize> {
+    pub async fn send_chunk(
+        &self,
+        _stream: &TcpStream,
+        _offset: usize,
+        _max_len: usize,
+    ) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "zero-copy sends require Linux sendfile(2)",
@@ -175,7 +192,10 @@ mod tests {
         let mut queued = 0usize;
         let mut chunk_offset = 0usize;
         while queued < pattern.len() * 2 {
-            let n = payload.send_chunk(&sender, chunk_offset).await.unwrap();
+            let n = payload
+                .send_chunk(&sender, chunk_offset, payload.len() - chunk_offset)
+                .await
+                .unwrap();
             chunk_offset += n;
             queued += n;
             if chunk_offset >= pattern.len() {
@@ -210,7 +230,10 @@ mod tests {
             let mut queued = 0usize;
             let mut chunk_offset = 0usize;
             while queued < TARGET {
-                let n = payload.send_chunk(&sender, chunk_offset).await.unwrap();
+                let n = payload
+                    .send_chunk(&sender, chunk_offset, payload.len() - chunk_offset)
+                    .await
+                    .unwrap();
                 chunk_offset += n;
                 queued += n;
                 if chunk_offset >= pattern.len() {
@@ -235,5 +258,41 @@ mod tests {
         };
         assert!(sent >= TARGET);
         assert!(drained >= sent);
+    }
+
+    /// `max_len` must cap the send, not just the payload end. `-n` relies on
+    /// this: the last write of a byte budget is a partial chunk, and sending
+    /// to the end of the payload anyway overshoots the requested transfer
+    /// size (it did — a 1,000,000-byte budget delivered 1,048,576).
+    #[tokio::test]
+    async fn send_chunk_respects_max_len() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = ZerocopyPayload::new(&[0xCD; 8192]).unwrap();
+
+        let recv = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            buf.len()
+        });
+
+        let sender = TcpStream::connect(addr).await.unwrap();
+        let mut sent = 0;
+        while sent < 100 {
+            let n = payload.send_chunk(&sender, sent, 100 - sent).await.unwrap();
+            if n == 0 {
+                continue;
+            }
+            sent += n;
+        }
+        drop(sender);
+
+        assert_eq!(sent, 100, "must not send past max_len");
+        assert_eq!(
+            recv.await.unwrap(),
+            100,
+            "receiver must see exactly max_len"
+        );
     }
 }

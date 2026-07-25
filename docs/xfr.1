@@ -26,6 +26,18 @@ Server port (default: 5201). Environment: XFR_PORT
 .BI \-t ", " \-\-time " DURATION"
 Test duration (default: 10s). Supports units: s, m, h. Environment: XFR_DURATION
 .TP
+.BI \-n ", " \-\-bytes " COUNT"
+Transfer this many bytes, then stop, instead of running for a fixed time.
+Binary suffixes: K=KiB, M=MiB, G=GiB (for example
+.BR "\-n 1G" ).
+The count is the total across all streams, not per stream. Without an explicit
+.B \-t
+the test runs until the transfer completes; with one,
+.B \-t
+becomes an upper bound. Cannot be combined with
+.BR \-\-probe\-mtu .
+Requires a server advertising the byte_budget_v1 capability. Environment: XFR_BYTES
+.TP
 .B \-u ", " \-\-udp
 Use UDP instead of TCP
 .TP
@@ -248,6 +260,9 @@ Server/client port
 .B XFR_DURATION
 Test duration
 .TP
+.B XFR_BYTES
+Byte count for a fixed-size transfer (see \-n)
+.TP
 .B XFR_PSK
 Pre-shared key
 .TP
@@ -278,6 +293,10 @@ Run a 10-second TCP upload test
 .TP
 .B xfr 192.168.1.1 \-R
 Download test (server sends to client)
+.TP
+.B xfr 192.168.1.1 \-n 1G
+Transfer exactly 1 GiB and stop, however long that takes \- comparable across
+links in a way a timed test is not
 .TP
 .B xfr 192.168.1.1 \-u \-b 1G
 UDP test at 1 Gbps

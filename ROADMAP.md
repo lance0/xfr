@@ -159,7 +159,7 @@
 - [ ] **Audit unwrap()/expect() calls** - reduce calls in production code, especially auth.rs HMAC init and serve.rs PSK handling
 - [ ] **Audit swallowed channel sends** - ~15 `let _ =` sites on `try_send`/`send` in serve.rs (TUI event channel, cancel/shutdown signals). Most are benign watch-channel semantics, but the cancel-path ones could mask a test that didn't actually stop; classify each and log the ones that matter
 - [ ] **Finish the settings-modal restart path** - `src/main.rs` has a live TODO ("Return restart signal with new params"); settings changed mid-test from the TUI modal may not fully apply
-- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime, async-trait
+- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime (async-trait is gone: it was declared but never used)
 - [x] **Join client data tasks** - Client::run now collects JoinHandles and joins with 2s timeout + abort before returning
 - [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
 
@@ -202,7 +202,7 @@
 - [ ] **QUIC bitrate pacing** - the warning half shipped in PR #97 (`-b`/`-w`/`--congestion`/`--tcp-nodelay` with `-Q` now warn instead of vanishing silently); the real fix remains: pace QUIC sends with the same byte-budget loop UDP uses
 - [x] **Connect timeout** (`--connect-timeout`) - shipped (PR #97): bounds TCP connect / QUIC handshake with a clear error naming the flag; off by default so existing behavior is unchanged
 - [x] **Propagate `--tcp-nodelay` to the server** - shipped as `TestStart.tcp_nodelay` (wire-additive, same threading as `zerocopy`). The client's request ORs into the server's data-socket nodelay default; no capability was added because the server already runs its data sockets with `TCP_NODELAY` always-on, so an old server ignoring the field degrades to identical behavior (same call as `window_size`)
-- [ ] **Test by amount** (`-n`/`--bytes`) - "send exactly 1 GiB then stop" instead of time-based; gives comparable runs across link speeds for CI and benchmarking. iperf3 parity (`-n`/`-k`)
+- [x] **Test by amount** (`-n`/`--bytes`) - shipped: transfer a fixed number of bytes instead of running for a fixed time, shared across all streams, all three protocols and all three directions (`byte_budget_v1` capability). `-t` becomes an upper bound when both are given. Byte-exactness needed two things beyond the send-loop stop: a graceful close instead of the timed path's RST (which discards the send buffer), and a post-`Finish` drain on the server so a paced sender's queued tail is actually received. iperf3's `-k` (block count) is not implemented
 - [ ] **Result metadata passthrough** (`--title`, `--extra-data`) - tag JSON/CSV results with a run label or arbitrary metadata for CI log ingestion; pairs with the JSON-schema item below
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
 - [x] **DSCP/TOS marking** (`--dscp`) - set DSCP/TOS on client TCP/UDP sockets for QoS policy testing; QUIC ignores it. Accepts numeric (0-255) or DSCP names (EF, AF11-AF43, CS0-CS7)

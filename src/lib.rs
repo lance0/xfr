@@ -38,6 +38,7 @@
 
 pub mod acl;
 pub mod auth;
+pub mod budget;
 pub mod client;
 pub mod config;
 pub mod control_crypto;
