@@ -84,30 +84,37 @@ fn udp_recv_interval_deltas(
     (total, deltas)
 }
 
-/// Download-mode per-stream Interval overlay: substitute the client's own
-/// receive-side readings into the server's `StreamInterval`s. The server is
-/// the sender there, so its per-stream bytes track send_to() acceptance
-/// (issue #81) and its `jitter_ms` is always `None` — only the receiver
-/// measures jitter, and without this overlay the TUI's live jitter never
-/// updates in `-u -R` (issue #143).
-fn overlay_udp_recv_intervals(
-    streams: Vec<crate::protocol::StreamInterval>,
+/// Download-mode per-stream intervals, built wholly from the client's own
+/// receive-side readings. The server is the sender there, so its per-stream
+/// bytes track send_to() acceptance (issue #81) and its `jitter_ms` is
+/// always `None` — only the receiver measures jitter (issue #143). Since
+/// every field is local, these intervals need no server `Interval` message
+/// at all, which is what lets download-mode progress run on a local clock
+/// while the control channel is clogged by the very saturation being
+/// measured (issue #93).
+fn local_udp_recv_intervals(
     deltas: &[u64],
     stats: &crate::stats::TestStats,
 ) -> Vec<crate::protocol::StreamInterval> {
-    streams
-        .into_iter()
-        .map(|mut s| {
-            if let Some(delta) = deltas.get(s.id as usize) {
-                s.bytes = *delta;
+    deltas
+        .iter()
+        .enumerate()
+        .map(|(id, &bytes)| {
+            let jitter_ms = stats
+                .streams
+                .get(id)
+                .map(|s| s.udp_jitter_ms())
+                .filter(|j| *j > 0.0);
+            crate::protocol::StreamInterval {
+                id: id as u8,
+                bytes,
+                retransmits: None,
+                jitter_ms,
+                lost: None,
+                error: None,
+                rtt_us: None,
+                cwnd: None,
             }
-            if let Some(local) = stats.streams.get(s.id as usize) {
-                let jitter_ms = local.udp_jitter_ms();
-                if jitter_ms > 0.0 {
-                    s.jitter_ms = Some(jitter_ms);
-                }
-            }
-            s
         })
         .collect()
 }
@@ -1039,6 +1046,21 @@ impl Client {
             self.config.protocol == Protocol::Udp && self.config.direction == Direction::Bidir;
         let mut last_recv_bytes: Vec<u64> = vec![0; stats.streams.len()];
         let mut last_recv_instant = tokio::time::Instant::now();
+        // Download-mode display metronome (issue #93): the server's Interval
+        // messages ride the same saturated server->client path as the UDP
+        // data, so using their arrival to pace progress emission stalls the
+        // display exactly when the link gets interesting. Every value we
+        // show in `-u -R` is already receiver-side truth (#81/#143), so a
+        // local 1 Hz clock drives emission instead and the server's
+        // Intervals are ignored — they carry nothing the receiver doesn't
+        // measure better itself.
+        let mut local_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        local_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let progress_start = tokio::time::Instant::now();
+        let mut paused_total = Duration::ZERO;
 
         // Split the transport so a dedicated reader task can own the recv
         // codec independently of the control loop's select!. This prevents
@@ -1069,7 +1091,10 @@ impl Client {
                                     aggregate,
                                     ..
                                 } => {
-                                    if let Some(ref tx) = progress_tx {
+                                    // `-u -R` progress is emitted by the local_interval
+                                    // arm below (issue #93); the server's Intervals are
+                                    // display-redundant there and stall under saturation.
+                                    if !udp_download && let Some(ref tx) = progress_tx {
                                         // Only overlay local TCP_INFO for sender-side contexts (Upload/Bidir).
                                         // In Download mode, server is the sender and has the correct metrics.
                                         let is_sender =
@@ -1083,28 +1108,8 @@ impl Client {
                                         } else {
                                             (aggregate.rtt_us, aggregate.cwnd, None)
                                         };
-                                        // Issue #81: in download mode the server is the UDP
-                                        // sender, so aggregate.bytes counts send_to() calls
-                                        // the kernel accepted — over a constrained link that
-                                        // tracks the requested -b rate, not what arrived.
-                                        // We are the receiver; report our own counters.
-                                        let (total_bytes, throughput_mbps, streams) = if udp_download {
-                                            let now = tokio::time::Instant::now();
-                                            let dt = now.duration_since(last_recv_instant).as_secs_f64();
-                                            last_recv_instant = now;
-                                            let (interval_total, deltas) =
-                                                udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
-                                            let mbps = if dt > 0.0 {
-                                                (interval_total as f64 * 8.0) / dt / 1_000_000.0
-                                            } else {
-                                                0.0
-                                            };
-                                            let streams =
-                                                overlay_udp_recv_intervals(streams, &deltas, &stats);
-                                            (interval_total, mbps, streams)
-                                        } else {
-                                            (aggregate.bytes, aggregate.throughput_mbps, streams)
-                                        };
+                                        let total_bytes = aggregate.bytes;
+                                        let throughput_mbps = aggregate.throughput_mbps;
                                         // Bidir UDP: the download half of the server's split
                                         // (`bytes_received` from our view) is its send-side
                                         // counter — same inflation as above. Substitute our
@@ -1146,16 +1151,9 @@ impl Client {
                                         // Both paths feed the same filter; older-or-same
                                         // counts are silently rejected (None -> consumers
                                         // preserve their previous loss state).
-                                        // In download mode our own receive trackers are the
-                                        // authoritative source; the server has no
-                                        // receiver-side counters to report there.
-                                        let filtered_udp_progress = if udp_download {
-                                            udp_progress_filter.apply(udp_local_progress(&stats))
-                                        } else {
-                                            aggregate
-                                                .udp_progress
-                                                .and_then(|p| udp_progress_filter.apply(p))
-                                        };
+                                        let filtered_udp_progress = aggregate
+                                            .udp_progress
+                                            .and_then(|p| udp_progress_filter.apply(p));
                                         let _ = tx
                                             .send(TestProgress {
                                                 elapsed_ms,
@@ -1266,6 +1264,7 @@ impl Client {
                             if let Some(local_end) = &mut local_end_deadline {
                                 *local_end += paused_for;
                             }
+                            paused_total += paused_for;
                         }
                         // Always pause local data loops
                         let _ = pause_tx.send(paused);
@@ -1322,6 +1321,48 @@ impl Client {
                             let _ = ctrl_writer.write_message(&mut writer, &serialized).await;
                         }
                         Err(e) => warn!("Failed to serialize finish message: {}", e),
+                    }
+                }
+                _ = local_interval.tick(), if udp_download && !local_stop_sent && pause_started_at.is_none() => {
+                    // (`local_stop_sent` gate: once the timed test has ended
+                    // locally, don't print zero-rate rows while the final
+                    // Result crosses a possibly-lossy control channel.)
+                    // Local display metronome for `-u -R` (issue #93): emit a
+                    // full progress update from our own receive counters,
+                    // independent of the (saturation-prone) control channel.
+                    if let Some(ref tx) = progress_tx {
+                        let now = tokio::time::Instant::now();
+                        let dt = now.duration_since(last_recv_instant).as_secs_f64();
+                        last_recv_instant = now;
+                        let (interval_total, deltas) =
+                            udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
+                        let throughput_mbps = if dt > 0.0 {
+                            (interval_total as f64 * 8.0) / dt / 1_000_000.0
+                        } else {
+                            0.0
+                        };
+                        let elapsed_ms = progress_start
+                            .elapsed()
+                            .saturating_sub(paused_total)
+                            .as_millis() as u64;
+                        let _ = tx
+                            .send(TestProgress {
+                                elapsed_ms,
+                                total_bytes: interval_total,
+                                throughput_mbps,
+                                streams: local_udp_recv_intervals(&deltas, &stats),
+                                rtt_us: None,
+                                cwnd: None,
+                                total_retransmits: None,
+                                bytes_sent: None,
+                                bytes_received: None,
+                                throughput_send_mbps: None,
+                                throughput_recv_mbps: None,
+                                udp_progress: udp_progress_filter
+                                    .apply(udp_local_progress(&stats)),
+                                udp_feedback_only: false,
+                            })
+                            .await;
                     }
                 }
                 _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
@@ -2992,25 +3033,14 @@ mod tests {
     }
 
     #[test]
-    fn overlay_udp_recv_intervals_substitutes_bytes_and_jitter() {
+    fn local_udp_recv_intervals_carry_receiver_bytes_and_jitter() {
         let stats = test_stats_with_recv_bytes(&[0, 0]);
         stats.streams[0].set_udp_jitter_us(2500); // 2.5 ms measured locally
         // stream 1 has no jitter reading yet -> must stay None, not Some(0.0)
 
-        let from_server: Vec<crate::protocol::StreamInterval> = (0..2)
-            .map(|id| crate::protocol::StreamInterval {
-                id,
-                bytes: 999_999, // sender-side count; must be replaced
-                retransmits: None,
-                jitter_ms: None, // server is the sender in -R: never set
-                lost: None,
-                error: None,
-                rtt_us: None,
-                cwnd: None,
-            })
-            .collect();
-
-        let out = overlay_udp_recv_intervals(from_server, &[1000, 500], &stats);
+        let out = local_udp_recv_intervals(&[1000, 500], &stats);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].id, out[1].id), (0, 1));
         assert_eq!(out[0].bytes, 1000);
         assert_eq!(out[1].bytes, 500);
         assert_eq!(out[0].jitter_ms, Some(2.5));
