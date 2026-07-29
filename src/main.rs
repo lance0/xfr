@@ -156,13 +156,10 @@ struct Cli {
     #[arg(value_name = "HOST")]
     host: Option<String>,
 
-    /// Server/client port
-    #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
-    port: u16,
-
     /// Test duration. Bare integers are seconds (`-t 10`), or use unit suffixes (`10s`, `1min`, `500ms`). Use 0 for infinite.
     /// Defaults to 10s unless `--probe-mtu` is used without `-t`, in which case it defaults to 60s.
     #[arg(short = 't', long, value_parser = parse_test_duration, env = "XFR_DURATION")]
+    #[arg(help_heading = "Test Options")]
     time: Option<Duration>,
 
     /// Transfer this many bytes, then stop, instead of running for a fixed time
@@ -171,54 +168,67 @@ struct Cli {
     /// finishes; with one, `-t` becomes an upper bound. Requires a server that
     /// advertises `byte_budget_v1`.
     #[arg(short = 'n', long = "bytes", value_parser = parse_byte_budget, env = "XFR_BYTES", conflicts_with = "probe_mtu")]
+    #[arg(help_heading = "Test Options")]
     bytes: Option<u64>,
 
     /// UDP mode
     #[arg(short = 'u', long, conflicts_with = "quic")]
+    #[arg(help_heading = "Test Options")]
     udp: bool,
 
     /// QUIC mode (encrypted, multiplexed streams)
     #[arg(short = 'Q', long, conflicts_with = "udp")]
+    #[arg(help_heading = "Test Options")]
     quic: bool,
 
     /// Target bitrate (e.g., 1G, 100M). Applies to TCP and UDP. 0 = unlimited.
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
+    #[arg(help_heading = "Test Options")]
     bitrate: Option<u64>,
 
     /// Number of parallel streams (1-128)
     #[arg(short = 'P', long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=128))]
+    #[arg(help_heading = "Test Options")]
     parallel: u8,
 
     /// Reverse direction (server sends to client)
     #[arg(short = 'R', long, conflicts_with = "bidir")]
+    #[arg(help_heading = "Test Options")]
     reverse: bool,
 
     /// Bidirectional test
     #[arg(long, conflicts_with = "reverse")]
+    #[arg(help_heading = "Test Options")]
     bidir: bool,
 
     /// JSON output
     #[arg(long, conflicts_with = "csv")]
+    #[arg(help_heading = "Output Options")]
     json: bool,
 
     /// JSON streaming output (one object per line)
     #[arg(long, conflicts_with = "csv")]
+    #[arg(help_heading = "Output Options")]
     json_stream: bool,
 
     /// CSV output
     #[arg(long, conflicts_with_all = ["json", "json_stream"])]
+    #[arg(help_heading = "Output Options")]
     csv: bool,
 
     /// Quiet mode - suppress interval output, show only summary
     #[arg(short = 'q', long)]
+    #[arg(help_heading = "Output Options")]
     quiet: bool,
 
     /// Output file
     #[arg(short = 'o', long)]
+    #[arg(help_heading = "Output Options")]
     output: Option<PathBuf>,
 
     /// Disable TUI
     #[arg(long)]
+    #[arg(help_heading = "Output Options")]
     no_tui: bool,
 
     /// Disable the background check for a newer xfr release (also honored via
@@ -228,44 +238,59 @@ struct Cli {
 
     /// Color theme (default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized)
     #[arg(long, default_value = "default")]
+    #[arg(help_heading = "Output Options")]
     theme: String,
 
     /// Report interval in seconds (default: 1.0)
     #[arg(short = 'i', long)]
+    #[arg(help_heading = "Output Options")]
     interval: Option<f64>,
 
     /// Omit first N seconds from interval output (TCP ramp-up)
     #[arg(long)]
+    #[arg(help_heading = "Output Options")]
     omit: Option<u64>,
+
+    /// Server/client port
+    #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
+    #[arg(help_heading = "Connection Options")]
+    port: u16,
 
     /// Disable Nagle algorithm
     #[arg(long)]
+    #[arg(help_heading = "Connection Options")]
     tcp_nodelay: bool,
 
     /// TCP congestion control algorithm (e.g. cubic, bbr, reno)
     #[arg(long = "congestion", value_name = "ALGO")]
+    #[arg(help_heading = "Connection Options")]
     congestion: Option<String>,
 
     /// DSCP/TOS marking: raw TOS byte (0-255) or DSCP name (EF, AF11, CS1, etc.)
     #[arg(long, value_name = "VALUE")]
+    #[arg(help_heading = "Connection Options")]
     dscp: Option<String>,
 
     /// Socket buffer size for TCP (SO_SNDBUF/SO_RCVBUF) and UDP
     /// (SO_SNDBUF/SO_RCVBUF on both ends), e.g., 512K, 1M, 16M. When
     /// unset, TCP uses kernel autotuning and UDP uses the kernel default.
     #[arg(short = 'w', long, value_parser = parse_size)]
+    #[arg(help_heading = "Connection Options")]
     window: Option<usize>,
 
     /// Timestamp format for interval output (relative, iso8601, unix)
     #[arg(long, value_parser = parse_timestamp_format, env = "XFR_TIMESTAMP_FORMAT")]
+    #[arg(help_heading = "Output Options")]
     timestamp_format: Option<TimestampFormat>,
 
     /// Log file path (e.g., "~/.config/xfr/xfr.log")
     #[arg(long, env = "XFR_LOG_FILE")]
+    #[arg(help_heading = "Output Options")]
     log_file: Option<String>,
 
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, env = "XFR_LOG_LEVEL")]
+    #[arg(help_heading = "Output Options")]
     log_level: Option<String>,
 
     /// Pre-shared key for authentication.
@@ -274,38 +299,47 @@ struct Cli {
     /// variable are visible to other users through process metadata such as
     /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
     #[arg(long, env = "XFR_PSK")]
+    #[arg(help_heading = "Authentication")]
     psk: Option<String>,
 
     /// Read PSK from file
     #[arg(long)]
+    #[arg(help_heading = "Authentication")]
     psk_file: Option<PathBuf>,
 
     /// Force IPv4 only
     #[arg(short = '4', long = "ipv4")]
+    #[arg(help_heading = "Connection Options")]
     ipv4_only: bool,
 
     /// Force IPv6 only
     #[arg(short = '6', long = "ipv6")]
+    #[arg(help_heading = "Connection Options")]
     ipv6_only: bool,
 
     /// Local address to bind to (e.g., 192.168.1.100 or 192.168.1.100:0)
     #[arg(long, value_name = "ADDR")]
+    #[arg(help_heading = "Connection Options")]
     bind: Option<String>,
 
     /// Client source port for firewall traversal (UDP/QUIC/TCP data streams)
     #[arg(long, value_name = "PORT")]
+    #[arg(help_heading = "Connection Options")]
     cport: Option<u16>,
 
     /// MPTCP mode (Multi-Path TCP, Linux 5.6+)
     #[arg(long, conflicts_with_all = ["udp", "quic"])]
+    #[arg(help_heading = "Connection Options")]
     mptcp: bool,
 
     /// Use random payload data (default for TCP/UDP client-sent traffic)
     #[arg(long, conflicts_with = "zeros")]
+    #[arg(help_heading = "Test Options")]
     random: bool,
 
     /// Use zero-filled payload data instead of random bytes
     #[arg(long, conflicts_with = "random")]
+    #[arg(help_heading = "Test Options")]
     zeros: bool,
 
     /// Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux only;
@@ -313,10 +347,12 @@ struct Cli {
     /// explicitly warns when zero-copy cannot take effect instead of
     /// silently falling back to regular writes.
     #[arg(short = 'Z', long, conflicts_with_all = ["udp", "quic"])]
+    #[arg(help_heading = "Test Options")]
     zerocopy: bool,
 
     /// Disable zero-copy TCP sends (use regular buffered writes)
     #[arg(long, conflicts_with = "zerocopy")]
+    #[arg(help_heading = "Test Options")]
     no_zerocopy: bool,
 
     /// Probe the path MTU instead of running a throughput test: walks
@@ -328,12 +364,14 @@ struct Cli {
         long,
         conflicts_with_all = ["quic", "reverse", "bidir", "bitrate", "parallel", "zerocopy", "zeros"]
     )]
+    #[arg(help_heading = "Test Options")]
     probe_mtu: bool,
 
     /// Fail if the control connection (TCP connect / QUIC handshake)
     /// takes longer than this (e.g. 5s). Without it, a dead or filtered
     /// server is bounded only by OS defaults, which can be minutes.
     #[arg(long, value_parser = parse_nonzero_duration, value_name = "DURATION")]
+    #[arg(help_heading = "Connection Options")]
     connect_timeout: Option<Duration>,
 }
 
@@ -342,50 +380,20 @@ struct Cli {
 enum Commands {
     /// Start server mode
     Serve {
-        /// Server port
-        #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
-        port: u16,
-
         /// Exit after one test
         #[arg(long)]
+        #[arg(help_heading = "Server Options")]
         one_off: bool,
 
         /// Enable TUI dashboard
         #[arg(long)]
+        #[arg(help_heading = "Server Options")]
         tui: bool,
 
         /// Maximum test duration (server-side limit). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`).
         #[arg(long, value_parser = parse_duration)]
+        #[arg(help_heading = "Server Options")]
         max_duration: Option<Duration>,
-
-        /// Prometheus metrics port
-        #[cfg(feature = "prometheus")]
-        #[arg(long)]
-        prometheus: Option<u16>,
-
-        /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
-        #[arg(long, env = "XFR_PUSH_GATEWAY")]
-        push_gateway: Option<String>,
-
-        /// Log file path (e.g., "~/.config/xfr/xfr.log")
-        #[arg(long, env = "XFR_LOG_FILE")]
-        log_file: Option<String>,
-
-        /// Log level (error, warn, info, debug, trace)
-        #[arg(long, env = "XFR_LOG_LEVEL")]
-        log_level: Option<String>,
-
-        /// Pre-shared key for authentication.
-        ///
-        /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
-        /// variable are visible to other users through process metadata such as
-        /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
-        #[arg(long, env = "XFR_PSK")]
-        psk: Option<String>,
-
-        /// Read PSK from file
-        #[arg(long)]
-        psk_file: Option<PathBuf>,
 
         /// Use a named server preset from the config file.
         ///
@@ -394,43 +402,93 @@ enum Commands {
         /// is applied only when `--max-duration` is not provided.
         /// Unknown presets are rejected.
         #[arg(long)]
+        #[arg(help_heading = "Server Options")]
         preset: Option<String>,
 
-        /// Max concurrent tests per IP (rate limiting)
+        /// Prometheus metrics port
+        #[cfg(feature = "prometheus")]
         #[arg(long)]
-        rate_limit: Option<u32>,
+        #[arg(help_heading = "Server Options")]
+        prometheus: Option<u16>,
 
-        /// Rate limit time window. Bare integers are seconds (`60`); must be greater than 0.
-        #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
-        rate_limit_window: Duration,
+        /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
+        #[arg(long, env = "XFR_PUSH_GATEWAY")]
+        #[arg(help_heading = "Server Options")]
+        push_gateway: Option<String>,
 
-        /// Allow IP/subnet (can be repeated)
-        #[arg(long = "allow", action = clap::ArgAction::Append)]
-        allow: Vec<String>,
-
-        /// Deny IP/subnet (can be repeated)
-        #[arg(long = "deny", action = clap::ArgAction::Append)]
-        deny: Vec<String>,
-
-        /// ACL rules file
+        /// Disable mDNS service registration
         #[arg(long)]
-        acl_file: Option<PathBuf>,
+        #[arg(help_heading = "Server Options")]
+        no_mdns: bool,
+
+        /// Server port
+        #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
+        #[arg(help_heading = "Connection Options")]
+        port: u16,
 
         /// Bind to specific address (e.g., 192.168.1.1, ::1)
         #[arg(short = 'B', long)]
+        #[arg(help_heading = "Connection Options")]
         bind: Option<IpAddr>,
 
         /// Force IPv4 only
         #[arg(short = '4', long = "ipv4")]
+        #[arg(help_heading = "Connection Options")]
         ipv4_only: bool,
 
         /// Force IPv6 only
         #[arg(short = '6', long = "ipv6")]
+        #[arg(help_heading = "Connection Options")]
         ipv6_only: bool,
 
-        /// Disable mDNS service registration
+        /// Max concurrent tests per IP (rate limiting)
         #[arg(long)]
-        no_mdns: bool,
+        #[arg(help_heading = "Access Control")]
+        rate_limit: Option<u32>,
+
+        /// Rate limit time window. Bare integers are seconds (`60`); must be greater than 0.
+        #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
+        #[arg(help_heading = "Access Control")]
+        rate_limit_window: Duration,
+
+        /// Allow IP/subnet (can be repeated)
+        #[arg(long = "allow", action = clap::ArgAction::Append)]
+        #[arg(help_heading = "Access Control")]
+        allow: Vec<String>,
+
+        /// Deny IP/subnet (can be repeated)
+        #[arg(long = "deny", action = clap::ArgAction::Append)]
+        #[arg(help_heading = "Access Control")]
+        deny: Vec<String>,
+
+        /// ACL rules file
+        #[arg(long)]
+        #[arg(help_heading = "Access Control")]
+        acl_file: Option<PathBuf>,
+
+        /// Pre-shared key for authentication.
+        ///
+        /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
+        /// variable are visible to other users through process metadata such as
+        /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
+        #[arg(long, env = "XFR_PSK")]
+        #[arg(help_heading = "Authentication")]
+        psk: Option<String>,
+
+        /// Read PSK from file
+        #[arg(long)]
+        #[arg(help_heading = "Authentication")]
+        psk_file: Option<PathBuf>,
+
+        /// Log file path (e.g., "~/.config/xfr/xfr.log")
+        #[arg(long, env = "XFR_LOG_FILE")]
+        #[arg(help_heading = "Output Options")]
+        log_file: Option<String>,
+
+        /// Log level (error, warn, info, debug, trace)
+        #[arg(long, env = "XFR_LOG_LEVEL")]
+        #[arg(help_heading = "Output Options")]
+        log_level: Option<String>,
     },
 
     /// Compare two test results
