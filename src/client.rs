@@ -1323,7 +1323,10 @@ impl Client {
                         Err(e) => warn!("Failed to serialize finish message: {}", e),
                     }
                 }
-                _ = local_interval.tick(), if udp_download && pause_started_at.is_none() => {
+                _ = local_interval.tick(), if udp_download && !local_stop_sent && pause_started_at.is_none() => {
+                    // (`local_stop_sent` gate: once the timed test has ended
+                    // locally, don't print zero-rate rows while the final
+                    // Result crosses a possibly-lossy control channel.)
                     // Local display metronome for `-u -R` (issue #93): emit a
                     // full progress update from our own receive counters,
                     // independent of the (saturation-prone) control channel.
