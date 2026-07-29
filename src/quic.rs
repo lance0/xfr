@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use quinn::{
     AsyncUdpSocket, ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
-    ServerConfig, TransportConfig, UdpPoller, VarInt,
+    ServerConfig, TransportConfig, UdpPoller, VarInt, WriteError,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -64,6 +64,11 @@ const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
 /// before rescheduling quinn's receive task, preventing starvation under heavy
 /// xfr-hello load (LAN-170 #32).
 const MAX_DIVERT_ITERATIONS: u32 = 16;
+/// Suppression window for peer-initiated stream stops near the test
+/// deadline. The peer stops streams / closes the connection at its own
+/// deadline, which can precede ours by the path RTT plus scheduling slop
+/// (mirrors tcp.rs SEND_TEARDOWN_GRACE).
+const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 
 /// Generate a self-signed certificate for QUIC
 ///
@@ -423,6 +428,21 @@ pub async fn send_quic_data(
                     }
                     Err(e) => {
                         crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);
+                        let now = tokio::time::Instant::now();
+                        let deadline_reached = !is_infinite && now >= deadline;
+                        let near_deadline = !is_infinite && now + SEND_TEARDOWN_GRACE >= deadline;
+                        let peer_closed = matches!(
+                            e,
+                            WriteError::Stopped(_) | WriteError::ConnectionLost(_)
+                        );
+                        // Treat a peer-initiated stop as clean teardown only when we
+                        // are already cancelling or very close to the configured end
+                        // time (mirrors the TCP send path). A mid-test stop still
+                        // surfaces as an error.
+                        if *cancel.borrow() || deadline_reached || (peer_closed && near_deadline) {
+                            debug!("QUIC send ended by peer during teardown: {}", e);
+                            break;
+                        }
                         error!("QUIC send error: {}", e);
                         return Err(e.into());
                     }
@@ -431,7 +451,12 @@ pub async fn send_quic_data(
         }
     }
 
-    send.finish()?;
+    // finish() only fails if the stream is already finished or stopped
+    // (e.g. by the peer during teardown above) — never data loss, so it
+    // isn't worth failing the whole send task over.
+    if let Err(e) = send.finish() {
+        debug!("QUIC stream finish after send loop: {}", e);
+    }
     Ok(())
 }
 
