@@ -234,7 +234,11 @@ impl ControlCodec {
         if payload.len() < 8 + 16 {
             return Err(anyhow!("protected frame too short"));
         }
-        let seq = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let seq = u64::from_le_bytes(
+            payload[..8]
+                .try_into()
+                .expect("length checked above; an 8-byte slice always converts"),
+        );
         if seq != self.seq {
             return Err(anyhow!(
                 "sequence mismatch: expected {}, got {}",

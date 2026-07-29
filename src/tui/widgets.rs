@@ -121,12 +121,6 @@ impl ProgressBar {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn style(mut self, style: Style) -> Self {
-        self.style = style;
-        self
-    }
-
     pub fn filled_style(mut self, style: Style) -> Self {
         self.filled_style = style;
         self
