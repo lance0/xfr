@@ -539,6 +539,25 @@ const HIGH_PPS_THRESHOLD: f64 = 100_000.0;
 /// Number of packets to send per burst in high-PPS mode
 const BURST_SIZE: u64 = 100;
 
+/// Suppression window for send errors near the test deadline. The server
+/// tears down its socket at its own deadline, which can precede ours by
+/// the path RTT plus scheduling slop (mirrors tcp.rs SEND_TEARDOWN_GRACE).
+const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+
+/// True when a failed send should be logged at debug instead of warn: the
+/// test is already cancelled or within [`SEND_TEARDOWN_GRACE`] of its
+/// deadline, so the peer closing its socket first (the kernel latches
+/// ECONNREFUSED onto a connected UDP socket) is expected teardown, not a
+/// failure. A mid-test send error still warns.
+fn is_teardown_send_error(
+    cancelled: bool,
+    is_infinite: bool,
+    now: Instant,
+    deadline: Instant,
+) -> bool {
+    cancelled || (!is_infinite && now + SEND_TEARDOWN_GRACE >= deadline)
+}
+
 /// Send UDP data at a paced rate (or unlimited if target_bitrate is 0)
 ///
 /// If `target` is Some, uses send_to() for unconnected sockets (server reverse mode).
@@ -684,7 +703,16 @@ pub async fn send_udp_paced(
                     sequence += 1;
                 }
                 Err(e) => {
-                    warn!("UDP send error: {}", e);
+                    if is_teardown_send_error(
+                        *cancel.borrow(),
+                        is_infinite,
+                        Instant::now(),
+                        deadline,
+                    ) {
+                        debug!("UDP send error during teardown: {}", e);
+                    } else {
+                        warn!("UDP send error: {}", e);
+                    }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                     // Continue sending - UDP is best-effort
                 }
@@ -799,7 +827,16 @@ async fn send_udp_unlimited(
                     sequence += 1;
                 }
                 Err(e) => {
-                    warn!("UDP send error: {}", e);
+                    if is_teardown_send_error(
+                        *cancel.borrow(),
+                        is_infinite,
+                        Instant::now(),
+                        deadline,
+                    ) {
+                        debug!("UDP send error during teardown: {}", e);
+                    } else {
+                        warn!("UDP send error: {}", e);
+                    }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                 }
             }
@@ -1269,6 +1306,21 @@ mod tests {
         let decoded = UdpPacketHeader::decode(&buffer).unwrap();
         assert_eq!(decoded.sequence, 12345);
         assert_eq!(decoded.timestamp_us, 67890);
+    }
+
+    #[test]
+    fn teardown_send_error_gating() {
+        let now = Instant::now();
+        let far = now + Duration::from_secs(5);
+        let near = now + Duration::from_millis(100);
+        // Mid-test failure must still warn
+        assert!(!is_teardown_send_error(false, false, now, far));
+        // Cancelled: suppress
+        assert!(is_teardown_send_error(true, false, now, far));
+        // Within the grace window of the deadline: suppress
+        assert!(is_teardown_send_error(false, false, now, near));
+        // Infinite tests have no deadline to be near
+        assert!(!is_teardown_send_error(false, true, now, far));
     }
 
     #[test]
