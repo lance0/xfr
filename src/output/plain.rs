@@ -228,6 +228,28 @@ pub fn output_interval_plain(
     output
 }
 
+/// Feedback-only stall line (issue #70 follow-up, scripted half of issue
+/// #93): printed while full `Interval` reports have stalled but 2 Hz UDP
+/// receiver feedback keeps arriving. Shows cumulative loss — the feedback
+/// path knows packet counts, not bytes, so fabricating a throughput row
+/// would be dishonest; this line says exactly what is known.
+pub fn output_feedback_plain(
+    timestamp: &str,
+    packets_lost: u64,
+    lost_percent: Option<f64>,
+) -> String {
+    match lost_percent {
+        Some(pct) => format!(
+            "[{}]  (reports stalled)  lost so far: {} ({:.1}%)\n",
+            timestamp, packets_lost, pct
+        ),
+        None => format!(
+            "[{}]  (reports stalled)  lost so far: {}\n",
+            timestamp, packets_lost
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +283,18 @@ mod tests {
             throughput_recv_mbps: None,
             mtu_probe: None,
         }
+    }
+
+    #[test]
+    fn feedback_stall_line_shows_cumulative_loss() {
+        let line = output_feedback_plain("00:00:07", 17_000, Some(20.04));
+        assert_eq!(
+            line,
+            "[00:00:07]  (reports stalled)  lost so far: 17000 (20.0%)\n"
+        );
+        // No receiver feedback decoded yet: counts without a percent.
+        let line = output_feedback_plain("00:00:07", 0, None);
+        assert_eq!(line, "[00:00:07]  (reports stalled)  lost so far: 0\n");
     }
 
     #[test]
