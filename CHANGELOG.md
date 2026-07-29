@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.23] - 2026-07-29
 
 ### Added
 - **Test by transfer size, not time (`-n`/`--bytes`)** — `xfr <host> -n 1G` sends exactly 1 GiB and stops, instead of running for a fixed number of seconds. Runs are then comparable across links of different speeds, which is what CI and benchmarking usually want; a timed test moves a different amount of data on every link. Binary suffixes (`K`/`M`/`G` = KiB/MiB/GiB), and the count is the total across all streams rather than per stream — `-P 8 -n 1G` still transfers 1 GiB, with faster streams simply carrying more of it. Without an explicit `-t` there is no clock at all; with one, `-t` becomes an upper bound and the test reports however much it managed. Works for TCP, UDP and QUIC in all three directions, and needs a server advertising the new `byte_budget_v1` capability — against an older server the client refuses to start rather than quietly running a timed test instead. UDP transfers whole datagrams, so its final one may be short — and a budget below one packet header warns rather than silently transferring nothing. Under the TUI the progress bar tracks bytes against the requested size instead of showing an "infinite" bar.
