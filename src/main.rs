@@ -1440,6 +1440,14 @@ async fn run_client_plain(
         // drop a tick while feedback continues to flow over UDP).
         let mut cached_udp_progress: Option<xfr::protocol::UdpIntervalProgress> = None;
         let mut last_printed_cumulative_lost: u64 = 0;
+        // Stall detection for scripted output (issue #70 follow-up, the
+        // non-TUI half of issue #93): full-interval rows print on control
+        // `Interval` arrival, which stalls under upload saturation. Track
+        // when the last real row printed so feedback-only updates can keep
+        // loss visible in the meantime.
+        let mut last_row_at = std::time::Instant::now();
+        let mut last_feedback_row_at = std::time::Instant::now();
+        let row_period = std::time::Duration::from_secs_f64(interval_secs.max(1.0));
 
         while let Some(progress) = rx.recv().await {
             // Update the cache from any update that carries udp_progress.
@@ -1449,11 +1457,60 @@ async fn run_client_plain(
             if let Some(p) = progress.udp_progress {
                 cached_udp_progress = Some(p);
             }
-            // Feedback-only updates have nothing else to print
-            // (throughput/bytes/retransmits are sentinel) and the next
-            // full interval will pick up the cached cumulative we just
-            // recorded above.
+            // Feedback-only updates have no bytes/throughput to print, and
+            // the next full interval will pick up the cached cumulative we
+            // just recorded above. But when full intervals have *stalled*
+            // (upload saturation clogging the control channel — issue #70
+            // follow-up, the scripted half of issue #93), these 1 Hz
+            // locally-clocked updates are the only live signal, so emit an
+            // explicit feedback event carrying what they actually know:
+            // cumulative loss. Plain text prints a stall line; --json-stream
+            // emits a marked `udp_feedback` event. CSV keeps its fixed
+            // columns and stays interval-only. The printed-loss baseline is
+            // NOT advanced, so the next real interval still reports its
+            // full delta window.
             if progress.udp_feedback_only {
+                if !quiet
+                    && !csv
+                    && let Some(cum) = cached_udp_progress
+                {
+                    let now = std::time::Instant::now();
+                    let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
+                    // Both gates run slightly under their nominal multiple
+                    // (1.9x and 0.9x): feedback updates tick at the same
+                    // nominal rate as rows, so exact >= comparisons skip
+                    // every marginally-early arrival and halve the cadence.
+                    let stalled = now.duration_since(last_row_at) >= row_period.mul_f64(1.9)
+                        && now.duration_since(last_feedback_row_at) >= row_period.mul_f64(0.9)
+                        && elapsed_secs > omit_secs as f64;
+                    if stalled {
+                        let timestamp = timestamp_format.format(test_start, now, test_start_system);
+                        let line = if json_stream {
+                            match xfr::output::json::output_feedback_json(
+                                &timestamp,
+                                elapsed_secs,
+                                cum.packets_received,
+                                cum.packets_lost,
+                                cum.lost_percent(),
+                            ) {
+                                Ok(line) => format!("{}\n", line),
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize feedback to JSON: {}", e);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            xfr::output::plain::output_feedback_plain(
+                                &timestamp,
+                                cum.packets_lost,
+                                cum.lost_percent(),
+                            )
+                        };
+                        print!("{}", line);
+                        let _ = io::stdout().flush();
+                        last_feedback_row_at = now;
+                    }
+                }
                 continue;
             }
             // Accumulate cumulative totals for fallback summary
@@ -1579,6 +1636,7 @@ async fn run_client_plain(
             };
             print!("{}", interval_output);
             let _ = io::stdout().flush();
+            last_row_at = std::time::Instant::now();
         }
     });
 

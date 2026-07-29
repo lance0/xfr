@@ -69,10 +69,77 @@ pub fn output_interval_json(
         .map_err(|e| anyhow::anyhow!("failed to serialize interval to JSON: {e}"))
 }
 
+/// Feedback-only streaming event (issue #70 follow-up, scripted half of
+/// issue #93): emitted while full `Interval` reports have stalled but 2 Hz
+/// UDP receiver feedback is still arriving. Carries only what the feedback
+/// path actually knows — cumulative packet counts — with an explicit
+/// `event` marker so line consumers can distinguish it from interval rows
+/// (which have no `event` field and always carry `bytes`).
+#[derive(Serialize)]
+pub struct StreamFeedback {
+    pub event: &'static str,
+    pub timestamp: String,
+    pub elapsed_secs: f64,
+    pub packets_received: u64,
+    pub packets_lost: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lost_percent: Option<f64>,
+}
+
+/// Output a feedback-only event as a JSON line (for --json-stream)
+pub fn output_feedback_json(
+    timestamp: &str,
+    elapsed_secs: f64,
+    packets_received: u64,
+    packets_lost: u64,
+    lost_percent: Option<f64>,
+) -> anyhow::Result<String> {
+    let feedback = StreamFeedback {
+        event: "udp_feedback",
+        timestamp: timestamp.to_string(),
+        elapsed_secs,
+        packets_received,
+        packets_lost,
+        lost_percent,
+    };
+    serde_json::to_string(&feedback)
+        .map_err(|e| anyhow::anyhow!("failed to serialize feedback to JSON: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::output::json::{output_interval_json, output_json, save_json, serialize_pretty};
+    use crate::output::json::{
+        output_feedback_json, output_interval_json, output_json, save_json, serialize_pretty,
+    };
     use crate::protocol::{StreamResult, TcpInfoSnapshot, TestResult};
+
+    #[test]
+    fn feedback_event_is_marked_and_distinct_from_intervals() {
+        let line = output_feedback_json("00:00:07", 7.0, 68_000, 17_000, Some(20.0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        // The `event` marker is what lets stream consumers tell these
+        // apart; interval rows must NOT grow one by accident.
+        assert_eq!(v["event"], "udp_feedback");
+        assert_eq!(v["packets_received"], 68_000);
+        assert_eq!(v["packets_lost"], 17_000);
+        assert_eq!(v["lost_percent"], 20.0);
+        assert!(v.get("bytes").is_none());
+
+        let interval = output_interval_json(
+            "00:00:07", 7.0, 100.0, 12_500_000, None, None, None, None, None,
+        )
+        .unwrap();
+        let iv: serde_json::Value = serde_json::from_str(&interval).unwrap();
+        assert!(iv.get("event").is_none());
+        assert!(iv.get("bytes").is_some());
+    }
+
+    #[test]
+    fn feedback_event_omits_unknown_percent() {
+        let line = output_feedback_json("00:00:07", 7.0, 0, 0, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(v.get("lost_percent").is_none());
+    }
 
     fn make_result() -> TestResult {
         TestResult {
