@@ -23,7 +23,7 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
     }
 }
 
-/// Color a throughput sparkline cell by the per-interval loss rate. Unknown
+/// Style a throughput sparkline cell by the per-interval loss rate. Unknown
 /// rate stays primary so we don't fake a signal we don't have; clean
 /// intervals stay primary; light loss (<1%) goes warning, heavy loss
 /// (>=1%) goes error. Thresholds intentionally differ from `loss_color`'s
@@ -33,12 +33,24 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
 /// either — the sparkline's "clean" state is the graph color so the
 /// background blends with the chart, not the success-green used in the
 /// stats panel.
-fn loss_severity_color(rate: Option<f64>, theme: &Theme) -> Color {
+///
+/// Severity is also encoded without hue (issue #158): light loss adds
+/// UNDERLINED (a baseline tick under the bar), heavy loss adds REVERSED
+/// (the column renders as a photographic negative — a bright pillar).
+/// The sparkline is the one display where color was the *only* channel
+/// carrying loss, which fails in sunlight glare, for colorblind users,
+/// in the monochrome theme, and under NO_COLOR. SGR 4/7 are the reliable
+/// modifiers across terminals (DIM is not).
+fn loss_severity_style(rate: Option<f64>, theme: &Theme) -> Style {
     match rate {
-        None => theme.graph_primary,
-        Some(r) if r <= 0.0 => theme.graph_primary,
-        Some(r) if r < 1.0 => theme.warning,
-        Some(_) => theme.error,
+        None => Style::default().fg(theme.graph_primary),
+        Some(r) if r <= 0.0 => Style::default().fg(theme.graph_primary),
+        Some(r) if r < 1.0 => Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::UNDERLINED),
+        Some(_) => Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::REVERSED),
     }
 }
 
@@ -296,7 +308,7 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         let styles: Vec<Style> = app
             .throughput_history
             .iter()
-            .map(|s| Style::default().fg(loss_severity_color(s.loss_rate_percent(), theme)))
+            .map(|s| loss_severity_style(s.loss_rate_percent(), theme))
             .collect();
         let sparkline = Sparkline::new(&data)
             .max(app.max_throughput().max(100.0))
@@ -958,4 +970,32 @@ fn draw_settings_buttons(
         Paragraph::new(button_line).alignment(Alignment::Center),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loss_severity_survives_without_hue() {
+        // Issue #158: the sparkline was the one display where color was
+        // the only channel carrying loss. Severity must also ride
+        // modifiers so it survives glare, monochrome, and NO_COLOR.
+        let theme = Theme::default_theme();
+
+        let clean = loss_severity_style(Some(0.0), &theme);
+        assert!(clean.add_modifier.is_empty());
+        assert_eq!(clean.fg, Some(theme.graph_primary));
+
+        let unknown = loss_severity_style(None, &theme);
+        assert!(unknown.add_modifier.is_empty());
+
+        let light = loss_severity_style(Some(0.5), &theme);
+        assert!(light.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(light.fg, Some(theme.warning));
+
+        let heavy = loss_severity_style(Some(5.0), &theme);
+        assert!(heavy.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(heavy.fg, Some(theme.error));
+    }
 }

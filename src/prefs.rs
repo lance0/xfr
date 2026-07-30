@@ -70,9 +70,28 @@ impl Prefs {
         self
     }
 
-    /// Get effective theme name
+    /// Get effective theme name.
+    ///
+    /// With no explicit choice anywhere (CLI, config, saved pref), a set
+    /// `NO_COLOR` environment variable (<https://no-color.org>) selects the
+    /// monochrome theme: crossterm already strips the color escapes under
+    /// NO_COLOR, so without this the RGB-palette themes degrade by
+    /// accident instead of by design. An explicit theme choice outranks
+    /// NO_COLOR — the convention governs *default* output, and an explicit
+    /// flag or saved pref is an explicit request. Because `self.theme`
+    /// stays `None`, the env-induced choice is never persisted to
+    /// prefs.toml.
     pub fn theme_name(&self) -> &str {
-        self.theme.as_deref().unwrap_or("default")
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        self.effective_theme_name(no_color)
+    }
+
+    fn effective_theme_name(&self, no_color: bool) -> &str {
+        match self.theme.as_deref() {
+            Some(t) => t,
+            None if no_color => "monochrome",
+            None => "default",
+        }
     }
 }
 
@@ -162,5 +181,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(prefs.theme_name(), "dracula");
+    }
+
+    #[test]
+    fn no_color_defaults_to_monochrome_but_never_outranks_a_choice() {
+        // (Tested via the injectable inner fn — the env var itself is
+        // process-global and would race parallel tests.)
+        let prefs = Prefs::default();
+        assert_eq!(prefs.effective_theme_name(true), "monochrome");
+        assert_eq!(prefs.effective_theme_name(false), "default");
+
+        // An explicit choice (CLI/config/saved pref all land in `theme`)
+        // outranks NO_COLOR: the convention governs default output only.
+        let prefs = Prefs {
+            theme: Some("dracula".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(prefs.effective_theme_name(true), "dracula");
     }
 }

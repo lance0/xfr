@@ -132,26 +132,40 @@ impl Theme {
         }
     }
 
-    /// Monochrome theme - grayscale only
+    /// Monochrome theme — high-contrast grayscale for glare, monochrome
+    /// displays, and `NO_COLOR` runs (issue #158).
+    ///
+    /// Built from terminal-adaptive ANSI colors, never `Rgb`: named colors
+    /// are remapped by the terminal's own palette, so the theme stays
+    /// readable on both dark and light backgrounds. (A hardcoded white is
+    /// invisible on a light terminal — and a light background is exactly
+    /// what wins in direct sun, where dark screens act as mirrors.)
+    /// Deliberately few levels: glare washes out mid-tone grays first, so
+    /// everything collapses to Reset / Gray / DarkGray, with maximum
+    /// contrast (the terminal's default foreground) on anything that
+    /// matters. Loss severity stays legible without hue via the modifier
+    /// encoding in the sparkline renderer.
     pub fn monochrome() -> Self {
         Self {
             name: Cow::Borrowed("monochrome"),
 
-            border: Color::Rgb(200, 200, 200),
-            border_focused: Color::Rgb(200, 200, 200),
-            text: Color::Rgb(255, 255, 255),
-            text_dim: Color::Rgb(120, 120, 120),
-            highlight_bg: Color::Rgb(50, 50, 50),
+            border: Color::DarkGray,
+            border_focused: Color::Gray,
+            text: Color::Reset,
+            text_dim: Color::DarkGray,
+            highlight_bg: Color::DarkGray,
 
-            success: Color::Rgb(200, 200, 200),
-            warning: Color::Rgb(170, 170, 170),
-            error: Color::Rgb(255, 255, 255),
+            success: Color::Reset,
+            // A real color, not Reset: also used as a *background* (update
+            // banner renders black-on-warning).
+            warning: Color::Gray,
+            error: Color::Reset,
 
-            accent: Color::Rgb(200, 200, 200),
-            header: Color::Rgb(255, 255, 255),
+            accent: Color::Reset,
+            header: Color::Reset,
 
-            graph_primary: Color::Rgb(200, 200, 200),
-            graph_secondary: Color::Rgb(150, 150, 150),
+            graph_primary: Color::Reset,
+            graph_secondary: Color::Gray,
         }
     }
 

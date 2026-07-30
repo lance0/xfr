@@ -79,7 +79,12 @@ Disable the background check for a newer release. Also honored via the
 DO_NOT_TRACK or XFR_NO_UPDATE_CHECK environment variables.
 .TP
 .BI \-\-theme " THEME"
-Color theme: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized
+Color theme: default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized.
+The monochrome theme (alias: mono) is the high-visibility option for glare
+and monochrome displays: it renders in the terminal's own default colors at
+maximum contrast, and works on light and dark backgrounds alike. Loss
+severity in the throughput graph is always also encoded without color
+(underline for light loss, reverse video for heavy loss).
 .TP
 .BI \-i ", " \-\-interval " SECS"
 Report interval in seconds (default: 1.0)
@@ -256,6 +261,11 @@ accepts the same names and numeric values as
 .TP
 .B XFR_PORT
 Server/client port
+.TP
+.B NO_COLOR
+When set and no theme is chosen via \fB\-\-theme\fR, config, or a saved
+preference, the monochrome theme is used (https://no-color.org). The choice
+is not persisted.
 .TP
 .B XFR_DURATION
 Test duration

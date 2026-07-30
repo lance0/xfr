@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The monochrome theme is now actually usable in sunlight** — it was built from hardcoded RGB grays whose mid-tone distinctions are exactly what glare washes out, and its fixed white text was invisible on light terminal backgrounds (the setup that works best outdoors, since dark screens mirror). It now renders in the terminal's own default colors at maximum contrast with just three levels, adapting to dark and light backgrounds alike. Loss severity in the throughput sparkline is additionally encoded without color in every theme: light loss underlines the bar, heavy loss reverses the cell into a bright pillar — so lossy intervals survive glare, monochrome, `NO_COLOR`, and colorblindness. Setting the standard `NO_COLOR` environment variable now selects the monochrome theme by default (an explicit `--theme`, config value, or saved preference still wins, and the env-induced choice is never persisted). (#158)
+
 ## [0.9.23] - 2026-07-29
 
 ### Added
