@@ -125,6 +125,11 @@ pub struct App {
     pub result: Option<TestResult>,
     pub error: Option<String>,
 
+    /// Deadline for the post-quit "waiting for server Result" grace period
+    /// (issue #159). While set, the footer shows a countdown so a quit on a
+    /// dead link reads as a bounded wait instead of a hang.
+    pub cancel_deadline: Option<Instant>,
+
     pub start_time: Option<Instant>,
     pub show_help: bool,
     pub show_streams: bool,
@@ -238,6 +243,8 @@ impl App {
 
             result: None,
             error: None,
+
+            cancel_deadline: None,
 
             start_time: None,
             show_help: false,
@@ -415,6 +422,7 @@ impl App {
 
         self.result = None;
         self.error = None;
+        self.cancel_deadline = None;
         self.start_time = None;
         self.show_help = false;
         self.show_streams = false;

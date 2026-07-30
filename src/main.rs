@@ -1825,8 +1825,11 @@ async fn run_client_tui(
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     match result {
-        Ok((test_result, final_prefs, print_json)) => {
+        Ok((test_result, final_prefs, print_json, partial)) => {
             if let Some(ref test_result) = test_result {
+                if partial {
+                    eprintln!("Warning: partial results (server did not respond to cancel)");
+                }
                 // Print JSON if requested via 'j' key
                 if print_json {
                     println!("{}", output_json(test_result)?);
@@ -1834,7 +1837,9 @@ async fn run_client_tui(
                     println!("{}", output_plain(test_result, config.mptcp));
                 }
 
-                if let Some(path) = output {
+                // Don't save incomplete fallback results to file — only real
+                // server results (same rule as the --no-tui fallback path).
+                if !partial && let Some(path) = output {
                     xfr::output::json::save_json(test_result, &path)?;
                     println!("Results saved to {}", path.display());
                 }
@@ -1854,6 +1859,28 @@ struct TuiRun {
     client: Arc<Client>,
     handle: tokio::task::JoinHandle<Result<xfr::protocol::TestResult>>,
     progress_rx: mpsc::Receiver<TestProgress>,
+}
+
+/// How long the TUI waits for the server's final Result after a quit before
+/// giving up and showing a locally-built summary (issue #159). Matches the
+/// --no-tui Ctrl+C fallback.
+const TUI_CANCEL_WAIT: Duration = Duration::from_secs(5);
+
+/// `(result, prefs, print_json_on_exit, partial)`; `partial` marks a
+/// fallback summary built from local counters because the server never
+/// answered the cancel.
+type TuiLoopExit = (
+    Option<xfr::protocol::TestResult>,
+    xfr::prefs::Prefs,
+    bool,
+    bool,
+);
+
+/// Fallback summary for a quit the server never acknowledged, from locally
+/// accumulated counters. `None` when nothing was transferred — there is no
+/// summary worth showing.
+fn tui_fallback_result(bytes: u64, elapsed_ms: u64) -> Option<xfr::protocol::TestResult> {
+    (bytes > 0).then(|| build_fallback_result(bytes, elapsed_ms))
 }
 
 fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
@@ -2076,7 +2103,7 @@ async fn run_tui_loop(
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
     update_disabled: bool,
-) -> Result<(Option<xfr::protocol::TestResult>, xfr::prefs::Prefs, bool)> {
+) -> Result<TuiLoopExit> {
     // Spawn the background update check unless it's disabled (flag/env/config/
     // pref) or compiled out. `update_rx` still exists so the poller is a no-op.
     let (update_tx, update_rx) = std::sync::mpsc::channel();
@@ -2110,19 +2137,28 @@ async fn run_tui_loop(
     let mut run = Some(spawn_tui_run(&config));
     app.on_connected();
 
-    // Track cancel state: when user presses 'q' or Ctrl+C during a running test,
+    // Cumulative counters mirroring the --no-tui fallback path: if the server
+    // never answers a cancel (issue #159), these still let us show a summary.
+    let mut fallback_bytes: u64 = 0;
+    let mut fallback_elapsed_ms: u64 = 0;
+
+    // Cancel state lives in `app.cancel_deadline` so the footer can render the
+    // remaining wait: when user presses 'q' or Ctrl+C during a running test,
     // we cancel and wait briefly for the server Result before exiting.
-    let mut cancel_deadline: Option<std::time::Instant> = None;
 
     loop {
         // If we're waiting for cancel result and deadline expired, exit now
-        if let Some(deadline) = cancel_deadline
+        if let Some(deadline) = app.cancel_deadline
             && deadline.elapsed() > Duration::ZERO
         {
             if let Some(current) = run.take() {
                 abort_tui_run(current).await;
             }
-            return Ok((app.result, prefs, print_json_on_exit));
+            let partial = app.result.is_none();
+            if partial {
+                app.result = tui_fallback_result(fallback_bytes, fallback_elapsed_ms);
+            }
+            return Ok((app.result, prefs, print_json_on_exit, partial));
         }
 
         poll_update_check(&mut app, &update_rx, &mut update_check_done);
@@ -2162,14 +2198,21 @@ async fn run_tui_loop(
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
                     prefs.theme = Some(app.theme_name().to_string());
                     apply_tui_settings(&mut config, &mut app);
-                    cancel_deadline = None;
+                    app.cancel_deadline = None;
+                    fallback_bytes = 0;
+                    fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
                     restart_tui_run(terminal, &mut app, &mut run, &config).await?;
                 }
                 continue;
             }
 
-            match tui_quit_action(&key, app.state, cancel_deadline.is_some(), run.is_some()) {
+            match tui_quit_action(
+                &key,
+                app.state,
+                app.cancel_deadline.is_some(),
+                run.is_some(),
+            ) {
                 TuiQuitAction::Noop => {}
                 TuiQuitAction::ExitError => {
                     prefs.theme = Some(app.theme_name().to_string());
@@ -2177,14 +2220,14 @@ async fn run_tui_loop(
                 }
                 TuiQuitAction::ExitOk => {
                     prefs.theme = Some(app.theme_name().to_string());
-                    return Ok((app.result, prefs, print_json_on_exit));
+                    return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::ForceExit => {
                     if let Some(current) = run.take() {
                         abort_tui_run(current).await;
                     }
                     prefs.theme = Some(app.theme_name().to_string());
-                    return Ok((app.result, prefs, print_json_on_exit));
+                    return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::Ignore => {
                     continue;
@@ -2193,8 +2236,11 @@ async fn run_tui_loop(
                     if let Some(active) = run.as_ref() {
                         let _ = active.client.cancel();
                     }
-                    cancel_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
-                    app.log("Cancelling, waiting for summary...");
+                    app.cancel_deadline = Some(std::time::Instant::now() + TUI_CANCEL_WAIT);
+                    app.log(format!(
+                        "Cancelling, waiting up to {}s for the server summary...",
+                        TUI_CANCEL_WAIT.as_secs()
+                    ));
                     continue;
                 }
             }
@@ -2231,7 +2277,9 @@ async fn run_tui_loop(
                     }
                 }
                 KeyCode::Char('r') => {
-                    cancel_deadline = None;
+                    app.cancel_deadline = None;
+                    fallback_bytes = 0;
+                    fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
                     restart_tui_run(terminal, &mut app, &mut run, &config).await?;
                 }
@@ -2252,7 +2300,7 @@ async fn run_tui_loop(
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Completed) => {
                     prefs.theme = Some(app.theme_name().to_string());
-                    return Ok((app.result, prefs, print_json_on_exit));
+                    return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Error) => {
                     prefs.theme = Some(app.theme_name().to_string());
@@ -2274,6 +2322,13 @@ async fn run_tui_loop(
         // Check for progress updates
         if let Some(active) = run.as_mut() {
             while let Ok(progress) = active.progress_rx.try_recv() {
+                // Same accumulation as the --no-tui print loop: interval byte
+                // deltas summed, last server-reported elapsed kept. Feedback-only
+                // updates carry sentinel byte/elapsed fields — skip them.
+                if !progress.udp_feedback_only {
+                    fallback_bytes += progress.total_bytes;
+                    fallback_elapsed_ms = progress.elapsed_ms;
+                }
                 app.on_progress(progress);
             }
         }
@@ -2289,19 +2344,26 @@ async fn run_tui_loop(
                     app.on_result(result);
 
                     // If we were waiting for cancel to complete, exit now with result
-                    if cancel_deadline.is_some() {
+                    if app.cancel_deadline.is_some() {
                         prefs.theme = Some(app.theme_name().to_string());
-                        return Ok((app.result, prefs, print_json_on_exit));
+                        return Ok((app.result, prefs, print_json_on_exit, false));
                     }
 
                     // Show final result for a moment
                     terminal.draw(|f| draw(f, &app))?;
                 }
                 Err(e) => {
-                    // If we were waiting for cancel to complete, just exit
-                    if cancel_deadline.is_some() {
+                    // If we were waiting for cancel to complete, exit with a
+                    // locally-built summary — on a dead link the run errors out
+                    // ("Timeout waiting for server response") well before the
+                    // cancel deadline, and the stats shouldn't be lost with it.
+                    if app.cancel_deadline.is_some() {
                         prefs.theme = Some(app.theme_name().to_string());
-                        return Ok((app.result, prefs, print_json_on_exit));
+                        let partial = app.result.is_none();
+                        if partial {
+                            app.result = tui_fallback_result(fallback_bytes, fallback_elapsed_ms);
+                        }
+                        return Ok((app.result, prefs, print_json_on_exit, partial));
                     }
 
                     app.on_error(e.to_string());
@@ -2677,6 +2739,18 @@ mod tests {
             tui_quit_action(&ctrl_c_key(), AppState::Running, true, true),
             TuiQuitAction::ForceExit
         );
+    }
+
+    #[test]
+    fn tui_fallback_result_only_when_data_was_collected() {
+        // Nothing transferred -> no summary worth showing ("Test cancelled.").
+        assert!(tui_fallback_result(0, 1000).is_none());
+
+        // 1 MB over 2 s -> 4 Mbps, built from the local counters (issue #159).
+        let result = tui_fallback_result(1_000_000, 2000).expect("summary for collected data");
+        assert_eq!(result.bytes_total, 1_000_000);
+        assert_eq!(result.duration_ms, 2000);
+        assert!((result.throughput_mbps - 4.0).abs() < 1e-9);
     }
 
     #[test]
