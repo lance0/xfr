@@ -561,20 +561,36 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let status_text = match app.state {
-        AppState::Connecting => "Connecting...",
-        AppState::Running => "Running...",
-        AppState::Paused => "Paused",
-        AppState::Completed => "Complete",
-        AppState::Error => "Error",
+    // A pending quit overrides the state label: show a live countdown so a
+    // cancel on a dead link reads as a bounded wait, not a hang (issue #159).
+    let cancel_wait_secs = app.cancel_deadline.map(|d| {
+        d.saturating_duration_since(std::time::Instant::now())
+            .as_secs_f64()
+            .ceil() as u64
+    });
+
+    let status_text = match cancel_wait_secs {
+        Some(secs) => format!("Waiting for server ({secs}s)..."),
+        None => match app.state {
+            AppState::Connecting => "Connecting...",
+            AppState::Running => "Running...",
+            AppState::Paused => "Paused",
+            AppState::Completed => "Complete",
+            AppState::Error => "Error",
+        }
+        .to_string(),
     };
 
-    let status_color = match app.state {
-        AppState::Connecting => theme.text_dim,
-        AppState::Running => theme.success,
-        AppState::Paused => theme.warning,
-        AppState::Completed => theme.success,
-        AppState::Error => theme.error,
+    let status_color = if cancel_wait_secs.is_some() {
+        theme.warning
+    } else {
+        match app.state {
+            AppState::Connecting => theme.text_dim,
+            AppState::Running => theme.success,
+            AppState::Paused => theme.warning,
+            AppState::Completed => theme.success,
+            AppState::Error => theme.error,
+        }
     };
 
     let mut spans = vec![

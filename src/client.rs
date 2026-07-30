@@ -1236,15 +1236,22 @@ impl Client {
                                 break;
                             }
                         };
-                        let _ = ctrl_writer
-                            .write_message(&mut writer, &serialized)
-                            .await;
-                        let _ = cancel_tx.send(true);
+                        // Arm the post-cancel deadline before writing, and
+                        // bound the write itself: on an effectively-dead link
+                        // (issue #159) the control socket's send buffer can be
+                        // full, and an unbounded write here would hang this
+                        // loop with only the test-duration deadline armed.
                         start_control_cancel_wait(
                             tokio::time::Instant::now(),
                             &mut deadline,
                             &mut pause_started_at,
                         );
+                        let _ = tokio::time::timeout(
+                            CONTROL_CANCEL_RESULT_TIMEOUT,
+                            ctrl_writer.write_message(&mut writer, &serialized),
+                        )
+                        .await;
+                        let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
                     }
                 }
