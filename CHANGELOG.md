@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Quitting on an effectively-dead link no longer discards your stats** — on a zombie connection (e.g. WiFi that is associated but passing nothing), pressing `q`/Ctrl+C in the TUI waits up to 5 seconds for the server's final summary with a visible `Waiting for server (Ns)...` countdown, then exits with a partial summary built from locally accumulated counters and a warning — previously it printed "Test cancelled." and dropped everything. One genuinely unbounded hang is also closed: the control-channel Cancel write ran before its timeout was armed, so a full send buffer could stall quit until the test-duration deadline. Partial summaries are never written to `--output` files. (#159)
+
 ### Changed
 - **The monochrome theme is now actually usable in sunlight** — it was built from hardcoded RGB grays whose mid-tone distinctions are exactly what glare washes out, and its fixed white text was invisible on light terminal backgrounds (the setup that works best outdoors, since dark screens mirror). It now renders in the terminal's own default colors at maximum contrast with just three levels, adapting to dark and light backgrounds alike. Loss severity in the throughput sparkline is additionally encoded without color in every theme: light loss underlines the bar, heavy loss reverses the cell into a bright pillar — so lossy intervals survive glare, monochrome, `NO_COLOR`, and colorblindness. Setting the standard `NO_COLOR` environment variable now selects the monochrome theme by default (an explicit `--theme`, config value, or saved preference still wins, and the env-induced choice is never persisted). (#158)
 
