@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.24] - 2026-07-30
 
 ### Fixed
 - **Quitting on an effectively-dead link no longer discards your stats** — on a zombie connection (e.g. WiFi that is associated but passing nothing), pressing `q`/Ctrl+C in the TUI waits up to 5 seconds for the server's final summary with a visible `Waiting for server (Ns)...` countdown, then exits with a partial summary built from locally accumulated counters and a warning — previously it printed "Test cancelled." and dropped everything. One genuinely unbounded hang is also closed: the control-channel Cancel write ran before its timeout was armed, so a full send buffer could stall quit until the test-duration deadline. Partial summaries are never written to `--output` files. (#159)
