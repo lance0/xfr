@@ -375,6 +375,16 @@ xfr <host> --theme nord        # Arctic blue tones
 
 Available themes: `default`, `kawaii`, `cyber`, `dracula`, `monochrome`, `matrix`, `nord`, `gruvbox`, `catppuccin`, `tokyo_night`, `solarized`
 
+The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
+the terminal's own default colors at maximum contrast, so it works on both
+dark and light terminal backgrounds — pair it with a light background at full
+brightness when working in direct sunlight. Loss severity in the throughput
+graph is always also encoded without color (light loss underlines the bar,
+heavy loss reverses the cell), so lossy intervals stay visible through glare,
+in monochrome, and for colorblind users. Setting the standard
+[`NO_COLOR`](https://no-color.org) environment variable selects `monochrome`
+automatically unless a theme is chosen explicitly.
+
 Your theme preference is auto-saved to `~/.config/xfr/prefs.toml`.
 
 ## Configuration
