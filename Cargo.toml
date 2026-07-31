@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "network-programming"]
 # Keep the published crate lean: the demo recording + its cassette are README
 # assets (crates.io resolves the README's image link against the repo), not
 # needed to build or use the crate.
-exclude = ["docs/*.gif", "docs/*.tape"]
+exclude = ["docs/*.gif", "docs/*.tape", ".github/assets/*"]
 
 [dependencies]
 # Async runtime

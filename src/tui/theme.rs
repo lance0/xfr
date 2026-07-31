@@ -325,6 +325,13 @@ impl Theme {
     }
 
     /// Get the theme name
+    /// True for the theme that cannot rely on hue to carry meaning. The
+    /// sparkline renderer uses this to switch heavy-loss marking from a
+    /// color tint to a reverse-video pillar (issue #158/#93 follow-up).
+    pub fn hue_free(&self) -> bool {
+        self.name == "monochrome"
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
