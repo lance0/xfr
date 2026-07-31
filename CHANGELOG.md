@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.25] - 2026-07-31
 
 ### Fixed
 - **Heavy-loss columns no longer render as red fragments floating at the top of the sparkline** — v0.9.24's hue-free severity marking applied reverse video in every theme, but reverse video swaps foreground and background *within each cell*, and a partial bar glyph only covers the cell's bottom — so the swap painted the empty top fraction and hid the bar (reported by brettowe within a day). Color themes now carry heavy loss as a red bar plus an underline (the artifact-free modifier), and the reverse-video treatment is reserved for the monochrome theme — where the widget now fills the whole column so heavy loss renders as one solid full-height pillar with the throughput bar as a negative silhouette inside it, instead of fragments at whatever height each bar's top cell sat. (#93 follow-up, #158)
