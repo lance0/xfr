@@ -2,7 +2,7 @@
 
 ## Market Context
 
-**iperf3 is in "maintenance mode"** (since v3.1) with limited resources for new development. This creates an opportunity for xfr to become the modern alternative.
+**iperf3 develops slowly, but it is not standing still** — recent releases added MPTCP and control-connection keepalives (3.19, May 2025) and UDP GSO/GRO on Linux (3.21, April 2026). What it still declines by design is the space xfr occupies: multi-client servers, a live TUI, QUIC, and built-in metrics.
 
 **Key advantages xfr already has over iperf3:**
 - Multi-client server support (iperf3's #1 complaint)
@@ -205,6 +205,7 @@
 - [x] **Test by amount** (`-n`/`--bytes`) - shipped: transfer a fixed number of bytes instead of running for a fixed time, shared across all streams, all three protocols and all three directions (`byte_budget_v1` capability). `-t` becomes an upper bound when both are given. Byte-exactness needed two things beyond the send-loop stop: a graceful close instead of the timed path's RST (which discards the send buffer), and a post-`Finish` drain on the server so a paced sender's queued tail is actually received. iperf3's `-k` (block count) is not implemented
 - [ ] **Result metadata passthrough** (`--title`, `--extra-data`) - tag JSON/CSV results with a run label or arbitrary metadata for CI log ingestion; pairs with the JSON-schema item below
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
+- [ ] **Advertise live RTT/cwnd in scripted output** - plain-text and `--json-stream` intervals already carry per-interval RTT, cwnd, and retransmits from live TCP_INFO polling; audit coverage across modes and say so in the comparison docs. Live human-readable RTT is the most-requested open iperf3 feature (esnet/iperf#1207)
 - [x] **DSCP/TOS marking** (`--dscp`) - set DSCP/TOS on client TCP/UDP sockets for QoS policy testing; QUIC ignores it. Accepts numeric (0-255) or DSCP names (EF, AF11-AF43, CS0-CS7)
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 - [ ] **CC algorithm A/B comparison** (`xfr cca-compare <host>`) - run back-to-back tests with different congestion control algorithms (BBR, CUBIC, Reno, etc.) and produce side-by-side comparison (throughput, retransmits, RTT). Leverages existing `--congestion` and `xfr diff`. BBR vs CUBIC is one of the most common network testing questions
@@ -253,10 +254,10 @@ Client behind strict firewall → which protocol?
 ### Medium Effort (moderate effort, high impact)
 - [x] **Pause/resume** (`p` key) - real traffic pause via `Pause`/`Resume` protocol messages and a second `watch` channel to data loops (v0.7.0, issue #19)
 - [ ] **Repeat mode** (`--repeat N --interval 60s`) - run N tests with delays and output summary; replaces cron-based scripting for CI/monitoring. Could extend to `xfr monitor` with local time-series storage (SQLite/JSON) and percentile tracking (p50/p95/p99)
-- [ ] **Responsiveness / bufferbloat scoring** (`xfr responsiveness`) - saturate the link (upload + download) while measuring latency every 200ms, report RPM (Roundtrips Per Minute) score and bufferbloat letter grade (A-F). Follows IETF `draft-ietf-ippm-responsiveness` methodology. No single-binary CLI tool does both throughput AND responsiveness scoring — Crusader, Flent, and Apple's `networkQuality` each require separate tools or are platform-specific. Highest differentiation opportunity
+- [ ] **Responsiveness / bufferbloat scoring** (`xfr responsiveness`) - saturate the link (upload + download) while measuring latency every 200ms, report RPM (Roundtrips Per Minute) and a bufferbloat letter grade (A-F), following the IETF `draft-ietf-ippm-responsiveness` methodology. The field is wide open: Apple's `networkQuality` is macOS-only, the reference `goresponsiveness` client is dormant and needs bespoke server configuration, Crusader stalled in 2025, and iperf2's `--bounceback` reports no RPM score. No self-hosted single-binary tool does throughput + responsiveness + grade. Top differentiation priority, and the natural moment for a public write-up and a small volunteer public-server list (the ACL/rate-limit/preset hardening a public server needs already exists)
 - [ ] **Server UDP port range** (`--data-port-range`) - configurable ephemeral port range for server-side UDP data sockets (requested in issue #38 for strict firewall environments on Windows)
 - [x] **UDP single-port mode** (issue #63) - shipped as `single_port_udp_v1`: modern peers route upload, download, bidir, and MTU-probe UDP streams to the server port via token-bearing hellos and connected same-port sockets. QUIC owns the shared UDP socket when enabled; xfr hellos are demuxed before QUIC, fixed-bit greasing is disabled server-side for sound classification, and a startup self-test gates capability advertisement. Legacy per-stream ports remain the fallback
-- [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP; iperf3 added this Aug 2025, would break through the 2 Gbps UDP ceiling
+- [ ] **UDP GSO/GRO** - kernel-level packet batching for UDP. iperf3 shipped this in 3.21 (April 2026), which turns xfr's ~2 Gbps UDP ceiling from an optimization target into a head-to-head liability on 10G+ links — table stakes now. `sendmmsg` batching (below) is the half-step if GSO proves finicky
 - [x] **UDP packet-size / MTU probe** (issue #64) - shipped in v0.9.17 as `--probe-mtu`: ladder + binary search with DF set, per-direction attribution via ack + same-size echo (`mtu_probe_v1` capability), netns CI coverage. Follow-up if users hit it: server-driven probe schedule so a reverse path *wider* than the forward one is observable
 
 ### Larger Projects (high effort, high impact)
@@ -274,7 +275,7 @@ Client behind strict firewall → which protocol?
 - [ ] **Test profiles** - save/load named test configurations
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 - [ ] **Server health check** (`--health-check`) - simple HTTP endpoint for load balancer integration; tiny listener on separate port or same port responding to `GET /health`
-- [ ] **UDP out-of-order & duplicate counting** - report reordered and duplicate packets separately from lost packets. rperf has this; important for lossy WAN analysis
+- [ ] **UDP out-of-order & duplicate counting** - report reordered and duplicate packets separately from lost packets; important for lossy WAN analysis. One-way delay is the natural companion (iperf2's headline differentiator; needs honest clock-sync caveats)
 - [ ] **QUIC-specific metrics** - report handshake time, 0-RTT resumption bytes, stream multiplexing overhead. Extends existing QUIC support with diagnostic detail
 
 ---
@@ -282,18 +283,25 @@ Client behind strict firewall → which protocol?
 ## Low Priority
 
 ### Distribution & Visibility
-- [ ] **Homebrew core submission** - at 439+ stars, well past the 75-star threshold. Would remove the need for `lance0/tap`
-- [ ] **ESnet Fasterdata listing** - contact ESnet to add xfr to their [throughput tool comparison page](https://fasterdata.es.net/performance-testing/network-troubleshooting-tools/throughput-tool-comparision/). The reference page for network tools in the research/enterprise community
-- [ ] **winget / MSI packaging** - first-class Windows distribution. Microsoft [tells users not to use iperf3 on Windows](https://techcommunity.microsoft.com/blog/networkingblog/three-reasons-why-you-should-not-use-iperf3-on-windows/4117876) — opportunity to capture that audience
+- [ ] **Homebrew core submission** - well past the notability bar at 500+ stars. Caveat: Homebrew prefers formulae submitted by users rather than authors — recruit a tap user to submit, or make the popularity case directly
+- [ ] **Keep downstream packages fresh** - openSUSE Tumbleweed ships 0.9.3 and nixpkgs is at 0.9.21; a badly stale package is a worse first impression than none. File update requests and check why the nixpkgs auto-bump bot hasn't fired. AUR and pkgsrc are current
+- [ ] **Alpine and Void packages** - the static musl binaries already exist and are ABI-verified on every release, so both are near-mechanical; Alpine matters disproportionately for the container audience
+- [ ] **Fedora / EPEL** - `rust2rpm` makes the spec mechanical; needs a sponsored packager (Rust SIG). EPEL brings RHEL/Rocky homelab servers
+- [ ] **Debian RFP** - file the Request For Package bug and let it ride; the sponsor and dependency-review pipeline runs 6-18 months and Ubuntu inherits the result. Not worth driving actively yet
+- [ ] **FreeBSD port** - portability already proven by pkgsrc/NetBSD; FreeBSD is over-represented among network engineers (pfSense/OPNsense adjacency)
+- [ ] **ESnet Fasterdata listing** - contact ESnet to add xfr to their [throughput tool comparison page](https://fasterdata.es.net/performance-testing/network-troubleshooting-tools/throughput-tool-comparision/). The reference page for network tools in the research/enterprise community; costs one email
+- [ ] **winget + Scoop** - first-class Windows distribution once Windows binaries exist (see Windows Native below). `wingetcreate` automates the winget manifest PR and Scoop's main bucket is a small JSON PR; skip Chocolatey (moderation queue, declining mindshare). Microsoft [tells users not to use iperf3 on Windows](https://techcommunity.microsoft.com/blog/networkingblog/three-reasons-why-you-should-not-use-iperf3-on-windows/4117876) and ethr — the Go tool that filled that gap — has been dormant since 2020, so the audience is unclaimed
+- [ ] **Awesome-list submissions** - awesome-tuis (bandwhich and gping are already listed), awesome-rust (networking section), awesome-ratatui. Steady long-tail discovery; Terminal Trove already lists xfr
+- [ ] **Show HN, timed** - prior third-party HN submissions sank without comments; save a first-person Show HN for the responsiveness-mode launch — bufferbloat content reliably travels there
 
 ### Windows Native
 - [x] **QUIC dual-stack fix** (issue #39) — QUIC server endpoint now handles `IPV6_V6ONLY` explicitly via socket2, fixing IPv4 QUIC on Windows/macOS where the default is `true`
-- [ ] Basic TCP/UDP testing (no TCP_INFO)
+- [ ] Basic TCP/UDP testing (stats via `SIO_TCP_INFO` where available)
 - [ ] TUI compatibility with Windows Terminal
 - [ ] Pre-built binaries
 - [x] Config path adjustment (`%APPDATA%\xfr`) — documented in README, FEATURES.md, and manpage
 
-*Rationale: Codebase already has fallbacks for Unix-specific features. Microsoft recommends against iperf3 on Windows, creating an opening for a cross-platform Rust tool.*
+*Rationale: the codebase already has fallbacks for Unix-specific features and `cargo check` runs on Windows in CI. The niche is unclaimed — Microsoft recommends against iperf3 on Windows and ethr has been dormant since 2020 — and no tool offers a client/server pair with identical output across Windows, Linux, and macOS. Windows binaries also unlock the winget/Scoop channel above.*
 
 ### TUI Code Refactoring
 - [ ] Split `ui.rs` into `render.rs` and `modals.rs`
@@ -365,9 +373,11 @@ Client behind strict firewall → which protocol?
 
 | Tool | Language | Multi-client | TUI | QUIC | Active Development |
 |------|----------|--------------|-----|------|-------------------|
-| iperf3 | C | No | No | No | Maintenance only |
+| iperf3 | C | No | No | No | Active, slow cadence |
 | iperf2 | C | Yes | No | No | Active |
-| rperf | Rust | Yes | No | No | Stale (since 2023) |
+| ethr | Go | Yes | Partial | No | Dormant since 2020 |
+| Crusader | Rust | ? | GUI | No | Stalled since 2025 |
+| rperf | Rust | Yes | No | No | Dead since 2023 |
 | nperf | Rust | ? | No | Yes | Low activity |
 | **xfr** | Rust | Yes | Yes | Yes | Active |
 

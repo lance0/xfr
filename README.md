@@ -53,7 +53,7 @@ See [Installation](#installation) below for setup instructions.
 |---------|--------|-----|
 | Live TUI | No | Yes (client & server) |
 | Multi-client server | No | Yes |
-| MPTCP | No | Yes (auto on server, `--mptcp` on client, Linux 5.6+) |
+| MPTCP | Yes (3.19+, Linux) | Yes (auto on server, `--mptcp` on client, Linux 5.6+) |
 | Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP & UDP + `--cport` |
 | Output formats | Text/JSON | Text/JSON/CSV |
 | Prometheus metrics | No | Yes (optional feature) |
