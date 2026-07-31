@@ -34,13 +34,22 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
 /// background blends with the chart, not the success-green used in the
 /// stats panel.
 ///
-/// Severity is also encoded without hue (issue #158): light loss adds
-/// UNDERLINED (a baseline tick under the bar), heavy loss adds REVERSED
-/// (the column renders as a photographic negative — a bright pillar).
-/// The sparkline is the one display where color was the *only* channel
-/// carrying loss, which fails in sunlight glare, for colorblind users,
-/// in the monochrome theme, and under NO_COLOR. SGR 4/7 are the reliable
-/// modifiers across terminals (DIM is not).
+/// Severity is also encoded without hue (issue #158): lossy columns are
+/// UNDERLINED — a baseline tick that renders identically at every bar
+/// height, giving colorblind users, glare, and NO_COLOR a "loss happened
+/// here" mark in every theme. In the monochrome theme, where hue can't
+/// distinguish light from heavy at all, heavy loss additionally renders
+/// as a REVERSED full-height pillar (the Sparkline widget fills the
+/// column's empty cells when it sees REVERSED, so the pillar is solid
+/// with the bar as a negative silhouette inside it).
+///
+/// REVERSED is deliberately NOT applied in color themes (#93 follow-up,
+/// reported by brettowe against v0.9.24): reverse video swaps fg/bg
+/// *within each cell*, and a partial bar glyph like `▅` only covers the
+/// cell's bottom — the swap painted the empty top fraction of the cell
+/// and hid the bar, so heavy-loss columns read as red fragments floating
+/// at the top of the graph. Color themes carry severity in the hue they
+/// already have; the pillar exists for the theme that has nothing else.
 fn loss_severity_style(rate: Option<f64>, theme: &Theme) -> Style {
     match rate {
         None => Style::default().fg(theme.graph_primary),
@@ -48,9 +57,12 @@ fn loss_severity_style(rate: Option<f64>, theme: &Theme) -> Style {
         Some(r) if r < 1.0 => Style::default()
             .fg(theme.warning)
             .add_modifier(Modifier::UNDERLINED),
-        Some(_) => Style::default()
+        Some(_) if theme.hue_free() => Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::REVERSED),
+        Some(_) => Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::UNDERLINED),
     }
 }
 
@@ -1010,8 +1022,23 @@ mod tests {
         assert!(light.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(light.fg, Some(theme.warning));
 
+        // Color themes must NOT get REVERSED (#93 follow-up: reverse video
+        // on a partial bar glyph marks the empty fraction of the cell and
+        // hides the bar — v0.9.24 rendered heavy loss as red fragments
+        // floating at the top of the graph). Hue plus underline carries
+        // severity there.
         let heavy = loss_severity_style(Some(5.0), &theme);
-        assert!(heavy.add_modifier.contains(Modifier::REVERSED));
+        assert!(heavy.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!heavy.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(heavy.fg, Some(theme.error));
+
+        // Monochrome has no hue to lean on: heavy loss becomes the
+        // REVERSED full-height pillar (the widget fills the column).
+        let mono = Theme::monochrome();
+        let heavy_mono = loss_severity_style(Some(5.0), &mono);
+        assert!(heavy_mono.add_modifier.contains(Modifier::REVERSED));
+        let light_mono = loss_severity_style(Some(0.5), &mono);
+        assert!(light_mono.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!light_mono.add_modifier.contains(Modifier::REVERSED));
     }
 }

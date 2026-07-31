@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
 
 use crate::stats::mbps_to_human;
@@ -91,6 +91,15 @@ impl Widget for Sparkline<'_> {
                 .and_then(|s| s.get(start + i).copied())
                 .unwrap_or(self.style);
 
+            // A REVERSED column style means "render this column as a solid
+            // full-height pillar" (monochrome heavy-loss marking): fill the
+            // empty cells too, so the swap produces one solid block with
+            // the bar as a negative silhouette — not floating fragments
+            // wherever each bar's partial top cell happens to sit (#93
+            // follow-up). Reverse video inverts within a cell, so a partial
+            // glyph alone would mark only the empty *fraction* of its cell.
+            let fill_empty = cell_style.add_modifier.contains(Modifier::REVERSED);
+
             // Render from bottom to top
             for row in 0..height {
                 let y = area.y + (height - 1 - row) as u16;
@@ -99,6 +108,8 @@ impl Widget for Sparkline<'_> {
                 if eighths_for_row > 0 {
                     let ch = SPARKLINE_CHARS[eighths_for_row - 1];
                     buf[(x, y)].set_char(ch).set_style(cell_style);
+                } else if fill_empty {
+                    buf[(x, y)].set_char(' ').set_style(cell_style);
                 }
             }
         }
@@ -249,6 +260,38 @@ mod tests {
     #[test]
     fn test_sparkline_chars() {
         assert_eq!(SPARKLINE_CHARS.len(), 8);
+    }
+
+    #[test]
+    fn reversed_columns_render_as_solid_pillars() {
+        // #93 follow-up: a REVERSED column must fill its empty cells so the
+        // fg/bg swap yields one solid full-height pillar, not fragments at
+        // whatever height the bar's partial top cell sits.
+        let area = Rect::new(0, 0, 2, 3);
+        let mut buf = Buffer::empty(area);
+        let data = [25.0, 25.0]; // 25% of max: bar occupies the bottom row only
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let plain = Style::default();
+        let styles = [reversed, plain];
+        Sparkline::new(&data)
+            .max(100.0)
+            .styles(&styles)
+            .render(area, &mut buf);
+
+        // Reversed column: every row styled — empty rows became styled spaces.
+        for y in 0..2 {
+            assert_eq!(buf[(0, y)].symbol(), " ");
+            assert!(
+                buf[(0, y)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
+        assert_ne!(buf[(0, 2)].symbol(), " "); // the bar glyph itself
+        // Plain column: cells above the bar remain untouched.
+        assert_eq!(buf[(1, 0)].symbol(), " ");
+        assert!(buf[(1, 0)].style().add_modifier.is_empty());
     }
 
     #[test]
