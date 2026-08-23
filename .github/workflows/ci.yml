@@ -122,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.85.5
+        uses: taiki-e/install-action@v2.86.4
         with:
           tool: cargo-deny@0.19.8
       # Advisories are deliberately excluded — audit.yml owns cargo-audit and
