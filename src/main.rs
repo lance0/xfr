@@ -2146,6 +2146,12 @@ async fn run_tui_loop(
     // remaining wait: when user presses 'q' or Ctrl+C during a running test,
     // we cancel and wait briefly for the server Result before exiting.
 
+    // Fingerprint of the last frame drawn (LAN-1226). Every mutation of `app`
+    // happens in this loop before the next draw, so one comparison right
+    // before `terminal.draw` covers key handling, progress, tick, result and
+    // error paths alike; an unchanged fingerprint skips the frame rebuild.
+    let mut last_drawn: Option<u64> = None;
+
     loop {
         // If we're waiting for cancel result and deadline expired, exit now
         if let Some(deadline) = app.cancel_deadline
@@ -2185,8 +2191,15 @@ async fn run_tui_loop(
             app.set_server_version(v);
         }
 
-        // Draw UI
-        terminal.draw(|f| draw(f, &app))?;
+        // Draw only when something on screen changed. The terminal size is
+        // part of the fingerprint: `terminal.draw`'s autoresize no longer
+        // runs every tick, and the Key-only event match below discards the
+        // Resize event, so a resize must show up here to re-flow the layout.
+        let fingerprint = app.render_fingerprint(terminal.size()?);
+        if last_drawn != Some(fingerprint) {
+            terminal.draw(|f| draw(f, &app))?;
+            last_drawn = Some(fingerprint);
+        }
 
         // Handle events with timeout
         if event::poll(Duration::from_millis(50))?
@@ -2348,9 +2361,8 @@ async fn run_tui_loop(
                         prefs.theme = Some(app.theme_name().to_string());
                         return Ok((app.result, prefs, print_json_on_exit, false));
                     }
-
-                    // Show final result for a moment
-                    terminal.draw(|f| draw(f, &app))?;
+                    // The next iteration draws the result screen: the
+                    // fingerprint changed.
                 }
                 Err(e) => {
                     // If we were waiting for cancel to complete, exit with a
@@ -2367,7 +2379,6 @@ async fn run_tui_loop(
                     }
 
                     app.on_error(e.to_string());
-                    terminal.draw(|f| draw(f, &app))?;
                 }
             }
         }

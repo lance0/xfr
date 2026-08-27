@@ -7,7 +7,7 @@ use crate::protocol::{Direction, Protocol};
 use super::theme::Theme;
 
 /// Settings category tabs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SettingsCategory {
     #[default]
     Display,
@@ -24,7 +24,7 @@ impl SettingsCategory {
 }
 
 /// Timestamp format for display
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TimestampFormat {
     #[default]
     Relative,
@@ -59,7 +59,7 @@ impl TimestampFormat {
 }
 
 /// Display units preference
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Units {
     #[default]
     Auto,
@@ -93,8 +93,12 @@ impl Units {
     }
 }
 
-/// State for the settings modal
-#[derive(Debug, Clone)]
+/// State for the settings modal.
+///
+/// `Hash` feeds `App::render_fingerprint`: every field here is either drawn
+/// by the settings modal or changes in lockstep with one that is, and a new
+/// field is fingerprinted automatically.
+#[derive(Debug, Clone, Hash)]
 pub struct SettingsState {
     /// Whether the modal is visible
     pub visible: bool,

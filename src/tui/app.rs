@@ -1,7 +1,10 @@
 //! TUI application state machine
 
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
+
+use ratatui::layout::Size;
 
 use crate::client::TestProgress;
 use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
@@ -25,7 +28,7 @@ const BAR_STALL_AFTER: Duration = Duration::from_secs(2);
 // noise, short enough to still track real network changes.
 const JITTER_HISTORY_SAMPLES: usize = 10;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppState {
     Connecting,
     Running,
@@ -66,7 +69,7 @@ impl ThroughputSample {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct LogEntry {
     pub timestamp: String,
     pub message: String,
@@ -909,6 +912,151 @@ impl App {
                 smoothed: Some(self.avg_jitter_ms()),
             }
         }
+    }
+
+    /// Whole seconds left in the post-quit grace period (issue #159), or
+    /// `None` when no cancel is pending. Rendered by the footer countdown and
+    /// hashed by `render_fingerprint` at this same one-second resolution.
+    pub fn cancel_wait_secs(&self) -> Option<u64> {
+        self.cancel_deadline.map(|d| {
+            d.saturating_duration_since(Instant::now())
+                .as_secs_f64()
+                .ceil() as u64
+        })
+    }
+
+    /// Hash of everything `ui::draw` puts on screen (LAN-1226). The TUI loop
+    /// redraws only when this changes, so the result, paused and error
+    /// screens stop rebuilding an identical frame twenty times a second, and
+    /// a Running frame is rebuilt only when something visible moved.
+    ///
+    /// Wall-clock inputs are hashed at the resolution the renderer shows:
+    /// `elapsed` as whole seconds, the progress bar as its filled cell count
+    /// for the current terminal width (`ui::progress_bar_cells`, the same
+    /// arithmetic the renderer uses, so a fill change is never skipped), and
+    /// the cancel countdown as whole seconds remaining. The terminal size is
+    /// hashed too: `terminal.draw`'s autoresize only runs when we draw, so a
+    /// resize has to count as a change.
+    ///
+    /// The destructure is deliberately exhaustive (no `..`): adding a field
+    /// to `App` fails to compile here until it is hashed or bound to `_`
+    /// with the reason it does not affect the frame.
+    pub fn render_fingerprint(&self, size: Size) -> u64 {
+        let App {
+            state,
+            host,
+            port,
+            protocol,
+            direction,
+            streams_count,
+            duration,
+            bitrate: _, // the modal draws `settings.bitrate`; this copy is never shown
+            byte_budget,
+            elapsed,
+            total_bytes,
+            current_throughput_mbps,
+            throughput_history,
+            jitter_history,
+            streams,
+            bidir_bytes_sent: _,     // only the per-direction Mbps are drawn
+            bidir_bytes_received: _, // (throughput_send/recv_mbps below)
+            throughput_send_mbps,
+            throughput_recv_mbps,
+            total_retransmits,
+            retransmits_are_authoritative: _, // accumulation policy, not shown
+            rtt_us,
+            cwnd: _, // never drawn
+            udp_jitter_ms,
+            udp_lost_percent,
+            udp_packets_sent: _, // event-log inputs; the log line lands in `history`
+            udp_packets_lost: _,
+            result: _, // never read by draw; on_result mirrors what is shown into the fields above
+            error,
+            cancel_deadline: _, // hashed as whole seconds via cancel_wait_secs()
+            start_time: _,      // tick() derives `elapsed` from it
+            show_help,
+            show_streams,
+            timestamp_format: _, // log timestamps are formatted when the entry is logged
+            theme,
+            theme_index,
+            settings,
+            history,
+            average_throughput_mbps,
+            throughput_sum: _, // feed average_throughput_mbps
+            throughput_count: _,
+            peak_throughput_mbps: _, // event-detection baselines; effects land in `history`
+            prev_retransmits: _,
+            prev_udp_lost: _,
+            prev_udp_progress: _,   // bar-tint baselines; effects land in
+            latest_udp_progress: _, // throughput_history and udp_lost_percent
+            last_bar_at: _,         // stall cadence clock; effects land in throughput_history
+            update_available,
+            server_version,
+            pause_started_at: _, // folded into start_time on resume
+        } = self;
+
+        let mut h = DefaultHasher::new();
+        size.hash(&mut h);
+        state.hash(&mut h);
+        host.hash(&mut h);
+        port.hash(&mut h);
+        protocol.hash(&mut h);
+        direction.hash(&mut h);
+        streams_count.hash(&mut h);
+        duration.hash(&mut h);
+        byte_budget.hash(&mut h);
+        elapsed.as_secs().hash(&mut h);
+        // The Real-time Stats block spends one cell per side on its border.
+        super::ui::progress_bar_cells(self, size.width.saturating_sub(2)).hash(&mut h);
+        total_bytes.hash(&mut h);
+        current_throughput_mbps.to_bits().hash(&mut h);
+        throughput_history.len().hash(&mut h);
+        for ThroughputSample {
+            mbps,
+            lost_packets,
+            interval_packets,
+        } in throughput_history
+        {
+            mbps.to_bits().hash(&mut h);
+            lost_packets.hash(&mut h);
+            interval_packets.hash(&mut h);
+        }
+        jitter_history.len().hash(&mut h);
+        for jitter in jitter_history {
+            jitter.to_bits().hash(&mut h);
+        }
+        streams.len().hash(&mut h);
+        for StreamData {
+            id,
+            bytes: _, // StreamBar draws throughput, retransmits and jitter
+            throughput_mbps,
+            retransmits,
+            jitter_ms,
+        } in streams
+        {
+            id.hash(&mut h);
+            throughput_mbps.to_bits().hash(&mut h);
+            retransmits.hash(&mut h);
+            jitter_ms.map(f64::to_bits).hash(&mut h);
+        }
+        throughput_send_mbps.to_bits().hash(&mut h);
+        throughput_recv_mbps.to_bits().hash(&mut h);
+        total_retransmits.hash(&mut h);
+        rtt_us.hash(&mut h);
+        udp_jitter_ms.to_bits().hash(&mut h);
+        udp_lost_percent.map(f64::to_bits).hash(&mut h);
+        error.hash(&mut h);
+        self.cancel_wait_secs().hash(&mut h);
+        show_help.hash(&mut h);
+        show_streams.hash(&mut h);
+        theme.name().hash(&mut h);
+        theme_index.hash(&mut h);
+        settings.hash(&mut h);
+        history.hash(&mut h);
+        average_throughput_mbps.to_bits().hash(&mut h);
+        update_available.hash(&mut h);
+        server_version.hash(&mut h);
+        h.finish()
     }
 }
 
@@ -1814,5 +1962,87 @@ mod tests {
         app.elapsed = Duration::from_secs(3);
         app.total_bytes = 999_999;
         assert_eq!(app.progress_percent(), 30.0);
+    }
+
+    #[test]
+    fn render_fingerprint_changes_only_when_the_frame_would() {
+        let size = Size::new(120, 40);
+        let mut app = App::default();
+        // Long test so one progress-bar cell (duration / bar width) is far
+        // coarser than the sub-second steps below.
+        app.duration = Duration::from_secs(3600);
+        app.on_connected();
+        assert_eq!(app.render_fingerprint(size), app.render_fingerprint(size));
+
+        // Sub-second elapsed drift with nothing else changed renders the same
+        // "0s" and the same bar fill, so a Running frame must be skippable.
+        app.elapsed = Duration::from_millis(100);
+        let fp = app.render_fingerprint(size);
+        app.elapsed = Duration::from_millis(900);
+        assert_eq!(fp, app.render_fingerprint(size), "sub-second drift only");
+        app.elapsed = Duration::from_millis(1000);
+        assert_ne!(fp, app.render_fingerprint(size), "whole-second crossing");
+
+        // A bar-fill cell boundary is visible even within one second: a 10s
+        // test on an 84-cell bar advances one cell every ~119ms.
+        app.duration = Duration::from_secs(10);
+        app.elapsed = Duration::from_millis(1000);
+        let fp = app.render_fingerprint(size);
+        app.elapsed = Duration::from_millis(1200);
+        assert_ne!(fp, app.render_fingerprint(size), "bar fill advanced");
+
+        // Every representative mutation dirties the frame.
+        let mutations: [(&str, fn(&mut App)); 12] = [
+            ("on_progress", |a| a.on_progress(make_progress(100.0, None))),
+            ("log", |a| a.log("line")),
+            ("toggle_help", |a| a.toggle_help()),
+            ("cycle_theme", |a| a.cycle_theme()),
+            ("set_server_version", |a| {
+                a.set_server_version("xfr/0.9.25".to_string())
+            }),
+            ("update_available", |a| {
+                a.update_available = Some("v9.9.9".to_string())
+            }),
+            ("toggle_pause", |a| a.toggle_pause()),
+            ("settings.toggle", |a| a.settings.toggle()),
+            ("settings.move_down", |a| a.settings.move_down()),
+            ("cancel countdown 3s", |a| {
+                a.cancel_deadline = Some(Instant::now() + Duration::from_millis(2500))
+            }),
+            ("cancel countdown 2s", |a| {
+                a.cancel_deadline = Some(Instant::now() + Duration::from_millis(1500))
+            }),
+            ("on_result", |a| {
+                a.on_result(TestResult {
+                    id: "test".to_string(),
+                    duration_ms: 10_000,
+                    bytes_total: 1234,
+                    throughput_mbps: 42.0,
+                    streams: vec![],
+                    tcp_info: None,
+                    udp_stats: None,
+                    bytes_sent: None,
+                    bytes_received: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
+                    mtu_probe: None,
+                })
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let before = app.render_fingerprint(size);
+            mutate(&mut app);
+            assert_ne!(
+                before,
+                app.render_fingerprint(size),
+                "{name} must dirty the frame"
+            );
+        }
+
+        // A resize re-flows the layout with identical state.
+        assert_ne!(
+            app.render_fingerprint(size),
+            app.render_fingerprint(Size::new(100, 30))
+        );
     }
 }

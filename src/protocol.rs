@@ -236,7 +236,7 @@ pub enum ControlMessage {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     #[default]
@@ -255,7 +255,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     #[default]

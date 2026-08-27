@@ -335,64 +335,31 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         frame.render_widget(sparkline, sparkline_area);
     }
 
-    // Transfer progress line
-    let progress = app.progress_percent() / 100.0;
+    // Transfer progress line: arrow-style bar [====>------] plus elapsed
+    // against the test's own denominator.
     let transferred = bytes_to_human(app.total_bytes);
     let elapsed_secs = app.elapsed.as_secs();
-
-    // Build arrow-style progress bar: [====>------] 45%
-    // Adaptive width: use available space with minimum of 10 chars
-    let prefix_len = 12; // "  Transfer: "
-    let suffix_len = 18; // " Xs/Xs" + "[]"
-    let transferred_len = transferred.len() + 1;
-    let available_width =
-        (inner.width as usize).saturating_sub(prefix_len + suffix_len + transferred_len);
-    let bar_width = available_width.max(10);
-
-    let (progress_bar, time_display) = if let Some(budget) = app.byte_budget.filter(|b| *b > 0) {
-        // `-n`: fill by bytes against the requested transfer size, and show
-        // that size as the denominator the way a timed test shows its duration.
-        let filled = (progress * bar_width as f64) as usize;
-        let empty = bar_width.saturating_sub(filled);
-        let arrow = if filled > 0 && filled < bar_width {
-            ">"
-        } else {
-            ""
-        };
-        let fill_chars = if arrow.is_empty() {
-            filled
-        } else {
-            filled.saturating_sub(1)
-        };
-        (
-            format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty)),
-            format!(" {}s/{}", elapsed_secs, bytes_to_human(budget)),
-        )
-    } else if app.is_infinite() {
-        // Infinite duration: show elapsed time with ∞
-        let filled = bar_width; // Full bar since no target
-        (
-            format!("[{}]", "=".repeat(filled)),
-            format!(" {}s/∞", elapsed_secs),
-        )
+    let (bar_width, filled) = progress_bar_cells(app, inner.width);
+    let empty = bar_width.saturating_sub(filled);
+    let arrow = if filled > 0 && filled < bar_width {
+        ">"
     } else {
-        let duration_secs = app.duration.as_secs();
-        let filled = (progress * bar_width as f64) as usize;
-        let empty = bar_width.saturating_sub(filled);
-        let arrow = if filled > 0 && filled < bar_width {
-            ">"
-        } else {
-            ""
-        };
-        let fill_chars = if arrow.is_empty() {
-            filled
-        } else {
-            filled.saturating_sub(1)
-        };
-        (
-            format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty)),
-            format!(" {}s/{}s", elapsed_secs, duration_secs),
-        )
+        ""
+    };
+    let fill_chars = if arrow.is_empty() {
+        filled
+    } else {
+        filled.saturating_sub(1)
+    };
+    let progress_bar = format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty));
+    let time_display = if let Some(budget) = app.byte_budget.filter(|b| *b > 0) {
+        // `-n`: the requested transfer size is the denominator, the way a
+        // timed test shows its duration.
+        format!(" {}s/{}", elapsed_secs, bytes_to_human(budget))
+    } else if app.is_infinite() {
+        format!(" {}s/∞", elapsed_secs)
+    } else {
+        format!(" {}s/{}s", elapsed_secs, app.duration.as_secs())
     };
 
     let transfer_line = Line::from(vec![
@@ -479,6 +446,27 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         ]
     };
     frame.render_widget(Paragraph::new(quality_lines), stats_chunks[1]);
+}
+
+/// Progress-bar geometry as `(bar_width, filled)` cells for the Real-time
+/// Stats block's inner width. Adaptive: whatever is left after the label,
+/// the transferred-bytes figure and the time suffix, minimum 10 cells. A
+/// `-n` test fills by bytes, a timed test by elapsed time, an open-ended
+/// test shows a full bar. Shared with `App::render_fingerprint` so the
+/// dirty check sees exactly the cell-quantized fill the renderer draws.
+pub(super) fn progress_bar_cells(app: &App, inner_width: u16) -> (usize, usize) {
+    let prefix_len = 12; // "  Transfer: "
+    let suffix_len = 18; // " Xs/Xs" + "[]"
+    let transferred_len = bytes_to_human(app.total_bytes).len() + 1;
+    let bar_width = (inner_width as usize)
+        .saturating_sub(prefix_len + suffix_len + transferred_len)
+        .max(10);
+    let filled = if app.byte_budget.is_none_or(|b| b == 0) && app.is_infinite() {
+        bar_width
+    } else {
+        (app.progress_percent() / 100.0 * bar_width as f64) as usize
+    };
+    (bar_width, filled)
 }
 
 fn draw_history(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -575,11 +563,7 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // A pending quit overrides the state label: show a live countdown so a
     // cancel on a dead link reads as a bounded wait, not a hang (issue #159).
-    let cancel_wait_secs = app.cancel_deadline.map(|d| {
-        d.saturating_duration_since(std::time::Instant::now())
-            .as_secs_f64()
-            .ceil() as u64
-    });
+    let cancel_wait_secs = app.cancel_wait_secs();
 
     let status_text = match cancel_wait_secs {
         Some(secs) => format!("Waiting for server ({secs}s)..."),
