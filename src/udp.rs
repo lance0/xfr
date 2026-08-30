@@ -534,10 +534,52 @@ impl Default for PacketTracker {
     }
 }
 
-/// Burst size threshold: batch packets when PPS exceeds this
-const HIGH_PPS_THRESHOLD: f64 = 100_000.0;
-/// Number of packets to send per burst in high-PPS mode
-const BURST_SIZE: u64 = 100;
+/// Bound timer wakeups for paced UDP. Tokio cannot reliably service the
+/// ~89,000 wakes/second that a 1 Gbps, 1400-byte stream would otherwise
+/// request, so faster streams send a small calculated batch per tick.
+const MAX_PACING_TICKS_PER_SEC: u64 = 10_000;
+/// Keep even absurd configured bitrates interruptible. Real rates hit socket
+/// backpressure well before this cap; it only guards the inner burst loop.
+const MAX_PACED_PACKETS_PER_TICK: u64 = 1024;
+/// Unlimited mode yields after this many datagrams so cancellation and other
+/// Tokio tasks remain responsive.
+const UNLIMITED_BURST_PACKETS: u64 = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PacingSchedule {
+    interval: Duration,
+    packets_per_tick: u64,
+}
+
+/// Build a smooth paced-send schedule while capping timer wake frequency.
+/// The old fixed breakpoint sent one packet per wake through 100,000 pps,
+/// then jumped straight to 100-packet bursts. At 1400 bytes that put the
+/// default 1 Gbps target below the batching threshold, where timer overhead
+/// held localhost delivery near 630 Mbps, while requesting 1.2 Gbps crossed
+/// the threshold and delivered the full rate. Calculated batches remove that
+/// inversion and stay much smaller than the old high-rate burst.
+fn pacing_schedule(target_bitrate: u64, packet_size: usize) -> PacingSchedule {
+    debug_assert!(target_bitrate > 0);
+    let bits_per_packet = (packet_size as u64).saturating_mul(8);
+    let bitrate_per_tick = bits_per_packet.saturating_mul(MAX_PACING_TICKS_PER_SEC);
+    let packets_per_tick = target_bitrate
+        .div_ceil(bitrate_per_tick)
+        .clamp(1, MAX_PACED_PACKETS_PER_TICK);
+
+    // Round the interval up to the next nanosecond so integer conversion can
+    // never make the sender run faster than requested. u128 keeps extreme
+    // user-provided bitrates and future packet sizes overflow-safe.
+    let interval_nanos = ((packets_per_tick as u128)
+        .saturating_mul(bits_per_packet as u128)
+        .saturating_mul(1_000_000_000))
+    .div_ceil(target_bitrate as u128)
+    .clamp(1, u64::MAX as u128) as u64;
+
+    PacingSchedule {
+        interval: Duration::from_nanos(interval_nanos),
+        packets_per_tick,
+    }
+}
 
 /// Suppression window for send errors near the test deadline. The server
 /// tears down its socket at its own deadline, which can precede ours by
@@ -592,20 +634,11 @@ pub async fn send_udp_paced(
     }
 
     let bits_per_packet = (packet_size * 8) as u64;
-
-    // Use floating-point for precision in interval calculation
     let packets_per_sec_f64 = target_bitrate as f64 / bits_per_packet as f64;
-
-    // For high PPS, batch multiple packets per interval to reduce timer overhead
-    let (pacing_interval, packets_per_tick) = if packets_per_sec_f64 > HIGH_PPS_THRESHOLD {
-        // High PPS: batch BURST_SIZE packets per interval
-        let interval = Duration::from_secs_f64(BURST_SIZE as f64 / packets_per_sec_f64);
-        (interval, BURST_SIZE)
-    } else {
-        // Normal PPS: one packet per interval
-        let interval = Duration::from_secs_f64(1.0 / packets_per_sec_f64);
-        (interval, 1)
-    };
+    let PacingSchedule {
+        interval: pacing_interval,
+        packets_per_tick,
+    } = pacing_schedule(target_bitrate, packet_size);
 
     debug!(
         "UDP pacing: {:.0} packets/sec, interval {:?}, {} packets/tick",
@@ -795,7 +828,7 @@ async fn send_udp_unlimited(
         }
 
         // Send a burst of packets before yielding
-        for _ in 0..BURST_SIZE {
+        for _ in 0..UNLIMITED_BURST_PACKETS {
             if *cancel.borrow() || crate::pause::is_paused(&pause) {
                 break;
             }
@@ -1321,6 +1354,47 @@ mod tests {
         assert!(is_teardown_send_error(false, false, now, near));
         // Infinite tests have no deadline to be near
         assert!(!is_teardown_send_error(false, true, now, far));
+    }
+
+    #[test]
+    fn pacing_schedule_avoids_the_old_high_rate_cliff() {
+        let bits_per_packet = (UDP_PAYLOAD_SIZE * 8) as u64;
+
+        let hundred_mbps = pacing_schedule(100_000_000, UDP_PAYLOAD_SIZE);
+        assert_eq!(hundred_mbps.packets_per_tick, 1);
+        assert_eq!(hundred_mbps.interval, Duration::from_micros(112));
+
+        let one_gbps = pacing_schedule(1_000_000_000, UDP_PAYLOAD_SIZE);
+        assert_eq!(one_gbps.packets_per_tick, 9);
+        assert_eq!(one_gbps.interval, Duration::from_nanos(100_800));
+
+        // The old implementation jumped from one packet per tick to 100 at
+        // 100,000 pps (1.12 Gbps for today's packet size). The new schedule
+        // remains close on both sides: ten packets just below, eleven just
+        // above, with an effective rate within 0.01% of the target.
+        let old_breakpoint = bits_per_packet * 100_000;
+        for target in [old_breakpoint - 1, old_breakpoint, old_breakpoint + 1] {
+            let schedule = pacing_schedule(target, UDP_PAYLOAD_SIZE);
+            assert!((10..=11).contains(&schedule.packets_per_tick));
+            let scheduled_bitrate = schedule.packets_per_tick as f64 * bits_per_packet as f64
+                / schedule.interval.as_secs_f64();
+            let relative_error = (scheduled_bitrate - target as f64).abs() / target as f64;
+            assert!(
+                relative_error < 0.0001,
+                "target {target}, scheduled {scheduled_bitrate}, error {relative_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn pacing_schedule_is_nonzero_and_bounded_at_extreme_rates() {
+        let slowest = pacing_schedule(1, UDP_PAYLOAD_SIZE);
+        assert_eq!(slowest.packets_per_tick, 1);
+        assert_eq!(slowest.interval, Duration::from_secs(11_200));
+
+        let fastest = pacing_schedule(u64::MAX, UDP_PAYLOAD_SIZE);
+        assert_eq!(fastest.packets_per_tick, MAX_PACED_PACKETS_PER_TICK);
+        assert!(fastest.interval >= Duration::from_nanos(1));
     }
 
     #[test]
