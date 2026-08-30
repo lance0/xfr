@@ -2,8 +2,9 @@
 //!
 //! Loads configuration from ~/.config/xfr/config.toml
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::protocol::TimestampFormat;
 
@@ -152,13 +153,24 @@ impl Config {
     /// Load configuration from the default path.
     /// Returns default config if file doesn't exist.
     pub fn load() -> anyhow::Result<Self> {
-        let config_path = Self::config_path();
-        if config_path.exists() {
-            let contents = std::fs::read_to_string(&config_path)?;
-            Ok(toml::from_str(&contents)?)
-        } else {
-            Ok(Self::default())
-        }
+        Self::load_from(&Self::config_path())
+    }
+
+    fn load_from(config_path: &Path) -> anyhow::Result<Self> {
+        let contents = match std::fs::read_to_string(config_path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read config file {}", config_path.display())
+                });
+            }
+        };
+
+        toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config file {}", config_path.display()))
     }
 
     /// Get the default config file path
@@ -184,6 +196,56 @@ mod tests {
         let config = Config::default();
         assert!(config.presets.is_empty());
         assert!(config.client.duration_secs.is_none());
+    }
+
+    #[test]
+    fn load_returns_defaults_only_when_config_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("missing").join("config.toml");
+
+        let config = Config::load_from(&config_path).unwrap();
+
+        assert!(config.presets.is_empty());
+        assert!(config.client.duration_secs.is_none());
+        assert!(config.server.psk.is_none());
+    }
+
+    #[test]
+    fn load_rejects_malformed_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[server\npsk = \"secret\"").unwrap();
+
+        let error = Config::load_from(&config_path).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to parse config file"));
+        assert!(message.contains(config_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn load_rejects_unreadable_existing_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::create_dir(&config_path).unwrap();
+
+        let error = Config::load_from(&config_path).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to read config file"));
+        assert!(message.contains(config_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn load_parses_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[server]\npsk = \"secret\"\nrate_limit = 3\n").unwrap();
+
+        let config = Config::load_from(&config_path).unwrap();
+
+        assert_eq!(config.server.psk.as_deref(), Some("secret"));
+        assert_eq!(config.server.rate_limit, Some(3));
     }
 
     #[test]

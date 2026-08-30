@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **QUIC now honors the advertised 128-stream CLI maximum** — upload and download data use unidirectional streams, but both endpoints raised only Quinn's bidirectional limit and left its unidirectional credit at the default 100. A `-Q -P 128` run therefore started exactly 100 active streams and left 28 blocked. Client and server now advertise all 128 unidirectional data streams, with a loopback regression opening the full set in both directions.
+- **Existing config files now fail closed when they cannot be read or parsed** — startup previously used `unwrap_or_default()`, silently discarding the whole file on any error. A malformed file could therefore drop a server PSK, ACL, or rate limit while still launching with permissive defaults. Missing files still use defaults; present but unusable files now stop startup with the config path and underlying error.
 
 ## [0.9.25] - 2026-07-31
 
