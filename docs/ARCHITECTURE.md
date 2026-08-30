@@ -289,7 +289,7 @@ pub struct TestResult {
     pub duration_ms: u64,
     pub throughput_mbps: f64,
     pub streams: Vec<StreamResult>,
-    pub tcp_info: Option<TcpInfoSnapshot>,   // RTT, retransmits, cwnd
+    pub tcp_info: Option<TcpInfoSnapshot>,   // RTT, retransmits, cwnd (bytes)
     pub udp_stats: Option<UdpStats>,         // loss, jitter, out-of-order
 }
 ```
@@ -340,7 +340,8 @@ the `TcpStream` (which may be moved or split for bidir mode).
 
 Lifecycle:
 1. **Set** — after accepting/connecting the data socket, before transfer starts
-2. **Poll** — `record_interval()` calls `poll_tcp_info()` each second to capture RTT/cwnd
+2. **Poll** — `record_interval()` calls `poll_tcp_info()` each second to capture
+   RTT and cwnd in bytes
 3. **Clear** — at the end of each stream handler task (including early-return error paths)
    to prevent stale fd reuse if the OS reassigns the descriptor
 

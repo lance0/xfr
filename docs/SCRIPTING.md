@@ -85,7 +85,7 @@ The output matches the `TestResult` structure (protocol version 1.1):
     "retransmits": 42,
     "rtt_us": 1200,
     "rtt_var_us": 100,
-    "cwnd": 10
+    "cwnd": 14480
   }
 }
 ```
@@ -112,7 +112,8 @@ xfr <host> --json-stream --no-tui
 ```
 
 Each line may also include optional fields: `retransmits`, `rtt_us`, `cwnd`
-(TCP), `jitter_ms` and `lost` (UDP). Fields that do not apply are omitted.
+(TCP), `jitter_ms` and `lost` (UDP). `cwnd` is the aggregate congestion
+window across streams, in bytes. Fields that do not apply are omitted.
 
 For upload-mode UDP tests between v0.9.14+ peers, the `lost` value uses the
 freshest cumulative receiver counts from either TCP control intervals or
