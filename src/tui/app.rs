@@ -1049,7 +1049,7 @@ impl App {
         self.cancel_wait_secs().hash(&mut h);
         show_help.hash(&mut h);
         show_streams.hash(&mut h);
-        theme.name().hash(&mut h);
+        theme.hash(&mut h);
         theme_index.hash(&mut h);
         settings.hash(&mut h);
         history.hash(&mut h);
@@ -1966,6 +1966,8 @@ mod tests {
 
     #[test]
     fn render_fingerprint_changes_only_when_the_frame_would() {
+        type AppMutation = (&'static str, fn(&mut App));
+
         let size = Size::new(120, 40);
         let mut app = App::default();
         // Long test so one progress-bar cell (duration / bar width) is far
@@ -1992,7 +1994,7 @@ mod tests {
         assert_ne!(fp, app.render_fingerprint(size), "bar fill advanced");
 
         // Every representative mutation dirties the frame.
-        let mutations: [(&str, fn(&mut App)); 12] = [
+        let mutations: &[AppMutation] = &[
             ("on_progress", |a| a.on_progress(make_progress(100.0, None))),
             ("log", |a| a.log("line")),
             ("toggle_help", |a| a.toggle_help()),
@@ -2006,11 +2008,11 @@ mod tests {
             ("toggle_pause", |a| a.toggle_pause()),
             ("settings.toggle", |a| a.settings.toggle()),
             ("settings.move_down", |a| a.settings.move_down()),
-            ("cancel countdown 3s", |a| {
-                a.cancel_deadline = Some(Instant::now() + Duration::from_millis(2500))
+            ("cancel countdown 60s", |a| {
+                a.cancel_deadline = Some(Instant::now() + Duration::from_secs(60))
             }),
-            ("cancel countdown 2s", |a| {
-                a.cancel_deadline = Some(Instant::now() + Duration::from_millis(1500))
+            ("cancel countdown 30s", |a| {
+                a.cancel_deadline = Some(Instant::now() + Duration::from_secs(30))
             }),
             ("on_result", |a| {
                 a.on_result(TestResult {
@@ -2029,7 +2031,7 @@ mod tests {
                 })
             }),
         ];
-        for (name, mutate) in mutations {
+        for &(name, mutate) in mutations {
             let before = app.render_fingerprint(size);
             mutate(&mut app);
             assert_ne!(
@@ -2044,5 +2046,12 @@ mod tests {
             app.render_fingerprint(size),
             app.render_fingerprint(Size::new(100, 30))
         );
+
+        // Hash the palette itself, not just the built-in theme name. This
+        // keeps the cache correct if a caller customizes Theme's public
+        // colors without changing its name.
+        let before = app.render_fingerprint(size);
+        app.theme.text = ratatui::style::Color::Magenta;
+        assert_ne!(before, app.render_fingerprint(size));
     }
 }

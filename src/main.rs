@@ -2216,6 +2216,10 @@ async fn run_tui_loop(
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
                     restart_tui_run(terminal, &mut app, &mut run, &config).await?;
+                    // `restart_tui_run` may draw a transient "restarting"
+                    // frame directly. Its replacement must not be skipped
+                    // against the fingerprint from before that draw.
+                    last_drawn = None;
                 }
                 continue;
             }
@@ -2295,6 +2299,7 @@ async fn run_tui_loop(
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
                     restart_tui_run(terminal, &mut app, &mut run, &config).await?;
+                    last_drawn = None;
                 }
                 KeyCode::Char('t') => {
                     app.cycle_theme();
