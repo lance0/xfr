@@ -1,7 +1,9 @@
 //! User preferences persistence.
 //!
-//! Saves runtime preferences (like last used theme) to ~/.config/xfr/prefs.toml
-//! Separate from config.toml which is for explicit user configuration.
+//! Saves runtime preferences (like the last used theme) as `xfr/prefs.toml`
+//! under the platform configuration directory returned by
+//! `dirs::config_dir()`. This is separate from `config.toml`, which is for
+//! explicit user configuration.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -33,7 +35,7 @@ pub struct Prefs {
 }
 
 impl Prefs {
-    /// Get prefs file path: ~/.config/xfr/prefs.toml
+    /// Get the preferences path under the platform configuration directory.
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|p| p.join("xfr").join("prefs.toml"))
     }

@@ -44,7 +44,7 @@ See [Installation](#installation) below for setup instructions.
 - **Result comparison** - `xfr diff` to detect performance regressions
 - **LAN discovery** - find xfr servers with mDNS (`xfr discover`)
 - **Prometheus metrics** - export stats for monitoring dashboards
-- **Config file** - save defaults in `~/.config/xfr/config.toml`
+- **Config file** - save defaults in the platform configuration directory
 - **Environment variables** - `XFR_PORT`, `XFR_DURATION` overrides
 
 ### vs iperf3
@@ -385,12 +385,14 @@ in monochrome, and for colorblind users. Setting the standard
 [`NO_COLOR`](https://no-color.org) environment variable selects `monochrome`
 automatically unless a theme is chosen explicitly.
 
-Your theme preference is auto-saved to `~/.config/xfr/prefs.toml`.
+Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
+in the same platform configuration directory.
 
 ## Configuration
 
 xfr reads defaults from:
-- **Linux/macOS:** `~/.config/xfr/config.toml`
+- **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
+- **macOS:** `~/Library/Application Support/xfr/config.toml`
 - **Windows:** `%APPDATA%\xfr\config.toml`
 
 ```toml
@@ -429,6 +431,17 @@ acl_file = "/path/to/acl.txt"
 push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
+```
+
+On Unix, a config containing either `psk` must grant no access to group or
+other users, so the shared key is not exposed to another local account:
+
+```bash
+# Linux
+chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
+
+# macOS
+chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
 
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` override the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
