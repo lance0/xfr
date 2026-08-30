@@ -121,6 +121,14 @@ impl AuthConfig {
     pub fn is_required(&self) -> bool {
         self.psk.is_some()
     }
+
+    /// Validate authentication settings before any network resources are used.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(psk) = self.psk.as_deref() {
+            validate_psk(psk)?;
+        }
+        Ok(())
+    }
 }
 
 // Need hex encoding
@@ -233,5 +241,31 @@ mod tests {
     fn test_validate_psk_too_long() {
         let long_psk = "x".repeat(MAX_PSK_LENGTH + 1);
         assert!(validate_psk(&long_psk).is_err());
+    }
+
+    #[test]
+    fn test_auth_config_validates_optional_psk() {
+        assert!(AuthConfig::default().validate().is_ok());
+        assert!(
+            AuthConfig {
+                psk: Some("secret".to_string()),
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            AuthConfig {
+                psk: Some(String::new()),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AuthConfig {
+                psk: Some("x".repeat(MAX_PSK_LENGTH + 1)),
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
