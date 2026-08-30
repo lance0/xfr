@@ -60,6 +60,11 @@ pub type XfrHelloDatagram = (Vec<u8>, SocketAddr);
 
 /// Default buffer size for QUIC send/receive operations (128 KB)
 const DEFAULT_BUFFER_SIZE: usize = 128 * 1024;
+/// Maximum data-stream count accepted by the CLI (`-P 128`). QUIC data
+/// streams are unidirectional, so both endpoints must advertise this much
+/// incoming unidirectional-stream credit or Quinn's default of 100 silently
+/// strands the final 28 streams.
+const MAX_CONCURRENT_DATA_STREAMS: u32 = 128;
 /// Maximum consecutive divert-only batches in `XfrLaneTee::poll_recv`
 /// before rescheduling quinn's receive task, preventing starvation under heavy
 /// xfr-hello load (LAN-170 #32).
@@ -109,7 +114,10 @@ pub fn create_server_endpoint(
     crypto.alpn_protocols = vec![b"xfr".to_vec()];
 
     let mut transport = TransportConfig::default();
-    transport.max_concurrent_bidi_streams(VarInt::from_u32(129)); // control + 128 data
+    // Preserve the existing bidirectional allowance; the control channel is
+    // bidirectional, while all xfr data streams use `open_uni`.
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS + 1));
+    transport.max_concurrent_uni_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS));
     transport.keep_alive_interval(Some(Duration::from_secs(5)));
 
     let quic_crypto = QuicServerConfig::try_from(crypto)?;
@@ -289,7 +297,8 @@ pub fn create_client_endpoint(
     crypto.alpn_protocols = vec![b"xfr".to_vec()];
 
     let mut transport = TransportConfig::default();
-    transport.max_concurrent_bidi_streams(VarInt::from_u32(129));
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS + 1));
+    transport.max_concurrent_uni_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS));
 
     let quic_crypto = QuicClientConfig::try_from(crypto)?;
     let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
@@ -526,6 +535,62 @@ pub async fn connect(endpoint: &Endpoint, addr: SocketAddr) -> anyhow::Result<Co
 mod tests {
     use super::*;
     use tokio::sync::watch;
+
+    /// The CLI accepts `-P 128`, and upload/download data use unidirectional
+    /// QUIC streams. Quinn otherwise advertises only 100 incoming uni streams,
+    /// leaving exactly 28 transfer tasks blocked forever. Exercise both
+    /// endpoint configs because each side receives data in one direction.
+    #[tokio::test]
+    async fn endpoint_configs_admit_all_128_data_streams() -> anyhow::Result<()> {
+        let (cert, key) = generate_self_signed_cert()?;
+        let server = create_server_endpoint(
+            "127.0.0.1:0".parse()?,
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )?;
+        let server_addr = server.local_addr()?;
+        let client = create_client_endpoint(server_addr, None)?;
+
+        let accept = async {
+            let incoming = server
+                .accept()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("server endpoint closed before accept"))?;
+            Ok::<_, anyhow::Error>(incoming.await?)
+        };
+        let (client_connection, server_connection) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(connect(&client, server_addr), accept)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("QUIC loopback handshake timed out"))??;
+
+        let mut client_streams = Vec::with_capacity(MAX_CONCURRENT_DATA_STREAMS as usize);
+        let mut server_streams = Vec::with_capacity(MAX_CONCURRENT_DATA_STREAMS as usize);
+        for stream_number in 1..=MAX_CONCURRENT_DATA_STREAMS {
+            let client_stream =
+                tokio::time::timeout(Duration::from_secs(1), client_connection.open_uni())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("client blocked opening data stream {stream_number}")
+                    })??;
+            client_streams.push(client_stream);
+
+            let server_stream =
+                tokio::time::timeout(Duration::from_secs(1), server_connection.open_uni())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("server blocked opening data stream {stream_number}")
+                    })??;
+            server_streams.push(server_stream);
+        }
+
+        assert_eq!(client_streams.len(), 128);
+        assert_eq!(server_streams.len(), 128);
+        Ok(())
+    }
 
     /// Regression for LAN-170 #33: `handle_cancel_change` must return
     /// `Stop` when the cancel sender drops (RecvError), preventing the
