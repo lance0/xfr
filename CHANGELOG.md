@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **QUIC now honors the advertised 128-stream CLI maximum** — upload and download data use unidirectional streams, but both endpoints raised only Quinn's bidirectional limit and left its unidirectional credit at the default 100. A `-Q -P 128` run therefore started exactly 100 active streams and left 28 blocked. Client and server now advertise all 128 unidirectional data streams, with a loopback regression opening the full set in both directions.
 - **Existing config files now fail closed when they cannot be read or parsed** — startup previously used `unwrap_or_default()`, silently discarding the whole file on any error. A malformed file could therefore drop a server PSK, ACL, or rate limit while still launching with permissive defaults. Missing files still use defaults; present but unusable files now stop startup with the config path and underlying error.
+- **Reordered UDP feedback can no longer roll live loss statistics backward** — each upload stream now rejects a feedback packet whose embedded stream ID does not match its connected socket or whose cumulative sequence denominator predates the snapshot already stored. Previously a delayed datagram could overwrite a newer per-stream slot; aggregate-level filtering could miss that regression when another stream advanced at the same time.
 
 ## [0.9.25] - 2026-07-31
 

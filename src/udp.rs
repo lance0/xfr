@@ -1101,13 +1101,38 @@ pub async fn receive_udp(
     ))
 }
 
+/// Store a feedback snapshot only when it belongs to this socket's stream
+/// and is at least as fresh as the slot's current cumulative denominator.
+fn store_udp_feedback(
+    slots: &mut [UdpIntervalProgress],
+    expected_stream_index: usize,
+    packet: UdpFeedbackPacket,
+) -> bool {
+    if usize::from(packet.stream_id) != expected_stream_index {
+        return false;
+    }
+
+    let Some(slot) = slots.get_mut(expected_stream_index) else {
+        return false;
+    };
+    let current_denominator = slot.packets_received.saturating_add(slot.packets_lost);
+    let next = packet.to_progress();
+    let next_denominator = next.packets_received.saturating_add(next.packets_lost);
+    if next_denominator < current_denominator {
+        return false;
+    }
+
+    *slot = next;
+    true
+}
+
 /// Receive `UdpFeedbackPacket`s from the server on the client's
 /// upload-mode UDP socket.
 ///
 /// Spawned alongside the client-side `send_udp_paced` task so the
 /// connected socket carries data in one direction and feedback in the
-/// other. Length-first demux: 36-byte packets that decode as feedback
-/// are written into `aggregator[stream_id]` for the per-test 1 Hz
+/// other. Length-first demux: valid 36-byte feedback packets for this
+/// stream are written into its aggregator slot for the per-test 1 Hz
 /// consumer task to pick up. Anything else (including unexpected data
 /// echoes or random short runts) is silently discarded — the client in
 /// upload mode owns no PacketTracker for this socket and must not
@@ -1149,12 +1174,12 @@ pub async fn receive_udp_feedback_only(
                             continue;
                         }
                         if let Some(pkt) = UdpFeedbackPacket::decode(&buffer[..n]) {
-                            // Cumulative counts are monotonic per-stream,
-                            // so we can safely overwrite our per-stream
-                            // slot — older counts can never be ahead.
                             let mut slots = aggregator.lock();
-                            if let Some(slot) = slots.get_mut(stream_index) {
-                                *slot = pkt.to_progress();
+                            if !store_udp_feedback(&mut slots, stream_index, pkt) {
+                                debug!(
+                                    "ignored stale or mismatched UDP feedback for stream {} (packet stream {})",
+                                    stream_index, pkt.stream_id
+                                );
                             }
                         }
                     }
@@ -1178,8 +1203,11 @@ pub async fn receive_udp_feedback_only(
                                 && let Some(pkt) = UdpFeedbackPacket::decode(&buffer[..n])
                             {
                                 let mut slots = aggregator.lock();
-                                if let Some(slot) = slots.get_mut(stream_index) {
-                                    *slot = pkt.to_progress();
+                                if !store_udp_feedback(&mut slots, stream_index, pkt) {
+                                    debug!(
+                                        "ignored stale or mismatched final UDP feedback for stream {} (packet stream {})",
+                                        stream_index, pkt.stream_id
+                                    );
                                 }
                             }
                         }
@@ -1466,6 +1494,58 @@ mod tests {
         assert!(pkt.encode(&mut buffer));
         buffer[5] = 99; // unknown kind
         assert!(UdpFeedbackPacket::decode(&buffer).is_none());
+    }
+
+    #[test]
+    fn feedback_slot_rejects_wrong_stream_and_reordered_snapshot() {
+        let mut slots = vec![UdpIntervalProgress {
+            packets_received: 90,
+            packets_lost: 10,
+        }];
+        let wrong_stream = UdpFeedbackPacket {
+            stream_id: 1,
+            elapsed_ms: 2_000,
+            packets_received: 1_000,
+            packets_lost: 0,
+        };
+        assert!(!store_udp_feedback(&mut slots, 0, wrong_stream));
+        assert_eq!(slots[0].packets_received, 90);
+        assert_eq!(slots[0].packets_lost, 10);
+
+        let reordered = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 500,
+            packets_received: 40,
+            packets_lost: 5,
+        };
+        assert!(!store_udp_feedback(&mut slots, 0, reordered));
+        assert_eq!(slots[0].packets_received, 90);
+        assert_eq!(slots[0].packets_lost, 10);
+    }
+
+    #[test]
+    fn feedback_slot_accepts_fresh_and_loss_corrected_snapshots() {
+        let mut slots = vec![UdpIntervalProgress::default()];
+        let fresh = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 500,
+            packets_received: 90,
+            packets_lost: 10,
+        };
+        assert!(store_udp_feedback(&mut slots, 0, fresh));
+
+        // Equal denominators are still fresh enough: a receiver may later
+        // reclassify a missing packet as reordered without changing the
+        // number of sequence positions it has observed.
+        let corrected = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 1_000,
+            packets_received: 91,
+            packets_lost: 9,
+        };
+        assert!(store_udp_feedback(&mut slots, 0, corrected));
+        assert_eq!(slots[0].packets_received, 91);
+        assert_eq!(slots[0].packets_lost, 9);
     }
 
     #[test]
