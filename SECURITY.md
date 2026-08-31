@@ -4,16 +4,14 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.4.x   | ✓         |
-| < 0.4   | ✗         |
+| Latest release | ✓ |
+| Older releases | ✗ |
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in xfr, please report it by opening a GitHub issue at:
-
-https://github.com/lance0/xfr/issues
-
-For sensitive vulnerabilities that should not be disclosed publicly, please email the maintainer directly.
+Report security vulnerabilities through [GitHub private vulnerability
+reporting](https://github.com/lance0/xfr/security/advisories/new). Do not include
+vulnerability details in a public issue.
 
 ### What to include
 
@@ -22,18 +20,13 @@ For sensitive vulnerabilities that should not be disclosed publicly, please emai
 - Potential impact
 - Suggested fix (if any)
 
-### Response timeline
-
-- Initial response: within 48 hours
-- Status update: within 7 days
-- Fix timeline: depends on severity
-
 ## Security Considerations
 
 xfr is a network bandwidth testing tool. When running the server:
 
 - The server accepts connections from any client by default
-- Use `--psk` for pre-shared key authentication (HMAC-SHA256 challenge-response)
+- Use `--psk` for mutual pre-shared key authentication and protected control
+  messages
 - Use `--allow` / `--deny` for IP-based access control lists
 - Use `--rate-limit` to prevent abuse from individual IPs
 - Consider firewall rules to restrict access
@@ -41,15 +34,24 @@ xfr is a network bandwidth testing tool. When running the server:
 
 ### Transport Encryption
 
-| Mode | Encryption | Authentication |
-|------|------------|----------------|
-| TCP  | None       | PSK optional   |
-| UDP  | None       | PSK optional   |
-| QUIC | TLS 1.3    | PSK optional   |
+| Mode | Bulk test data | Control channel |
+|------|----------------|-----------------|
+| TCP  | Plaintext | Plaintext without PSK; ChaCha20-Poly1305 after PSK authentication |
+| UDP  | Plaintext | Uses the same TCP control channel behavior |
+| QUIC | TLS 1.3; server identity is not verified | TLS 1.3; PSK can add protected application control |
 
-**Important:** QUIC encrypts traffic but uses self-signed certificates without server verification. This means QUIC alone does not protect against man-in-the-middle attacks. **Always use PSK with QUIC on untrusted networks.**
+With PSK enabled, peers authenticate each other using HMAC-SHA256 proofs and
+post-auth control messages are protected with ChaCha20-Poly1305. TCP and UDP
+bulk payloads remain plaintext.
 
-For encrypted + authenticated connections, use QUIC with PSK:
+QUIC encrypts each TLS connection, but xfr uses a self-signed server certificate
+without PKI verification. The PSK proof and protected control channel are not
+bound to that TLS session or to its bulk streams. An active relay can therefore
+terminate and forward QUIC connections while accessing the bulk payload. QUIC
+with PSK is not end-to-end bulk-data authentication or confidentiality against
+such a relay; use an authenticated VPN when those properties are required.
+
+To combine QUIC transport encryption with PSK-protected control:
 ```bash
 xfr serve --psk "secretkey"
 xfr <host> -Q --psk "secretkey"

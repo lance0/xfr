@@ -80,7 +80,7 @@ Encrypted transport over UDP using TLS 1.3:
 ```bash
 xfr <host> --quic              # QUIC transport (short: -Q)
 xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
-xfr <host> --quic --psk secret # QUIC with PSK authentication
+xfr <host> --quic --psk secret # QUIC with PSK-protected control
 ```
 
 QUIC provides:
@@ -89,7 +89,10 @@ QUIC provides:
 - Connection migration capability
 - Head-of-line blocking avoidance
 
-**Security Note**: QUIC encrypts traffic but uses self-signed certificates by default. For authenticated connections, combine with `--psk` to prevent MITM attacks.
+**Security Note**: QUIC encrypts traffic but does not verify the self-signed
+server certificate. PSK authenticates and protects xfr control messages, but is
+not bound to the QUIC bulk streams. Use an authenticated VPN when
+endpoint-verified confidentiality matters.
 
 ### MPTCP (Multi-Path TCP)
 
@@ -453,7 +456,7 @@ Restrict which IPs can connect:
 
 ```bash
 xfr serve --allow 192.168.0.0/16           # Only allow local network
-xfr serve --allow 10.0.0.0/8 --deny 0.0.0.0/0   # Allow 10.x, deny all else
+xfr serve --allow 10.0.0.0/8 --deny 10.42.0.0/16 # Allow 10.x except 10.42.x
 xfr serve --acl-file /etc/xfr/acl.txt      # Load ACL from file
 ```
 
@@ -461,10 +464,12 @@ ACL file format:
 ```
 allow 192.168.0.0/16
 allow 10.0.0.0/8
-deny 0.0.0.0/0
+deny 192.168.1.0/24
 ```
 
-Rules are evaluated in order. First match wins.
+Deny rules always take precedence. If any allow rules exist, addresses that
+match none of them are rejected; with no allow rules, otherwise-unmatched
+addresses are accepted. Rule order does not change the result.
 
 ### PSK Authentication
 
@@ -479,7 +484,8 @@ xfr serve --psk-file /etc/xfr/psk.txt
 xfr <host> --psk mysecretkey
 ```
 
-Authentication uses HMAC-SHA256 challenge-response.
+Authentication uses HMAC-SHA256 challenge-response. Once both peers are
+authenticated, post-auth control messages use ChaCha20-Poly1305.
 
 > **Security note:** Values supplied via `--psk` or the `XFR_PSK` environment
 > variable are visible through process metadata (`ps`, `/proc/<pid>/environ`,
@@ -506,10 +512,16 @@ xfr serve --prometheus 9090
 Available at `http://localhost:9090/metrics`:
 
 ```
-xfr_bytes_total{direction="upload"} 1234567890
-xfr_throughput_mbps{direction="upload"} 987.65
+xfr_bytes_total 1234567890
+xfr_throughput_mbps 987.65
+xfr_tests_total 3
+xfr_test_duration_seconds_count 3
 xfr_active_tests 2
-xfr_retransmits_total 42
+xfr_stream_bytes_total{test_id="abc",stream_id="0"} 1234567890
+xfr_stream_throughput_mbps{test_id="abc",stream_id="0"} 987.65
+xfr_stream_retransmits_total{test_id="abc",stream_id="0"} 42
+xfr_tcp_rtt_microseconds{test_id="abc"} 1200
+xfr_tcp_retransmits_total{test_id="abc"} 42
 ```
 
 ### Push Gateway
