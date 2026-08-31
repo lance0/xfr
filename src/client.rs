@@ -320,6 +320,16 @@ impl Default for ClientConfig {
     }
 }
 
+impl ClientConfig {
+    /// Validate settings before DNS resolution or socket creation.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(psk) = self.psk.as_deref() {
+            auth::validate_psk(psk)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct TestProgress {
     pub elapsed_ms: u64,
@@ -552,6 +562,7 @@ impl Client {
         &self,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
+        self.config.validate()?;
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
 
         if self.config.protocol == Protocol::Quic && self.config.bitrate.is_some() {
@@ -3408,5 +3419,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("overlaps requested data source ports 5300-5303"));
+    }
+
+    #[tokio::test]
+    async fn run_rejects_invalid_psk_before_network_io() {
+        let config = ClientConfig {
+            host: "this-host-must-not-be-resolved.invalid".to_string(),
+            psk: Some(String::new()),
+            ..Default::default()
+        };
+
+        let error = Client::new(config).run(None).await.unwrap_err();
+
+        assert!(error.to_string().contains("PSK cannot be empty"));
     }
 }

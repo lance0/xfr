@@ -117,6 +117,13 @@ impl Default for ServerConfig {
     }
 }
 
+impl ServerConfig {
+    /// Validate settings before binding listeners or allocating server tasks.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.auth.validate()
+    }
+}
+
 /// Build the optional preset ACL from configured allowed client CIDRs.
 fn build_preset_acl(allowed_clients: Option<&Vec<String>>) -> anyhow::Result<Option<Acl>> {
     if let Some(clients) = allowed_clients {
@@ -470,6 +477,8 @@ impl Server {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        self.config.validate()?;
+
         let listener = if let Some(ip) = self.config.bind_addr {
             let addr = SocketAddr::new(ip, self.config.port);
             info!("Binding to {}", addr);
@@ -4234,5 +4243,20 @@ mod tests {
             initial_read_timeout_for_peer(&tests, v4),
             Duration::from_millis(128 * INITIAL_READ_TIMEOUT_PER_STREAM_MS)
         );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_invalid_psk_before_binding() {
+        let config = ServerConfig {
+            bind_addr: Some("203.0.113.1".parse().unwrap()),
+            auth: AuthConfig {
+                psk: Some("x".repeat(crate::auth::MAX_PSK_LENGTH + 1)),
+            },
+            ..Default::default()
+        };
+
+        let error = Server::new(config).run().await.unwrap_err();
+
+        assert!(error.to_string().contains("PSK exceeds maximum length"));
     }
 }
