@@ -25,8 +25,10 @@
 //! # Security Model
 //!
 //! QUIC provides transport encryption via TLS 1.3, but xfr uses self-signed
-//! certificates by default (server identity is not verified). For authenticated
-//! connections, combine with PSK authentication (`--psk`) to prevent MITM attacks.
+//! certificates by default, so unauthenticated sessions do not verify server
+//! identity. For authenticated connections, combine QUIC with PSK authentication
+//! (`--psk`): xfr binds the PSK handshake to the exact TLS connection using the
+//! RFC 9266 exporter, preventing a terminating relay from splicing two QUIC legs.
 //!
 //! The self-signed approach is chosen because:
 //! 1. xfr is typically used on trusted networks (LAN, VPN)
@@ -40,12 +42,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use hkdf::Hkdf;
 use quinn::{
     AsyncUdpSocket, ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
     ServerConfig, TransportConfig, UdpPoller, VarInt, WriteError,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use sha2::Sha256;
 use socket2::{Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
@@ -74,6 +78,36 @@ const MAX_DIVERT_ITERATIONS: u32 = 16;
 /// deadline, which can precede ours by the path RTT plus scheduling slop
 /// (mirrors tcp.rs SEND_TEARDOWN_GRACE).
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+/// TLS exporter label for binding application PSK authentication to the QUIC
+/// connection. RFC 9266 defines this exact label; it is wire-stable.
+const PSK_CHANNEL_BINDING_EXPORTER_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
+/// HKDF info for the per-connection PSK. This is also wire-stable.
+const PSK_SESSION_INFO: &[u8] = b"xfr-quic-psk-session-v1";
+
+/// Derive the per-connection PSK used by QUIC authentication and control
+/// protection. The TLS exporter is a public HKDF salt; the configured PSK is
+/// the input keying material, preserving the PSK as the secret input.
+pub(crate) fn derive_psk_session_key(
+    connection: &Connection,
+    configured_psk: &str,
+) -> anyhow::Result<[u8; 32]> {
+    let mut exporter = [0u8; 32];
+    connection
+        .export_keying_material(&mut exporter, PSK_CHANNEL_BINDING_EXPORTER_LABEL, b"")
+        .map_err(|_| anyhow::anyhow!("failed to export QUIC TLS channel-binding material"))?;
+    derive_psk_session_key_from_exporter(configured_psk, &exporter)
+}
+
+fn derive_psk_session_key_from_exporter(
+    configured_psk: &str,
+    exporter: &[u8; 32],
+) -> anyhow::Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(Some(exporter), configured_psk.as_bytes());
+    let mut session_psk = [0u8; 32];
+    hk.expand(PSK_SESSION_INFO, &mut session_psk)
+        .map_err(|_| anyhow::anyhow!("failed to derive QUIC PSK session key"))?;
+    Ok(session_psk)
+}
 
 /// Generate a self-signed certificate for QUIC
 ///
@@ -535,6 +569,79 @@ pub async fn connect(endpoint: &Endpoint, addr: SocketAddr) -> anyhow::Result<Co
 mod tests {
     use super::*;
     use tokio::sync::watch;
+
+    #[test]
+    fn psk_session_key_derivation_matches_fixed_vector() {
+        assert_eq!(
+            PSK_CHANNEL_BINDING_EXPORTER_LABEL,
+            b"EXPORTER-Channel-Binding"
+        );
+        let exporter = [0x11; 32];
+        let session = derive_psk_session_key_from_exporter("shared-psk", &exporter).unwrap();
+        // d53bc3e727a6432f421cee4ed63490d79f11bb86a1a961e4137ef4bc40c0213c
+        assert_eq!(
+            session,
+            [
+                0xd5, 0x3b, 0xc3, 0xe7, 0x27, 0xa6, 0x43, 0x2f, 0x42, 0x1c, 0xee, 0x4e, 0xd6, 0x34,
+                0x90, 0xd7, 0x9f, 0x11, 0xbb, 0x86, 0xa1, 0xa9, 0x61, 0xe4, 0x13, 0x7e, 0xf4, 0xbc,
+                0x40, 0xc0, 0x21, 0x3c,
+            ]
+        );
+    }
+
+    #[test]
+    fn psk_session_keys_are_bound_to_one_tls_exporter() {
+        let exporter_a = [0x11; 32];
+        let exporter_b = [0x22; 32];
+        let session_a = derive_psk_session_key_from_exporter("shared-psk", &exporter_a).unwrap();
+        let session_b = derive_psk_session_key_from_exporter("shared-psk", &exporter_b).unwrap();
+        assert_ne!(session_a, session_b);
+
+        // An auth response relayed from one QUIC connection must not verify
+        // on another connection, even when both endpoints share the PSK.
+        let response = crate::auth::compute_response_with_key("challenge", &session_a);
+        assert!(!crate::auth::verify_response_with_key(
+            "challenge",
+            &session_b,
+            &response,
+        ));
+
+        // The later server proof and protected control keys remain bound too.
+        let proof = crate::control_crypto::compute_server_proof_with_key(
+            b"client hello",
+            b"server hello",
+            "client nonce",
+            "server nonce",
+            &session_a,
+        )
+        .unwrap();
+        assert!(
+            !crate::control_crypto::verify_server_proof_with_key(
+                b"client hello",
+                b"server hello",
+                "client nonce",
+                "server nonce",
+                &session_b,
+                &proof,
+            )
+            .unwrap()
+        );
+
+        let (mut sender, _) = crate::control_crypto::ControlCodec::derive_pair_with_key(
+            "client nonce",
+            "server nonce",
+            &session_a,
+        )
+        .unwrap();
+        let (mut wrong_receiver, _) = crate::control_crypto::ControlCodec::derive_pair_with_key(
+            "client nonce",
+            "server nonce",
+            &session_b,
+        )
+        .unwrap();
+        let frame = sender.seal(b"bound control message").unwrap();
+        assert!(wrong_receiver.open(&frame).is_err());
+    }
 
     /// The CLI accepts `-P 128`, and upload/download data use unidirectional
     /// QUIC streams. Quinn otherwise advertises only 100 incoming uni streams,

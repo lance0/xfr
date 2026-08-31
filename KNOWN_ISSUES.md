@@ -136,9 +136,9 @@ A warning is logged when `-b` is used with QUIC.
 
 QUIC transport uses self-signed certificates and does not verify the server's identity. This is intentional for ease of use in trusted environments.
 
-**Impact:** QUIC connections are encrypted but do not authenticate the server, leaving them vulnerable to server impersonation or man-in-the-middle attacks on untrusted networks.
+**Impact:** QUIC connections without a PSK are encrypted but do not authenticate the server, leaving them vulnerable to server impersonation or man-in-the-middle attacks on untrusted networks.
 
-**Mitigation:** Do not treat QUIC's self-signed certificate as server identity on unauthenticated sessions. Use `--psk-file` on untrusted networks: modern PSK sessions require AEAD-protected control channels and verify a server proof bound to the handshake transcript. The self-signed QUIC certificate is still not a public PKI identity.
+**Mitigation:** Do not treat QUIC's self-signed certificate as server identity on unauthenticated sessions. Use `--psk-file` on untrusted networks: current PSK sessions bind mutual authentication and protected-control keys to the exact TLS connection through the RFC 9266 exporter. Both peers must support `quic_channel_binding_v1`; QUIC + PSK fails closed otherwise. The self-signed QUIC certificate is still not a public PKI identity.
 
 ### Protocol Extensions Require Major Version Bump
 

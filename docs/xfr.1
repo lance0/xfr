@@ -357,9 +357,12 @@ Compare results, fail if throughput drops more than 5%
 Find xfr servers on the local network via mDNS
 .SH PROTOCOL
 .B xfr
-servers and clients using protocol v1.1 exchange capability strings during the
+servers and clients exchange capability strings during the protocol v1.1
 .B Hello
-handshake (protocol v1.1). A feature activates only when both peers advertise its capability; older peers fall back to prior behavior, so adding a capability is wire-additive.
+handshake. Optional features activate only when both peers advertise their
+capability and otherwise fall back to prior behavior. Mandatory capabilities
+fail closed when their protected operation is requested; they never silently
+downgrade.
 .TP
 .B tcp
 Peer supports TCP tests.
@@ -394,6 +397,22 @@ Server answers path-MTU probe packets (ack + same-size echo) for \-\-probe\-mtu 
 .TP
 .B single_port_udp_v1
 All UDP stream data flows to the server's main port via per-stream connected sockets negotiated with a token-bearing hello, instead of per-stream ephemeral server ports (issue #63). Advertised only when a startup self-test proves the kernel's connected-socket routing; servers fall back to ephemeral ports for older clients or unsupported platforms. Available v0.9.18+.
+.TP
+.B protected_control_v1
+Mandatory for PSK sessions. Post-auth control messages use ChaCha20-Poly1305;
+peers that lack this capability are rejected rather than downgraded to
+plaintext control.
+.TP
+.B quic_channel_binding_v1
+Mandatory for QUIC + PSK sessions. The PSK authentication and protected-control
+keys are bound to the exact TLS connection through the RFC 9266 exporter. Both
+peers must support this capability.
+.TP
+.B byte_budget_v1
+Server honors fixed-size transfers requested with
+.BR -n / --bytes .
+This is a hard requirement: the client refuses a byte-budget test when the
+server lacks the capability.
 
 .SH SIGNALS
 .TP

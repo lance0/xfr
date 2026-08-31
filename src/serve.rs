@@ -1155,6 +1155,11 @@ async fn handle_quic_client(
 
     let connection = incoming.await?;
     debug!("QUIC connection established with {}", peer_addr);
+    let quic_session_psk = security
+        .psk
+        .as_deref()
+        .map(|psk| quic::derive_psk_session_key(&connection, psk))
+        .transpose()?;
 
     // Accept control stream (bidirectional)
     let (mut ctrl_send, ctrl_recv) = connection.accept_bi().await?;
@@ -1213,6 +1218,20 @@ async fn handle_quic_client(
                         "Client lacks protected_control_v1 — refusing PSK session"
                     ));
                 }
+                if !crate::protocol::capability_advertised(
+                    &capabilities,
+                    crate::protocol::QUIC_CHANNEL_BINDING_CAPABILITY,
+                ) {
+                    let error = ControlMessage::error(
+                        "QUIC PSK authentication requires quic_channel_binding_v1 capability",
+                    );
+                    ctrl_send
+                        .write_all(format!("{}\n", error.serialize()?).as_bytes())
+                        .await?;
+                    return Err(anyhow::anyhow!(
+                        "Client lacks quic_channel_binding_v1 — refusing QUIC PSK session"
+                    ));
+                }
                 let nonce = auth::generate_nonce();
                 let hello = ControlMessage::server_hello_with_auth_and_capabilities(
                     nonce.clone(),
@@ -1257,10 +1276,10 @@ async fn handle_quic_client(
 
         match msg {
             ControlMessage::AuthResponse { response } => {
-                let psk = security.psk.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("PSK required for authentication but not configured")
-                })?;
-                if !auth::verify_response(&nonce, psk, &response) {
+                let session_psk = quic_session_psk
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("QUIC PSK session key was not derived"))?;
+                if !auth::verify_response_with_key(&nonce, session_psk, &response) {
                     if let Some(tx) = &security.tui_tx {
                         let _ = tx.try_send(ServerEvent::AuthFailure);
                     }
@@ -1277,19 +1296,22 @@ async fn handle_quic_client(
                         "PSK session requires client_nonce in Hello for protected control"
                     )
                 })?;
-                let (c2s, s2c) =
-                    crate::control_crypto::ControlCodec::derive_pair(&client_nonce, &nonce, psk)?;
+                let (c2s, s2c) = crate::control_crypto::ControlCodec::derive_pair_with_key(
+                    &client_nonce,
+                    &nonce,
+                    session_psk,
+                )?;
                 transport = crate::control_crypto::ProtectedControl::protected_server(c2s, s2c);
 
                 // Server proof over the exact bytes of both hellos: the
                 // received client hello and the server hello captured at
                 // send time — so the MAC can't drift from the wire bytes.
-                let server_proof = crate::control_crypto::compute_server_proof(
+                let server_proof = crate::control_crypto::compute_server_proof_with_key(
                     raw_client_hello.as_bytes(),
                     server_hello_json.as_bytes(),
                     &client_nonce,
                     &nonce,
-                    psk,
+                    session_psk,
                 )?;
                 let success = ControlMessage::auth_success_with_proof(server_proof);
                 ctrl_send
@@ -1418,9 +1440,10 @@ async fn handle_quic_client(
 
 /// One-line observability for every control connection: client software,
 /// protocol version, and which of the server's capabilities the client
-/// does NOT advertise — i.e. the features that will silently fall back
-/// for this session. "Which client version was that" is the first
-/// question for any field report, so the log answers it up front.
+/// does NOT advertise. Optional features may fall back for the session;
+/// mandatory security requirements fail closed when requested. "Which client
+/// version was that" is the first question for any field report, so the log
+/// answers it up front.
 fn log_client_hello(
     peer_addr: SocketAddr,
     version: &str,
@@ -1445,7 +1468,7 @@ fn log_client_hello(
         .collect();
     if !missing.is_empty() {
         info!(
-            "Client {} lacks capabilities: {} (affected features fall back this session)",
+            "Client {} lacks capabilities: {} (optional features may fall back; requested mandatory features fail closed)",
             peer_addr,
             missing.join(", ")
         );

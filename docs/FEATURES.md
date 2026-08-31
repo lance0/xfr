@@ -80,7 +80,7 @@ Encrypted transport over UDP using TLS 1.3:
 ```bash
 xfr <host> --quic              # QUIC transport (short: -Q)
 xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
-xfr <host> --quic --psk secret # QUIC with PSK-protected control
+xfr <host> --quic --psk secret # PSK-authenticated QUIC
 ```
 
 QUIC provides:
@@ -89,10 +89,12 @@ QUIC provides:
 - Connection migration capability
 - Head-of-line blocking avoidance
 
-**Security Note**: QUIC encrypts traffic but does not verify the self-signed
-server certificate. PSK authenticates and protects xfr control messages, but is
-not bound to the QUIC bulk streams. Use an authenticated VPN when
-endpoint-verified confidentiality matters.
+**Security Note**: Without a PSK, QUIC encrypts traffic but does not verify the
+self-signed server certificate. With a PSK, xfr binds mutual authentication and
+protected-control keys to the exact TLS connection using the RFC 9266 exporter,
+so a terminating relay cannot splice the handshake onto a different connection.
+Both peers must support `quic_channel_binding_v1`; QUIC + PSK fails closed
+otherwise. The self-signed certificate is still not a public PKI identity.
 
 ### MPTCP (Multi-Path TCP)
 
@@ -129,7 +131,7 @@ The control protocol version is 1.1. Client and server exchange version informat
 
 ### Capability Negotiation
 
-Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, `udp_feedback_v1`, `zerocopy_v1`, `mtu_probe_v1`, and `single_port_udp_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port mode); a feature activates only when both peers advertise it. Older peers that don't list a capability fall back to the prior behavior — adding a capability is wire-additive. The server may withhold a capability it can't honor at runtime (e.g. `single_port_udp_v1` when the startup self-test fails).
+Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, `udp_feedback_v1`, `zerocopy_v1`, `mtu_probe_v1`, `single_port_udp_v1`, `protected_control_v1`, `quic_channel_binding_v1`, and `byte_budget_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port mode); a feature activates only when both peers advertise it. Optional capabilities fall back to the prior behavior with older peers. Mandatory capabilities fail closed instead: PSK requires `protected_control_v1`, QUIC + PSK additionally requires `quic_channel_binding_v1`, and byte-budget tests require `byte_budget_v1`. Both sides of a QUIC + PSK deployment must therefore be upgraded together. The server may withhold an optional capability it can't honor at runtime (e.g. `single_port_udp_v1` when the startup self-test fails).
 
 The `udp_feedback_v1` capability (added in v0.9.14) lets the server send 36-byte cumulative-counts packets back to the client at 2 Hz on the same UDP data socket, providing live UDP loss visibility without depending on the TCP control channel that may be competing for ACKs against a saturated UDP uplink.
 
@@ -485,7 +487,9 @@ xfr <host> --psk mysecretkey
 ```
 
 Authentication uses HMAC-SHA256 challenge-response. Once both peers are
-authenticated, post-auth control messages use ChaCha20-Poly1305.
+authenticated, post-auth control messages use ChaCha20-Poly1305. On QUIC, the
+authentication and control keys are also bound to the exact TLS connection via
+the RFC 9266 exporter; both peers must support `quic_channel_binding_v1`.
 
 > **Security note:** Values supplied via `--psk` or the `XFR_PSK` environment
 > variable are visible through process metadata (`ps`, `/proc/<pid>/environ`,

@@ -1111,6 +1111,135 @@ async fn test_quic_with_psk() {
     assert!(result.is_ok(), "QUIC with PSK should succeed: {:?}", result);
 }
 
+/// A new PSK-configured QUIC server must reject a peer that supports protected
+/// control framing but not TLS-exporter channel binding. This exercises the
+/// transport-specific fail-closed check over a real QUIC connection.
+#[tokio::test]
+async fn test_quic_psk_rejects_client_without_channel_binding() {
+    use tokio::io::AsyncBufReadExt;
+    use xfr::protocol::ControlMessage;
+
+    let port = get_test_port();
+    let _server = start_secure_server(
+        port,
+        Some("quic-downgrade-secret".to_string()),
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let endpoint = xfr::quic::create_client_endpoint(addr, None).unwrap();
+    let connection = xfr::quic::connect(&endpoint, addr).await.unwrap();
+    let (mut send, recv) = connection.open_bi().await.unwrap();
+    let mut reader = tokio::io::BufReader::new(recv);
+
+    let hello = ControlMessage::Hello {
+        version: "1.1".to_string(),
+        client: Some("pre-channel-binding-client".to_string()),
+        server: None,
+        capabilities: Some(vec!["protected_control_v1".to_string()]),
+        auth: None,
+        client_nonce: Some("client-nonce".to_string()),
+    };
+    send.write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+        .await
+        .unwrap();
+
+    let mut line = String::new();
+    match timeout(Duration::from_secs(5), reader.read_line(&mut line)).await {
+        Ok(Ok(n)) => {
+            if n == 0 {
+                return;
+            }
+            match ControlMessage::deserialize(line.trim()).expect("parse response") {
+                ControlMessage::Error { message } => assert!(
+                    message.contains("quic_channel_binding_v1"),
+                    "expected channel-binding refusal, got: {message}"
+                ),
+                other => panic!("expected Error refusing unbound QUIC PSK, got: {other:?}"),
+            }
+        }
+        // Quinn may surface the handler's immediate connection close before
+        // its best-effort Error frame. Either result is a fail-closed reject;
+        // a normal server Hello below would still fail this test.
+        Ok(Err(_)) => {}
+        Err(_) => panic!("server neither rejected nor responded within 5s"),
+    }
+}
+
+/// A new PSK-configured QUIC client must likewise refuse an older server that
+/// offers protected control but not TLS-exporter channel binding.
+#[tokio::test]
+async fn test_quic_psk_rejects_server_without_channel_binding() {
+    use tokio::io::AsyncBufReadExt;
+    use xfr::protocol::ControlMessage;
+
+    let port = get_test_port();
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let (cert, key) = xfr::quic::generate_self_signed_cert().unwrap();
+    let endpoint =
+        xfr::quic::create_server_endpoint(addr, xfr::net::AddressFamily::V4Only, cert, key, None)
+            .unwrap();
+
+    let _legacy_server = tokio::spawn(async move {
+        let incoming = endpoint.accept().await.expect("accept QUIC connection");
+        let connection = incoming.await.expect("complete QUIC handshake");
+        let (mut send, recv) = connection.accept_bi().await.expect("accept control stream");
+        let mut reader = tokio::io::BufReader::new(recv);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read client hello");
+
+        let hello = ControlMessage::server_hello_with_auth_and_capabilities(
+            "legacy-challenge".to_string(),
+            vec!["protected_control_v1".to_string()],
+        );
+        send.write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+            .await
+            .expect("send legacy server hello");
+        // Keep the connection alive long enough for the client to consume
+        // the Hello and make its capability decision.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+
+    let client = Client::new(ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(1),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: Some("quic-downgrade-secret".to_string()),
+        address_family: xfr::net::AddressFamily::V4Only,
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    });
+    let error = timeout(Duration::from_secs(5), client.run(None))
+        .await
+        .expect("client should reject promptly")
+        .expect_err("client must refuse an unbound QUIC PSK server");
+    assert!(
+        error.to_string().contains("quic_channel_binding_v1"),
+        "unexpected refusal: {error:#}"
+    );
+}
+
 /// Positive TCP PSK round-trip. Unlike QUIC (which is TLS-encrypted regardless),
 /// the TCP control channel is plaintext without LAN-159, so this exercises the
 /// security-critical path end to end: capability negotiation, the server

@@ -2089,6 +2089,7 @@ impl Client {
 
         let server_capabilities;
         let mut server_nonce_var: Option<String> = None;
+        let mut quic_session_psk: Option<[u8; 32]> = None;
         match msg {
             ControlMessage::Hello {
                 version,
@@ -2128,7 +2129,20 @@ impl Client {
                         ));
                     }
 
-                    let response = auth::compute_response(&challenge.nonce, psk);
+                    // QUIC PSK auth must be bound to this exact TLS session.
+                    // Without this mandatory capability, an active relay can
+                    // forward the application handshake across two QUIC legs.
+                    if !crate::protocol::capability_advertised(
+                        &server_capabilities,
+                        crate::protocol::QUIC_CHANNEL_BINDING_CAPABILITY,
+                    ) {
+                        return Err(anyhow::anyhow!(
+                            "Server does not support quic_channel_binding_v1 — refusing QUIC PSK session"
+                        ));
+                    }
+                    let session_psk = quic::derive_psk_session_key(&connection, psk)?;
+
+                    let response = auth::compute_response_with_key(&challenge.nonce, &session_psk);
                     let auth_msg = ControlMessage::auth_response(response);
                     ctrl_send
                         .write_all(format!("{}\n", auth_msg.serialize()?).as_bytes())
@@ -2146,12 +2160,12 @@ impl Client {
                             })?;
                             match server_proof {
                                 Some(proof) => {
-                                    if !crate::control_crypto::verify_server_proof(
+                                    if !crate::control_crypto::verify_server_proof_with_key(
                                         client_hello_json.as_bytes(),
                                         raw_server_hello.as_bytes(),
                                         cn,
                                         &challenge.nonce,
-                                        psk,
+                                        &session_psk,
                                         &proof,
                                     )? {
                                         return Err(anyhow::anyhow!(
@@ -2173,6 +2187,7 @@ impl Client {
                             return Err(anyhow::anyhow!("Unexpected auth response"));
                         }
                     }
+                    quic_session_psk = Some(session_psk);
                 }
             }
             ControlMessage::Error { message } => {
@@ -2186,18 +2201,17 @@ impl Client {
         // Install AEAD-protected control channel if PSK auth was used.
         let mut transport = crate::control_crypto::ProtectedControl::plaintext();
         if has_psk {
-            let psk = self
-                .config
-                .psk
+            let session_psk = quic_session_psk
                 .as_ref()
-                .expect("has_psk implies PSK configured");
+                .ok_or_else(|| anyhow::anyhow!("QUIC PSK session key was not derived"))?;
             let cn = client_nonce
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("PSK session but no client_nonce"))?;
             let sn = server_nonce_var
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("PSK session but no server nonce"))?;
-            let (c2s, s2c) = crate::control_crypto::ControlCodec::derive_pair(cn, sn, psk)?;
+            let (c2s, s2c) =
+                crate::control_crypto::ControlCodec::derive_pair_with_key(cn, sn, session_psk)?;
             transport = crate::control_crypto::ProtectedControl::protected_client(c2s, s2c);
         }
 

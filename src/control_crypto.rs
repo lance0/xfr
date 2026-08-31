@@ -92,13 +92,13 @@ const NONCE_LEN: usize = 12;
 fn derive_keys(
     client_nonce: &str,
     server_nonce: &str,
-    psk: &str,
+    key_material: impl AsRef<[u8]>,
 ) -> Result<([u8; 32], [u8; 32], [u8; 32])> {
     let mut salt = Vec::with_capacity(client_nonce.len() + server_nonce.len());
     salt.extend_from_slice(client_nonce.as_bytes());
     salt.extend_from_slice(server_nonce.as_bytes());
 
-    let hk = Hkdf::<Sha256>::new(Some(&salt), psk.as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(&salt), key_material.as_ref());
 
     let mut c2s_key = [0u8; 32];
     hk.expand(Direction::C2S.info(), &mut c2s_key)
@@ -127,7 +127,27 @@ pub fn compute_server_proof(
     server_nonce: &str,
     psk: &str,
 ) -> Result<String> {
-    let (_, _, s2c_auth_key) = derive_keys(client_nonce, server_nonce, psk)?;
+    compute_server_proof_with_key(
+        client_hello_bytes,
+        server_hello_bytes,
+        client_nonce,
+        server_nonce,
+        psk.as_bytes(),
+    )
+}
+
+/// Compute a server proof from binary key material.
+///
+/// QUIC supplies a TLS-exporter-bound session PSK here; TCP continues to use
+/// the configured PSK through [`compute_server_proof`].
+pub(crate) fn compute_server_proof_with_key(
+    client_hello_bytes: &[u8],
+    server_hello_bytes: &[u8],
+    client_nonce: &str,
+    server_nonce: &str,
+    key_material: &[u8],
+) -> Result<String> {
+    let (_, _, s2c_auth_key) = derive_keys(client_nonce, server_nonce, key_material)?;
     // Fully qualified: `chacha20poly1305::KeyInit` is also in scope here.
     let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&s2c_auth_key)
         .expect("HMAC can take key of any size");
@@ -145,12 +165,31 @@ pub fn verify_server_proof(
     psk: &str,
     expected: &str,
 ) -> Result<bool> {
-    let actual = compute_server_proof(
+    verify_server_proof_with_key(
         client_hello_bytes,
         server_hello_bytes,
         client_nonce,
         server_nonce,
-        psk,
+        psk.as_bytes(),
+        expected,
+    )
+}
+
+/// Verify a server proof made from binary key material (constant-time).
+pub(crate) fn verify_server_proof_with_key(
+    client_hello_bytes: &[u8],
+    server_hello_bytes: &[u8],
+    client_nonce: &str,
+    server_nonce: &str,
+    key_material: &[u8],
+    expected: &str,
+) -> Result<bool> {
+    let actual = compute_server_proof_with_key(
+        client_hello_bytes,
+        server_hello_bytes,
+        client_nonce,
+        server_nonce,
+        key_material,
     )?;
     Ok(constant_time_eq(actual.as_bytes(), expected.as_bytes()))
 }
@@ -183,7 +222,16 @@ impl ControlCodec {
         server_nonce: &str,
         psk: &str,
     ) -> Result<(ControlCodec, ControlCodec)> {
-        let (c2s, s2c, _) = derive_keys(client_nonce, server_nonce, psk)?;
+        Self::derive_pair_with_key(client_nonce, server_nonce, psk.as_bytes())
+    }
+
+    /// Derive a pair of codecs from binary key material.
+    pub(crate) fn derive_pair_with_key(
+        client_nonce: &str,
+        server_nonce: &str,
+        key_material: &[u8],
+    ) -> Result<(ControlCodec, ControlCodec)> {
+        let (c2s, s2c, _) = derive_keys(client_nonce, server_nonce, key_material)?;
         Ok((
             ControlCodec::new(&c2s, Direction::C2S),
             ControlCodec::new(&s2c, Direction::S2C),
