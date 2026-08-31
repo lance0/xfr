@@ -59,7 +59,7 @@ one_off = false
 no_mdns = false
 
 # Prometheus metrics port (requires --features prometheus)
-# prometheus = 9090
+# prometheus_port = 9090
 
 # Server presets - use with: xfr serve --preset limited
 [[presets]]

@@ -1,4 +1,4 @@
-.TH XFR 1 "July 2026" "xfr 0.9.25" "User Commands"
+.TH XFR 1 "2026-08-30" "xfr 0.9.25" "User Commands"
 .SH NAME
 xfr \- modern network bandwidth testing with TUI
 .SH SYNOPSIS
@@ -111,7 +111,7 @@ Log file path (e.g., ~/.config/xfr/xfr.log)
 Log level: error, warn, info, debug, trace
 .TP
 .BI \-\-psk " KEY"
-Pre-shared key for server authentication. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
+Pre-shared key for mutual peer authentication and protected post-auth control messages. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
 .TP
 .BI \-\-psk\-file " FILE"
 Read PSK from file
@@ -171,6 +171,9 @@ Maximum test duration (server-side limit)
 .BI \-\-push\-gateway " URL"
 Prometheus push gateway URL (e.g., http://pushgateway:9091)
 .TP
+.BI \-\-prometheus " PORT"
+Prometheus metrics endpoint port (requires the prometheus build feature)
+.TP
 .BI \-\-log\-file " PATH"
 Log file path
 .TP
@@ -178,7 +181,7 @@ Log file path
 Log level: error, warn, info, debug, trace
 .TP
 .BI \-\-psk " KEY"
-Pre-shared key for authentication. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
+Pre-shared key for mutual peer authentication and protected post-auth control messages. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
 .TP
 .BI \-\-psk\-file " FILE"
 Read PSK from file
@@ -193,14 +196,16 @@ Max concurrent tests per IP
 Rate limit time window (default: 60s)
 .TP
 .BI \-\-allow " IP/SUBNET"
-Allow IP or subnet (can be repeated)
+Allow IP or subnet (can be repeated).
+If any allow rules exist, clients matching none are rejected.
+With no allow rules, otherwise-unmatched clients are accepted.
 .TP
 .BI \-\-deny " IP/SUBNET"
-Deny IP or subnet (can be repeated)
+Deny IP or subnet (can be repeated).
+Deny rules always take precedence.
 .TP
 .BI \-\-acl\-file " FILE"
 Load ACL rules from file
-.TP
 .TP
 .BI \-B ", " \-\-bind " IP"
 Bind to specific address (e.g., 192.168.1.1, ::1). Rejects unspecified addresses; use \fB\-4\fR/\fB\-6\fR instead to control address family. Validates against \fB\-4\fR/\fB\-6\fR flags.
@@ -342,7 +347,7 @@ Start server with live dashboard
 .B xfr serve \-\-psk secret \-\-rate\-limit 2
 Authenticated server with rate limiting
 .TP
-.B xfr serve \-\-allow 192.168.0.0/16 \-\-deny 0.0.0.0/0
+.B xfr serve \-\-allow 192.168.0.0/16
 Server with IP access control
 .TP
 .B xfr diff baseline.json current.json \-\-threshold 5
@@ -351,7 +356,6 @@ Compare results, fail if throughput drops more than 5%
 .B xfr discover
 Find xfr servers on the local network via mDNS
 .SH PROTOCOL
-.PP
 .B xfr
 servers and clients using protocol v1.1 exchange capability strings during the
 .B Hello

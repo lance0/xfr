@@ -56,7 +56,7 @@ impl Acl {
     /// # Comment
     /// allow 192.168.0.0/16
     /// allow 10.0.0.0/8
-    /// deny 0.0.0.0/0
+    /// deny 192.168.1.0/24
     /// ```
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;

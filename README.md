@@ -261,7 +261,7 @@ xfr serve --max-duration 60s # Limit test duration
 xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
 xfr serve --psk mysecret     # Require PSK authentication
 xfr serve --rate-limit 2     # Max 2 concurrent tests per IP
-xfr serve --allow 192.168.0.0/16 --deny 0.0.0.0/0  # IP ACL
+xfr serve --allow 192.168.0.0/16  # Only allow the local subnet
 ```
 
 ### Client
@@ -294,7 +294,10 @@ xfr 192.168.1.1 --quic -R    # QUIC download test
 
 QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single connection.
 
-**Security Note:** QUIC encrypts traffic but does not verify server identity by default. For authenticated connections, use `--psk` on both client and server to prevent MITM attacks.
+**Security Note:** QUIC encrypts each connection but does not verify server
+identity. PSK authenticates and protects the application control channel, but
+is not cryptographically bound to QUIC bulk streams. Use an authenticated VPN
+when endpoint-verified confidentiality matters.
 
 ### MPTCP Mode
 
@@ -461,12 +464,16 @@ Enable with `--features prometheus`:
 xfr serve --prometheus 9090
 ```
 
-Metrics available at `http://localhost:9090/metrics`:
+Metrics available at `http://localhost:9090/metrics` include:
 
-- `xfr_bytes_total` - Total bytes transferred
-- `xfr_throughput_mbps` - Current throughput
-- `xfr_active_tests` - Number of active tests
-- `xfr_retransmits_total` - TCP retransmissions
+- `xfr_bytes_total`, `xfr_throughput_mbps`, `xfr_tests_total`, and
+  `xfr_active_tests` - aggregate transfer and server state
+- `xfr_test_duration_seconds` - test duration histogram
+- `xfr_stream_bytes_total`, `xfr_stream_throughput_mbps`, and
+  `xfr_stream_retransmits_total` - per-stream metrics labeled by `test_id` and
+  `stream_id`
+- `xfr_tcp_rtt_microseconds` and `xfr_tcp_retransmits_total` - TCP metrics
+  labeled by `test_id`
 
 See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 
@@ -534,23 +541,31 @@ TCP and UDP tests use random payloads by default to avoid inflated results on WA
 
 ### Transport Encryption
 
-| Mode | Encryption | Certificate Verification |
-|------|------------|-------------------------|
-| TCP | None | N/A |
-| UDP | None | N/A |
-| QUIC | TLS 1.3 | Disabled by default |
+| Mode | Bulk test data | Control channel |
+|------|----------------|-----------------|
+| TCP | Plaintext | Plaintext without PSK; ChaCha20-Poly1305 after PSK authentication |
+| UDP | Plaintext | Uses the same TCP control channel behavior |
+| QUIC | TLS 1.3; server identity is not verified | TLS 1.3; PSK can add protected application control |
 
-**QUIC mode** (`-Q/--quic`) provides TLS 1.3 encryption but does not verify server certificates, making it vulnerable to MITM attacks without additional authentication. **Always use `--psk` with QUIC on untrusted networks.** Alternatively, use a VPN or SSH tunnel.
+**QUIC mode** (`-Q/--quic`) uses a self-signed server certificate without PKI
+verification. An active relay can terminate and forward the QUIC connection.
+PSK protects xfr control messages end to end, but it is not bound to the QUIC
+bulk streams and does not make their data end-to-end authenticated.
 
 ### Authentication
 
-PSK authentication (`--psk`) verifies client identity but does not encrypt TCP/UDP traffic. For encrypted + authenticated connections, use QUIC with PSK:
+PSK authentication (`--psk`) authenticates both peers and protects post-auth
+control messages with ChaCha20-Poly1305. TCP and UDP bulk test payloads remain
+plaintext; QUIC bulk payloads are transport-encrypted but not PSK-authenticated.
+Use an authenticated VPN when endpoint-verified confidentiality is required.
+
+To combine QUIC transport encryption with PSK-protected control:
 
 ```bash
 # Server
 xfr serve --psk "secretkey"
 
-# Client (encrypted + authenticated)
+# Client (QUIC transport + PSK-protected control)
 xfr <host> -Q --psk "secretkey"
 ```
 
@@ -634,6 +649,7 @@ Ensure the server is running and the port is not blocked by a firewall. TCP, UDP
 - [Known Issues](KNOWN_ISSUES.md) - Edge cases and limitations
 - [Roadmap](ROADMAP.md) - Planned features
 - [Contributing](CONTRIBUTING.md) - Development guidelines
+- [Security Policy](SECURITY.md) - Supported versions and private reporting
 
 ## See Also
 
