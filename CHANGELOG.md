@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-08-31
 
 ### Security
 - **QUIC PSK authentication is now bound to the exact TLS connection** — previously the PSK challenge, server proof, and protected-control keys did not include QUIC channel-binding material, so an active terminating relay could forward the application handshake across two TLS connections and access the bulk payload. QUIC + PSK now mixes the RFC 9266 `EXPORTER-Channel-Binding` value into its per-connection PSK before authentication or control-key derivation, preventing that splice without knowledge of the PSK. The protection is mandatory: client and server fail closed unless both advertise `quic_channel_binding_v1`, so mixed old/new QUIC + PSK deployments must upgrade both sides together. QUIC without PSK remains encrypted with an unverified self-signed server certificate.
