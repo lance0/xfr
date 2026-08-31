@@ -76,7 +76,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1.48.0
+      - uses: crate-ci/typos@v1.49.1
 
   doc:
     name: Doc (deny rustdoc warnings)
