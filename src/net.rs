@@ -1693,15 +1693,24 @@ mod tests {
         };
         let local = socket.local_addr().unwrap();
 
-        // Send a packet from an IPv4 socket to the dual-stack listener.
+        // Send packets from an IPv4 socket to the dual-stack listener. UDP
+        // delivery is not guaranteed, so retransmit within one bounded wait.
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port());
-        sender.send_to(b"ping", target).await.unwrap();
 
         let mut buf = [0u8; 4];
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(500), socket.recv(&mut buf))
-                .await;
+        let receive = async {
+            let mut retransmit = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    result = socket.recv(&mut buf) => return result,
+                    _ = retransmit.tick() => {
+                        sender.send_to(b"ping", target).await?;
+                    }
+                }
+            }
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), receive).await;
         match result {
             Ok(Ok(n)) => assert_eq!(n, 4, "should receive exactly 4 bytes"),
             other => panic!("dual-stack UDP socket should receive IPv4 packets, got {other:?}"),
