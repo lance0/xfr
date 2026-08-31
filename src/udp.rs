@@ -917,6 +917,14 @@ pub async fn receive_udp(
     // mid-test as a side benefit). Feedback emission targets this address.
     let mut last_client_addr: Option<SocketAddr> = None;
 
+    // Keep one inactivity timer for the life of the receive task. Do not
+    // reset it for every datagram: at high packet rates that would still
+    // churn Tokio's timer wheel. When it wakes, either the stream really is
+    // idle or we re-arm it for the remainder since the most recent packet.
+    let inactivity_timer = tokio::time::sleep(UDP_INACTIVITY_TIMEOUT);
+    tokio::pin!(inactivity_timer);
+    let mut pause_channel_open = crate::pause::channel_is_open(&pause);
+
     // 2 Hz feedback emission. Skip missed ticks: every feedback packet
     // carries cumulative counts, so the next tick is self-correcting and
     // there's no value in sending a backlog of stale snapshots when the
@@ -942,21 +950,15 @@ pub async fn receive_udp(
                 break;
             }
             last_recv = Instant::now();
+            pause_channel_open = crate::pause::channel_is_open(&pause);
+            inactivity_timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + UDP_INACTIVITY_TIMEOUT);
             continue;
-        }
-
-        // Check for client inactivity (handles abrupt disconnects)
-        if last_recv.elapsed() > UDP_INACTIVITY_TIMEOUT {
-            debug!(
-                "UDP receive timeout: no packets for {:?}",
-                UDP_INACTIVITY_TIMEOUT
-            );
-            break;
         }
 
         // Use recv_from for unconnected sockets, recv for connected
         let recv_future = socket.recv_from(&mut buffer);
-        let timeout_future = tokio::time::sleep(Duration::from_millis(100));
 
         tokio::select! {
             result = recv_future => {
@@ -1032,8 +1034,34 @@ pub async fn receive_udp(
                     }
                 }
             }
-            _ = timeout_future => {
-                // Check cancel and inactivity timeout again
+            result = cancel.changed() => {
+                if result.is_err() || *cancel.borrow() {
+                    debug!("UDP receive cancelled");
+                    break;
+                }
+            }
+            result = pause.changed(), if pause_channel_open => {
+                if result.is_err() {
+                    // A closed pause channel means "not paused". Disable
+                    // this always-ready arm so the receive loop cannot spin.
+                    pause_channel_open = false;
+                }
+                // On a real change, restart the loop so the shared pause
+                // helper can wait for resume while still observing cancel.
+            }
+            _ = &mut inactivity_timer => {
+                let inactive_for = last_recv.elapsed();
+                if inactive_for >= UDP_INACTIVITY_TIMEOUT {
+                    debug!(
+                        "UDP receive timeout: no packets for {:?}",
+                        UDP_INACTIVITY_TIMEOUT
+                    );
+                    break;
+                }
+                inactivity_timer.as_mut().reset(
+                    tokio::time::Instant::now()
+                        + UDP_INACTIVITY_TIMEOUT.saturating_sub(inactive_for),
+                );
             }
             _ = async { feedback_timer.as_mut().unwrap().tick().await }, if feedback_timer.is_some() => {
                 // Emit a receiver-progress feedback packet back to the
@@ -1894,5 +1922,26 @@ mod tests {
         })
         .await;
         assert!(overall.is_ok(), "test should complete within 10s");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn receive_udp_wakes_immediately_on_cancel() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let stats = Arc::new(StreamStats::new(0));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+
+        let mut receive = Box::pin(receive_udp(socket, stats, cancel_rx, pause_rx, false, None));
+
+        // Poll once to place the receiver inside its select, then signal
+        // cancel and poll once more. The watch arm must make that second poll
+        // ready without advancing a clock or relying on task scheduling.
+        assert!(futures::poll!(receive.as_mut()).is_pending());
+        cancel_tx.send(true).unwrap();
+        let result = futures::poll!(receive.as_mut());
+        assert!(
+            matches!(&result, std::task::Poll::Ready(Ok(_))),
+            "cancel should make the receiver ready immediately, got {result:?}"
+        );
     }
 }
