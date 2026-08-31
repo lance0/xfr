@@ -5,6 +5,7 @@
 use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
 use sha2::Sha256;
+use std::io::Read;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -82,13 +83,24 @@ pub(crate) fn require_owner_only_permissions(
 /// the owner (mode bits for group/other are set), because such permissions
 /// would let other users on the host read the pre-shared key.
 pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open PSK file {}", path.display()))?;
+
     #[cfg(unix)]
     {
-        let metadata = std::fs::metadata(path)?;
+        // Inspect the open handle, not the path, so the permissions and bytes
+        // always belong to the same inode even if a symlink or path is swapped.
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("failed to inspect PSK file {}", path.display()))?;
         require_owner_only_permissions(path, &metadata, "PSK file")?;
     }
 
-    let content = std::fs::read_to_string(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("failed to read PSK file {}", path.display()))?;
     let psk = content.trim().to_string();
     validate_psk(&psk)?;
     Ok(psk)
@@ -223,6 +235,18 @@ mod tests {
 
         let psk = read_psk_file(&path).unwrap();
         assert_eq!(psk, "owner-only-key");
+    }
+
+    #[test]
+    fn test_read_psk_file_errors_include_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.psk");
+
+        let error = read_psk_file(&path).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to open PSK file"));
+        assert!(message.contains(path.to_str().unwrap()));
     }
 
     #[test]
