@@ -8,7 +8,7 @@ use ratatui::style::Color;
 use std::borrow::Cow;
 
 /// All themeable colors in the application
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct Theme {
     name: Cow<'static, str>,
 

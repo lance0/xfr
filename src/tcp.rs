@@ -1739,7 +1739,8 @@ mod tests {
         );
 
         // Verify each chunk is exactly the pattern, with no prefix replay.
-        for (i, chunk) in received.chunks_exact(BUF).enumerate() {
+        let (chunks, remainder) = received.as_chunks::<BUF>();
+        for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(
                 chunk,
                 pattern.as_slice(),
@@ -1749,9 +1750,8 @@ mod tests {
         }
 
         // Also ensure every byte boundary is a multiple of BUF.
-        assert_eq!(
-            received.len() % BUF,
-            0,
+        assert!(
+            remainder.is_empty(),
             "received length is not a multiple of the buffer size"
         );
     }
