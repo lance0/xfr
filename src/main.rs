@@ -2406,10 +2406,17 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     let server_handle = tokio::spawn(async move { server.run().await });
 
     let mut app = ServerApp::new();
+    // The dashboard's uptime and active-test timers render at one-second
+    // resolution. Keep the 100 ms event poll for responsive input, but skip
+    // frame construction until visible state (or terminal size) changes.
+    let mut last_drawn: Option<u64> = None;
 
     loop {
-        // Draw UI
-        terminal.draw(|f| server_draw(f, &app))?;
+        let fingerprint = app.render_fingerprint(terminal.size()?);
+        if last_drawn != Some(fingerprint) {
+            terminal.draw(|f| server_draw(f, &app))?;
+            last_drawn = Some(fingerprint);
+        }
 
         // Handle keyboard events with timeout
         if event::poll(Duration::from_millis(100))?
@@ -2457,9 +2464,6 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
                 }
             }
         }
-
-        // Update bandwidth history
-        app.update_bandwidth();
 
         // Check if server task ended
         if server_handle.is_finished() {

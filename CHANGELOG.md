@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **The TUI no longer rebuilds an unchanged frame twenty times a second** — the client loop drew on every 50 ms tick, and although ratatui only writes cells that differ, every `format!`, `Line` and `Span` in the frame was rebuilt regardless, so a finished, paused or errored test sat at ~0.6% of a core doing nothing visible. The loop now hashes everything the renderer reads (state, stats, sparkline and log history, overlays, settings, theme, terminal size, and the wall-clock values at the resolution they are shown: whole-second elapsed, cell-quantized progress bar, whole-second cancel countdown) and skips the draw when the hash matches the last frame drawn. Idle-screen CPU drops to near zero; a running test redraws only when a visible value changes. The fingerprint destructures `App` exhaustively, so a new field must be classified before the code compiles, and the terminal size is part of it so a resize while idle still re-flows the layout. (LAN-1226)
+- **The server dashboard now skips unchanged frames too** — it previously rebuilt the full header and active-test table before every 100 ms input poll even though its clocks render only whole seconds. An exhaustive render fingerprint now reduces an idle dashboard from ten frame builds per second to one, while test events, help toggles, and terminal resizes still redraw immediately.
 
 ## [0.9.25] - 2026-07-31
 

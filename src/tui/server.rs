@@ -3,6 +3,7 @@
 //! Real-time monitoring of active tests and server statistics.
 
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ pub enum ServerEvent {
 
 use crate::stats::mbps_to_human;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
@@ -133,6 +134,68 @@ impl ServerApp {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    /// Hash of every value rendered by [`draw`]. The server loop compares
+    /// this with the last drawn frame so its 100 ms event poll can stay
+    /// responsive without rebuilding an identical dashboard ten times per
+    /// second. Wall-clock values are reduced to the whole seconds the UI
+    /// displays, and the terminal size is included so resize reflow is never
+    /// skipped.
+    pub fn render_fingerprint(&self, size: Size) -> u64 {
+        self.render_fingerprint_at(size, Instant::now())
+    }
+
+    fn render_fingerprint_at(&self, size: Size, now: Instant) -> u64 {
+        // Keep these destructures exhaustive: a newly rendered field should
+        // fail compilation here until its cache behavior is decided.
+        let ServerApp {
+            active_tests,
+            total_tests,
+            failed_tests,
+            total_bytes: _,       // accumulated for bookkeeping, not rendered
+            bandwidth_history: _, // reserved history is not currently rendered
+            connections_blocked,
+            auth_failures,
+            start_time,
+            show_help,
+        } = self;
+
+        let mut h = DefaultHasher::new();
+        size.hash(&mut h);
+        now.saturating_duration_since(*start_time)
+            .as_secs()
+            .hash(&mut h);
+        total_tests.hash(&mut h);
+        failed_tests.hash(&mut h);
+        connections_blocked.hash(&mut h);
+        auth_failures.hash(&mut h);
+        show_help.hash(&mut h);
+
+        active_tests.len().hash(&mut h);
+        for ActiveTestInfo {
+            id: _, // row identity used for updates, not rendered
+            client_ip,
+            protocol,
+            direction,
+            streams,
+            started,
+            duration_secs,
+            bytes: _, // accumulated for bookkeeping, not rendered
+            throughput_mbps,
+        } in active_tests
+        {
+            client_ip.hash(&mut h);
+            protocol.hash(&mut h);
+            direction.hash(&mut h);
+            streams.hash(&mut h);
+            now.saturating_duration_since(*started)
+                .as_secs()
+                .hash(&mut h);
+            duration_secs.hash(&mut h);
+            throughput_mbps.to_bits().hash(&mut h);
+        }
+        h.finish()
     }
 }
 
@@ -386,5 +449,51 @@ mod tests {
         assert_eq!(app.total_tests, 2);
         assert_eq!(app.failed_tests, 1);
         assert_eq!(app.total_bytes, 150);
+    }
+
+    #[test]
+    fn render_fingerprint_tracks_visible_server_state() {
+        let now = Instant::now();
+        let size = Size::new(120, 40);
+        let mut app = ServerApp::new();
+        app.start_time = now - Duration::from_secs(10);
+
+        let idle = app.render_fingerprint_at(size, now);
+        assert_eq!(
+            idle,
+            app.render_fingerprint_at(size, now + Duration::from_millis(999)),
+            "sub-second uptime drift is not visible"
+        );
+        assert_ne!(
+            idle,
+            app.render_fingerprint_at(size, now + Duration::from_secs(1)),
+            "whole-second uptime changes the header"
+        );
+        assert_ne!(
+            idle,
+            app.render_fingerprint_at(Size::new(100, 30), now),
+            "terminal resize reflows the dashboard"
+        );
+
+        let mut test = active_test("visible");
+        test.started = now - Duration::from_secs(2);
+        app.add_test(test);
+        let active = app.render_fingerprint_at(size, now);
+        assert_ne!(idle, active, "a new row must dirty the frame");
+
+        app.update_test("visible", 1024, 42.0);
+        let updated = app.render_fingerprint_at(size, now);
+        assert_ne!(active, updated, "visible throughput changed");
+        assert_ne!(
+            updated,
+            app.render_fingerprint_at(size, now + Duration::from_secs(1)),
+            "active-test elapsed time changed"
+        );
+
+        app.toggle_help();
+        let help = app.render_fingerprint_at(size, now);
+        assert_ne!(updated, help, "help overlay changed");
+        app.record_blocked();
+        assert_ne!(help, app.render_fingerprint_at(size, now));
     }
 }
