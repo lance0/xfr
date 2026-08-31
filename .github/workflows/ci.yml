@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1.49.1
+      - uses: crate-ci/typos@v1.50.0
 
   doc:
     name: Doc (deny rustdoc warnings)
@@ -107,7 +107,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
       # Compile the tests too (--no-run) so a dependency MSRV bump or a test
       # using an API newer than 1.88 fails here, not only non-test code.
