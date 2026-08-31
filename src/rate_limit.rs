@@ -4,21 +4,19 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
 
 /// Rate limiter state for a single IP
 struct IpState {
-    count: AtomicU32,
-    last_access: Mutex<Instant>,
+    count: u32,
+    last_access: Instant,
 }
 
 /// Per-IP rate limiter
 pub struct RateLimiter {
-    limits: DashMap<IpAddr, Arc<IpState>>,
+    limits: DashMap<IpAddr, IpState>,
     max_per_ip: u32,
     window: Duration,
 }
@@ -41,75 +39,45 @@ impl RateLimiter {
     ///
     /// Returns Ok(()) if allowed, Err with current count if rate limited
     pub fn check(&self, ip: IpAddr) -> Result<(), RateLimitError> {
-        let state = self
-            .limits
-            .entry(ip)
-            .or_insert_with(|| {
-                Arc::new(IpState {
-                    count: AtomicU32::new(0),
-                    last_access: Mutex::new(Instant::now()),
-                })
-            })
-            .clone();
+        // Keep the DashMap entry guard through the admission update. Cleanup
+        // therefore cannot unlink a zero-count state between lookup and
+        // increment, and release will always find the state that was admitted.
+        let mut state = self.limits.entry(ip).or_insert_with(|| IpState {
+            count: 0,
+            last_access: Instant::now(),
+        });
 
-        // Use compare_exchange loop for atomic check-and-increment
-        loop {
-            let current = state.count.load(Ordering::SeqCst);
-            if current >= self.max_per_ip {
-                return Err(RateLimitError {
-                    ip,
-                    current,
-                    max: self.max_per_ip,
-                });
-            }
-
-            // Try to atomically increment from current to current+1
-            match state.count.compare_exchange(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    *state.last_access.lock() = Instant::now();
-                    return Ok(());
-                }
-                Err(_) => {
-                    // Another thread modified the count, retry
-                    continue;
-                }
-            }
+        if state.count >= self.max_per_ip {
+            return Err(RateLimitError {
+                ip,
+                current: state.count,
+                max: self.max_per_ip,
+            });
         }
+
+        state.count += 1;
+        state.last_access = Instant::now();
+        Ok(())
     }
 
     /// Release a slot when a test completes
     pub fn release(&self, ip: IpAddr) {
-        if let Some(state) = self.limits.get(&ip) {
-            // Use fetch_update to atomically decrement without underflow
-            let _ = state
-                .count
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    Some(count.saturating_sub(1))
-                });
+        if let Some(mut state) = self.limits.get_mut(&ip) {
+            state.count = state.count.saturating_sub(1);
         }
     }
 
     /// Get current count for an IP
     pub fn current_count(&self, ip: IpAddr) -> u32 {
-        self.limits
-            .get(&ip)
-            .map(|s| s.count.load(Ordering::SeqCst))
-            .unwrap_or(0)
+        self.limits.get(&ip).map(|state| state.count).unwrap_or(0)
     }
 
     /// Clean up stale entries
     pub fn cleanup(&self) {
         let now = Instant::now();
         self.limits.retain(|_, state| {
-            let last = *state.last_access.lock();
-            let count = state.count.load(Ordering::SeqCst);
             // Keep if active (count > 0) or recently accessed
-            count > 0 || now.duration_since(last) < self.window
+            state.count > 0 || now.duration_since(state.last_access) < self.window
         });
     }
 
@@ -195,6 +163,8 @@ impl RateLimitConfig {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn test_allows_under_limit() {
@@ -237,5 +207,83 @@ mod tests {
         assert!(limiter.check(ip2).is_ok());
         assert!(limiter.check(ip1).is_err());
         assert!(limiter.check(ip2).is_err());
+    }
+
+    #[test]
+    fn test_cleanup_preserves_active_admission() {
+        let limiter = RateLimiter::new(1, Duration::ZERO);
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+
+        limiter.check(ip).unwrap();
+        limiter.cleanup();
+        assert_eq!(limiter.current_count(ip), 1);
+
+        limiter.release(ip);
+        limiter.cleanup();
+        assert_eq!(limiter.current_count(ip), 0);
+    }
+
+    #[test]
+    fn test_concurrent_cleanup_cannot_unlink_admission() {
+        const ITERATIONS: usize = 5_000;
+
+        let limiter = Arc::new(RateLimiter::new(1, Duration::ZERO));
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let start = Arc::new(Barrier::new(3));
+        let finish = Arc::new(Barrier::new(3));
+        let admitted = Arc::new(AtomicBool::new(false));
+        let mut violations = 0usize;
+
+        std::thread::scope(|scope| {
+            let checker_limiter = limiter.clone();
+            let checker_start = start.clone();
+            let checker_finish = finish.clone();
+            let checker_admitted = admitted.clone();
+            scope.spawn(move || {
+                for _ in 0..ITERATIONS {
+                    checker_start.wait();
+                    checker_admitted.store(checker_limiter.check(ip).is_ok(), Ordering::SeqCst);
+                    checker_finish.wait();
+                }
+            });
+
+            let cleaner_limiter = limiter.clone();
+            let cleaner_start = start.clone();
+            let cleaner_finish = finish.clone();
+            scope.spawn(move || {
+                for _ in 0..ITERATIONS {
+                    cleaner_start.wait();
+                    cleaner_limiter.cleanup();
+                    cleaner_finish.wait();
+                }
+            });
+
+            for _ in 0..ITERATIONS {
+                // Seed a stale zero-count entry so check and cleanup contend
+                // on precisely the state that the old Arc-based design could
+                // unlink after check dropped its map guard.
+                if limiter.check(ip).is_ok() {
+                    limiter.release(ip);
+                } else {
+                    violations += 1;
+                }
+
+                admitted.store(false, Ordering::SeqCst);
+                start.wait();
+                finish.wait();
+
+                let was_admitted = admitted.load(Ordering::SeqCst);
+                let count = limiter.current_count(ip);
+                if !was_admitted || count != 1 {
+                    violations += 1;
+                }
+                for _ in 0..count {
+                    limiter.release(ip);
+                }
+                limiter.cleanup();
+            }
+        });
+
+        assert_eq!(violations, 0, "cleanup unlinked an admission in progress");
     }
 }
