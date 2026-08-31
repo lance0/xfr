@@ -13,6 +13,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The action ref is the Rust toolchain version, not an action release.
+      # Keep the MSRV selector aligned with package.rust-version manually.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       github-actions:
         patterns:
