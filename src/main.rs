@@ -896,8 +896,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Load config file (falls back to defaults if not found)
-    let file_config = Config::load().unwrap_or_default();
+    // A missing config is fine, but an existing config must be usable. Silently
+    // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
+    let file_config = Config::load()?;
 
     // Determine logging config based on command (server vs client)
     let (effective_log_file, effective_log_level, tui_enabled) = match &cli.command {
