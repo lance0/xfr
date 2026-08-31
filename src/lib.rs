@@ -6,7 +6,7 @@
 //!
 //! xfr can be used as a library for embedding bandwidth tests in your application:
 //!
-//! ```ignore
+//! ```no_run
 //! use xfr::{Client, ClientConfig};
 //! use std::time::Duration;
 //!

@@ -419,6 +419,10 @@ xfr <host> --json --no-tui | jq -r '
 ' | curl --data-binary @- http://pushgateway:9091/metrics/job/xfr/instance/$(hostname)
 ```
 
+The built-in Push Gateway payload uses an `xfr_duration_seconds` gauge. The
+live scrape endpoint is a separate metric contract and uses the
+`xfr_test_duration_seconds` histogram plus labeled per-stream and TCP metrics.
+
 ### Metrics Endpoint
 
 For continuous monitoring (requires `--features prometheus` at build time):
@@ -430,17 +434,23 @@ xfr serve --prometheus 9090
 Metrics available at `http://localhost:9090/metrics`:
 
 ```
-# HELP xfr_bytes_total Total bytes transferred
+# HELP xfr_bytes_total Total bytes transferred across all tests
 # TYPE xfr_bytes_total counter
 xfr_bytes_total 1234567890
 
-# HELP xfr_throughput_mbps Current throughput
+# HELP xfr_throughput_mbps Current aggregate throughput in Mbps
 # TYPE xfr_throughput_mbps gauge
 xfr_throughput_mbps 987.65
 
-# HELP xfr_duration_seconds Test duration
-# TYPE xfr_duration_seconds gauge
-xfr_duration_seconds 10.0
+# HELP xfr_test_duration_seconds Distribution of test durations in seconds
+# TYPE xfr_test_duration_seconds histogram
+xfr_test_duration_seconds_bucket{le="10"} 1
+xfr_test_duration_seconds_sum 10.0
+xfr_test_duration_seconds_count 1
+
+# HELP xfr_tcp_retransmits_total Total TCP retransmits
+# TYPE xfr_tcp_retransmits_total counter
+xfr_tcp_retransmits_total{test_id="abc"} 42
 ```
 
 ### Grafana Dashboard
