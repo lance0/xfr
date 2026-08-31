@@ -22,8 +22,15 @@ pub fn generate_nonce() -> String {
 
 /// Compute HMAC-SHA256 response for a challenge
 pub fn compute_response(nonce: &str, psk: &str) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(psk.as_bytes()).expect("HMAC can take key of any size");
+    compute_response_with_key(nonce, psk.as_bytes())
+}
+
+/// Compute a response from binary key material.
+///
+/// QUIC uses this with a session PSK that is bound to the connection's TLS
+/// exporter. The public string-based API remains the stable path for TCP.
+pub(crate) fn compute_response_with_key(nonce: &str, key: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(nonce.as_bytes());
     let result = mac.finalize();
     hex::encode(result.into_bytes())
@@ -31,7 +38,12 @@ pub fn compute_response(nonce: &str, psk: &str) -> String {
 
 /// Verify an authentication response
 pub fn verify_response(nonce: &str, psk: &str, response: &str) -> bool {
-    let expected = compute_response(nonce, psk);
+    verify_response_with_key(nonce, psk.as_bytes(), response)
+}
+
+/// Verify a response made from binary key material.
+pub(crate) fn verify_response_with_key(nonce: &str, key: &[u8], response: &str) -> bool {
+    let expected = compute_response_with_key(nonce, key);
     // Constant-time comparison to prevent timing attacks
     constant_time_eq(expected.as_bytes(), response.as_bytes())
 }

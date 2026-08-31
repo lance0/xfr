@@ -509,9 +509,10 @@ impl std::fmt::Display for TimestampFormat {
 
 /// Capability strings advertised in client and server hello messages.
 /// Both peers must list a string here for the corresponding feature to
-/// be active in the session. Adding a new capability is wire-additive:
-/// older peers simply don't see it in the other side's hello and fall
-/// back to the prior behavior.
+/// be active in the session. Optional capabilities are wire-additive and
+/// fall back to the prior behavior with an older peer. Capabilities marked
+/// mandatory below instead fail closed when their protected operation is
+/// requested; they must never silently downgrade.
 pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "tcp",
     "udp",
@@ -543,6 +544,10 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // v0.9.20: PSK sessions require AEAD-protected control channel.
     // Mandatory when PSK is configured — not a negotiable fallback.
     "protected_control_v1",
+    // PSK-authenticated QUIC sessions mix RFC 9266 TLS exporter material into
+    // every application-layer auth and control key. Mandatory for QUIC + PSK
+    // so the application handshake cannot be relayed across two TLS sessions.
+    QUIC_CHANNEL_BINDING_CAPABILITY,
     // v0.9.23: server honors TestStart.byte_budget and the Finish message
     // (`-n`, transfer a fixed number of bytes instead of running for a
     // fixed time). Hard requirement for `-n` — an old server ignores the
@@ -554,6 +559,10 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
 /// Capability string for byte-budget tests (`-n`). Named because both the
 /// client's pre-flight check and the server's hello reference it.
 pub const BYTE_BUDGET_CAPABILITY: &str = "byte_budget_v1";
+
+/// Mandatory capability for PSK-authenticated QUIC sessions to bind the PSK
+/// handshake and protected control channel to the underlying TLS connection.
+pub const QUIC_CHANNEL_BINDING_CAPABILITY: &str = "quic_channel_binding_v1";
 
 /// Capability string for single-port UDP (issue #63). Kept as a named
 /// constant because the server filters it out of its hello at runtime
@@ -1018,6 +1027,15 @@ mod tests {
         let filtered = supported_capabilities_without(SINGLE_PORT_UDP_CAPABILITY);
         assert!(!filtered.iter().any(|c| c == SINGLE_PORT_UDP_CAPABILITY));
         assert_eq!(filtered.len(), full.len() - 1);
+    }
+
+    #[test]
+    fn test_supported_capabilities_quic_channel_binding() {
+        assert!(
+            supported_capabilities()
+                .iter()
+                .any(|c| c == QUIC_CHANNEL_BINDING_CAPABILITY)
+        );
     }
 
     #[test]

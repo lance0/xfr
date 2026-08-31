@@ -295,9 +295,11 @@ xfr 192.168.1.1 --quic -R    # QUIC download test
 QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single connection.
 
 **Security Note:** QUIC encrypts each connection but does not verify server
-identity. PSK authenticates and protects the application control channel, but
-is not cryptographically bound to QUIC bulk streams. Use an authenticated VPN
-when endpoint-verified confidentiality matters.
+identity without a PSK. With a PSK, xfr binds mutual authentication and the
+protected control channel to the exact TLS connection using the RFC 9266
+exporter, so a terminating relay cannot splice the handshake onto another QUIC
+connection. Both peers must support `quic_channel_binding_v1`; QUIC + PSK fails
+closed otherwise. The self-signed certificate is still not a public PKI identity.
 
 ### MPTCP Mode
 
@@ -545,19 +547,25 @@ TCP and UDP tests use random payloads by default to avoid inflated results on WA
 |------|----------------|-----------------|
 | TCP | Plaintext | Plaintext without PSK; ChaCha20-Poly1305 after PSK authentication |
 | UDP | Plaintext | Uses the same TCP control channel behavior |
-| QUIC | TLS 1.3; server identity is not verified | TLS 1.3; PSK can add protected application control |
+| QUIC | TLS 1.3; identity unverified without PSK | TLS 1.3; exporter-bound PSK protection when enabled |
 
 **QUIC mode** (`-Q/--quic`) uses a self-signed server certificate without PKI
-verification. An active relay can terminate and forward the QUIC connection.
-PSK protects xfr control messages end to end, but it is not bound to the QUIC
-bulk streams and does not make their data end-to-end authenticated.
+verification. Without a PSK, an active relay can terminate and forward the QUIC
+connection. With a PSK, xfr mixes the RFC 9266 TLS exporter into the
+authentication proof and protected-control keys, binding them to the exact QUIC
+connection that carries the bulk streams. A relay cannot splice authentication
+across two QUIC connections without the PSK. This requires both peers to
+advertise `quic_channel_binding_v1`; the session fails closed otherwise.
 
 ### Authentication
 
 PSK authentication (`--psk`) authenticates both peers and protects post-auth
 control messages with ChaCha20-Poly1305. TCP and UDP bulk test payloads remain
-plaintext; QUIC bulk payloads are transport-encrypted but not PSK-authenticated.
-Use an authenticated VPN when endpoint-verified confidentiality is required.
+plaintext. QUIC bulk payloads are TLS-encrypted, and on upgraded PSK sessions
+that TLS connection is authenticated by the exporter-bound PSK handshake. The
+self-signed certificate is still not a public PKI identity; use an authenticated
+VPN when you need centrally managed endpoint identities or isolation between
+different holders of a shared PSK.
 
 To combine QUIC transport encryption with PSK-protected control:
 
