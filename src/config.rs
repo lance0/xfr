@@ -1,9 +1,11 @@
 //! Configuration file support
 //!
-//! Loads configuration from ~/.config/xfr/config.toml
+//! Loads `xfr/config.toml` from the platform configuration directory returned
+//! by `dirs::config_dir()`.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::protocol::TimestampFormat;
@@ -157,8 +159,8 @@ impl Config {
     }
 
     fn load_from(config_path: &Path) -> anyhow::Result<Self> {
-        let contents = match std::fs::read_to_string(config_path) {
-            Ok(contents) => contents,
+        let mut file = match std::fs::File::open(config_path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
@@ -169,8 +171,30 @@ impl Config {
             }
         };
 
-        toml::from_str(&contents)
-            .with_context(|| format!("failed to parse config file {}", config_path.display()))
+        // Capture metadata from the same open handle that supplies the
+        // contents, avoiding a path-swap race during the permissions check.
+        #[cfg(unix)]
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("failed to inspect config file {}", config_path.display()))?;
+
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+
+        let config: Self = toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
+
+        #[cfg(unix)]
+        if config.client.psk.is_some() || config.server.psk.is_some() {
+            crate::auth::require_owner_only_permissions(
+                config_path,
+                &metadata,
+                "config file containing a PSK",
+            )?;
+        }
+
+        Ok(config)
     }
 
     /// Get the default config file path
@@ -241,11 +265,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, "[server]\npsk = \"secret\"\nrate_limit = 3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let config = Config::load_from(&config_path).unwrap();
 
         assert_eq!(config.server.psk.as_deref(), Some("secret"));
         assert_eq!(config.server.rate_limit, Some(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_broad_permissions_when_config_contains_psk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[server]\npsk = \"secret\"\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = Config::load_from(&config_path).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("config file containing a PSK"));
+        assert!(message.contains("overly broad permissions (644)"));
+        assert!(message.contains(config_path.to_str().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_allows_broad_permissions_when_config_has_no_psk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[server]\nport = 9000\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config = Config::load_from(&config_path).unwrap();
+
+        assert_eq!(config.server.port, Some(9000));
+        assert!(config.server.psk.is_none());
     }
 
     #[test]

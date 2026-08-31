@@ -55,6 +55,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
+/// Reject secret-bearing files that grant any access to group or other users.
+#[cfg(unix)]
+pub(crate) fn require_owner_only_permissions(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+    description: &str,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        anyhow::bail!(
+            "{} {:?} has overly broad permissions ({:03o}): group/other access is not allowed",
+            description,
+            path,
+            mode
+        );
+    }
+    Ok(())
+}
+
 /// Read PSK from file, trimming whitespace.
 ///
 /// On Unix, rejects files that are readable or writable by anyone other than
@@ -63,16 +84,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(path)?;
-        let mode = metadata.mode() & 0o777;
-        if mode & 0o077 != 0 {
-            anyhow::bail!(
-                "PSK file {:?} has overly broad permissions ({:03o}): group/other access is not allowed",
-                path,
-                mode
-            );
-        }
+        require_owner_only_permissions(path, &metadata, "PSK file")?;
     }
 
     let content = std::fs::read_to_string(path)?;

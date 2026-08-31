@@ -223,7 +223,7 @@ Regression threshold percentage (default: 5)
 Discovery timeout (default: 5s)
 .SH CONFIGURATION
 .B xfr
-reads configuration from \fI~/.config/xfr/config.toml\fR (Linux/macOS) or \fI%APPDATA%\\xfr\\config.toml\fR (Windows) if present.
+reads configuration from \fI$XDG_CONFIG_HOME/xfr/config.toml\fR (Linux, defaulting to \fI~/.config/xfr/config.toml\fR), \fI~/Library/Application Support/xfr/config.toml\fR (macOS), or \fI%APPDATA%\\xfr\\config.toml\fR (Windows) if present.
 CLI arguments override config file values. Environment variables override config file.
 .PP
 Example config:
@@ -246,6 +246,19 @@ psk = "secret"
 rate_limit = 5
 no_mdns = false
 allow = ["192.168.0.0/16"]
+.fi
+.RE
+.PP
+On Unix, a config containing a
+.B psk
+must grant no group or other access. Set owner-only permissions with:
+.RS
+.nf
+# Linux
+chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
+
+# macOS
+chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 .fi
 .RE
 .PP
@@ -401,10 +414,16 @@ Test was interrupted by SIGINT before server could report a full result (partial
 .SH FILES
 .TP
 .I ~/.config/xfr/config.toml
-User configuration file
+Linux user configuration file (when XDG_CONFIG_HOME is unset)
+.TP
+.I ~/Library/Application\ Support/xfr/config.toml
+macOS user configuration file
 .TP
 .I ~/.config/xfr/prefs.toml
-User preferences (theme)
+Linux user preferences (when XDG_CONFIG_HOME is unset)
+.TP
+.I ~/Library/Application\ Support/xfr/prefs.toml
+macOS user preferences (theme)
 .SH SEE ALSO
 .BR iperf3 (1)
 .SH BUGS

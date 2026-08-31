@@ -325,7 +325,8 @@ xfr <host> --timestamp-format unix       # "1705316400"
 ### Config File
 
 xfr reads defaults from:
-- **Linux/macOS:** `~/.config/xfr/config.toml`
+- **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
+- **macOS:** `~/Library/Application Support/xfr/config.toml`
 - **Windows:** `%APPDATA%\xfr\config.toml`
 
 ```toml
@@ -366,6 +367,17 @@ log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 ```
 
+On Unix, a config containing either `psk` must grant no access to group or
+other users, so the shared key is not exposed to another local account:
+
+```bash
+# Linux
+chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
+
+# macOS
+chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
+```
+
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value overrides them. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` take precedence over the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
 ### Environment Variables
@@ -381,7 +393,8 @@ Environment variables override config file settings:
 
 ### User Preferences
 
-Theme preference is saved to `~/.config/xfr/prefs.toml`:
+Theme preference is saved beside `config.toml` as `xfr/prefs.toml` in the same
+platform configuration directory:
 
 ```toml
 theme = "dracula"
