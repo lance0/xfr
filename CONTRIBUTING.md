@@ -13,54 +13,65 @@
    cd xfr
    ```
 
-3. Build:
+3. Install [just](https://just.systems/) once:
    ```bash
-   cargo build
+   cargo install --locked just
    ```
 
-4. Run tests:
+4. Build:
    ```bash
-   cargo test --all-features
+   just build
+   ```
+
+5. Run the standard local checks before opening a pull request:
+   ```bash
+   just check
    ```
 
 ## Code Style
 
-- Run `cargo fmt` before committing
-- Run `cargo clippy --all-features` and fix any warnings
+- Run `just fmt` before committing
+- Run `just lint` and fix any warnings
 - Keep lines under 100 characters when possible
 
 ### Pre-commit hooks
 
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and `cargo clippy`
-on every commit and `cargo test --lib` on every push. Set it up once:
+on every commit and the all-features test suite before each push. Set up both
+hook stages once:
 
 ```bash
 # Recommended: prek (fast Rust port, drop-in compatible)
 cargo install --locked prek
-prek install
 
 # Or via standalone installer (no Rust toolchain needed)
 curl -LsSf https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+
+# Install both hook stages configured by the repository
+just install-hooks
 
 # Or with the original Python pre-commit
 pipx install pre-commit
 pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
-After install, hooks run automatically. To run them manually against staged
-files: `prek run` (or `pre-commit run`).
+After installation, the hooks run automatically. Use `just check` for the
+standard local check before opening a pull request.
 
 ## Testing
 
 ```bash
-# Run all tests
-cargo test --all-features
+# Run formatting, lint, test feature matrices, and rustdoc checks
+just check
 
-# Run with specific feature
-cargo test --features prometheus
+# Run a focused test
+cargo test --locked test_name
 
-# Run integration tests only
-cargo test --test integration
+# Run benchmarks
+just bench
+
+# Linux-only network namespace tests (require root)
+just netns
 ```
 
 ## Pull Request Process
@@ -68,8 +79,8 @@ cargo test --test integration
 1. Fork the repository
 2. Create a feature branch from `master`
 3. Make your changes
-4. Run `cargo fmt` and `cargo clippy --all-features`
-5. Ensure all tests pass
+4. Run `just check`
+5. Ensure any relevant benchmarks or network namespace tests pass
 6. Submit a pull request
 
 ## Feature Flags
@@ -81,29 +92,8 @@ cargo test --test integration
 
 ## Architecture Overview
 
-```
-src/
-├── main.rs          # CLI entry point
-├── lib.rs           # Library exports
-├── client.rs        # Client implementation
-├── serve.rs         # Server implementation
-├── protocol.rs      # Control protocol messages
-├── tcp.rs           # TCP data transfer
-├── udp.rs           # UDP pacing and jitter
-├── stats.rs         # Test statistics
-├── config.rs        # Config file loading
-├── diff.rs          # Result comparison
-├── discover.rs      # mDNS discovery
-├── tcp_info.rs      # Platform TCP_INFO
-├── tui/             # Terminal UI
-│   ├── app.rs       # App state
-│   ├── ui.rs        # Drawing
-│   └── widgets.rs   # Custom widgets
-└── output/          # Output formats
-    ├── plain.rs     # Plain text
-    ├── json.rs      # JSON
-    └── prometheus.rs # Prometheus metrics
-```
+See [Architecture](docs/ARCHITECTURE.md) for the maintained overview of the
+protocol, data paths, and source layout.
 
 ## Adding Features
 

@@ -174,10 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_theme_name() {
-        let prefs = Prefs::default();
-        assert_eq!(prefs.theme_name(), "default");
-
+    fn explicit_theme_name_ignores_environment() {
         let prefs = Prefs {
             theme: Some("dracula".to_string()),
             ..Default::default()
