@@ -492,7 +492,7 @@ impl TestStats {
         let total_cwnd = if cwnd_values.is_empty() {
             None
         } else {
-            Some(cwnd_values.iter().sum())
+            Some(cwnd_values.iter().copied().fold(0u32, u32::saturating_add))
         };
 
         AggregateInterval {
@@ -557,7 +557,7 @@ impl TestStats {
             if let Some(info) = stream.poll_tcp_info() {
                 rtt_sum += info.rtt_us as u64;
                 retransmits += info.retransmits;
-                cwnd += info.cwnd;
+                cwnd = cwnd.saturating_add(info.cwnd);
                 count += 1;
             }
         }
@@ -582,7 +582,7 @@ impl TestStats {
                 rtt_sum += info.rtt_us as u64;
                 rtt_var_sum += info.rtt_var_us as u64;
                 retransmits += info.retransmits;
-                cwnd += info.cwnd;
+                cwnd = cwnd.saturating_add(info.cwnd);
                 if let Some(acked) = info.bytes_acked {
                     bytes_acked_sum += acked;
                     any_bytes_acked = true;
@@ -758,6 +758,23 @@ mod tests {
     }
 
     #[test]
+    fn test_final_local_tcp_info_saturates_cwnd_total() {
+        let stats = TestStats::new("test".to_string(), 2);
+        for stream in &stats.streams {
+            stream.set_final_tcp_info(TcpInfoSnapshot {
+                retransmits: 0,
+                rtt_us: 100,
+                rtt_var_us: 10,
+                cwnd: u32::MAX,
+                bytes_acked: None,
+            });
+        }
+
+        let info = stats.final_local_tcp_info().unwrap();
+        assert_eq!(info.cwnd, u32::MAX);
+    }
+
+    #[test]
     fn test_final_local_tcp_info_rounds_fractional_averages() {
         let stats = TestStats::new("test".to_string(), 2);
 
@@ -820,6 +837,29 @@ mod tests {
 
         let aggregate = stats.to_aggregate(&intervals);
         assert_eq!(aggregate.rtt_us, Some(101));
+        assert_eq!(aggregate.cwnd, Some(96 * 1024));
+    }
+
+    #[test]
+    fn test_aggregate_interval_saturates_cwnd_total() {
+        let stats = TestStats::new("test".to_string(), 2);
+        let now = Instant::now();
+        let intervals = [u32::MAX, 1].map(|cwnd| IntervalStats {
+            timestamp: now,
+            bytes: 0,
+            throughput_mbps: 0.0,
+            retransmits: 0,
+            jitter_ms: 0.0,
+            lost: 0,
+            rtt_us: None,
+            cwnd: Some(cwnd),
+            bytes_sent: 0,
+            bytes_received: 0,
+            cumulative_packets_received: 0,
+            cumulative_packets_lost: 0,
+        });
+
+        assert_eq!(stats.to_aggregate(&intervals).cwnd, Some(u32::MAX));
     }
 
     #[test]

@@ -312,6 +312,7 @@ pub struct StreamInterval {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_us: Option<u32>,
+    /// Congestion window in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwnd: Option<u32>,
 }
@@ -335,6 +336,7 @@ pub struct AggregateInterval {
     pub udp_progress: Option<UdpIntervalProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_us: Option<u32>,
+    /// Sum of per-stream congestion windows in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwnd: Option<u32>,
     /// Bidirectional test: bytes sent by the reporting side during this interval.
@@ -402,6 +404,7 @@ pub struct TcpInfoSnapshot {
     pub retransmits: u64,
     pub rtt_us: u32,
     pub rtt_var_us: u32,
+    /// Congestion window in bytes.
     pub cwnd: u32,
     /// Bytes acknowledged by the peer (from `tcpi_bytes_acked` on Linux).
     /// Used to correct overcount on abortive close where unACK'd buffer is discarded.

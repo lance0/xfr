@@ -5,6 +5,12 @@
 
 use crate::protocol::TcpInfoSnapshot;
 
+/// Linux reports `tcpi_snd_cwnd` in segments; xfr exposes cwnd in bytes.
+#[cfg(any(target_os = "linux", test))]
+fn linux_cwnd_bytes(segments: u32, send_mss: u32) -> u32 {
+    segments.saturating_mul(send_mss)
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -97,7 +103,7 @@ mod linux {
                 retransmits: info.tcpi_total_retrans as u64,
                 rtt_us: info.tcpi_rtt,
                 rtt_var_us: info.tcpi_rttvar,
-                cwnd: info.tcpi_snd_cwnd,
+                cwnd: linux_cwnd_bytes(info.tcpi_snd_cwnd, info.tcpi_snd_mss),
                 bytes_acked,
             })
         } else {
@@ -224,3 +230,14 @@ pub use macos::{get_tcp_info, get_tcp_info_from_fd};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use fallback::{get_tcp_info, get_tcp_info_from_fd};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_congestion_window_converts_segments_to_bytes() {
+        assert_eq!(linux_cwnd_bytes(10, 1448), 14_480);
+        assert_eq!(linux_cwnd_bytes(u32::MAX, 2), u32::MAX);
+    }
+}
