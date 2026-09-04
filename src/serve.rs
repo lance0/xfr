@@ -1345,6 +1345,7 @@ async fn handle_quic_client(
             duration_secs,
             direction,
             byte_budget,
+            bitrate,
             ..
         } => {
             if protocol != Protocol::Quic {
@@ -1418,6 +1419,7 @@ async fn handle_quic_client(
                 duration,
                 direction,
                 byte_budget,
+                bitrate,
                 active_tests,
                 peer_addr,
                 security.tui_tx.clone(),
@@ -1879,13 +1881,13 @@ async fn run_quic_test(
     duration: Duration,
     direction: Direction,
     byte_budget: Option<u64>,
+    bitrate: Option<u64>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
     transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<()> {
-    // Create test stats
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (pause_tx, pause_rx) = watch::channel(false);
@@ -1933,6 +1935,14 @@ async fn run_quic_test(
     let (sending_done_tx, mut sending_done_rx) = mpsc::channel::<()>(1);
     let sending_done_tx = end_on_server_send.then_some(sending_done_tx);
     // "Our receive streams reached EOF" — ends a post-Finish drain early.
+    let per_stream_bitrate = bitrate.map(|b| {
+        if b == 0 {
+            0
+        } else {
+            (b / streams as u64).max(1)
+        }
+    });
+
     let (recv_done_tx, mut recv_done_rx) = mpsc::channel::<()>(1);
     let recv_done_tx = byte_budget.is_some().then_some(recv_done_tx);
 
@@ -1981,6 +1991,7 @@ async fn run_quic_test(
                                 send,
                                 stream_stats,
                                 duration,
+                                per_stream_bitrate,
                                 cancel,
                                 pause,
                                 budget,
@@ -2021,6 +2032,7 @@ async fn run_quic_test(
                                 send,
                                 send_stats,
                                 duration,
+                                per_stream_bitrate,
                                 send_cancel,
                                 send_pause,
                                 budget,

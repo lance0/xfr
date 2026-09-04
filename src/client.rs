@@ -565,9 +565,6 @@ impl Client {
         self.config.validate()?;
         info!("Connecting to {}:{}...", self.config.host, self.config.port);
 
-        if self.config.protocol == Protocol::Quic && self.config.bitrate.is_some() {
-            warn!("Bitrate limit (-b) not implemented for QUIC; running at full speed");
-        }
         if self.config.protocol != Protocol::Tcp && self.config.tcp_congestion.is_some() {
             warn!(
                 "--congestion is only supported for TCP; ignoring for {}",
@@ -2300,6 +2297,14 @@ impl Client {
         let quic_sending_done = finish_on_budget.then_some(quic_sending_done);
         let mut finish_sent = false;
 
+        let per_stream_bitrate = self.config.bitrate.map(|b| {
+            if b == 0 {
+                0
+            } else {
+                (b / self.config.streams as u64).max(1)
+            }
+        });
+
         // Spawn data streams based on direction
         for i in 0..self.config.streams {
             let stream_stats = stats.streams[i as usize].clone();
@@ -2310,7 +2315,7 @@ impl Client {
             let conn = connection.clone();
             let budget = budget.clone();
             let sending_done = quic_sending_done.clone();
-
+            let bitrate = per_stream_bitrate;
             quic_handles.push(tokio::spawn(async move {
                 // See spawn_tcp_streams: the "send loops finished" signal.
                 let _sending_done = sending_done;
@@ -2323,6 +2328,7 @@ impl Client {
                                     send,
                                     stream_stats,
                                     duration,
+                                    bitrate,
                                     cancel,
                                     pause,
                                     budget,
@@ -2363,6 +2369,7 @@ impl Client {
                                         send,
                                         send_stats,
                                         duration,
+                                        bitrate,
                                         send_cancel,
                                         send_pause,
                                         budget,

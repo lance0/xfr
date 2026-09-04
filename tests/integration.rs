@@ -984,6 +984,109 @@ async fn test_quic_download() {
 }
 
 #[tokio::test]
+async fn test_quic_upload_bitrate_pacing() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Request 20 Mbps pacing on a 2-second test (expected ~5 MB total).
+    // Without pacing, loopback QUIC easily achieves > 1000 Mbps (> 250 MB).
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(20_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC paced upload should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC paced upload should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert!(
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 50.0,
+        "Expected throughput near 20 Mbps, got {:.1} Mbps",
+        result.throughput_mbps
+    );
+}
+
+#[tokio::test]
+async fn test_quic_download_bitrate_pacing() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Request 20 Mbps pacing on a 2-second download test.
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: Some(20_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC paced download should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC paced download should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert!(
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 50.0,
+        "Expected throughput near 20 Mbps, got {:.1} Mbps",
+        result.throughput_mbps
+    );
+}
+
+#[tokio::test]
 async fn test_quic_multi_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
