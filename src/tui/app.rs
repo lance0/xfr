@@ -146,7 +146,6 @@ pub struct App {
     // History log
     pub history: VecDeque<LogEntry>,
     pub average_throughput_mbps: f64,
-    throughput_sum: f64,
     throughput_count: u64,
 
     // Event tracking for history
@@ -260,7 +259,6 @@ impl App {
 
             history: VecDeque::with_capacity(LOG_HISTORY),
             average_throughput_mbps: 0.0,
-            throughput_sum: 0.0,
             throughput_count: 0,
 
             peak_throughput_mbps: 0.0,
@@ -439,7 +437,6 @@ impl App {
         self.server_version = None;
 
         self.average_throughput_mbps = 0.0;
-        self.throughput_sum = 0.0;
         self.throughput_count = 0;
 
         self.log("Test restarting...");
@@ -724,12 +721,19 @@ impl App {
             self.udp_lost_percent = Some(p);
         }
 
-        // Track average throughput across every full interval, including
-        // zero-throughput intervals so stalls and lossy periods reduce the
-        // average just like they do in the final result.
-        self.throughput_sum += progress.throughput_mbps;
+        // Average throughput is byte-weighted (total bytes over elapsed), not a
+        // mean of the per-interval rates. Intervals are not equal length — the
+        // first one covers the ~1ms sliver between test start and the first
+        // report, so a plain mean weights a 1500 Mbps micro-sample the same as
+        // a full second and roughly doubles the figure (LAN-1496). This also
+        // makes stalls reduce the average exactly as they do in the final
+        // result, which is what the previous comment here intended.
         self.throughput_count += 1;
-        self.average_throughput_mbps = self.throughput_sum / self.throughput_count as f64;
+        let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
+        if elapsed_secs > 0.0 {
+            self.average_throughput_mbps =
+                (self.total_bytes as f64 * 8.0) / elapsed_secs / 1_000_000.0;
+        }
 
         // Log significant events
         self.detect_events(progress.throughput_mbps);
@@ -772,6 +776,10 @@ impl App {
             self.elapsed = self.duration; // Show full duration on completion
         }
         self.total_bytes = result.bytes_total;
+        // Pin the average to the server-authoritative figure rather than
+        // whatever the last interval left behind, so the panel and the
+        // "Test completed. Avg:" log agree with the JSON/CSV output.
+        self.average_throughput_mbps = result.throughput_mbps;
         // Sum retransmits from streams (captured after transfer, accurate for download mode)
         self.total_retransmits = result.streams.iter().filter_map(|s| s.retransmits).sum();
 
@@ -986,7 +994,6 @@ impl App {
             settings,
             history,
             average_throughput_mbps,
-            throughput_sum: _, // feed average_throughput_mbps
             throughput_count: _,
             peak_throughput_mbps: _, // event-detection baselines; effects land in `history`
             prev_retransmits: _,
@@ -1835,20 +1842,45 @@ mod tests {
     }
 
     #[test]
-    fn average_throughput_includes_zero_throughput_intervals() {
-        // Regression: zero-throughput intervals were previously skipped,
-        // inflating the average in lossy/stall periods.
+    fn average_throughput_is_byte_weighted_not_a_mean_of_rates() {
+        // Regression (LAN-1496): the average was a plain mean of the
+        // per-interval rates, so the first interval — a ~1ms sliver between
+        // test start and the first report, reported at a huge rate — carried
+        // the same weight as a full second and roughly doubled the figure.
         let mut app = App::default();
         app.state = AppState::Running;
 
-        app.on_progress(make_progress(100.0, None));
-        assert!((app.average_throughput_mbps - 100.0).abs() < f64::EPSILON);
+        // 1ms sliver at ~1548 Mbps, then a full second at 200 Mbps.
+        let mut sliver = make_progress(1547.9, None);
+        sliver.elapsed_ms = 1;
+        sliver.total_bytes = 193_488;
+        app.on_progress(sliver);
 
-        app.on_progress(make_progress(0.0, None));
-        assert!((app.average_throughput_mbps - 50.0).abs() < f64::EPSILON);
+        let mut steady = make_progress(200.0, None);
+        steady.elapsed_ms = 1001;
+        steady.total_bytes = 25_000_000;
+        app.on_progress(steady);
 
-        app.on_progress(make_progress(100.0, None));
-        assert!((app.average_throughput_mbps - (200.0 / 3.0)).abs() < 1e-9);
+        // Byte-weighted: 25_193_488 B * 8 / 1.001 s ~= 201.3 Mbps.
+        // A mean of the two rates would report ~874 Mbps instead.
+        let avg = app.average_throughput_mbps;
+        assert!(
+            (avg - 201.3).abs() < 1.0,
+            "expected ~201 Mbps byte-weighted, got {avg}"
+        );
+
+        // Preserved from the original regression this test covered: an
+        // interval that moves no bytes while the clock advances must pull the
+        // average down rather than leaving it untouched.
+        let mut stalled = make_progress(0.0, None);
+        stalled.elapsed_ms = 2001;
+        stalled.total_bytes = 0;
+        app.on_progress(stalled);
+        assert!(
+            app.average_throughput_mbps < avg,
+            "a zero-byte interval must reduce the average, got {}",
+            app.average_throughput_mbps
+        );
     }
 
     #[test]
