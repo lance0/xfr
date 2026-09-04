@@ -954,9 +954,11 @@ impl App {
     /// a Running frame is rebuilt only when something visible moved.
     ///
     /// Wall-clock inputs are hashed at the resolution the renderer shows:
-    /// `elapsed` as whole seconds, the progress bar as its filled cell count
-    /// for the current terminal width (`ui::progress_bar_cells`, the same
-    /// arithmetic the renderer uses, so a fill change is never skipped), and
+    /// `elapsed` as whole seconds, the progress bar as its filled width in
+    /// eighths of a cell for the current terminal width
+    /// (`ui::progress_bar_cells`, the same arithmetic the renderer uses, so a
+    /// fill change is never skipped — the bar draws partial blocks, so whole
+    /// cells would be too coarse a signal), and
     /// the cancel countdown as whole seconds remaining. The terminal size is
     /// hashed too: `terminal.draw`'s autoresize only runs when we draw, so a
     /// resize has to count as a change.
@@ -2124,13 +2126,21 @@ mod tests {
         app.elapsed = Duration::from_millis(1000);
         assert_ne!(fp, app.render_fingerprint(size), "whole-second crossing");
 
-        // A bar-fill cell boundary is visible even within one second: a 10s
-        // test on an 84-cell bar advances one cell every ~119ms.
+        // A bar-fill boundary is visible even within one second: a 10s test on
+        // an 86-cell bar advances a cell every ~116ms.
         app.duration = Duration::from_secs(10);
         app.elapsed = Duration::from_millis(1000);
         let fp = app.render_fingerprint(size);
         app.elapsed = Duration::from_millis(1200);
         assert_ne!(fp, app.render_fingerprint(size), "bar fill advanced");
+
+        // ...and the bar draws partial blocks, so an eighth of a cell (~15ms
+        // here) is already visible movement. Hashing whole cells would call
+        // these two frames identical and hold a stale bar on screen.
+        app.elapsed = Duration::from_millis(1000);
+        let fp = app.render_fingerprint(size);
+        app.elapsed = Duration::from_millis(1040);
+        assert_ne!(fp, app.render_fingerprint(size), "bar advanced one eighth");
 
         // Every representative mutation dirties the frame.
         let mutations: &[AppMutation] = &[

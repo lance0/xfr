@@ -28,10 +28,11 @@ pub enum ServerEvent {
     AuthFailure,
 }
 
+use super::theme::Theme;
 use crate::stats::mbps_to_human;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 
@@ -200,7 +201,7 @@ impl ServerApp {
 }
 
 /// Draw the server dashboard
-pub fn draw(frame: &mut Frame, app: &ServerApp) {
+pub fn draw(frame: &mut Frame, app: &ServerApp, theme: &Theme) {
     let size = frame.area();
 
     let chunks = Layout::default()
@@ -212,16 +213,16 @@ pub fn draw(frame: &mut Frame, app: &ServerApp) {
         ])
         .split(size);
 
-    draw_header(frame, app, chunks[0]);
-    draw_tests_table(frame, app, chunks[1]);
-    draw_footer(frame, chunks[2]);
+    draw_header(frame, app, theme, chunks[0]);
+    draw_tests_table(frame, app, theme, chunks[1]);
+    draw_footer(frame, theme, chunks[2]);
 
     if app.show_help {
-        draw_help_overlay(frame, size);
+        draw_help_overlay(frame, theme, size);
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rect) {
     let uptime = app.uptime();
     let hours = uptime.as_secs() / 3600;
     let mins = (uptime.as_secs() % 3600) / 60;
@@ -230,9 +231,15 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     let title = format!(" xfr server - uptime {:02}:{:02}:{:02} ", hours, mins, secs);
 
     let block = Block::default()
-        .title(title)
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::White));
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().fg(theme.text));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -252,12 +259,14 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     let active = Paragraph::new(vec![
         Line::from(Span::styled(
             "Active Tests",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             format!("{}", app.active_tests.len()),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
         )),
     ]);
@@ -267,12 +276,14 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     let bw_widget = Paragraph::new(vec![
         Line::from(Span::styled(
             "Bandwidth",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             bw_str,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
     ]);
@@ -282,14 +293,16 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     let total = Paragraph::new(vec![
         Line::from(Span::styled(
             "Tests / Failed",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             format!("{} / {}", app.total_tests, app.failed_tests),
             Style::default().fg(if app.failed_tests > 0 {
-                Color::Red
+                theme.error
             } else {
-                Color::Gray
+                theme.text_dim
             }),
         )),
     ]);
@@ -299,29 +312,37 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, area: Rect) {
     let security = Paragraph::new(vec![
         Line::from(Span::styled(
             "Blocked / Auth Fail",
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             format!("{} / {}", app.connections_blocked, app.auth_failures),
             Style::default().fg(if app.connections_blocked > 0 || app.auth_failures > 0 {
-                Color::Yellow
+                theme.warning
             } else {
-                Color::Gray
+                theme.text_dim
             }),
         )),
     ]);
     frame.render_widget(security, stats_chunks[3]);
 }
 
-fn draw_tests_table(frame: &mut Frame, app: &ServerApp, area: Rect) {
+fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rect) {
     let block = Block::default()
-        .title(" Active Tests ")
-        .borders(Borders::ALL);
+        .title(Span::styled(
+            " Active Tests ",
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if app.active_tests.is_empty() {
-        let msg = Paragraph::new("No active tests").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("No active tests").style(Style::default().fg(theme.text_dim));
         frame.render_widget(msg, inner);
         return;
     }
@@ -334,7 +355,11 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, area: Rect) {
         "Elapsed",
         "Throughput",
     ])
-    .style(Style::default().add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD),
+    )
     .bottom_margin(1);
 
     let rows: Vec<Row> = app
@@ -367,17 +392,23 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, area: Rect) {
         ],
     )
     .header(header)
-    .style(Style::default().fg(Color::White));
+    .style(Style::default().fg(theme.text));
 
     frame.render_widget(table, inner);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new("[q] Quit   [?] Help").style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(footer, area);
+fn draw_footer(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let footer = Line::from(vec![
+        Span::styled("[", Style::default().fg(theme.text_dim)),
+        Span::styled("q", Style::default().fg(theme.accent)),
+        Span::styled("] Quit   [", Style::default().fg(theme.text_dim)),
+        Span::styled("?", Style::default().fg(theme.accent)),
+        Span::styled("] Help", Style::default().fg(theme.text_dim)),
+    ]);
+    frame.render_widget(Paragraph::new(footer), area);
 }
 
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
+fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
     let help_width = 40;
     let help_height = 8;
     let help_area = Rect {
@@ -389,29 +420,35 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 
     let help_text = vec![
         Line::from(vec![
-            Span::styled("q", Style::default().fg(Color::Cyan)),
-            Span::raw(" - Quit server"),
+            Span::styled("q", Style::default().fg(theme.accent)),
+            Span::styled(" - Quit server", Style::default().fg(theme.text_dim)),
         ]),
         Line::from(vec![
-            Span::styled("?", Style::default().fg(Color::Cyan)),
-            Span::raw(" - Toggle help"),
+            Span::styled("?", Style::default().fg(theme.accent)),
+            Span::styled(" - Toggle help", Style::default().fg(theme.text_dim)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::raw("Press "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" to close"),
+            Span::styled("Press ", Style::default().fg(theme.text_dim)),
+            Span::styled("Esc", Style::default().fg(theme.accent)),
+            Span::styled(" to close", Style::default().fg(theme.text_dim)),
         ]),
     ];
 
-    let help = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .title(" Help ")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::White).bg(Color::Black)),
-        )
-        .style(Style::default().bg(Color::Black));
+    // No hardcoded background: `Clear` already blanks the cells, so the
+    // overlay inherits the terminal's own background and stays legible on a
+    // light theme instead of painting white-on-black into it.
+    let help = Paragraph::new(help_text).block(
+        Block::default()
+            .title(Span::styled(
+                " Help ",
+                Style::default()
+                    .fg(theme.header)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border)),
+    );
 
     frame.render_widget(ratatui::widgets::Clear, help_area);
     frame.render_widget(help, help_area);
@@ -420,7 +457,51 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
+
+    /// Every foreground colour the dashboard actually paints.
+    fn rendered_colors(app: &ServerApp, theme: &Theme) -> HashSet<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal.draw(|f| draw(f, app, theme)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..20)
+            .flat_map(|y| (0..90).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].style().fg.unwrap_or(Color::Reset))
+            .collect()
+    }
+
+    /// Regression: the dashboard hardcoded `Color::White/Cyan/Green/Red/Gray`,
+    /// so it ignored `--theme` entirely and rendered white-on-nothing — which
+    /// is unreadable on a light terminal background.
+    #[test]
+    fn dashboard_paints_only_theme_colors() {
+        let mut app = ServerApp::new();
+        app.add_test(active_test("t1"));
+        app.record_blocked();
+        app.fail_test("t1", 1);
+
+        let mono = Theme::by_name("monochrome");
+        let painted = rendered_colors(&app, &mono);
+
+        // A hue-free theme must not leak the old hardcoded accents.
+        for banned in [Color::Cyan, Color::Green, Color::Red, Color::Yellow] {
+            assert!(
+                !painted.contains(&banned),
+                "monochrome dashboard painted {banned:?}: {painted:?}"
+            );
+        }
+
+        // ...and switching themes must actually change what lands on screen,
+        // which a hardcoded palette could never do.
+        let kawaii = rendered_colors(&app, &Theme::by_name("kawaii"));
+        assert_ne!(
+            painted, kawaii,
+            "theme change did not alter the rendered colours"
+        );
+    }
 
     fn active_test(id: &str) -> ActiveTestInfo {
         ActiveTestInfo {

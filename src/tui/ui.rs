@@ -147,7 +147,7 @@ fn draw_title(frame: &mut Frame, theme: &Theme, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " - Modern Rust TUI for Network Testing ",
+            concat!(" v", env!("CARGO_PKG_VERSION"), " "),
             Style::default().fg(theme.text_dim),
         ),
         Span::styled("]", Style::default().fg(theme.border)),
@@ -343,23 +343,21 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         frame.render_widget(sparkline, sparkline_chunks[1]);
     }
 
-    // Transfer progress line: arrow-style bar [====>------] plus elapsed
+    // Transfer progress line: an eighth-resolution block bar plus elapsed
     // against the test's own denominator.
     let transferred = bytes_to_human(app.total_bytes);
     let elapsed_secs = app.elapsed.as_secs();
-    let (bar_width, filled) = progress_bar_cells(app, inner.width);
-    let empty = bar_width.saturating_sub(filled);
-    let arrow = if filled > 0 && filled < bar_width {
-        ">"
-    } else {
-        ""
-    };
-    let fill_chars = if arrow.is_empty() {
-        filled
-    } else {
-        filled.saturating_sub(1)
-    };
-    let progress_bar = format!("[{}{}{}]", "=".repeat(fill_chars), arrow, "-".repeat(empty));
+    let (bar_width, filled_eighths) = progress_bar_cells(app, inner.width);
+    let full_cells = filled_eighths / 8;
+    let remainder = filled_eighths % 8;
+    let mut bar_filled = BAR_FULL.to_string().repeat(full_cells);
+    if remainder > 0 {
+        bar_filled.push(BAR_PARTIALS[remainder - 1]);
+    }
+    let drawn = full_cells + usize::from(remainder > 0);
+    let bar_empty = BAR_EMPTY
+        .to_string()
+        .repeat(bar_width.saturating_sub(drawn));
     let time_display = if let Some(budget) = app.byte_budget.filter(|b| *b > 0) {
         // `-n`: the requested transfer size is the denominator, the way a
         // timed test shows its duration.
@@ -373,7 +371,8 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let transfer_line = Line::from(vec![
         Span::styled("  Transfer: ", Style::default().fg(theme.text_dim)),
         Span::styled(format!("{} ", transferred), Style::default().fg(theme.text)),
-        Span::styled(progress_bar, Style::default().fg(theme.graph_secondary)),
+        Span::styled(bar_filled, Style::default().fg(theme.graph_primary)),
+        Span::styled(bar_empty, Style::default().fg(theme.text_dim)),
         Span::styled(time_display, Style::default().fg(theme.text)),
     ]);
     frame.render_widget(Paragraph::new(transfer_line), chunks[1]);
@@ -462,19 +461,38 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
 /// `-n` test fills by bytes, a timed test by elapsed time, an open-ended
 /// test shows a full bar. Shared with `App::render_fingerprint` so the
 /// dirty check sees exactly the cell-quantized fill the renderer draws.
+/// Progress-bar glyphs, the sparkline's eighth resolution turned on its side.
+/// `BAR_PARTIALS` are the left-aligned partial blocks (1/8 through 7/8), so the
+/// bar advances an eighth of a cell at a time instead of jumping a whole
+/// character. `BAR_FULL` against `BAR_EMPTY` differs in texture, not just hue,
+/// so progress stays readable on the hue-free themes and under `NO_COLOR` —
+/// the same reason the heavy-loss marker stipples rather than recolors.
+const BAR_FULL: char = '█';
+const BAR_EMPTY: char = '░';
+const BAR_PARTIALS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
+/// Bar width in cells and how much of it is filled, in **eighths of a cell**.
+///
+/// The renderer draws at eighth resolution, so this reports eighths: the
+/// fingerprint in `App::render_fingerprint` hashes the result to decide
+/// whether a frame changed, and a whole-cell count would let up to seven
+/// eighths of visible movement pass unnoticed and freeze the bar.
 pub(super) fn progress_bar_cells(app: &App, inner_width: u16) -> (usize, usize) {
     let prefix_len = 12; // "  Transfer: "
-    let suffix_len = 18; // " Xs/Xs" + "[]"
+    let suffix_len = 16; // " Xs/Xs" (the bar carries no [] delimiters)
     let transferred_len = bytes_to_human(app.total_bytes).len() + 1;
     let bar_width = (inner_width as usize)
         .saturating_sub(prefix_len + suffix_len + transferred_len)
         .max(10);
-    let filled = if app.byte_budget.is_none_or(|b| b == 0) && app.is_infinite() {
-        bar_width
+    let total_eighths = bar_width * 8;
+    let filled_eighths = if app.byte_budget.is_none_or(|b| b == 0) && app.is_infinite() {
+        total_eighths
     } else {
-        (app.progress_percent() / 100.0 * bar_width as f64) as usize
+        // Clamped: progress_percent can read past 100 on an overshooting `-n`
+        // transfer, and the renderer repeats these counts into a String.
+        ((app.progress_percent() / 100.0 * total_eighths as f64) as usize).min(total_eighths)
     };
-    (bar_width, filled)
+    (bar_width, filled_eighths)
 }
 
 fn draw_history(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -597,51 +615,87 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     };
 
-    let mut spans = vec![
-        Span::styled("[", Style::default().fg(theme.text_dim)),
-        Span::styled("q", Style::default().fg(theme.accent)),
-        Span::styled("] Quit | [", Style::default().fg(theme.text_dim)),
-        Span::styled("p", Style::default().fg(theme.accent)),
-        Span::styled("] Pause | [", Style::default().fg(theme.text_dim)),
-        Span::styled("r", Style::default().fg(theme.accent)),
-        Span::styled("] Restart | [", Style::default().fg(theme.text_dim)),
-        Span::styled("s", Style::default().fg(theme.accent)),
-        Span::styled("] Settings | [", Style::default().fg(theme.text_dim)),
-        Span::styled("?", Style::default().fg(theme.accent)),
-        Span::styled("] Help | [", Style::default().fg(theme.text_dim)),
-        Span::styled("t", Style::default().fg(theme.accent)),
-        Span::styled("] Theme", Style::default().fg(theme.text_dim)),
+    let mut keys = vec![
+        ("q", "Quit"),
+        ("p", "Pause"),
+        ("r", "Restart"),
+        ("s", "Settings"),
+        ("?", "Help"),
+        ("t", "Theme"),
     ];
-
-    // Add streams toggle hint when multiple streams exist
     if app.streams_count > 1 {
-        spans.push(Span::styled(" | [", Style::default().fg(theme.text_dim)));
-        spans.push(Span::styled("d", Style::default().fg(theme.accent)));
-        spans.push(Span::styled(
-            "] Streams",
-            Style::default().fg(theme.text_dim),
-        ));
+        keys.push(("d", "Streams"));
     }
-
-    // Add dismiss hint when update available
     if app.update_available.is_some() {
-        spans.push(Span::styled(" | [", Style::default().fg(theme.text_dim)));
-        spans.push(Span::styled("u", Style::default().fg(theme.accent)));
-        spans.push(Span::styled(
-            "] Dismiss",
-            Style::default().fg(theme.text_dim),
-        ));
+        keys.push(("u", "Dismiss"));
     }
 
-    spans.push(Span::styled(
-        " | Status: ",
-        Style::default().fg(theme.text_dim),
-    ));
-    spans.push(Span::styled(status_text, Style::default().fg(status_color)));
+    // Status is the only thing down here that changes, so it gets its own
+    // chunk on the right and the key hints absorb any clipping. Laid out as
+    // one line, the full hint list runs ~107 columns and an 80-column
+    // terminal used to lose "Status: ..." off the right edge entirely —
+    // truncating the single field worth reading.
+    let status_label = format!(" Status: {}", status_text);
+    let status_width = status_label.chars().count() as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(status_width)])
+        .split(area);
 
-    let footer = Line::from(spans);
+    // "[q] Quit | ..." costs len(key) + len(label) + 3 per hint plus 3-column
+    // separators; the compact "q:Quit ..." form drops to len+1 and single
+    // spaces, which fits the default hint set beside Status on 80 columns.
+    let full_width: usize = keys
+        .iter()
+        .map(|(k, l)| k.len() + l.len() + 3)
+        .sum::<usize>()
+        + 3 * keys.len().saturating_sub(1);
+    let compact = full_width > chunks[0].width as usize;
 
-    frame.render_widget(Paragraph::new(footer), area);
+    // Drop whole hints that don't fit rather than letting ratatui clip the
+    // last one part-way through its label. A shorter list reads as a shorter
+    // list; half a label reads as a rendering bug.
+    let sep_width = if compact { 1 } else { 3 };
+    let hint_pad = if compact { 1 } else { 3 };
+    let available = chunks[0].width as usize;
+    let mut used = 0usize;
+
+    let mut spans = Vec::with_capacity(keys.len() * 3);
+    for (i, (key, label)) in keys.iter().enumerate() {
+        let sep_cost = if i > 0 { sep_width } else { 0 };
+        let cost = sep_cost + key.len() + label.len() + hint_pad;
+        if used + cost > available {
+            break;
+        }
+        used += cost;
+
+        if i > 0 {
+            let sep = if compact { " " } else { " | " };
+            spans.push(Span::styled(sep, Style::default().fg(theme.text_dim)));
+        }
+        if compact {
+            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!(":{}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        } else {
+            spans.push(Span::styled("[", Style::default().fg(theme.text_dim)));
+            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!("] {}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+
+    let status = Line::from(vec![
+        Span::styled(" Status: ", Style::default().fg(theme.text_dim)),
+        Span::styled(status_text, Style::default().fg(status_color)),
+    ]);
+    frame.render_widget(Paragraph::new(status), chunks[1]);
 }
 
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
@@ -1045,6 +1099,13 @@ mod small_terminal_tests {
     // same rect, so it escapes the band on exactly the same bugs the bar does.
     const BAR_GLYPHS: [&str; 9] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁", "░"];
 
+    // The subset the progress bar cannot produce. `█` and `░` are shared with
+    // the transfer bar's fill and track, so only these prove a *sparkline*
+    // glyph landed somewhere it should not. `running_app_with_history` feeds
+    // 42 Mbps against a 100 Mbps floor, so an escaped sparkline is always a
+    // partial-height bar — keep that fixture mid-scale or this loses its teeth.
+    const SPARKLINE_ONLY_GLYPHS: [&str; 7] = ["▇", "▆", "▅", "▄", "▃", "▂", "▁"];
+
     fn running_app_with_history() -> App {
         let mut app = App::default();
         app.state = AppState::Running;
@@ -1087,7 +1148,15 @@ mod small_terminal_tests {
                 if !is_border_row && !is_transfer_row {
                     continue;
                 }
-                for glyph in BAR_GLYPHS {
+                // The transfer line draws its own progress bar out of `█` and
+                // `░`, so those two prove nothing there; a border row has no
+                // business carrying any of them.
+                let glyphs: &[&str] = if is_border_row {
+                    &BAR_GLYPHS
+                } else {
+                    &SPARKLINE_ONLY_GLYPHS
+                };
+                for glyph in glyphs {
                     assert!(
                         !row.contains(glyph),
                         "height {height}: sparkline glyph {glyph:?} escaped its band onto {row:?}"
@@ -1095,6 +1164,50 @@ mod small_terminal_tests {
                 }
             }
         }
+    }
+
+    /// Regression: the footer laid its key hints and Status out as a single
+    /// line running ~107 columns. On the 80-column default (macOS Terminal,
+    /// tmux splits, the Linux console) ratatui clipped the right edge, and
+    /// the casualty was Status — the one field down there that changes.
+    #[test]
+    fn footer_keeps_status_when_the_hints_do_not_fit() {
+        // 94 is the boundary: the full hint list still fits beside Status
+        // there, so it only has to prove Status survives.
+        for width in [60, 80, 94] {
+            let frame = rows(width, 24);
+            let footer = frame.last().expect("footer row").clone();
+            assert!(
+                footer.contains("Status:"),
+                "width {width}: footer lost its Status label: {footer:?}"
+            );
+            assert!(
+                footer.contains("Running"),
+                "width {width}: footer lost the status value: {footer:?}"
+            );
+        }
+
+        // Below that, the hints are what absorb the loss, not Status.
+        for width in [60, 80] {
+            let frame = rows(width, 24);
+            let footer = frame.last().expect("footer row").clone();
+            assert!(
+                footer.contains("q:Quit"),
+                "width {width}: expected compact hints: {footer:?}"
+            );
+        }
+    }
+
+    /// ...and a wide terminal still gets the roomy labels.
+    #[test]
+    fn footer_uses_full_hints_when_there_is_room() {
+        let frame = rows(140, 24);
+        let footer = frame.last().expect("footer row");
+        assert!(
+            footer.contains("[q] Quit"),
+            "expected full hints: {footer:?}"
+        );
+        assert!(footer.contains("Status:"), "footer lost Status: {footer:?}");
     }
 
     /// Tiny terminals must degrade, not panic.

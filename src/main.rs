@@ -1105,7 +1105,12 @@ async fn main() -> Result<()> {
             };
 
             if server_tui {
-                run_server_tui(config).await?;
+                // Same precedence as the client TUI: --theme > saved pref >
+                // NO_COLOR-derived default. There is no server section for a
+                // theme in config.toml, so the saved pref carries a user's
+                // choice across from the client.
+                let prefs = xfr::prefs::Prefs::load().with_overrides(Some(&cli.theme), None);
+                run_server_tui(config, prefs.theme_name()).await?;
             } else {
                 let server = Server::new(config);
                 server.run().await?;
@@ -2395,10 +2400,15 @@ async fn run_tui_loop(
     }
 }
 
-async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
+async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()> {
     // Create channel for server events
     let (tx, mut rx) = mpsc::channel::<ServerEvent>(100);
     config.tui_tx = Some(tx);
+
+    // The dashboard used to hardcode its palette, which made it unreadable on
+    // a light terminal and deaf to `--theme`. Resolve it the way the client
+    // TUI does so both honour the same flag, saved pref, and NO_COLOR.
+    let theme = xfr::tui::theme::Theme::by_name(theme_name);
 
     // Setup terminal. The guard is armed before entering the alternate screen
     // so a failure there still restores cooked mode on the way out.
@@ -2421,7 +2431,7 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     loop {
         let fingerprint = app.render_fingerprint(terminal.size()?);
         if last_drawn != Some(fingerprint) {
-            terminal.draw(|f| server_draw(f, &app))?;
+            terminal.draw(|f| server_draw(f, &app, &theme))?;
             last_drawn = Some(fingerprint);
         }
 

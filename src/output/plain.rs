@@ -202,8 +202,13 @@ pub fn output_interval_plain(
     lost: Option<u64>,
     rtt_us: Option<u32>,
 ) -> String {
+    // Right-align every column that has another column after it. The human
+    // formatters return variable-width strings ("193 KB" vs "119.25 MB",
+    // "200.0 Mbps" vs "1.20 Gbps"), so an unpadded line makes the numbers
+    // jump sideways once a second while streaming. Widths cover the widest
+    // value each formatter produces below 1000 Gbps / 1 TB.
     let mut output = format!(
-        "[{}]  {}  {}",
+        "[{}]  {:>11}  {:>10}",
         timestamp,
         mbps_to_human(throughput_mbps),
         bytes_to_human(bytes)
@@ -211,13 +216,13 @@ pub fn output_interval_plain(
 
     // UDP shows jitter/lost; TCP shows rtx/rtt. Use jitter presence to distinguish.
     if let Some(jitter) = jitter_ms {
-        output.push_str(&format!("  jitter: {:.2}ms", jitter));
+        output.push_str(&format!("  jitter: {:>7.2}ms", jitter));
         if let Some(l) = lost {
             output.push_str(&format!("  lost: {}", l));
         }
     } else {
         if let Some(rtx) = retransmits {
-            output.push_str(&format!("  rtx: {}", rtx));
+            output.push_str(&format!("  rtx: {:>5}", rtx));
         }
         if let Some(rtt) = rtt_us {
             output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
@@ -350,7 +355,9 @@ mod tests {
             None,
             Some(50),
         );
-        assert!(output.contains("rtx: 5"));
+        // Columns are right-aligned so the numbers don't slide sideways
+        // between samples; the counts keep their own fixed width.
+        assert!(output.contains("rtx:     5"), "unexpected line: {output}");
         assert!(output.contains("rtt: 0.05ms"));
         assert!(!output.contains("jitter:"));
         assert!(!output.contains("lost:"));
@@ -368,9 +375,45 @@ mod tests {
             Some(3),
             None,
         );
-        assert!(output.contains("jitter: 1.42ms"));
+        assert!(
+            output.contains("jitter:    1.42ms"),
+            "unexpected line: {output}"
+        );
         assert!(output.contains("lost: 3"));
         assert!(!output.contains("rtx:"));
         assert!(!output.contains("rtt:"));
+    }
+
+    #[test]
+    fn interval_columns_stay_put_across_magnitudes() {
+        // Streaming output is read as a column, one line per second. A sample
+        // formatted "900 B" / "200.0 Mbps" and one formatted "150.00 MB" /
+        // "1.20 Gbps" must land their later columns in the same place, or the
+        // numbers visibly slide sideways as the transfer ramps up.
+        let small = output_interval_plain("1.001", 1.0, 200.0, 900, Some(0), None, None, Some(120));
+        let large = output_interval_plain(
+            "2.001",
+            2.0,
+            1_200.0,
+            157_286_400,
+            Some(0),
+            None,
+            None,
+            Some(120),
+        );
+
+        let rtx_col = |line: &str| line.find("rtx:").expect("rtx column present");
+        assert_eq!(
+            rtx_col(&small),
+            rtx_col(&large),
+            "columns drifted:\n{small}\n{large}"
+        );
+
+        let rtt_col = |line: &str| line.find("rtt:").expect("rtt column present");
+        assert_eq!(
+            rtt_col(&small),
+            rtt_col(&large),
+            "columns drifted:\n{small}\n{large}"
+        );
     }
 }
