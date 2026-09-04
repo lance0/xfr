@@ -266,13 +266,20 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // The gap between the graph and the transfer bar is a luxury, and the
+    // panel only has 8 inner rows to spend at full height. On a short
+    // terminal ratatui shrinks these chunks, and a row spent on whitespace
+    // is a row taken from the sparkline — at 15 rows it blanked the graph
+    // completely. Collapse the gap to nothing rather than the data.
+    let graph_gap = u16::from(inner.height >= 8);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Throughput sparkline + current value
-            Constraint::Length(1), // Transfer progress
-            Constraint::Length(1), // Spacer
-            Constraint::Length(2), // Stats row
+            Constraint::Length(3),         // Throughput sparkline + current value
+            Constraint::Length(graph_gap), // Spacer
+            Constraint::Length(1),         // Transfer progress
+            Constraint::Length(1),         // Spacer
+            Constraint::Length(2),         // Stats row
         ])
         .split(inner);
 
@@ -375,13 +382,13 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         Span::styled(bar_empty, Style::default().fg(theme.text_dim)),
         Span::styled(time_display, Style::default().fg(theme.text)),
     ]);
-    frame.render_widget(Paragraph::new(transfer_line), chunks[1]);
+    frame.render_widget(Paragraph::new(transfer_line), chunks[2]);
 
     // Stats row: Current/Average Speed | Jitter/Packet Loss
     let stats_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[3]);
+        .split(chunks[4]);
 
     let current_speed = mbps_to_human(app.current_throughput_mbps);
     let avg_speed = mbps_to_human(app.average_throughput_mbps);
