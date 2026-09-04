@@ -10,6 +10,11 @@ use crate::stats::mbps_to_human;
 // Use 8-level block characters for sparklines
 const SPARKLINE_CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// Texture for the empty cells above a heavy-loss column in a hue-free theme.
+/// A 25% stipple reads as clearly "not the bar" next to a solid block, so the
+/// column is marked full height while the bar keeps its true height.
+const MARKED_EMPTY: char = '░';
+
 /// A sparkline widget that can render multiple rows for taller graphs.
 /// Optionally supports per-sample styles: when `styles` is set, each sample
 /// is drawn in its corresponding style, falling back to the widget-wide
@@ -91,14 +96,24 @@ impl Widget for Sparkline<'_> {
                 .and_then(|s| s.get(start + i).copied())
                 .unwrap_or(self.style);
 
-            // A REVERSED column style means "render this column as a solid
-            // full-height pillar" (monochrome heavy-loss marking): fill the
-            // empty cells too, so the swap produces one solid block with
-            // the bar as a negative silhouette — not floating fragments
-            // wherever each bar's partial top cell happens to sit (#93
-            // follow-up). Reverse video inverts within a cell, so a partial
-            // glyph alone would mark only the empty *fraction* of its cell.
-            let fill_empty = cell_style.add_modifier.contains(Modifier::REVERSED);
+            // A REVERSED column style is the hue-free "heavy loss here" marker.
+            // It is a signal, not something to hand to the terminal: reverse
+            // video swaps ink and background *within a cell*, so a full block
+            // renders in the background colour and disappears while the empty
+            // cells above it render solid. The visible shape becomes the bar's
+            // complement, which reads as a bar of inverted height — a 10%
+            // column looks nearly full and a 90% column looks nearly empty.
+            //
+            // Mark the column without deforming it instead: draw the bar
+            // normally and stipple the empty cells above it. Height stays
+            // readable, and a marked column is unmistakable in a theme that
+            // has no hue to spend.
+            let marked = cell_style.add_modifier.contains(Modifier::REVERSED);
+            let cell_style = if marked {
+                cell_style.remove_modifier(Modifier::REVERSED)
+            } else {
+                cell_style
+            };
 
             // Render from bottom to top
             for row in 0..height {
@@ -108,8 +123,8 @@ impl Widget for Sparkline<'_> {
                 if eighths_for_row > 0 {
                     let ch = SPARKLINE_CHARS[eighths_for_row - 1];
                     buf[(x, y)].set_char(ch).set_style(cell_style);
-                } else if fill_empty {
-                    buf[(x, y)].set_char(' ').set_style(cell_style);
+                } else if marked {
+                    buf[(x, y)].set_char(MARKED_EMPTY).set_style(cell_style);
                 }
             }
         }
@@ -263,35 +278,77 @@ mod tests {
     }
 
     #[test]
-    fn reversed_columns_render_as_solid_pillars() {
-        // #93 follow-up: a REVERSED column must fill its empty cells so the
-        // fg/bg swap yields one solid full-height pillar, not fragments at
-        // whatever height the bar's partial top cell sits.
+    fn marked_columns_stipple_the_empty_cells_without_touching_the_bar() {
+        // A heavy-loss column marks its full height with stipple above the
+        // bar. The bar itself is drawn exactly as an unmarked column would
+        // draw it, and REVERSED never reaches the terminal: rendering it
+        // literally made a full block paint in the background colour, so the
+        // visible shape was the bar's complement and the column read as a bar
+        // of inverted height.
         let area = Rect::new(0, 0, 2, 3);
         let mut buf = Buffer::empty(area);
         let data = [25.0, 25.0]; // 25% of max: bar occupies the bottom row only
-        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let marked = Style::default().add_modifier(Modifier::REVERSED);
         let plain = Style::default();
-        let styles = [reversed, plain];
+        let styles = [marked, plain];
         Sparkline::new(&data)
             .max(100.0)
             .styles(&styles)
             .render(area, &mut buf);
 
-        // Reversed column: every row styled — empty rows became styled spaces.
+        // Marked column: empty rows carry the stipple, never reverse video.
         for y in 0..2 {
-            assert_eq!(buf[(0, y)].symbol(), " ");
+            assert_eq!(buf[(0, y)].symbol(), "░");
             assert!(
-                buf[(0, y)]
+                !buf[(0, y)]
                     .style()
                     .add_modifier
-                    .contains(Modifier::REVERSED)
+                    .contains(Modifier::REVERSED),
+                "REVERSED must be consumed as a signal, not handed to the terminal"
             );
         }
-        assert_ne!(buf[(0, 2)].symbol(), " "); // the bar glyph itself
+
+        // The bar cell is identical in both columns: marking must not deform
+        // the value being displayed.
+        assert_eq!(buf[(0, 2)].symbol(), buf[(1, 2)].symbol());
+        assert_ne!(buf[(0, 2)].symbol(), "░");
+        assert!(
+            !buf[(0, 2)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+
         // Plain column: cells above the bar remain untouched.
         assert_eq!(buf[(1, 0)].symbol(), " ");
         assert!(buf[(1, 0)].style().add_modifier.is_empty());
+    }
+
+    #[test]
+    fn marking_preserves_relative_bar_heights() {
+        // The inverted-rendering bug made a 10% column read taller than a 90%
+        // one. Whatever the marking, ink height must still rank with value.
+        let area = Rect::new(0, 0, 2, 3);
+        let mut buf = Buffer::empty(area);
+        let data = [10.0, 90.0];
+        let marked = Style::default().add_modifier(Modifier::REVERSED);
+        let styles = [marked, marked];
+        Sparkline::new(&data)
+            .max(100.0)
+            .styles(&styles)
+            .render(area, &mut buf);
+
+        let bar_cells = |x: u16| {
+            (0..3)
+                .filter(|&y| buf[(x, y)].symbol() != "░" && buf[(x, y)].symbol() != " ")
+                .count()
+        };
+        assert!(
+            bar_cells(0) < bar_cells(1),
+            "10% column drew {} bar cells, 90% column drew {} — height must rank with value",
+            bar_cells(0),
+            bar_cells(1)
+        );
     }
 
     #[test]
