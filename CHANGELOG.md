@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.1] - 2026-09-04
 
 ### Security
 - **Updated `quinn-proto` to 0.11.17** — 0.10.0 shipped 0.11.16, which closed [RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185) / GHSA-4w2j-m93h-cj5j. 0.11.17 closes three further remote memory-exhaustion issues that `cargo audit` does not yet list: [GHSA-qfwj-vfxf-92j2](https://github.com/quinn-rs/quinn/security/advisories/GHSA-qfwj-vfxf-92j2) (the 0.11.15 stream-reassembly guard can be bypassed), [GHSA-2hv7-gw8g-gpq5](https://github.com/quinn-rs/quinn/security/advisories/GHSA-2hv7-gw8g-gpq5) (zero-length DATAGRAM frames bypass `datagram_receive_buffer_size`), and [GHSA-hmxj-32vh-65vr](https://github.com/quinn-rs/quinn/security/advisories/GHSA-hmxj-32vh-65vr) (unbounded `retire_cids` growth from already-retired NEW_CONNECTION_ID frames). Public QUIC servers (`xfr serve`) are in the blast radius. Lockfile-only; no source or API changes.
@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **The TUI title bar no longer pitches the project** — the header read `[ xfr - Modern Rust TUI for Network Testing ]`, a README subtitle in the viewport of an operator running a benchmark. It now reads `[ xfr vX.Y.Z ]`, which answers the question a title bar is actually asked.
 - **The transfer progress bar is drawn with block glyphs instead of ASCII** — a `[=====>------]` arrow bar sat directly beneath a sparkline rendered in Unicode blocks, two decades of terminal aesthetics in adjacent rows. The bar now fills with `█` against a `░` track and carries a partial-block tip (`▏`–`▉`), so it advances an eighth of a cell at a time rather than jumping a whole character. Fill and track differ in texture, not only hue, so progress stays legible on the hue-free themes and under `NO_COLOR`.
+- **The throughput graph and the transfer bar no longer touch** — the sparkline band ran straight into the `Transfer:` line while a blank row sat unused against the panel's bottom border, so the layout was spending 7 of its 8 inner rows. That row now separates the graph from the bar, at no cost in height. The gap is conditional: on a terminal too short for the full panel a row spent on whitespace is a row taken from the data, so below full height it collapses to zero and the panel fills in priority order — transfer bar, gap, current speed, average speed, then the graph.
 - **Plain streaming output holds its columns still** — `mbps_to_human` and `bytes_to_human` return variable-width strings, so an interval line re-flowed every second as the transfer crossed `KB`→`MB`→`GB` or `Mbps`→`Gbps` and the numbers slid sideways under the eye. Every column that has another column after it is now right-aligned to a fixed width.
 - **Dependency refresh** — all semver-compatible updates taken, including `mdns-sd` 0.21.0 → 0.21.1 (goodbye packets after conflict rename; skip only a malformed name instead of the whole packet), `hyper` 1.11.1, `toml` 1.1.5, `rcgen` 0.14.10, and `rustls-webpki` 0.103.15. No `Cargo.toml` constraint changes.
 
