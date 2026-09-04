@@ -141,7 +141,7 @@ mod mdns_impl {
             .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "xfr-server".to_string());
         let hostname = dns_label(&raw_hostname);
-        if hostname != raw_hostname {
+        if raw_hostname.trim().len() > DNS_LABEL_MAX {
             warn!(
                 "system hostname {:?} exceeds the 63-byte DNS label limit; advertising {:?}",
                 raw_hostname, hostname
