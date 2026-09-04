@@ -326,13 +326,13 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
             .max(app.max_throughput().max(100.0))
             .style(Style::default().fg(theme.graph_primary))
             .styles(&styles);
-        let sparkline_area = Rect {
-            x: sparkline_chunks[1].x,
-            y: sparkline_chunks[1].y,
-            width: sparkline_chunks[1].width,
-            height: 3,
-        };
-        frame.render_widget(sparkline, sparkline_area);
+        // Render into the allotted chunk rather than a hand-built rect with a
+        // hardcoded height. The band is `Constraint::Length(3)`, so this is the
+        // same 3 rows on any normal terminal — but when the window is too short
+        // for the full layout, ratatui shrinks the chunk to 0-2 rows and a
+        // fixed height of 3 spilled the bars over the panel's bottom border
+        // (visible below ~16 rows).
+        frame.render_widget(sparkline, sparkline_chunks[1]);
     }
 
     // Transfer progress line: arrow-style bar [====>------] plus elapsed
@@ -1024,5 +1024,68 @@ mod tests {
         let light_mono = loss_severity_style(Some(0.5), &mono);
         assert!(light_mono.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!light_mono.add_modifier.contains(Modifier::REVERSED));
+    }
+}
+
+#[cfg(test)]
+mod small_terminal_tests {
+    use super::*;
+    use crate::tui::app::{AppState, ThroughputSample};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    const BAR_GLYPHS: [&str; 8] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁"];
+
+    fn running_app_with_history() -> App {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        for _ in 0..8 {
+            app.throughput_history.push_back(ThroughputSample {
+                mbps: 42.0,
+                lost_packets: 0,
+                interval_packets: 10,
+            });
+        }
+        app
+    }
+
+    fn rows(width: u16, height: u16) -> Vec<String> {
+        let app = running_app_with_history();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// Regression: the throughput sparkline was rendered into a hand-built
+    /// Rect with a hardcoded `height: 3`. On a terminal too short for the full
+    /// layout, ratatui shrinks that band to 0-2 rows, and the fixed height
+    /// spilled bars over the Real-time Stats panel's bottom border — visible
+    /// on anything under ~16 rows.
+    #[test]
+    fn sparkline_never_paints_over_a_panel_border() {
+        for height in 8..=20u16 {
+            for row in rows(60, height) {
+                let is_border_row = row.starts_with('\u{2514}') || row.starts_with('\u{250c}');
+                if !is_border_row {
+                    continue;
+                }
+                for glyph in BAR_GLYPHS {
+                    assert!(
+                        !row.contains(glyph),
+                        "height {height}: sparkline glyph {glyph:?} painted on a border row: {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Tiny terminals must degrade, not panic.
+    #[test]
+    fn renders_without_panicking_at_tiny_sizes() {
+        for (w, h) in [(1, 1), (5, 3), (10, 5), (20, 8), (40, 12), (80, 24)] {
+            let _ = rows(w, h);
+        }
     }
 }
