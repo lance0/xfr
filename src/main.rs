@@ -210,6 +210,7 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["csv", "json"])]
     #[arg(help_heading = "Output Options")]
     json_stream: bool,
+
     /// CSV output
     #[arg(long, conflicts_with_all = ["json", "json_stream"])]
     #[arg(help_heading = "Output Options")]
@@ -1815,11 +1816,12 @@ async fn run_client_tui(
     prefs: xfr::prefs::Prefs,
     update_disabled: bool,
 ) -> Result<xfr::prefs::Prefs> {
-    // Setup terminal
+    // Setup terminal. The guard is armed before entering the alternate screen
+    // so a failure there still restores cooked mode on the way out.
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2405,13 +2407,15 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<ServerEvent>(100);
     config.tui_tx = Some(tx);
 
-    // Setup terminal
+    // Setup terminal. The guard is armed before entering the alternate screen
+    // so a failure there still restores cooked mode on the way out.
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
     let server = Server::new(config);
     let server_handle = tokio::spawn(async move { server.run().await });
 
