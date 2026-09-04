@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **mDNS registration no longer silently fails on a 64-byte Linux hostname** — DNS labels are capped at 63 bytes, but Linux `HOST_NAME_MAX` is 64. xfr passed the nodename through to mdns-sd unchanged, which then skipped the oversize records at encode time while still returning success, so `xfr serve` logged a registration that `xfr discover` could not see. Oversized names are now truncated at a UTF-8 boundary with a short stable suffix so two long hostnames that share a prefix stay distinct. (#194)
+
 ## [0.10.0] - 2026-08-31
 
 ### Security

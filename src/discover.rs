@@ -13,11 +13,50 @@ pub struct DiscoveredServer {
     pub version: Option<String>,
 }
 
+/// RFC 1035 §3.1: a DNS label is at most 63 bytes. Linux `HOST_NAME_MAX` is
+/// 64, so a legal nodename can be one byte too long for mDNS. mdns-sd 0.21
+/// then skips the oversize record at encode time (`WriteError::NameTooLong`)
+/// while `register()` still returns `Ok` — #194.
+const DNS_LABEL_MAX: usize = 63;
+
+fn dns_label(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return "xfr-server".to_string();
+    }
+    if name.len() <= DNS_LABEL_MAX {
+        return name.to_string();
+    }
+
+    // '-' + 4 hex from FNV-1a keeps two 64-byte names that share a 63-byte
+    // prefix from advertising the same instance.
+    let suffix = format!("-{:04x}", fnv1a_16(name.as_bytes()));
+    let mut end = DNS_LABEL_MAX - suffix.len();
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + suffix.len());
+    out.push_str(&name[..end]);
+    out.push_str(&suffix);
+    out
+}
+
+fn fnv1a_16(bytes: &[u8]) -> u16 {
+    const OFFSET: u32 = 2_166_136_261;
+    const PRIME: u32 = 16_777_619;
+    let mut hash = OFFSET;
+    for &b in bytes {
+        hash ^= u32::from(b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash as u16
+}
+
 #[cfg(feature = "discovery")]
 mod mdns_impl {
     use super::*;
     use mdns_sd::{ServiceDaemon, ServiceEvent};
-    use tracing::{debug, info};
+    use tracing::{debug, info, warn};
 
     const SERVICE_TYPE: &str = "_xfr._tcp.local.";
 
@@ -92,9 +131,16 @@ mod mdns_impl {
 
         let mdns = ServiceDaemon::new()?;
 
-        let hostname = hostname::get()
+        let raw_hostname = hostname::get()
             .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "xfr-server".to_string());
+        let hostname = dns_label(&raw_hostname);
+        if hostname != raw_hostname {
+            warn!(
+                "system hostname {:?} exceeds the 63-byte DNS label limit; advertising {:?}",
+                raw_hostname, hostname
+            );
+        }
 
         let service = ServiceInfo::new(
             SERVICE_TYPE,
@@ -148,5 +194,139 @@ impl std::fmt::Display for DiscoveredServer {
             write!(f, " xfr/{}", version)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DNS_LABEL_MAX, dns_label};
+
+    #[test]
+    fn short_hostname_is_unchanged() {
+        assert_eq!(dns_label("xfr-short"), "xfr-short");
+    }
+
+    #[test]
+    fn sixty_three_byte_hostname_is_kept() {
+        let raw = "y".repeat(DNS_LABEL_MAX);
+        assert_eq!(dns_label(&raw), raw);
+    }
+
+    #[test]
+    fn sixty_four_byte_linux_hostname_fits_a_dns_label() {
+        let raw = "x".repeat(64);
+        let label = dns_label(&raw);
+        assert!(label.len() <= DNS_LABEL_MAX);
+        assert_ne!(label, raw);
+        assert!(label.starts_with('x'));
+    }
+
+    #[test]
+    fn long_hostnames_that_share_a_prefix_stay_distinct() {
+        let a = format!("{}a", "x".repeat(63));
+        let b = format!("{}b", "x".repeat(63));
+        assert_eq!(a.len(), 64);
+        assert_eq!(b.len(), 64);
+        let la = dns_label(&a);
+        let lb = dns_label(&b);
+        assert_ne!(la, lb);
+        assert!(la.len() <= DNS_LABEL_MAX);
+        assert!(lb.len() <= DNS_LABEL_MAX);
+    }
+
+    #[test]
+    fn truncation_does_not_split_utf8() {
+        // 62 ASCII bytes + 2-byte 'é' = 64 → drop the accented char, keep a suffix.
+        let raw = format!("{}é", "a".repeat(62));
+        assert_eq!(raw.len(), 64);
+        let label = dns_label(&raw);
+        assert!(label.is_char_boundary(label.len()));
+        assert!(label.len() <= DNS_LABEL_MAX);
+        assert!(label.starts_with("a"));
+        assert!(!label.contains('é'));
+    }
+
+    #[test]
+    fn empty_or_whitespace_falls_back() {
+        assert_eq!(dns_label(""), "xfr-server");
+        assert_eq!(dns_label("   "), "xfr-server");
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn sanitized_64_byte_name_has_encodable_labels() {
+        use mdns_sd::ServiceInfo;
+
+        let hostname = dns_label(&"x".repeat(64));
+        let info = ServiceInfo::new(
+            "_xfr._tcp.local.",
+            &hostname,
+            &format!("{}.local.", hostname),
+            "",
+            5201,
+            [("version", "test")].as_ref(),
+        )
+        .unwrap();
+
+        for label in info.get_hostname().trim_end_matches('.').split('.') {
+            assert!(
+                label.len() <= DNS_LABEL_MAX,
+                "host label {label:?} is {} bytes",
+                label.len()
+            );
+        }
+        let instance = info.get_fullname().split('.').next().unwrap();
+        assert!(
+            instance.len() <= DNS_LABEL_MAX,
+            "instance label {instance:?} is {} bytes",
+            instance.len()
+        );
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn sanitized_64_byte_hostname_is_discoverable() {
+        use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+        use std::time::{Duration, Instant};
+
+        let raw = format!(
+            "xfr194{pid}{pad}",
+            pid = std::process::id(),
+            pad = "x".repeat(64)
+        );
+        let hostname = dns_label(&raw[..64]);
+        assert!(hostname.len() <= DNS_LABEL_MAX);
+
+        let mdns = ServiceDaemon::new().expect("mdns daemon");
+        let service = ServiceInfo::new(
+            "_xfr._tcp.local.",
+            &hostname,
+            &format!("{}.local.", hostname),
+            "",
+            18941,
+            [("version", "test-194")].as_ref(),
+        )
+        .unwrap()
+        .enable_addr_auto();
+        mdns.register(service).expect("register");
+
+        let receiver = mdns.browse("_xfr._tcp.local.").expect("browse");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut found = false;
+        while Instant::now() < deadline {
+            if let Ok(ServiceEvent::ServiceResolved(info)) =
+                receiver.recv_timeout(Duration::from_millis(100))
+            {
+                if info.get_fullname().starts_with(&hostname) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        let _ = mdns.shutdown();
+        assert!(
+            found,
+            "sanitized 64-byte hostname {hostname:?} was not discovered"
+        );
     }
 }
