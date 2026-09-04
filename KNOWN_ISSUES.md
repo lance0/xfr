@@ -126,12 +126,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ## By Design
 
-### QUIC Bitrate Limiting Not Implemented
-
-QUIC mode ignores the `-b/--bitrate` flag. Pacing support may be added in a future release.
-
-A warning is logged when `-b` is used with QUIC.
-
 ### QUIC Server Certificate Not Verified
 
 QUIC transport uses self-signed certificates and does not verify the server's identity. This is intentional for ease of use in trusted environments.
@@ -175,6 +169,7 @@ The following issues have been fixed and are listed here for reference.
 - **DataHello flood protection** - The server validates that the `test_id` in a DataHello message corresponds to an active test before processing, rejecting unknown test IDs immediately.
 - **cancel.changed() busy-loop** - The stream collection `select!` loop now handles the sender-dropped error from `cancel.changed()` instead of spinning on `Err`, preventing CPU spin when the cancel sender is dropped.
 - **TCP bitrate limiting** - TCP bitrate pacing (`-b` for TCP) was added in v0.6.1 using a byte-budget sleep approach with interruptible sleeps and buffer auto-capping.
+- **QUIC bitrate limiting** - QUIC previously accepted `-b/--bitrate` on the CLI and dropped it on the send paths, so a rate-limited QUIC test ran at line rate and only logged a warning. Both directions are now paced with the same cumulative byte-budget approach used for TCP and UDP, split per stream, with the send buffer capped so a rate limit cannot be overshot by the first write.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
