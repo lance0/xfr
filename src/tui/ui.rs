@@ -1064,17 +1064,23 @@ mod small_terminal_tests {
     /// spilled bars over the Real-time Stats panel's bottom border — visible
     /// on anything under ~16 rows.
     #[test]
-    fn sparkline_never_paints_over_a_panel_border() {
+    fn sparkline_never_paints_outside_its_band() {
         for height in 8..=20u16 {
             for row in rows(60, height) {
+                // The bug was "writes outside the allotted chunk", not "writes
+                // on a border" — the border was just where it showed up first.
+                // A spill one row shorter lands on the Transfer line instead,
+                // which is inside the same panel and would pass a
+                // borders-only check.
                 let is_border_row = row.starts_with('\u{2514}') || row.starts_with('\u{250c}');
-                if !is_border_row {
+                let is_transfer_row = row.contains("Transfer:");
+                if !is_border_row && !is_transfer_row {
                     continue;
                 }
                 for glyph in BAR_GLYPHS {
                     assert!(
                         !row.contains(glyph),
-                        "height {height}: sparkline glyph {glyph:?} painted on a border row: {row:?}"
+                        "height {height}: sparkline glyph {glyph:?} escaped its band onto {row:?}"
                     );
                 }
             }

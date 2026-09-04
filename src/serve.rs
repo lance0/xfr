@@ -2696,8 +2696,8 @@ async fn run_test(
     drop(recv_done_tx);
 
     // Start the interval loop without waiting for TCP stream collection. The
-    // first tick is still one full period out — see the matching timer in the
-    // TCP path for why the immediate tick is skipped (LAN-1496).
+    // first tick is still one full period out — see the matching timer in
+    // `run_quic_test` for why the immediate tick is skipped (LAN-1496).
     let mut interval_timer =
         tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
     interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
