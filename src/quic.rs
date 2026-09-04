@@ -404,14 +404,26 @@ pub async fn send_quic_data(
     mut send: SendStream,
     stats: Arc<StreamStats>,
     duration: Duration,
+    bitrate: Option<u64>,
     mut cancel: watch::Receiver<bool>,
     mut pause: watch::Receiver<bool>,
     budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<()> {
-    let buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
-    let mut deadline = tokio::time::Instant::now() + duration;
+    // Cap buffer size for rate-limited sends to prevent large first-write burst
+    let buf_size = match bitrate {
+        Some(bps) if bps > 0 => {
+            let bytes_per_sec = bps / 8;
+            // Target ~10 writes/sec minimum, capped at default buffer size
+            DEFAULT_BUFFER_SIZE.min((bytes_per_sec / 10).max(1) as usize)
+        }
+        _ => DEFAULT_BUFFER_SIZE,
+    };
+    let buffer = vec![0u8; buf_size];
+    let start = tokio::time::Instant::now();
+    let mut deadline = start + duration;
     let is_infinite = duration == Duration::ZERO;
-
+    let mut pace_start = start;
+    let mut pace_bytes_offset: u64 = 0;
     loop {
         if *cancel.borrow() {
             debug!("QUIC send cancelled");
@@ -426,6 +438,9 @@ pub async fn send_quic_data(
             }
             // Extend the deadline by the time spent paused (LAN-230)
             deadline += paused;
+            // Reset pacing baseline after resume to prevent catch-up burst
+            pace_start = tokio::time::Instant::now();
+            pace_bytes_offset = stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
             continue;
         }
 
@@ -468,6 +483,29 @@ pub async fn send_quic_data(
                     Ok(n) => {
                         crate::budget::refund_unwritten(budget.as_ref(), claimed, n);
                         stats.add_bytes_sent(n as u64);
+
+                        // Pace sends to target bitrate using byte-budget approach
+                        if let Some(bps) = bitrate
+                            && bps > 0
+                        {
+                            let bytes_per_sec = bps as f64 / 8.0;
+                            let elapsed = pace_start.elapsed().as_secs_f64();
+                            let expected = elapsed * bytes_per_sec;
+                            let total = (stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+                                - pace_bytes_offset) as f64;
+                            if total > expected {
+                                let overshoot = Duration::from_secs_f64((total - expected) / bytes_per_sec);
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.changed() => {
+                                        debug!("QUIC send cancelled during pacing sleep");
+                                        break;
+                                    }
+                                    _ = pause.changed(), if crate::pause::channel_is_open(&pause) => {}
+                                    _ = tokio::time::sleep(overshoot) => {}
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         crate::budget::refund_unwritten(budget.as_ref(), claimed, 0);

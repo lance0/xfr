@@ -1199,10 +1199,6 @@ async fn main() -> Result<()> {
             if protocol == xfr::protocol::Protocol::Quic {
                 for (set, msg) in [
                     (
-                        network_options.bitrate.is_some(),
-                        "-b/--bitrate is ignored with QUIC (pacing is not implemented for QUIC)",
-                    ),
-                    (
                         cli.window.is_some(),
                         "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
                     ),
@@ -2014,10 +2010,6 @@ fn log_tui_quic_ignored_options(app: &mut App, config: &ClientConfig) {
 
     for (set, msg) in [
         (
-            config.bitrate.is_some(),
-            "-b/--bitrate is ignored with QUIC (pacing is not implemented for QUIC)",
-        ),
-        (
             config.window_size.is_some(),
             "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
         ),
@@ -2146,6 +2138,7 @@ async fn run_tui_loop(
     // check is disabled so the poller never blocks on the empty channel).
     let mut update_check_done = update_disabled;
 
+    log_tui_quic_ignored_options(&mut app, &config);
     let mut run = Some(spawn_tui_run(&config));
     app.on_connected();
 
