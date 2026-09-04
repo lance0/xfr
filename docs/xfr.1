@@ -45,7 +45,7 @@ Use UDP instead of TCP
 Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
 .BI \-b ", " \-\-bitrate " RATE"
-Target bitrate for UDP mode (e.g., 1G, 100M, 10K)
+Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M, 10K). Global across all streams; 0 means unlimited
 .TP
 .BI \-P ", " \-\-parallel " N"
 Number of parallel streams (default: 1)
@@ -84,7 +84,10 @@ The monochrome theme (alias: mono) is the high-visibility option for glare
 and monochrome displays: it renders in the terminal's own default colors at
 maximum contrast, and works on light and dark backgrounds alike. Loss
 severity in the throughput graph is always also encoded without color
-(underline for light loss, reverse video for heavy loss).
+(underline for light loss; in a theme with no hue to spend, heavy loss also
+stipples the empty cells above the bar, marking the column while the bar keeps
+its true height). The server dashboard resolves its palette the same way, so
+\fB\-\-theme\fR, a saved preference and \fBNO_COLOR\fR apply to it too.
 .TP
 .BI \-i ", " \-\-interval " SECS"
 Report interval in seconds (default: 1.0)

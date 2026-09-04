@@ -384,14 +384,18 @@ The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
 the terminal's own default colors at maximum contrast, so it works on both
 dark and light terminal backgrounds — pair it with a light background at full
 brightness when working in direct sunlight. Loss severity in the throughput
-graph is always also encoded without color (light loss underlines the bar,
-heavy loss reverses the cell), so lossy intervals stay visible through glare,
-in monochrome, and for colorblind users. Setting the standard
+graph is always also encoded without color — light loss underlines the bar,
+and in a theme with no hue to spend heavy loss additionally stipples the empty
+cells above it, marking the whole column while the bar keeps its true height —
+so lossy intervals stay visible through glare, in monochrome, and for
+colorblind users. Setting the standard
 [`NO_COLOR`](https://no-color.org) environment variable selects `monochrome`
 automatically unless a theme is chosen explicitly.
 
 Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
-in the same platform configuration directory.
+in the same platform configuration directory. The server dashboard
+(`xfr serve --tui`) resolves its palette through the same precedence, so
+`--theme`, a saved preference, and `NO_COLOR` all apply to it too.
 
 ## Configuration
 
@@ -488,7 +492,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
-| `--bitrate` | `-b` | unlimited | Target bitrate for TCP and UDP (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |

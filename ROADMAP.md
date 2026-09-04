@@ -199,7 +199,7 @@
 - [x] **Client source port pinning** (`--cport`) - pin local port for firewall traversal (issue #16); UDP and TCP data streams use sequential ports for multi-stream (`-P 4` → ports 5300-5303), QUIC multiplexes on single port. See decision tree below
 - [x] **Random payload data** (`--random`) - fill send buffers with random bytes to defeat WAN optimizer/compression/dedup bias (issue #34). Both client and server TCP/UDP; QUIC skipped (already encrypted). Fill-once per buffer, no per-write overhead. `--zeros` only affects client-sent traffic; server payload mode not yet negotiated over wire
 - [ ] **Configurable UDP packet size** (`--packet-size`) - set UDP datagram size for jumbo frame validation and MTU path testing; iperf3 `--set-mss` is TCP-only (issue esnet/iperf#861). `--probe-mtu` (v0.9.17) answers "what size survives" — this is the complement: actually *running the test* at that size
-- [ ] **QUIC bitrate pacing** - the warning half shipped in PR #97 (`-b`/`-w`/`--congestion`/`--tcp-nodelay` with `-Q` now warn instead of vanishing silently); the real fix remains: pace QUIC sends with the same byte-budget loop UDP uses
+- [x] **QUIC bitrate pacing** - shipped: `send_quic_data` paces against a cumulative byte budget (bytes sent versus elapsed × target rate, sleeping off the overshoot), the same shape TCP and UDP use. The client divides `-b` across its streams and the server does the same for downloads from `TestStart.bitrate`, so both directions are limited; the pacing baseline resets on resume so a pause cannot produce a catch-up burst, and the send buffer is capped at a tenth of a second's worth of bytes so the first write cannot overshoot. The warning half had shipped earlier in PR #97; the `-b`-is-ignored warning is now gone
 - [x] **Connect timeout** (`--connect-timeout`) - shipped (PR #97): bounds TCP connect / QUIC handshake with a clear error naming the flag; off by default so existing behavior is unchanged
 - [x] **Propagate `--tcp-nodelay` to the server** - shipped as `TestStart.tcp_nodelay` (wire-additive, same threading as `zerocopy`). The client's request ORs into the server's data-socket nodelay default; no capability was added because the server already runs its data sockets with `TCP_NODELAY` always-on, so an old server ignoring the field degrades to identical behavior (same call as `window_size`)
 - [x] **Test by amount** (`-n`/`--bytes`) - shipped: transfer a fixed number of bytes instead of running for a fixed time, shared across all streams, all three protocols and all three directions (`byte_budget_v1` capability). `-t` becomes an upper bound when both are given. Byte-exactness needed two things beyond the send-loop stop: a graceful close instead of the timed path's RST (which discards the send buffer), and a post-`Finish` drain on the server so a paced sender's queued tail is actually received. iperf3's `-k` (block count) is not implemented
@@ -406,7 +406,7 @@ If you need these features, combine xfr with purpose-built tools.
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for documented edge cases and limitations.
 
 **Potential future improvements** (from known issues):
-- [ ] QUIC bitrate pacing support — folded into the "QUIC silently drops TestStart parameters" quick win above
+- [x] QUIC bitrate pacing support — shipped; `-b` now paces QUIC uploads and downloads
 - [ ] UDP reverse mode error reporting to client
 
 ---

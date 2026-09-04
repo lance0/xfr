@@ -11,10 +11,13 @@
 
 Output "docs/demo.gif"
 
-Set Width 1200
-Set Height 720
-Set FontSize 15
-Set Padding 18
+# Rendered at 2x (was 1200x720 / FontSize 15). Same 127x36 terminal, twice the
+# pixels per character cell, so the block glyphs in the throughput graph and the
+# transfer bar stay sharp when GitHub scales the image down.
+Set Width 2400
+Set Height 1440
+Set FontSize 30
+Set Padding 36
 Set Theme "Catppuccin Mocha"
 Set CursorBlink false
 
