@@ -357,10 +357,16 @@ impl App {
         self.theme.name()
     }
 
+    /// Called when the run task is spawned, which is *before* any socket is
+    /// established — so this only claims an attempt. The matching "Connected"
+    /// line is logged from [`Self::set_server_version`], the first point at
+    /// which a peer has actually answered. Claiming success here printed
+    /// "Connected to server." above "Error: Connection refused" on a refused
+    /// port.
     pub fn on_connected(&mut self) {
         self.state = AppState::Running;
         self.start_time = Some(Instant::now());
-        self.log("Connected to server.");
+        self.log("Connecting to server...");
     }
 
     /// Apply new test parameters chosen in the settings modal. The caller is
@@ -543,7 +549,12 @@ impl App {
     /// boundary and lands in a terminal. A hostile or compromised server
     /// could otherwise smuggle terminal escape sequences or an oversized
     /// payload into our display.
+    /// Receiving it is also the first proof a peer actually answered, so the
+    /// "Connected" line is logged here rather than optimistically at spawn.
     pub fn set_server_version(&mut self, version: String) {
+        if self.server_version.is_none() {
+            self.log("Connected to server.");
+        }
         self.server_version = Some(sanitize_server_version(&version));
     }
 
@@ -1234,6 +1245,42 @@ mod tests {
         assert!(app.server_version.is_none());
         app.set_server_version("xfr/0.9.8".to_string());
         assert_eq!(app.server_version.as_deref(), Some("xfr/0.9.8"));
+    }
+
+    fn logged(app: &App) -> Vec<String> {
+        app.history.iter().map(|e| e.message.clone()).collect()
+    }
+
+    #[test]
+    fn refused_connection_never_claims_it_connected() {
+        // Regression: `on_connected` runs when the task is spawned, before any
+        // socket exists, and used to log "Connected to server." — so a refused
+        // port showed that line sitting directly above the connection error.
+        let mut app = App::default();
+        app.on_connected();
+        app.on_error("Connection refused (os error 111)".to_string());
+
+        let messages = logged(&app);
+        assert!(
+            !messages.iter().any(|m| m.contains("Connected to server")),
+            "must not claim a connection that never happened: {messages:?}"
+        );
+        assert!(messages.iter().any(|m| m.contains("Connecting to server")));
+    }
+
+    #[test]
+    fn connected_is_logged_once_when_the_peer_answers() {
+        let mut app = App::default();
+        app.on_connected();
+        app.set_server_version("xfr/0.10.0".to_string());
+        // A second Hello (or a refreshed version) must not re-log.
+        app.set_server_version("xfr/0.10.0".to_string());
+
+        let connected = logged(&app)
+            .iter()
+            .filter(|m| m.contains("Connected to server"))
+            .count();
+        assert_eq!(connected, 1, "expected exactly one connected line");
     }
 
     #[test]
