@@ -242,13 +242,14 @@ mod tests {
 
     #[test]
     fn truncation_does_not_split_utf8() {
-        // 62 ASCII bytes + 2-byte 'é' = 64 → drop the accented char, keep a suffix.
-        let raw = format!("{}é", "a".repeat(62));
-        assert_eq!(raw.len(), 64);
+        // 57 ASCII bytes + four 2-byte 'é' = 65. The 58-byte cut lands inside
+        // the second 'é', so the sanitizer has to walk back to 57; slicing at
+        // 58 directly would panic.
+        let raw = format!("{}{}", "a".repeat(57), "é".repeat(4));
+        assert_eq!(raw.len(), 65);
         let label = dns_label(&raw);
-        assert!(label.is_char_boundary(label.len()));
         assert!(label.len() <= DNS_LABEL_MAX);
-        assert!(label.starts_with("a"));
+        assert!(label.starts_with(&"a".repeat(57)));
         assert!(!label.contains('é'));
     }
 
