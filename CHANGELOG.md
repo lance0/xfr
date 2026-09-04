@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Updated `quinn-proto` to 0.11.17** — 0.10.0 shipped 0.11.16, which closed [RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185) / GHSA-4w2j-m93h-cj5j. 0.11.17 closes three further remote memory-exhaustion issues that `cargo audit` does not yet list: [GHSA-qfwj-vfxf-92j2](https://github.com/quinn-rs/quinn/security/advisories/GHSA-qfwj-vfxf-92j2) (the 0.11.15 stream-reassembly guard can be bypassed), [GHSA-2hv7-gw8g-gpq5](https://github.com/quinn-rs/quinn/security/advisories/GHSA-2hv7-gw8g-gpq5) (zero-length DATAGRAM frames bypass `datagram_receive_buffer_size`), and [GHSA-hmxj-32vh-65vr](https://github.com/quinn-rs/quinn/security/advisories/GHSA-hmxj-32vh-65vr) (unbounded `retire_cids` growth from already-retired NEW_CONNECTION_ID frames). Public QUIC servers (`xfr serve`) are in the blast radius. Lockfile-only; no source or API changes.
+
+### Changed
+- **Dependency refresh** — all semver-compatible updates taken, including `mdns-sd` 0.21.0 → 0.21.1 (goodbye packets after conflict rename; skip only a malformed name instead of the whole packet), `hyper` 1.11.1, `toml` 1.1.5, `rcgen` 0.14.10, and `rustls-webpki` 0.103.15. No `Cargo.toml` constraint changes.
+
+### Maintenance
+- **CI action pins** — `crate-ci/typos` 1.50.0 → 1.50.1 (don't rewrite `asend` in Python) and `taiki-e/install-action` 2.87.0 → 2.87.4. `cargo-deny` stays pinned at 0.19.8.
+
 ### Fixed
 - **mDNS registration no longer silently fails on a 64-byte Linux hostname** — DNS labels are capped at 63 bytes, but Linux `HOST_NAME_MAX` is 64. xfr passed the nodename through to mdns-sd unchanged, which then skipped the oversize records at encode time while still returning success, so `xfr serve` logged a registration that `xfr discover` could not see. Oversized names are now truncated at a UTF-8 boundary with a short stable suffix so two long hostnames that share a prefix stay distinct. (#194)
 

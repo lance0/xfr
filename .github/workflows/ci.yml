@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1.50.0
+      - uses: crate-ci/typos@v1.50.1
 
   doc:
     name: Doc (deny rustdoc warnings)
@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.0
+        uses: taiki-e/install-action@v2.87.4
         with:
           tool: cargo-deny@0.19.8
       # Advisories are deliberately excluded — audit.yml owns cargo-audit and
