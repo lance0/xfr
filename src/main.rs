@@ -202,15 +202,14 @@ struct Cli {
     bidir: bool,
 
     /// JSON output
-    #[arg(long, conflicts_with = "csv")]
+    #[arg(long, conflicts_with_all = ["csv", "json_stream"])]
     #[arg(help_heading = "Output Options")]
     json: bool,
 
     /// JSON streaming output (one object per line)
-    #[arg(long, conflicts_with = "csv")]
+    #[arg(long, conflicts_with_all = ["csv", "json"])]
     #[arg(help_heading = "Output Options")]
     json_stream: bool,
-
     /// CSV output
     #[arg(long, conflicts_with_all = ["json", "json_stream"])]
     #[arg(help_heading = "Output Options")]
@@ -1798,6 +1797,17 @@ fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protoco
     }
 }
 
+/// RAII guard that restores raw mode and leaves the alternate screen on drop,
+/// ensuring terminal recovery even if the TUI event loop panics or exits early.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+    }
+}
+
 async fn run_client_tui(
     config: ClientConfig,
     output: Option<PathBuf>,
@@ -1809,6 +1819,7 @@ async fn run_client_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1822,9 +1833,7 @@ async fn run_client_tui(
     .await;
 
     // Restore terminal
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-
+    drop(_guard);
     match result {
         Ok((test_result, final_prefs, print_json, partial)) => {
             if let Some(ref test_result) = test_result {
@@ -2400,9 +2409,9 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let server = Server::new(config);
     let server_handle = tokio::spawn(async move { server.run().await });
 
@@ -2473,9 +2482,7 @@ async fn run_server_tui(mut config: ServerConfig) -> Result<()> {
     }
 
     // Restore terminal
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-
+    drop(_guard);
     Ok(())
 }
 

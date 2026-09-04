@@ -139,6 +139,7 @@ impl Acl {
 
     /// Get the rule that matched (for logging)
     pub fn matched_rule(&self, ip: IpAddr) -> Option<String> {
+        let ip = normalize_ip(ip);
         for network in &self.deny {
             if network.contains(ip) {
                 return Some(format!("deny {}", network));
@@ -229,5 +230,30 @@ mod tests {
 
         assert!(acl.is_allowed(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(!acl.is_allowed(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1))));
+    }
+
+    #[test]
+    fn test_matched_rule_normalizes_ipv4_mapped_ipv6() {
+        let mut acl = Acl::new();
+        acl.allow("192.168.0.0/16".parse().unwrap());
+        acl.deny("10.0.0.0/8".parse().unwrap());
+
+        // IPv4-mapped IPv6 for 192.168.1.1
+        let mapped_allow = "::ffff:192.168.1.1".parse().unwrap();
+        assert_eq!(
+            acl.matched_rule(mapped_allow),
+            Some("allow 192.168.0.0/16".to_string())
+        );
+
+        // IPv4-mapped IPv6 for 10.0.0.1
+        let mapped_deny = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(
+            acl.matched_rule(mapped_deny),
+            Some("deny 10.0.0.0/8".to_string())
+        );
+
+        // Unmatched address
+        let unmatched = "172.16.0.1".parse().unwrap();
+        assert_eq!(acl.matched_rule(unmatched), None);
     }
 }

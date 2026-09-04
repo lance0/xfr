@@ -673,17 +673,6 @@ impl Server {
                         continue;
                     }
 
-                    // Check rate limit
-                    if let Some(ref limiter) = quic_rate_limiter
-                        && let Err(e) = limiter.check(peer_ip)
-                    {
-                        warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
-                        if let Some(tx) = &quic_security.tui_tx {
-                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
-                        }
-                        continue;
-                    }
-
                     // Acquire semaphore permit to limit concurrent handlers
                     let permit = match quic_semaphore.clone().try_acquire_owned() {
                         Ok(permit) => permit,
@@ -695,6 +684,17 @@ impl Server {
                             continue;
                         }
                     };
+
+                    // Check rate limit
+                    if let Some(ref limiter) = quic_rate_limiter
+                        && let Err(e) = limiter.check(peer_ip)
+                    {
+                        warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
+                        if let Some(tx) = &quic_security.tui_tx {
+                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                        }
+                        continue;
+                    }
 
                     info!("QUIC client connected: {}", peer_addr);
 

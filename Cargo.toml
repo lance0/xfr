@@ -94,7 +94,7 @@ discovery = ["dep:mdns-sd"]
 update-check = ["dep:update-informer"]
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio = { version = "1", features = ["test-util"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
 tempfile = "3"
 

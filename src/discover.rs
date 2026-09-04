@@ -81,13 +81,13 @@ mod mdns_impl {
                 break;
             }
 
-            // Use recv_timeout to avoid blocking indefinitely
-            // Cap at 100ms to allow periodic deadline checks
+            // Use recv_async with timeout to keep the async executor unblocked.
+            // Cap at 100ms to allow periodic deadline checks.
             let wait_time = remaining.min(Duration::from_millis(100));
-            let event = receiver.recv_timeout(wait_time);
+            let event = tokio::time::timeout(wait_time, receiver.recv_async()).await;
 
             match event {
-                Ok(ServiceEvent::ServiceResolved(info)) => {
+                Ok(Ok(ServiceEvent::ServiceResolved(info))) => {
                     debug!("Service resolved: {:?}", info);
 
                     for addr in info.get_addresses() {
@@ -101,8 +101,11 @@ mod mdns_impl {
                                 .map(|v| v.val_str().to_string()),
                         };
 
-                        // Avoid duplicates
-                        if !servers.iter().any(|s: &DiscoveredServer| s.ip == server.ip) {
+                        // Avoid duplicates (same IP and port)
+                        if !servers
+                            .iter()
+                            .any(|s: &DiscoveredServer| s.ip == server.ip && s.port == server.port)
+                        {
                             info!(
                                 "Found server: {}:{} ({})",
                                 server.ip,
@@ -113,22 +116,28 @@ mod mdns_impl {
                         }
                     }
                 }
-                Ok(ServiceEvent::ServiceFound(service_type, name)) => {
+                Ok(Ok(ServiceEvent::ServiceFound(service_type, name))) => {
                     debug!("Service found: {} {}", service_type, name);
                 }
-                Ok(ServiceEvent::SearchStarted(_)) => {
+                Ok(Ok(ServiceEvent::SearchStarted(_))) => {
                     debug!("mDNS search started");
                 }
-                Ok(event) => {
+                Ok(Ok(event)) => {
                     debug!("mDNS event: {:?}", event);
                 }
+                Ok(Err(_)) => {
+                    // Channel disconnected
+                    break;
+                }
                 Err(_) => {
-                    // Timeout or disconnected - continue to check deadline
+                    // Timeout elapsed - continue to check deadline
                 }
             }
         }
 
-        mdns.shutdown()?;
+        if let Err(e) = mdns.shutdown() {
+            debug!("mDNS shutdown error: {e}");
+        }
         Ok(servers)
     }
 

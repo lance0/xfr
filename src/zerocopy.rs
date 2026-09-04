@@ -111,11 +111,17 @@ impl ZerocopyPayload {
             return Ok(0);
         }
         let mut off = offset as libc::off_t;
-        let n = unsafe { libc::sendfile(socket_fd, self.file.as_raw_fd(), &mut off, remaining) };
-        if n < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(n as usize)
+        loop {
+            let n =
+                unsafe { libc::sendfile(socket_fd, self.file.as_raw_fd(), &mut off, remaining) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(n as usize);
         }
     }
 
