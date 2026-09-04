@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **mDNS registration no longer silently fails on a 64-byte Linux hostname** — DNS labels are capped at 63 bytes, but Linux `HOST_NAME_MAX` is 64. xfr passed the nodename through to mdns-sd unchanged, which then skipped the oversize records at encode time while still returning success, so `xfr serve` logged a registration that `xfr discover` could not see. Oversized names are now truncated at a UTF-8 boundary with a short stable suffix so two long hostnames that share a prefix stay distinct. (#194)
+- **QUIC rate-limiter slot leak on handler semaphore saturation** — the QUIC acceptor now acquires the handler permit before checking rate limits, preventing connections rejected by concurrency limits from leaking per-IP quota.
+- **TUI byte-budget progress and completion statistics** — `-n` tests now accumulate interval byte deltas and pin final results, fixing progress bar jumps and 0s completion duration.
+- **Multi-instance mDNS discovery** — servers on the same host with distinct ports are no longer deduplicated away, and discovery polling is non-blocking.
+- **Constant-time comparison in protected control channel** — padded comparison avoids early return on length mismatch.
+- **ACL rule matching for IPv4-mapped IPv6** — `matched_rule` now normalizes addresses before checking network rules.
+- **Zerocopy sendfile EINTR retry** — interrupted syscalls in `sendfile_once` are retried rather than failing the transfer.
+- **TUI terminal restoration guard** — RAII guard restores normal terminal mode and leaves the alternate screen on panic or error unwinding.
 
 ## [0.10.0] - 2026-08-31
 

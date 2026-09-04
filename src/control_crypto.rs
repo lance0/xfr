@@ -586,15 +586,21 @@ impl ControlWriter {
     }
 }
 
-/// Constant-time comparison.
+/// Constant-time comparison to prevent timing attacks.
+///
+/// Padding to the length of the longer input avoids the early-return that
+/// would otherwise leak whether the two slices have different lengths. The
+/// length difference is folded into the accumulator so that trailing zero
+/// bytes do not accidentally produce equality.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let len = a.len().max(b.len());
     let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for i in 0..len {
+        let x = a.get(i).unwrap_or(&0);
+        let y = b.get(i).unwrap_or(&0);
         result |= x ^ y;
     }
+    result |= (a.len() != b.len()) as u8;
     result == 0
 }
 
@@ -823,5 +829,15 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn constant_time_eq_works_for_equal_and_different_lengths() {
+        assert!(constant_time_eq(b"secret-value", b"secret-value"));
+        assert!(!constant_time_eq(b"secret-value", b"secret-other"));
+        assert!(!constant_time_eq(b"secret", b"secret-longer"));
+        assert!(!constant_time_eq(b"secret-longer", b"secret"));
+        assert!(!constant_time_eq(b"", b"non-empty"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

@@ -577,7 +577,7 @@ impl App {
         // anyway, producing a one-frame flash of the server-authoritative
         // value that users couldn't perceive. `on_result()` pins the final
         // once the test completes.
-        self.total_bytes = progress.total_bytes;
+        self.total_bytes = self.total_bytes.saturating_add(progress.total_bytes);
         self.current_throughput_mbps = progress.throughput_mbps;
 
         // Bidirectional split: when the server reports per-direction counts
@@ -766,8 +766,12 @@ impl App {
 
     pub fn on_result(&mut self, result: TestResult) {
         self.state = AppState::Completed;
-        self.elapsed = self.duration; // Show full duration on completion
-
+        if self.is_infinite() {
+            self.elapsed = Duration::from_millis(result.duration_ms);
+        } else {
+            self.elapsed = self.duration; // Show full duration on completion
+        }
+        self.total_bytes = result.bytes_total;
         // Sum retransmits from streams (captured after transfer, accurate for download mode)
         self.total_retransmits = result.streams.iter().filter_map(|s| s.retransmits).sum();
 
@@ -1962,6 +1966,62 @@ mod tests {
         app.elapsed = Duration::from_secs(3);
         app.total_bytes = 999_999;
         assert_eq!(app.progress_percent(), 30.0);
+    }
+
+    #[test]
+    fn on_progress_accumulates_total_bytes_across_intervals() {
+        let mut app = App::default();
+        assert_eq!(app.total_bytes, 0);
+
+        let mut progress = TestProgress {
+            elapsed_ms: 1000,
+            total_bytes: 1000,
+            throughput_mbps: 8.0,
+            streams: vec![],
+            rtt_us: None,
+            cwnd: None,
+            total_retransmits: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            udp_progress: None,
+            udp_feedback_only: false,
+        };
+        app.on_progress(progress.clone());
+        assert_eq!(app.total_bytes, 1000);
+
+        progress.elapsed_ms = 2000;
+        progress.total_bytes = 1500;
+        app.on_progress(progress);
+        assert_eq!(app.total_bytes, 2500);
+    }
+
+    #[test]
+    fn on_result_sets_elapsed_and_total_bytes_for_byte_budget_test() {
+        let mut app = App::default();
+        app.duration = Duration::ZERO;
+        app.byte_budget = Some(10_000);
+        assert!(app.is_infinite());
+
+        let result = TestResult {
+            id: "test-123".to_string(),
+            duration_ms: 3500,
+            bytes_total: 10_000,
+            throughput_mbps: 22.8,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+        };
+        app.on_result(result);
+        assert_eq!(app.elapsed, Duration::from_millis(3500));
+        assert_eq!(app.total_bytes, 10_000);
+        assert_eq!(app.progress_percent(), 100.0);
     }
 
     #[test]
