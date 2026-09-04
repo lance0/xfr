@@ -17,8 +17,13 @@ pub struct DiscoveredServer {
 /// 64, so a legal nodename can be one byte too long for mDNS. mdns-sd 0.21
 /// then skips the oversize record at encode time (`WriteError::NameTooLong`)
 /// while `register()` still returns `Ok` — #194.
+///
+/// Compiled for `discovery` and for unit tests so `--no-default-features`
+/// clippy does not treat the sanitizer as dead code.
+#[cfg(any(feature = "discovery", test))]
 const DNS_LABEL_MAX: usize = 63;
 
+#[cfg(any(feature = "discovery", test))]
 fn dns_label(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
@@ -41,6 +46,7 @@ fn dns_label(name: &str) -> String {
     out
 }
 
+#[cfg(any(feature = "discovery", test))]
 fn fnv1a_16(bytes: &[u8]) -> u16 {
     const OFFSET: u32 = 2_166_136_261;
     const PRIME: u32 = 16_777_619;
@@ -330,11 +336,10 @@ mod tests {
         while Instant::now() < deadline {
             if let Ok(ServiceEvent::ServiceResolved(info)) =
                 receiver.recv_timeout(Duration::from_millis(100))
+                && info.get_fullname().starts_with(&hostname)
             {
-                if info.get_fullname().starts_with(&hostname) {
-                    found = true;
-                    break;
-                }
+                found = true;
+                break;
             }
         }
         let _ = mdns.shutdown();
