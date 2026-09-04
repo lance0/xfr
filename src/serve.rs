@@ -2056,8 +2056,14 @@ async fn run_quic_test(
         let (mut cmd_rx, control_handle) =
             spawn_control_reader(ctrl_reader, reader_half, id.to_string());
 
-        // Send interval updates
-        let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+        // Send interval updates. First tick is one full period out:
+        // `tokio::time::interval` fires immediately, which produced a ~1ms
+        // opening sample whose throughput (bytes so far over a sliver of a
+        // second) came out around 1500 Mbps on a 200 Mbps test. That outlier
+        // set the TUI graph's Y-scale — flattening every real sample to a
+        // stub — and led the first `--json-stream` line (LAN-1496).
+        let mut interval_timer =
+            tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
         // Skip stale ticks rather than bursting them on unblock: if write_all stalls
         // under back-pressure, Burst would emit several stale interval samples with
         // fresh client-side arrival timestamps once the writer unblocks — both the
@@ -2689,8 +2695,11 @@ async fn run_test(
     drop(sending_done_tx);
     drop(recv_done_tx);
 
-    // Start interval loop IMMEDIATELY (don't wait for TCP stream collection)
-    let mut interval_timer = tokio::time::interval(STATS_INTERVAL);
+    // Start the interval loop without waiting for TCP stream collection. The
+    // first tick is still one full period out — see the matching timer in the
+    // TCP path for why the immediate tick is skipped (LAN-1496).
+    let mut interval_timer =
+        tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
     interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = std::time::Instant::now();
     let mut paused_total = Duration::ZERO;
