@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependency refresh** — all semver-compatible updates taken, including `mdns-sd` 0.21.0 → 0.21.1 (goodbye packets after conflict rename; skip only a malformed name instead of the whole packet), `hyper` 1.11.1, `toml` 1.1.5, `rcgen` 0.14.10, and `rustls-webpki` 0.103.15. No `Cargo.toml` constraint changes.
 
 ### Maintenance
-- **CI action pins** — `crate-ci/typos` 1.50.0 → 1.50.1 (don't rewrite `asend` in Python) and `taiki-e/install-action` 2.87.0 → 2.87.4. `cargo-deny` stays pinned at 0.19.8.
+- **CI action pins** — `crate-ci/typos` 1.50.0 → 1.50.1 and `taiki-e/install-action` 2.87.0 → 2.87.4. `cargo-deny` stays pinned at 0.19.8.
 
 ### Fixed
 - **mDNS registration no longer silently fails on a 64-byte Linux hostname** — DNS labels are capped at 63 bytes, but Linux `HOST_NAME_MAX` is 64. xfr passed the nodename through to mdns-sd unchanged, which then skipped the oversize records at encode time while still returning success, so `xfr serve` logged a registration that `xfr discover` could not see. Oversized names are now truncated at a UTF-8 boundary with a short stable suffix so two long hostnames that share a prefix stay distinct. (#194)
