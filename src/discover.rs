@@ -283,11 +283,25 @@ mod tests {
         );
     }
 
+    /// Live multicast register + browse. Default `cargo test` skips this
+    /// (`#[ignore]`): GitHub Actions and most container sandboxes have no
+    /// multicast route, and we have not verified localhost mDNS there.
+    /// Opt in locally (or later in CI, after a green run) with:
+    /// `XFR_MDNS_LIVE=1 cargo test --lib discover::tests -- --ignored --nocapture`
     #[cfg(feature = "discovery")]
     #[test]
+    #[ignore = "live mDNS multicast; set XFR_MDNS_LIVE=1"]
     fn sanitized_64_byte_hostname_is_discoverable() {
         use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
         use std::time::{Duration, Instant};
+
+        match std::env::var("XFR_MDNS_LIVE") {
+            Ok(v) if matches!(v.trim(), "1" | "true" | "yes") => {}
+            _ => {
+                eprintln!("skipping live mDNS test: set XFR_MDNS_LIVE=1 and pass --ignored");
+                return;
+            }
+        }
 
         let raw = format!(
             "xfr194{pid}{pad}",
