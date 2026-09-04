@@ -37,11 +37,11 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
 /// Severity is also encoded without hue (issue #158): lossy columns are
 /// UNDERLINED — a baseline tick that renders identically at every bar
 /// height, giving colorblind users, glare, and NO_COLOR a "loss happened
-/// here" mark in every theme. In the monochrome theme, where hue can't
-/// distinguish light from heavy at all, heavy loss additionally renders
-/// as a REVERSED full-height pillar (the Sparkline widget fills the
-/// column's empty cells when it sees REVERSED, so the pillar is solid
-/// with the bar as a negative silhouette inside it).
+/// here" mark in every theme. In a hue-free theme, where the palette can't
+/// separate light from heavy at all, heavy loss adds REVERSED. That is a
+/// *signal to the Sparkline widget*, not a style handed to the terminal:
+/// the widget stipples the empty cells above the bar so the whole column
+/// is marked while the bar keeps its true height.
 ///
 /// REVERSED is deliberately NOT applied in color themes (#93 follow-up,
 /// reported by brettowe against v0.9.24): reverse video swaps fg/bg
@@ -49,7 +49,15 @@ fn loss_color(loss_percent: f64, theme: &Theme) -> Color {
 /// cell's bottom — the swap painted the empty top fraction of the cell
 /// and hid the bar, so heavy-loss columns read as red fragments floating
 /// at the top of the graph. Color themes carry severity in the hue they
-/// already have; the pillar exists for the theme that has nothing else.
+/// already have; the stipple exists for the theme that has nothing else.
+///
+/// The widget used to render REVERSED literally, filling the empty cells so
+/// the swap produced "a solid pillar with the bar as a negative silhouette".
+/// It did produce a negative — which is the problem. A full block under
+/// reverse video paints in the background colour and vanishes, so the
+/// visible shape was the bar's complement and a marked column read as a bar
+/// of *inverted* height: 10% looked nearly full, 90% looked nearly empty,
+/// while its unmarked neighbours in the same row still read normally.
 fn loss_severity_style(rate: Option<f64>, theme: &Theme) -> Style {
     match rate {
         None => Style::default().fg(theme.graph_primary),
@@ -59,7 +67,7 @@ fn loss_severity_style(rate: Option<f64>, theme: &Theme) -> Style {
             .add_modifier(Modifier::UNDERLINED),
         Some(_) if theme.hue_free() => Style::default()
             .fg(theme.error)
-            .add_modifier(Modifier::REVERSED),
+            .add_modifier(Modifier::UNDERLINED | Modifier::REVERSED),
         Some(_) => Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::UNDERLINED),
@@ -1033,7 +1041,9 @@ mod small_terminal_tests {
     use crate::tui::app::{AppState, ThroughputSample};
     use ratatui::{Terminal, backend::TestBackend};
 
-    const BAR_GLYPHS: [&str; 8] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁"];
+    // Includes the heavy-loss stipple: it is written by the same loop over the
+    // same rect, so it escapes the band on exactly the same bugs the bar does.
+    const BAR_GLYPHS: [&str; 9] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁", "░"];
 
     fn running_app_with_history() -> App {
         let mut app = App::default();
