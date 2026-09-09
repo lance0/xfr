@@ -1087,6 +1087,175 @@ async fn test_quic_download_bitrate_pacing() {
 }
 
 #[tokio::test]
+async fn test_quic_download_bitrate_pacing_multi_stream() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Request 20 Mbps total pacing shared by 2 streams (10 Mbps each) on a
+    // 2-second download test. Per-stream pacing divides the configured
+    // bitrate evenly (serve.rs / client.rs), so the measured total should
+    // still sit near the requested 20 Mbps, not 2x or 4x it.
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 2,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: Some(20_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC paced download should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC paced download should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert_eq!(result.streams.len(), 2, "Should have 2 streams");
+    // Upper bound is tighter than the single-stream tests' 50.0 on purpose: if
+    // the per-stream division were dropped, two streams would each pace at the
+    // full 20 Mbps for a ~41 Mbps aggregate, which 50.0 would happily accept.
+    // Anything at or above 2x the budget has to fail for this test to mean
+    // anything. Measured aggregate is a flat 20.0 Mbps -- pacing is a hard
+    // cumulative cap, so 30.0 is 50% of headroom, not a tight fit.
+    assert!(
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 30.0,
+        "Expected total throughput near 20 Mbps across 2 streams, got {:.1} Mbps",
+        result.throughput_mbps
+    );
+}
+
+#[tokio::test]
+async fn test_quic_upload_bitrate_pacing_multi_stream() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Request 20 Mbps total pacing shared by 4 streams (5 Mbps each) on a
+    // 2-second test. With per-stream pacing, the client's stream bitrate is
+    // bitrate / num_streams, so the aggregate should still track the
+    // requested budget rather than summing n full-rate streams.
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: Some(20_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC paced upload should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC paced upload should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert_eq!(result.streams.len(), 4, "Should have 4 streams");
+    assert!(
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 50.0,
+        "Expected total throughput near 20 Mbps across 4 streams, got {:.1} Mbps",
+        result.throughput_mbps
+    );
+}
+
+#[tokio::test]
+async fn test_quic_download_bitrate_pacing_4_streams() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Request 20 Mbps total pacing shared by 4 streams (5 Mbps each) on a
+    // 2-second download test.
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Quic,
+        streams: 4,
+        duration: Duration::from_secs(2),
+        direction: Direction::Download,
+        bitrate: Some(20_000_000),
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+
+    assert!(result.is_ok(), "QUIC paced download should complete");
+    let result = result.unwrap();
+    assert!(
+        result.is_ok(),
+        "QUIC paced download should succeed: {:?}",
+        result
+    );
+
+    let result = result.unwrap();
+    assert_eq!(result.streams.len(), 4, "Should have 4 streams");
+    assert!(
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 50.0,
+        "Expected total throughput near 20 Mbps across 4 streams, got {:.1} Mbps",
+        result.throughput_mbps
+    );
+}
+
+#[tokio::test]
 async fn test_quic_multi_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
