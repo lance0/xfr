@@ -1134,8 +1134,14 @@ async fn test_quic_download_bitrate_pacing_multi_stream() {
 
     let result = result.unwrap();
     assert_eq!(result.streams.len(), 2, "Should have 2 streams");
+    // Upper bound is tighter than the single-stream tests' 50.0 on purpose: if
+    // the per-stream division were dropped, two streams would each pace at the
+    // full 20 Mbps for a ~41 Mbps aggregate, which 50.0 would happily accept.
+    // Anything at or above 2x the budget has to fail for this test to mean
+    // anything. Measured aggregate is a flat 20.0 Mbps -- pacing is a hard
+    // cumulative cap, so 30.0 is 50% of headroom, not a tight fit.
     assert!(
-        result.throughput_mbps > 5.0 && result.throughput_mbps < 50.0,
+        result.throughput_mbps > 5.0 && result.throughput_mbps < 30.0,
         "Expected total throughput near 20 Mbps across 2 streams, got {:.1} Mbps",
         result.throughput_mbps
     );
