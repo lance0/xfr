@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Updated `rustls` to 0.23.45** — closes [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285) / GHSA-2mjx-qc3c-rqvc. rustls 0.23.13 through 0.23.44 accepted TLS 1.3 handshake messages sent at the wrong encryption level when they followed a key-changing message in the same record — for example a plaintext `EncryptedExtensions` packed behind the `ServerHello` — instead of terminating the connection as RFC 8446 section 5.1 requires. The handshake transcript remains authenticated, so a network-position attacker cannot alter or complete a handshake; the effect is that a peer could send handshake messages in plaintext that should have been encrypted without the connection being rejected. rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; QUIC interoperates with 0.10.0 peers in both directions, with and without a PSK.
+
 ## [0.10.1] - 2026-09-04
 
 ### Security
