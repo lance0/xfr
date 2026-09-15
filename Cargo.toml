@@ -41,7 +41,7 @@ mdns-sd = { version = "0.21", optional = true }
 
 # Config
 toml = "1.1"
-dirs = "6"
+dirs = "7"
 
 # Misc
 anyhow = "1"
