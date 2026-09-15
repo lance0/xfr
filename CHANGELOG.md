@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Updated `rustls` to 0.23.45** — closes [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285) / GHSA-2mjx-qc3c-rqvc. rustls 0.23.13 through 0.23.44 accepted TLS 1.3 handshake messages sent at the wrong encryption level when they followed a key-changing message in the same record — for example a plaintext `EncryptedExtensions` packed behind the `ServerHello` — instead of terminating the connection as RFC 8446 section 5.1 requires. The handshake transcript remains authenticated, so a network-position attacker cannot alter or complete a handshake; the effect is that a peer could send handshake messages in plaintext that should have been encrypted without the connection being rejected. rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; QUIC interoperates with 0.10.0 peers in both directions, with and without a PSK.
 
+### Changed
+- **Dependency refresh** — `dirs` 6 → 7, `toml` 1.1.6, `uuid` 1.26.1. The `dirs` major bump changes one thing: on Windows, `preference_dir()` now resolves to the roaming rather than the local AppData folder. xfr locates `config.toml` and `prefs.toml` through `config_dir()`, which is unchanged, so no configuration or saved preference moves on any platform.
+
+### Maintenance
+- **CI action pin** — `taiki-e/install-action` 2.87.4 → 2.87.10.
+
+### Fixed
+- **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+
 ## [0.10.1] - 2026-09-04
 
 ### Security
