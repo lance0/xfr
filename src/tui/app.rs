@@ -641,8 +641,9 @@ impl App {
             self.throughput_recv_mbps = tr;
         }
 
-        // Update stream data
-        // Intervals are sent every second, so throughput = bytes * 8 / 1_000_000
+        // Update stream data. Reports can span multiple sampling windows
+        // under control-channel backpressure; derive each stream's rate
+        // from its share of the aggregate rather than assuming one second.
         let mut total_jitter = 0.0;
         let mut total_lost = 0u64;
         let mut jitter_count = 0;
@@ -650,8 +651,11 @@ impl App {
         for interval in &progress.streams {
             if let Some(stream) = self.streams.get_mut(interval.id as usize) {
                 stream.bytes = interval.bytes;
-                // Use 1-second interval for throughput calculation (intervals are 1s apart)
-                stream.throughput_mbps = (interval.bytes as f64 * 8.0) / 1_000_000.0;
+                stream.throughput_mbps = if progress.total_bytes > 0 {
+                    progress.throughput_mbps * interval.bytes as f64 / progress.total_bytes as f64
+                } else {
+                    0.0
+                };
                 stream.retransmits = interval.retransmits.unwrap_or(0);
                 stream.jitter_ms = interval.jitter_ms;
             }
@@ -2006,6 +2010,80 @@ mod tests {
         let bar = app.throughput_history.back().copied().unwrap();
         assert_eq!(bar.lost_packets, 200);
         assert_eq!(bar.interval_packets, 1200);
+    }
+
+    #[test]
+    fn stream_rates_follow_aggregate_across_variable_report_windows() {
+        let mut app = App::default();
+        app.apply_test_params(
+            Protocol::Tcp,
+            Direction::Upload,
+            3,
+            Duration::from_secs(10),
+            None,
+        );
+        app.state = AppState::Running;
+
+        // The same 2 + 4 Mbps transfer arrives as a one-second report, a
+        // coalesced four-second report, then a quarter-second report. A
+        // fixed one-second denominator would show 8 + 16 Mbps for the
+        // coalesced report and 0.5 + 1 Mbps for the final short report.
+        for (elapsed_ms, bytes) in [
+            (1_000, [250_000, 500_000, 0]),
+            (5_000, [1_000_000, 2_000_000, 0]),
+            (5_250, [62_500, 125_000, 0]),
+        ] {
+            let mut progress = make_progress(6.0, None);
+            progress.elapsed_ms = elapsed_ms;
+            progress.total_bytes = bytes.iter().sum();
+            progress.streams = bytes
+                .into_iter()
+                .enumerate()
+                .map(|(id, bytes)| crate::protocol::StreamInterval {
+                    id: id as u8,
+                    bytes,
+                    retransmits: None,
+                    jitter_ms: None,
+                    lost: None,
+                    error: None,
+                    rtt_us: None,
+                    cwnd: None,
+                })
+                .collect();
+            app.on_progress(progress);
+
+            assert_eq!(app.streams[0].throughput_mbps, 2.0);
+            assert_eq!(app.streams[1].throughput_mbps, 4.0);
+            assert_eq!(app.streams[2].throughput_mbps, 0.0);
+            assert_eq!(
+                app.streams.iter().map(|s| s.throughput_mbps).sum::<f64>(),
+                app.current_throughput_mbps,
+            );
+        }
+        assert_eq!(app.total_bytes, 3_937_500);
+    }
+
+    #[test]
+    fn zero_byte_report_clears_stream_rates_without_nan() {
+        let mut app = App::default();
+        app.streams[0].throughput_mbps = 8.0;
+
+        let mut progress = make_progress(0.0, None);
+        progress.elapsed_ms = 4_000;
+        progress.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 0,
+            retransmits: None,
+            jitter_ms: None,
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+        }];
+        app.on_progress(progress);
+
+        assert_eq!(app.streams[0].throughput_mbps, 0.0);
+        assert!(app.streams[0].throughput_mbps.is_finite());
     }
 
     #[test]

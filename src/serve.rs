@@ -16,8 +16,7 @@ use crate::acl::{Acl, AclConfig};
 use crate::auth::{self, AuthConfig};
 use crate::net::{self, AddressFamily};
 use crate::protocol::{
-    ControlMessage, Direction, PROTOCOL_VERSION, Protocol, StreamInterval, TestResult,
-    versions_compatible,
+    ControlMessage, Direction, PROTOCOL_VERSION, Protocol, TestResult, versions_compatible,
 };
 use crate::quic;
 use crate::rate_limit::{RateLimitConfig, RateLimitGuard, RateLimiter};
@@ -26,6 +25,12 @@ use crate::tcp::{self, TcpConfig};
 use crate::tui::server::{ActiveTestInfo, ServerEvent};
 use crate::udp;
 use tokio::sync::mpsc;
+
+#[cfg(test)]
+mod quic_backpressure_tests;
+mod reporting;
+#[cfg(test)]
+mod tcp_backpressure_tests;
 
 /// Maximum control message line length to prevent memory DoS
 const MAX_LINE_LENGTH: usize = 65536;
@@ -2142,175 +2147,32 @@ async fn run_quic_test(
         // Split the transport: reader task owns the recv half + ctrl_reader;
         // the stats loop owns the send half.  Same pattern as TCP — prompt
         // cancel/pause latency without the LAN-229 desync hazard.
-        let (reader_half, mut writer_half) = transport.split();
+        let (reader_half, writer_half) = transport.split();
         let (mut cmd_rx, control_handle) =
             spawn_control_reader(ctrl_reader, reader_half, id.to_string());
 
-        // Send interval updates. First tick is one full period out:
-        // `tokio::time::interval` fires immediately, which produced a ~1ms
-        // opening sample whose throughput (bytes so far over a sliver of a
-        // second) came out around 1500 Mbps on a 200 Mbps test. That outlier
-        // set the TUI graph's Y-scale — flattening every real sample to a
-        // stub — and led the first `--json-stream` line (LAN-1496).
-        let mut interval_timer =
-            tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
-        // Skip stale ticks rather than bursting them on unblock: if write_all stalls
-        // under back-pressure, Burst would emit several stale interval samples with
-        // fresh client-side arrival timestamps once the writer unblocks — both the
-        // timestamps and the throughput numbers attached to those samples are
-        // misleading. Skip drops them; cumulative state in StreamStats atomics still
-        // surfaces correctly on the next live tick and at end-of-test.
-        interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let start = std::time::Instant::now();
-        let mut paused_total = Duration::ZERO;
-        let mut pause_start: Option<std::time::Instant> = None;
-
-        let mut loop_err: Option<anyhow::Error> = None;
-        // `-n` completion tracking; see budget_transfer_complete.
-        let byte_budget_test = byte_budget.is_some();
-        let mut client_finished = false;
-        let mut server_send_done = false;
-        let mut drain_until: Option<tokio::time::Instant> = None;
-        loop {
-            tokio::select! {
-                _ = async {
-                    match drain_until {
-                        Some(t) => tokio::time::sleep_until(t).await,
-                        None => std::future::pending().await,
-                    }
-                }, if drain_until.is_some() => {
-                    warn!(
-                        "QUIC test {}: drain window expired after client Finish; \
-                         the tail of the transfer may not have arrived",
-                        id
-                    );
-                    client_finished = true;
-                    drain_until = None;
-                    if budget_transfer_complete(direction, client_finished, server_send_done) {
-                        break;
-                    }
-                }
-                _ = recv_done_rx.recv(), if drain_until.is_some() => {
-                    debug!("QUIC test {}: drained after Finish, ending test", id);
-                    client_finished = true;
-                    drain_until = None;
-                    if budget_transfer_complete(direction, client_finished, server_send_done) {
-                        break;
-                    }
-                }
-                _ = sending_done_rx.recv(), if end_on_server_send && !server_send_done => {
-                    server_send_done = true;
-                    if budget_transfer_complete(direction, client_finished, server_send_done) {
-                        debug!("QUIC test {}: byte budget delivered, ending test", id);
-                        break;
-                    }
-                }
-                _ = interval_timer.tick() => {
-                    // Duration::ZERO means infinite - only break if duration is set.
-                    // Subtract paused_total plus any in-progress pause so the
-                    // clock doesn't expire while paused (LAN-230).
-                    let active_elapsed = active_elapsed(start, paused_total, pause_start);
-                    if duration != Duration::ZERO
-                        && active_elapsed >= duration
-                    {
-                        break;
-                    }
-
-                    let intervals = stats.record_intervals();
-                    let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
-                        .zip(intervals.iter())
-                        .map(|(s, i)| s.to_interval(i))
-                        .collect();
-                    let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
-
-                    let interval_msg = ControlMessage::Interval {
-                        id: id.to_string(),
-                        elapsed_ms: active_elapsed.as_millis() as u64,
-                        streams: stream_intervals,
-                        aggregate: aggregate.clone(),
-                    };
-
-                    if let Some(tx) = &tui_tx {
-                        let _ = tx.try_send(ServerEvent::TestUpdated {
-                            id: id.to_string(),
-                            bytes: aggregate.bytes,
-                            throughput_mbps: aggregate.throughput_mbps,
-                        });
-                    }
-
-                    match interval_msg.serialize() {
-                        Ok(serialized) => {
-                            if writer_half.write_message(&mut ctrl_send, &serialized).await.is_err() {
-                                warn!("Failed to send interval");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            loop_err = Some(e);
-                            break;
-                        }
-                    }
-                }
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(ControlCommand::Finish) if byte_budget_test => {
-                            // Written and closed, not necessarily delivered:
-                            // drain until our receive streams end (see run_test).
-                            if drain_until.is_none() {
-                                debug!("QUIC test {}: client finished sending, draining", id);
-                                drain_until = Some(
-                                    tokio::time::Instant::now() + finish_drain_grace(Protocol::Quic),
-                                );
-                            }
-                        }
-                        Some(ControlCommand::Finish) => {
-                            warn!("QUIC test {}: ignoring Finish on a test with no byte budget", id);
-                        }
-                        Some(ControlCommand::Cancel) => {
-                            info!("QUIC test {} cancelled by client", id);
-                            if let Some(test) = active_tests.lock().await.get(id) {
-                                let _ = test.cancel_tx.send(true);
-                            }
-                            let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                            match cancelled.serialize() {
-                                Ok(serialized) => {
-                                    if let Err(e) = writer_half.write_message(&mut ctrl_send, &serialized).await {
-                                        loop_err = Some(e.into());
-                                    }
-                                }
-                                Err(e) => loop_err = Some(e),
-                            }
-                            break;
-                        }
-                        Some(ControlCommand::Pause) => {
-                            info!("QUIC test {} paused", id);
-                            if pause_start.is_none() {
-                                pause_start = Some(std::time::Instant::now());
-                            }
-                            if let Some(test) = active_tests.lock().await.get(id) {
-                                let _ = test.pause_tx.send(true);
-                            }
-                        }
-                        Some(ControlCommand::Resume) => {
-                            info!("QUIC test {} resumed", id);
-                            if let Some(pause_instant) = pause_start.take() {
-                                paused_total += pause_instant.elapsed();
-                            }
-                            if let Some(test) = active_tests.lock().await.get(id) {
-                                let _ = test.pause_tx.send(false);
-                            }
-                        }
-                        None => {
-                            debug!("Control reader for QUIC test {} exited", id);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Abort the control-reader task so it doesn't outlive the test.
+        let reporting_result = reporting::run(
+            &mut ctrl_send,
+            writer_half,
+            reporting::ReportLoopConfig {
+                id,
+                protocol: Protocol::Quic,
+                duration,
+                direction,
+                stats: &stats,
+                active_tests: &active_tests,
+                tui_tx: tui_tx.as_ref(),
+                byte_budget_test: byte_budget.is_some(),
+                end_on_server_send,
+            },
+            &mut cmd_rx,
+            &mut sending_done_rx,
+            &mut recv_done_rx,
+        )
+        .await;
+        // The reader must not outlive the test, including a failed write.
         control_handle.abort();
+        let mut reports = reporting_result?;
 
         // Signal handlers to stop
         if let Some(test) = active_tests.lock().await.get(id) {
@@ -2327,12 +2189,9 @@ async fn run_quic_test(
             }
         }
 
-        if let Some(e) = loop_err {
-            return Err(e);
-        }
-
-        // Send final result
-        let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
+        // Capture the data duration before any terminal control flushing.
+        let duration_ms =
+            active_elapsed_ms(reports.start, reports.paused_total, reports.pause_start);
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
@@ -2367,9 +2226,7 @@ async fn run_quic_test(
             client_udp_send_errors: None,
         });
 
-        writer_half
-            .write_message(&mut ctrl_send, &result.serialize()?)
-            .await?;
+        reports.finish(&mut ctrl_send, &result.serialize()?).await?;
 
         // Finish the control stream to ensure result is sent
         ctrl_send.finish()?;
@@ -2425,9 +2282,9 @@ async fn run_quic_test(
 
 /// Run the actual bandwidth test
 #[allow(clippy::too_many_arguments)]
-async fn run_test(
+async fn run_test<W: AsyncWrite + Unpin>(
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: &mut W,
     id: &str,
     protocol: Protocol,
     streams: u8,
@@ -2642,416 +2499,268 @@ async fn run_test(
     // an error or cancellation exits early.
     let run_result: anyhow::Result<(u64, u64, f64)> = async {
         // Spawn data stream handlers
-    // `-n`: one budget shared by every server send loop, so the server
-    // delivers exactly N bytes in download/bidir however they divide across
-    // streams. The channel closes when the last send loop finishes, which
-    // is how the interval loop below learns the transfer is complete
-    // without waiting out a clock.
-    let budget = byte_budget.map(crate::budget::ByteBudget::new);
-    let server_sends = matches!(direction, Direction::Download | Direction::Bidir);
-    let end_on_server_send = byte_budget.is_some() && server_sends;
-    let (sending_done_tx, mut sending_done_rx) = mpsc::channel::<()>(1);
-    let sending_done_tx = end_on_server_send.then_some(sending_done_tx);
-    // Separate signal for "our receive loops hit EOF", which is what lets a
-    // post-Finish drain end as soon as the tail lands instead of burning the
-    // whole grace window. UDP receive loops never see an EOF, so they don't
-    // take a handle and the grace window governs there.
-    let (recv_done_tx, mut recv_done_rx) = mpsc::channel::<()>(1);
-    let recv_done_tx =
-        (byte_budget.is_some() && protocol != Protocol::Udp).then_some(recv_done_tx);
+        // `-n`: one budget shared by every server send loop, so the server
+        // delivers exactly N bytes in download/bidir however they divide across
+        // streams. The channel closes when the last send loop finishes, which
+        // is how the interval loop below learns the transfer is complete
+        // without waiting out a clock.
+        let budget = byte_budget.map(crate::budget::ByteBudget::new);
+        let server_sends = matches!(direction, Direction::Download | Direction::Bidir);
+        let end_on_server_send = byte_budget.is_some() && server_sends;
+        let (sending_done_tx, mut sending_done_rx) = mpsc::channel::<()>(1);
+        let sending_done_tx = end_on_server_send.then_some(sending_done_tx);
+        // Separate signal for "our receive loops hit EOF", which is what lets a
+        // post-Finish drain end as soon as the tail lands instead of burning the
+        // whole grace window. UDP receive loops never see an EOF, so they don't
+        // take a handle and the grace window governs there.
+        let (recv_done_tx, mut recv_done_rx) = mpsc::channel::<()>(1);
+        let recv_done_tx =
+            (byte_budget.is_some() && protocol != Protocol::Udp).then_some(recv_done_tx);
 
-    // For TCP and single-port UDP: spawn stream collection in background
-    // to not block the interval loop
-    // For legacy UDP: handlers are spawned immediately
-    let (collection_handle, udp_handles) = match protocol {
-        Protocol::Tcp => {
-            // Single-port mode: spawn stream collection in background
-            // This allows interval loop and cancel handling to run while waiting for streams
-            if let Some(rx) = data_stream_rx {
-                let stats_clone = stats.clone();
-                let cancel_clone = cancel_rx.clone();
-                let pause_clone = pause_rx.clone();
-                let budget_clone = budget.clone();
-                let sending_done_clone = sending_done_tx.clone();
-                let recv_done_clone = recv_done_tx.clone();
-                let handle = tokio::spawn(async move {
-                    spawn_tcp_stream_handlers(
-                        rx,
-                        streams as usize,
-                        stats_clone,
-                        direction,
-                        duration,
-                        cancel_clone,
-                        congestion.clone(),
-                        bitrate,
-                        pause_clone,
-                        dscp,
-                        client_window_size,
-                        zerocopy,
-                        tcp_nodelay,
-                        budget_clone,
-                        sending_done_clone,
-                        recv_done_clone,
-                    )
-                    .await
-                });
+        // For TCP and single-port UDP: spawn stream collection in background
+        // to not block the interval loop
+        // For legacy UDP: handlers are spawned immediately
+        let (collection_handle, udp_handles) = match protocol {
+            Protocol::Tcp => {
+                // Single-port mode: spawn stream collection in background
+                // This allows interval loop and cancel handling to run while waiting for streams
+                if let Some(rx) = data_stream_rx {
+                    let stats_clone = stats.clone();
+                    let cancel_clone = cancel_rx.clone();
+                    let pause_clone = pause_rx.clone();
+                    let budget_clone = budget.clone();
+                    let sending_done_clone = sending_done_tx.clone();
+                    let recv_done_clone = recv_done_tx.clone();
+                    let handle = tokio::spawn(async move {
+                        spawn_tcp_stream_handlers(
+                            rx,
+                            streams as usize,
+                            stats_clone,
+                            direction,
+                            duration,
+                            cancel_clone,
+                            congestion.clone(),
+                            bitrate,
+                            pause_clone,
+                            dscp,
+                            client_window_size,
+                            zerocopy,
+                            tcp_nodelay,
+                            budget_clone,
+                            sending_done_clone,
+                            recv_done_clone,
+                        )
+                        .await
+                    });
+                    (Some(handle), Vec::new())
+                } else {
+                    (None, Vec::new())
+                }
+            }
+            Protocol::Udp if udp_socket_rx.is_some() => {
+                // Single-port mode: connected sockets stream in from the hello
+                // dispatcher as the client's per-stream handshakes land; the
+                // collection task mirrors the TCP DataHello flow. Covers both
+                // bulk transfers and --probe-mtu (handled per socket inside).
+                let rx = udp_socket_rx.take().expect("guarded by match arm");
+                let token = udp_token.expect("single-port UDP always has a token");
+                let handle = tokio::spawn(spawn_single_port_udp_handlers(
+                    rx,
+                    streams as usize,
+                    token,
+                    stats.clone(),
+                    direction,
+                    duration,
+                    bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                    packet_size,
+                    cancel_rx.clone(),
+                    pause_rx.clone(),
+                    dscp,
+                    client_supports_udp_feedback,
+                    mtu_probe,
+                    budget.clone(),
+                    sending_done_tx.clone(),
+                ));
                 (Some(handle), Vec::new())
-            } else {
+            }
+            Protocol::Udp if mtu_probe => {
+                // Probe mode replaces the bulk handlers entirely: every
+                // socket answers XFRP probes with ack + same-size echo until
+                // the control channel ends the test. DF is set so oversized
+                // echoes die at the constraining hop instead of fragmenting;
+                // a failure to set it degrades reverse-direction results, so
+                // it warns rather than aborting the probe.
+                let handles = udp_sockets
+                    .iter()
+                    .map(|socket| {
+                        let ipv6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+                        if let Err(e) = net::set_dont_fragment(socket, ipv6) {
+                            warn!(
+                                "MTU probe: could not set don't-fragment on echo socket: {} \
+                             (oversized echoes may fragment and overstate the reverse path)",
+                                e
+                            );
+                        }
+                        let socket = socket.clone();
+                        let cancel = cancel_rx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = udp::respond_mtu_probes(socket, cancel, None).await {
+                                error!("MTU probe responder error: {}", e);
+                            }
+                        })
+                    })
+                    .collect();
+                (None, handles)
+            }
+            Protocol::Udp => {
+                let handles = spawn_udp_handlers(
+                    udp_sockets,
+                    stats.clone(),
+                    direction,
+                    duration,
+                    bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                    packet_size,
+                    cancel_rx.clone(),
+                    pause_rx.clone(),
+                    dscp,
+                    client_supports_udp_feedback,
+                    budget.clone(),
+                    sending_done_tx.clone(),
+                )
+                .await;
+                (None, handles)
+            }
+            Protocol::Quic => {
+                // Unreachable - QUIC returns early above
                 (None, Vec::new())
             }
-        }
-        Protocol::Udp if udp_socket_rx.is_some() => {
-            // Single-port mode: connected sockets stream in from the hello
-            // dispatcher as the client's per-stream handshakes land; the
-            // collection task mirrors the TCP DataHello flow. Covers both
-            // bulk transfers and --probe-mtu (handled per socket inside).
-            let rx = udp_socket_rx.take().expect("guarded by match arm");
-            let token = udp_token.expect("single-port UDP always has a token");
-            let handle = tokio::spawn(spawn_single_port_udp_handlers(
-                rx,
-                streams as usize,
-                token,
-                stats.clone(),
-                direction,
+        };
+
+        // Split the transport: the reader task owns the recv half + the
+        // buffered reader; the stats loop owns the send half.  This gives
+        // prompt cancel/pause latency (not serialized behind the 1s stats
+        // interval tick) without the LAN-229 desync hazard (read_message is
+        // never cancelled mid-frame).
+        let (ctrl_reader, ctrl_writer) = transport.split();
+        let (mut cmd_rx, control_handle) =
+            spawn_control_reader(reader, ctrl_reader, id.to_string());
+
+        // Every data loop has its own clone now; ours would keep these channels
+        // open forever, and with `-n` (no clock) the test would never end.
+        drop(sending_done_tx);
+        drop(recv_done_tx);
+
+        let reporting_result = reporting::run(
+            writer,
+            ctrl_writer,
+            reporting::ReportLoopConfig {
+                id,
+                protocol,
                 duration,
-                bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
-                packet_size,
-                cancel_rx.clone(),
-                pause_rx.clone(),
-                dscp,
-                client_supports_udp_feedback,
-                mtu_probe,
-                budget.clone(),
-                sending_done_tx.clone(),
-            ));
-            (Some(handle), Vec::new())
-        }
-        Protocol::Udp if mtu_probe => {
-            // Probe mode replaces the bulk handlers entirely: every
-            // socket answers XFRP probes with ack + same-size echo until
-            // the control channel ends the test. DF is set so oversized
-            // echoes die at the constraining hop instead of fragmenting;
-            // a failure to set it degrades reverse-direction results, so
-            // it warns rather than aborting the probe.
-            let handles = udp_sockets
-                .iter()
-                .map(|socket| {
-                    let ipv6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
-                    if let Err(e) = net::set_dont_fragment(socket, ipv6) {
-                        warn!(
-                            "MTU probe: could not set don't-fragment on echo socket: {} \
-                             (oversized echoes may fragment and overstate the reverse path)",
-                            e
-                        );
-                    }
-                    let socket = socket.clone();
-                    let cancel = cancel_rx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = udp::respond_mtu_probes(socket, cancel, None).await {
-                            error!("MTU probe responder error: {}", e);
-                        }
-                    })
-                })
-                .collect();
-            (None, handles)
-        }
-        Protocol::Udp => {
-            let handles = spawn_udp_handlers(
-                udp_sockets,
-                stats.clone(),
                 direction,
-                duration,
-                bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
-                packet_size,
-                cancel_rx.clone(),
-                pause_rx.clone(),
-                dscp,
-                client_supports_udp_feedback,
-                budget.clone(),
-                sending_done_tx.clone(),
-            )
-            .await;
-            (None, handles)
+                stats: &stats,
+                active_tests: &active_tests,
+                tui_tx: tui_tx.as_ref(),
+                byte_budget_test: byte_budget.is_some(),
+                end_on_server_send,
+            },
+            &mut cmd_rx,
+            &mut sending_done_rx,
+            &mut recv_done_rx,
+        )
+        .await;
+        control_handle.abort();
+        let mut reports = reporting_result?;
+
+        // Signal handlers to stop
+        if let Some(test) = active_tests.lock().await.get(id) {
+            let _ = test.cancel_tx.send(true);
         }
-        Protocol::Quic => {
-            // Unreachable - QUIC returns early above
-            (None, Vec::new())
-        }
-    };
 
-    // Split the transport: the reader task owns the recv half + the
-    // buffered reader; the stats loop owns the send half.  This gives
-    // prompt cancel/pause latency (not serialized behind the 1s stats
-    // interval tick) without the LAN-229 desync hazard (read_message is
-    // never cancelled mid-frame).
-    let (ctrl_reader, mut ctrl_writer) = transport.split();
-    let (mut cmd_rx, control_handle) = spawn_control_reader(reader, ctrl_reader, id.to_string());
-
-    // Every data loop has its own clone now; ours would keep these channels
-    // open forever, and with `-n` (no clock) the test would never end.
-    drop(sending_done_tx);
-    drop(recv_done_tx);
-
-    // Start the interval loop without waiting for TCP stream collection. The
-    // first tick is still one full period out — see the matching timer in
-    // `run_quic_test` for why the immediate tick is skipped (LAN-1496).
-    let mut interval_timer =
-        tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
-    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let start = std::time::Instant::now();
-    let mut paused_total = Duration::ZERO;
-    let mut pause_start: Option<std::time::Instant> = None;
-
-    let mut loop_err: Option<anyhow::Error> = None;
-    // `-n` completion tracking; see budget_transfer_complete.
-    let byte_budget_test = byte_budget.is_some();
-    let mut client_finished = false;
-    let mut server_send_done = false;
-    // Set when the client's Finish arrives: the transfer is written but not
-    // necessarily delivered, so we keep counting until the receive loops hit
-    // EOF or this window expires.
-    let mut drain_until: Option<tokio::time::Instant> = None;
-    loop {
-        tokio::select! {
-            _ = async {
-                match drain_until {
-                    Some(t) => tokio::time::sleep_until(t).await,
-                    None => std::future::pending().await,
-                }
-            }, if drain_until.is_some() => {
-                warn!(
-                    "Test {}: drain window expired after client Finish; \
-                     the tail of the transfer may not have arrived",
-                    id
-                );
-                client_finished = true;
-                if budget_transfer_complete(direction, client_finished, server_send_done) {
-                    break;
-                }
-                drain_until = None;
-            }
-            _ = recv_done_rx.recv(), if drain_until.is_some() => {
-                // Receive loops hit EOF: everything the client sent is in.
-                debug!("Test {}: drained after Finish, ending test", id);
-                client_finished = true;
-                drain_until = None;
-                if budget_transfer_complete(direction, client_finished, server_send_done) {
-                    break;
-                }
-            }
-            _ = interval_timer.tick() => {
-                // Duration::ZERO means infinite - only break if duration is set.
-                // Subtract paused_total plus any in-progress pause so the
-                // clock doesn't expire while paused (LAN-230).
-                let active_elapsed = active_elapsed(start, paused_total, pause_start);
-                if duration != Duration::ZERO
-                    && active_elapsed >= duration
-                {
-                    break;
-                }
-
-                let intervals = stats.record_intervals();
-                let stream_intervals: Vec<StreamInterval> = stats.streams.iter()
-                    .zip(intervals.iter())
-                    .map(|(s, i)| s.to_interval(i))
-                    .collect();
-                let aggregate = stats.to_aggregate_with_direction(&intervals, direction == Direction::Bidir);
-
-                let interval_msg = ControlMessage::Interval {
-                    id: id.to_string(),
-                    elapsed_ms: active_elapsed.as_millis() as u64,
-                    streams: stream_intervals,
-                    aggregate: aggregate.clone(),
-                };
-
-                // Notify TUI of progress
-                if let Some(tx) = &tui_tx {
-                    let _ = tx.try_send(ServerEvent::TestUpdated {
-                        id: id.to_string(),
-                        bytes: aggregate.bytes,
-                        throughput_mbps: aggregate.throughput_mbps,
-                    });
-                }
-
-                match interval_msg.serialize() {
-                    Ok(serialized) => {
-                        if ctrl_writer.write_message(writer, &serialized).await.is_err() {
-                            warn!("Failed to send interval, client may have disconnected");
-                            break;
+        // Wait for all data handlers to complete
+        match (collection_handle, udp_handles) {
+            (Some(handle), _) => {
+                // TCP / single-port UDP: wait for the stream collection task,
+                // then wait for individual handlers
+                match handle.await {
+                    Ok(stream_handles) => {
+                        let results = futures::future::join_all(stream_handles).await;
+                        for result in results {
+                            if let Err(e) = result
+                                && e.is_panic()
+                            {
+                                error!("Stream handler panicked: {:?}", e);
+                            }
                         }
                     }
                     Err(e) => {
-                        loop_err = Some(e);
-                        break;
+                        if e.is_panic() {
+                            error!("Stream collection task panicked: {:?}", e);
+                        } else {
+                            warn!("Stream collection task was cancelled");
+                        }
                     }
                 }
             }
-            _ = sending_done_rx.recv(), if end_on_server_send && !server_send_done => {
-                // Our send loops delivered the whole `-n` budget.
-                server_send_done = true;
-                if budget_transfer_complete(direction, client_finished, server_send_done) {
-                    debug!("Test {}: byte budget delivered, ending test", id);
-                    break;
-                }
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(ControlCommand::Finish) if byte_budget_test => {
-                        // The client has written and closed its whole `-n`
-                        // budget — but written is not delivered: with pacing
-                        // or a slow link, megabytes can still be in the send
-                        // buffer. Keep counting until our receive loops see
-                        // EOF (or the window expires), then end normally.
-                        if drain_until.is_none() {
-                            debug!("Test {}: client finished sending, draining", id);
-                            drain_until = Some(
-                                tokio::time::Instant::now() + finish_drain_grace(protocol),
-                            );
-                        }
-                    }
-                    Some(ControlCommand::Finish) => {
-                        warn!("Test {}: ignoring Finish on a test with no byte budget", id);
-                    }
-                    Some(ControlCommand::Cancel) => {
-                        info!("Test {} cancelled by client", id);
-                        if let Some(test) = active_tests.lock().await.get(id) {
-                            let _ = test.cancel_tx.send(true);
-                        }
-                        let cancelled = ControlMessage::Cancelled { id: id.to_string() };
-                        match cancelled.serialize() {
-                            Ok(serialized) => {
-                                if let Err(e) = ctrl_writer.write_message(writer, &serialized).await {
-                                    loop_err = Some(e.into());
-                                }
-                            }
-                            Err(e) => loop_err = Some(e),
-                        }
-                        break;
-                    }
-                    Some(ControlCommand::Pause) => {
-                        info!("Test {} paused", id);
-                        if pause_start.is_none() {
-                            pause_start = Some(std::time::Instant::now());
-                        }
-                        if let Some(test) = active_tests.lock().await.get(id) {
-                            let _ = test.pause_tx.send(true);
-                        }
-                    }
-                    Some(ControlCommand::Resume) => {
-                        info!("Test {} resumed", id);
-                        if let Some(pause_instant) = pause_start.take() {
-                            paused_total += pause_instant.elapsed();
-                        }
-                        if let Some(test) = active_tests.lock().await.get(id) {
-                            let _ = test.pause_tx.send(false);
-                        }
-                    }
-                    None => {
-                        debug!("Control reader for test {} exited", id);
-                        break;
+            (None, handles) if !handles.is_empty() => {
+                // UDP/QUIC: wait for handlers directly
+                let results = futures::future::join_all(handles).await;
+                for result in results {
+                    if let Err(e) = result
+                        && e.is_panic()
+                    {
+                        error!("UDP/QUIC stream handler panicked: {:?}", e);
                     }
                 }
             }
+            _ => {}
         }
+
+        // Capture the data duration before any terminal control flushing.
+        let duration_ms =
+            active_elapsed_ms(reports.start, reports.paused_total, reports.pause_start);
+        let bytes_total = stats.total_bytes();
+        let throughput_mbps = if duration_ms > 0 {
+            (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
+        } else {
+            0.0
+        };
+
+        let stream_results: Vec<_> = stats
+            .streams
+            .iter()
+            .map(|s| s.to_result(duration_ms))
+            .collect();
+
+        // For bidir tests, expose per-direction totals so clients can distinguish
+        // upload from download throughput on asymmetric links (issue #56).
+        let (bytes_sent, bytes_received, throughput_send_mbps, throughput_recv_mbps) =
+            directional_totals(direction, &stats, duration_ms);
+
+        let result = ControlMessage::Result(TestResult {
+            id: id.to_string(),
+            bytes_total,
+            duration_ms,
+            throughput_mbps,
+            streams: stream_results,
+            tcp_info: stats.final_local_tcp_info(),
+            udp_stats: stats.aggregate_udp_stats(),
+            bytes_sent,
+            bytes_received,
+            throughput_send_mbps,
+            throughput_recv_mbps,
+            mtu_probe: None,
+            server_udp_send_errors: stats.udp_send_errors(),
+            client_udp_send_errors: None,
+        });
+
+        // Send result FIRST so the client isn't blocked by slow post-processing
+        // (push gateway retries, metrics hooks, etc.)
+        reports.finish(writer, &result.serialize()?).await?;
+
+        Ok((bytes_total, duration_ms, throughput_mbps))
     }
-
-    // Abort the control-reader task so it doesn't outlive the test.
-    control_handle.abort();
-
-    if let Some(e) = loop_err {
-        return Err(e);
-    }
-
-    // Signal handlers to stop
-    if let Some(test) = active_tests.lock().await.get(id) {
-        let _ = test.cancel_tx.send(true);
-    }
-
-    // Wait for all data handlers to complete
-    match (collection_handle, udp_handles) {
-        (Some(handle), _) => {
-            // TCP / single-port UDP: wait for the stream collection task,
-            // then wait for individual handlers
-            match handle.await {
-                Ok(stream_handles) => {
-                    let results = futures::future::join_all(stream_handles).await;
-                    for result in results {
-                        if let Err(e) = result
-                            && e.is_panic()
-                        {
-                            error!("Stream handler panicked: {:?}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    if e.is_panic() {
-                        error!("Stream collection task panicked: {:?}", e);
-                    } else {
-                        warn!("Stream collection task was cancelled");
-                    }
-                }
-            }
-        }
-        (None, handles) if !handles.is_empty() => {
-            // UDP/QUIC: wait for handlers directly
-            let results = futures::future::join_all(handles).await;
-            for result in results {
-                if let Err(e) = result
-                    && e.is_panic()
-                {
-                    error!("UDP/QUIC stream handler panicked: {:?}", e);
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Send final result
-    let duration_ms = active_elapsed_ms(start, paused_total, pause_start);
-    let bytes_total = stats.total_bytes();
-    let throughput_mbps = if duration_ms > 0 {
-        (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
-    } else {
-        0.0
-    };
-
-    let stream_results: Vec<_> = stats
-        .streams
-        .iter()
-        .map(|s| s.to_result(duration_ms))
-        .collect();
-
-    // For bidir tests, expose per-direction totals so clients can distinguish
-    // upload from download throughput on asymmetric links (issue #56).
-    let (bytes_sent, bytes_received, throughput_send_mbps, throughput_recv_mbps) =
-        directional_totals(direction, &stats, duration_ms);
-
-    let result = ControlMessage::Result(TestResult {
-        id: id.to_string(),
-        bytes_total,
-        duration_ms,
-        throughput_mbps,
-        streams: stream_results,
-        tcp_info: stats.final_local_tcp_info(),
-        udp_stats: stats.aggregate_udp_stats(),
-        bytes_sent,
-        bytes_received,
-        throughput_send_mbps,
-        throughput_recv_mbps,
-        mtu_probe: None,
-        server_udp_send_errors: stats.udp_send_errors(),
-        client_udp_send_errors: None,
-    });
-
-    // Send result FIRST so the client isn't blocked by slow post-processing
-    // (push gateway retries, metrics hooks, etc.)
-    ctrl_writer
-        .write_message(writer, &result.serialize()?)
-        .await?;
-
-    Ok((bytes_total, duration_ms, throughput_mbps))
-}
-.await;
+    .await;
 
     // Always remove the active entry and stop data handlers.
     remove_active_test(&active_tests, id).await;

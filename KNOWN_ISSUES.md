@@ -70,17 +70,17 @@ This document tracks known limitations and edge cases that are documented but no
 
 **Impact:** Upload throughput rows and CSV cadence can lag or arrive in bursts, even while feedback loss events remain current. A feedback event carries cumulative loss rather than a full throughput interval.
 
-**Workaround:** Consume `udp_feedback` events in JSON-stream scripts when live loss matters. Use fair queuing to reduce control-channel stalls; decoupling server stats sampling from control writes remains tracked in ROADMAP.md.
+**Workaround:** Consume `udp_feedback` events in JSON-stream scripts when live loss matters. Use fair queuing to reduce control-channel stalls. Server sampling now continues independently of control writes; pending interval deltas coalesce until the channel recovers.
 
 ---
 
 ### Control-Channel Delivery Stalls Under Deep FIFO Bufferbloat
 
-**Issue:** When the path to the server holds multiple seconds of FIFO queue (no AQM) and a UDP test oversubscribes it, TCP control messages queue behind the test's own flood, tail-drop, and retransmit. Packet captures during the v0.9.18 cycle show interval messages then arriving in batches every ~2 or ~4 seconds (the two stable rhythms of the queue/RTO interaction) instead of at the 1 Hz report cadence. The server's interval emission itself also degrades to ~2 s under this condition because stats sampling is coupled to the blocked control write. Which rhythm a given run locks onto is sensitive to startup phase — the single-port UDP handshake (v0.9.18, issue #63) shifts that phase, which changes the typical batch size in synthetic tests without changing the control channel's behavior.
+**Issue:** When the path to the server holds multiple seconds of FIFO queue (no AQM) and a UDP test oversubscribes it, TCP control messages queue behind the test's own flood, tail-drop, and retransmit. Packet captures during the v0.9.18 cycle showed interval messages arriving in batches every ~2 or ~4 seconds instead of at the 1 Hz report cadence. Server sampling now runs independently of control writes: a blocked frame resumes in place, and subsequent samples coalesce with their byte/loss deltas and sampling durations preserved. Congestion still delays delivery to the client.
 
-**Impact:** Live interval rows (plain/CSV/JSON-stream) batch up under pathological bufferbloat. The TUI live loss counter and sparkline are unaffected (they ride `udp_feedback_v1` over UDP and the local-tick sparkline cadence). End-of-test results are always correct.
+**Impact:** Live interval rows (plain/CSV/JSON-stream) can still bunch under pathological bufferbloat. The TUI live loss counter and sparkline use UDP feedback and a local clock. Server sampling, control commands, and test deadlines continue while reports are blocked. A peer that never resumes reading eventually loses its terminal result when the bounded flush deadline expires; the server still stops data handlers and releases the active test.
 
-**Mitigation:** This is inherent to sharing a FIFO-bloated link with the traffic being tested; AQM (fq_codel, the modern Linux default) eliminates it entirely. Feedback-driven plain-text and JSON-stream loss events already provide visibility while full intervals stall. Decoupling stats sampling from control writes remains tracked in ROADMAP.md.
+**Mitigation:** Use AQM such as fq_codel to reduce FIFO queueing. Feedback-driven plain-text and JSON-stream loss events provide visibility while full intervals stall.
 
 ---
 
