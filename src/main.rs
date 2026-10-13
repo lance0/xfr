@@ -3222,10 +3222,11 @@ mod tests {
                 .env("XFR_PORT", DEFAULT_PORT.to_string())
                 .output()
                 .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // `--exact` with a stale name runs zero tests and still exits 0.
             assert!(
-                output.status.success(),
-                "environment precedence check failed: {}{}",
-                String::from_utf8_lossy(&output.stdout),
+                output.status.success() && stdout.contains("1 passed"),
+                "environment precedence check failed: {stdout}{}",
                 String::from_utf8_lossy(&output.stderr),
             );
             return;
