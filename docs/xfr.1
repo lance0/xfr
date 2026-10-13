@@ -163,7 +163,7 @@ Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
-Listen port (default: 5201). Environment: XFR_PORT
+Listen port (default: \fBport\fR from the [server] config section, else 5201). Environment: XFR_PORT, which overrides the config file
 .TP
 .B \-\-one\-off
 Exit after a single test
