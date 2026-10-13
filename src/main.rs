@@ -22,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
 use xfr::diff::{DEFAULT_DIFF_THRESHOLD_PERCENT, DiffConfig, run_diff};
+use xfr::net::AddressFamily;
 use xfr::output::{output_csv, output_json, output_plain};
 
 /// Output format options
@@ -314,7 +315,7 @@ struct Cli {
     psk_file: Option<PathBuf>,
 
     /// Force IPv4 only
-    #[arg(short = '4', long = "ipv4")]
+    #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6_only")]
     #[arg(help_heading = "Connection Options")]
     ipv4_only: bool,
 
@@ -438,7 +439,7 @@ enum Commands {
         bind: Option<IpAddr>,
 
         /// Force IPv4 only
-        #[arg(short = '4', long = "ipv4")]
+        #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6_only")]
         #[arg(help_heading = "Connection Options")]
         ipv4_only: bool,
 
@@ -785,6 +786,55 @@ fn parse_dscp(s: &str) -> Result<u8, String> {
     }
 }
 
+fn resolve_address_family(
+    ipv4_only: bool,
+    ipv6_only: bool,
+    config_value: Option<&str>,
+    config_key: &str,
+) -> Result<AddressFamily> {
+    if ipv4_only {
+        return Ok(AddressFamily::V4Only);
+    }
+    if ipv6_only {
+        return Ok(AddressFamily::V6Only);
+    }
+    match config_value {
+        Some(value) => value.parse().map_err(|()| {
+            anyhow::anyhow!("invalid {config_key}: {value:?}; expected ipv4, ipv6, or dual")
+        }),
+        None => Ok(AddressFamily::default()),
+    }
+}
+
+fn resolve_server_address_family(
+    bind: Option<IpAddr>,
+    ipv4_only: bool,
+    ipv6_only: bool,
+    config_value: Option<&str>,
+) -> Result<AddressFamily> {
+    // A specific bind address selects the family before config defaults.
+    if let Some(ip) = bind {
+        if ip.is_unspecified() {
+            anyhow::bail!(
+                "--bind {} is an unspecified address; use -4/-6 instead to control address family",
+                ip
+            );
+        }
+        if ipv4_only && ip.is_ipv6() {
+            anyhow::bail!("--bind {} is IPv6 but -4/--ipv4 forces IPv4", ip);
+        }
+        if ipv6_only && ip.is_ipv4() {
+            anyhow::bail!("--bind {} is IPv4 but -6/--ipv6 forces IPv6", ip);
+        }
+        return Ok(if ip.is_ipv4() {
+            AddressFamily::V4Only
+        } else {
+            AddressFamily::V6Only
+        });
+    }
+    resolve_address_family(ipv4_only, ipv6_only, config_value, "server.address_family")
+}
+
 /// Parse a bind address string (can be "IP" or "IP:port")
 fn parse_bind_address(s: &str) -> anyhow::Result<std::net::SocketAddr> {
     use std::net::SocketAddr;
@@ -1116,37 +1166,12 @@ async fn main() -> Result<()> {
                 )?,
             };
 
-            // Determine address family
-            // When --bind is specified, derive family from the IP and validate
-            // against -4/-6 to prevent contradictions (e.g., --bind 127.0.0.1 -6)
-            let address_family = if let Some(ip) = bind {
-                if ip.is_unspecified() {
-                    anyhow::bail!(
-                        "--bind {} is an unspecified address; use -4/-6 instead to control address family",
-                        ip
-                    );
-                }
-                let derived = if ip.is_ipv4() {
-                    xfr::net::AddressFamily::V4Only
-                } else {
-                    xfr::net::AddressFamily::V6Only
-                };
-                if ipv4_only && ip.is_ipv6() {
-                    anyhow::bail!("--bind {} is IPv6 but -4/--ipv4 forces IPv4", ip);
-                }
-                if ipv6_only && ip.is_ipv4() {
-                    anyhow::bail!("--bind {} is IPv4 but -6/--ipv6 forces IPv6", ip);
-                }
-                derived
-            } else if ipv4_only {
-                xfr::net::AddressFamily::V4Only
-            } else if ipv6_only {
-                xfr::net::AddressFamily::V6Only
-            } else if let Some(ref af) = file_config.server.address_family {
-                af.parse().unwrap_or_default()
-            } else {
-                xfr::net::AddressFamily::default()
-            };
+            let address_family = resolve_server_address_family(
+                bind,
+                ipv4_only,
+                ipv6_only,
+                file_config.server.address_family.as_deref(),
+            )?;
 
             let server_no_mdns = no_mdns || file_config.server.no_mdns.unwrap_or(false);
 
@@ -1370,15 +1395,12 @@ async fn main() -> Result<()> {
             }
 
             // Determine address family
-            let client_address_family = if cli.ipv4_only {
-                xfr::net::AddressFamily::V4Only
-            } else if cli.ipv6_only {
-                xfr::net::AddressFamily::V6Only
-            } else if let Some(ref af) = file_config.client.address_family {
-                af.parse().unwrap_or_default()
-            } else {
-                xfr::net::AddressFamily::default()
-            };
+            let client_address_family = resolve_address_family(
+                cli.ipv4_only,
+                cli.ipv6_only,
+                file_config.client.address_family.as_deref(),
+                "client.address_family",
+            )?;
 
             // Parse bind address (can be "IP" or "IP:port")
             let mut bind_addr = if let Some(ref bind_str) = network_options.bind {
@@ -3627,6 +3649,89 @@ mod tests {
         // --cport + QUIC multi-stream → ok (QUIC multiplexes on one socket)
         let result = validate_bind_address(addr, Protocol::Quic, 4, true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn address_family_cli_rejects_contradictory_flags() {
+        for mode in ["host", "serve"] {
+            for flags in [
+                vec!["-4", "-6"],
+                vec!["-6", "-4"],
+                vec!["--ipv4", "--ipv6"],
+                vec!["--ipv6", "--ipv4"],
+                vec!["-46"],
+            ] {
+                let error = Cli::try_parse_from(["xfr", mode].into_iter().chain(flags))
+                    .err()
+                    .expect("contradictory address-family flags should fail");
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            }
+        }
+    }
+
+    #[test]
+    fn address_family_rejects_invalid_effective_config() {
+        for key in ["client.address_family", "server.address_family"] {
+            let error = resolve_address_family(false, false, Some("ip4"), key).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(key));
+            assert!(message.contains("ip4"));
+        }
+    }
+
+    #[test]
+    fn address_family_accepts_valid_config() {
+        // Alias coverage lives with `AddressFamily::from_str` in net.rs.
+        let key = "client.address_family";
+        let resolve = |value| resolve_address_family(false, false, value, key).unwrap();
+        assert_eq!(resolve(Some("IPv6")), AddressFamily::V6Only);
+        assert_eq!(resolve(None), AddressFamily::DualStack);
+    }
+
+    #[test]
+    fn address_family_cli_overrides_unused_invalid_config() {
+        for key in ["client.address_family", "server.address_family"] {
+            assert_eq!(
+                resolve_address_family(true, false, Some("ip4"), key).unwrap(),
+                AddressFamily::V4Only,
+            );
+            assert_eq!(
+                resolve_address_family(false, true, Some("ip4"), key).unwrap(),
+                AddressFamily::V6Only,
+            );
+        }
+        for mode in ["host", "serve"] {
+            for flag in ["-4", "-6", "--ipv4", "--ipv6"] {
+                assert!(Cli::try_parse_from(["xfr", mode, flag]).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn address_family_server_bind_overrides_unused_config() {
+        for (ip, expected) in [
+            ("127.0.0.1", AddressFamily::V4Only),
+            ("::1", AddressFamily::V6Only),
+        ] {
+            assert_eq!(
+                resolve_server_address_family(Some(ip.parse().unwrap()), false, false, Some("ip4"))
+                    .unwrap(),
+                expected,
+            );
+        }
+        assert!(
+            resolve_server_address_family(Some("127.0.0.1".parse().unwrap()), false, true, None)
+                .is_err()
+        );
+        assert!(
+            resolve_server_address_family(Some("::1".parse().unwrap()), true, false, None).is_err()
+        );
+        for ip in ["0.0.0.0", "::"] {
+            assert!(
+                resolve_server_address_family(Some(ip.parse().unwrap()), false, false, None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

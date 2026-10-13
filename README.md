@@ -474,6 +474,12 @@ chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` override the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
+The `address_family` setting accepts `ipv4`, `ipv6`, or `dual`, including existing
+aliases such as `4`, `6`, and `both`. Unknown effective values are rejected.
+`-4`/`--ipv4` and `-6`/`--ipv6` override config defaults and cannot be used together.
+A specific server `--bind` address also selects its address family; any `-4`/`-6`
+flag must agree with that address.
+
 Environment variables override config file:
 
 ```bash
