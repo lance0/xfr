@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **Cancelling a legacy UDP reverse or bidirectional test before data flowed delayed the summary** — on the legacy per-stream UDP path (older clients, or a server whose single-port self-test failed), the server waits for the client's first datagram to learn its address, and that wait ignored Cancel. If the datagram never arrived, the summary came up to 10 seconds late, after the client had already given up waiting. Cancel now ends the wait immediately.
 
 ## [0.10.1] - 2026-09-04
 
