@@ -29,19 +29,15 @@ pub struct StreamStats {
     pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
-    pub udp_lost: AtomicU64,      // Unfilled sequence gaps; late packets can reduce this
     pub last_udp_lost: AtomicU64, // For interval calculation
-    /// Cumulative UDP packets received on this stream — counted only on
-    /// successful header decode and sequence deduplication. Junk/foreign datagrams
-    /// still bump `bytes_received` because they consumed wire bandwidth, but
-    /// must not dilute the loss denominator. Used by the aggregator to
-    /// compute a running loss percentage that matches what the sequence
-    /// tracker actually saw.
-    pub udp_packets_received: AtomicU64,
-    /// Serialize receiver updates and snapshots of the pair. A repaired gap
-    /// increases received while decreasing lost, so two independent atomic
+    /// Cumulative UDP packets received on this stream and unfilled sequence
+    /// gaps (late packets can reduce lost). Received counts only decoded,
+    /// deduplicated packets: junk/foreign datagrams still bump
+    /// `bytes_received` because they consumed wire bandwidth, but must not
+    /// dilute the loss denominator. Kept behind one lock because a repaired
+    /// gap increases received while decreasing lost, so two independent
     /// loads could otherwise observe an impossible denominator.
-    udp_progress_lock: Mutex<()>,
+    udp_progress: Mutex<UdpIntervalProgress>,
     /// Mid-test UDP send failures on this stream (teardown-window errors
     /// excluded) and the most recent message, reported in the final result.
     udp_send_errors: Mutex<Option<UdpSendErrors>>,
@@ -93,10 +89,8 @@ impl StreamStats {
             last_bytes_received: AtomicU64::new(0),
             last_tcp_retransmits: AtomicU64::new(0),
             udp_jitter_us: AtomicU64::new(0),
-            udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
-            udp_packets_received: AtomicU64::new(0),
-            udp_progress_lock: Mutex::new(()),
+            udp_progress: Mutex::new(UdpIntervalProgress::default()),
             udp_send_errors: Mutex::new(None),
             tcp_info_fd: AtomicI32::new(-1),
             final_tcp_info: Mutex::new(None),
@@ -172,35 +166,18 @@ impl StreamStats {
         self.udp_jitter_us.store(jitter_us, Ordering::Relaxed);
     }
 
-    /// Add lost packets to cumulative count
-    pub fn add_udp_lost(&self, count: u64) {
-        let _guard = self.udp_progress_lock.lock();
-        self.udp_lost.fetch_add(count, Ordering::Relaxed);
-    }
-
-    /// Add to cumulative UDP packets-received count.
-    pub fn add_udp_received(&self, count: u64) {
-        let _guard = self.udp_progress_lock.lock();
-        self.udp_packets_received
-            .fetch_add(count, Ordering::Relaxed);
-    }
-
     /// Publish the receiver's unique packet count and current unfilled gaps
     /// together. Unlike received, lost may decrease when a late packet arrives.
     pub fn set_udp_progress(&self, received: u64, lost: u64) {
-        let _guard = self.udp_progress_lock.lock();
-        self.udp_packets_received.store(received, Ordering::Relaxed);
-        self.udp_lost.store(lost, Ordering::Relaxed);
+        *self.udp_progress.lock() = UdpIntervalProgress {
+            packets_received: received,
+            packets_lost: lost,
+        };
     }
 
-    /// Snapshot a coherent UDP `(received, lost)` pair. Receiver updates use
-    /// `set_udp_progress` rather than writing the public counters separately.
+    /// Snapshot a coherent UDP `(received, lost)` pair.
     pub fn udp_progress_snapshot(&self) -> UdpIntervalProgress {
-        let _guard = self.udp_progress_lock.lock();
-        UdpIntervalProgress {
-            packets_received: self.udp_packets_received.load(Ordering::Relaxed),
-            packets_lost: self.udp_lost.load(Ordering::Relaxed),
-        }
+        *self.udp_progress.lock()
     }
 
     /// Get current jitter in milliseconds
@@ -254,10 +231,10 @@ impl StreamStats {
             0.0
         };
 
-        // UDP stats for this interval. Snapshot the live atomics here, at
+        // UDP stats for this interval. Snapshot the live counters here, at
         // the same moment we capture per-interval deltas, and stash them in
         // `IntervalStats` so the aggregator pulls cumulative counts from a
-        // consistent point in time. Re-reading the atomics later in
+        // consistent point in time. Re-reading the counters later in
         // `to_aggregate_with_direction` would attribute packets that arrived
         // between the two reads to the wrong sparkline sample.
         let jitter_ms = self.udp_jitter_ms();
@@ -894,8 +871,8 @@ mod tests {
     #[test]
     fn observed_zero_udp_jitter_is_distinct_from_an_unknown_stream() {
         let stats = TestStats::new("jitter".to_string(), 3);
-        stats.streams[0].add_udp_received(10);
-        stats.streams[1].add_udp_received(10);
+        stats.streams[0].set_udp_progress(10, 0);
+        stats.streams[1].set_udp_progress(10, 0);
         stats.streams[1].set_udp_jitter_us(2000);
         let mut intervals = stats.record_intervals();
 

@@ -24,8 +24,8 @@ fn live_loss_path_carries_through_to_app_state() {
     let stats = TestStats::new("live-path".to_string(), 2);
 
     // Interval 1: 600 received total, 0 lost.
-    stats.streams[0].add_udp_received(300);
-    stats.streams[1].add_udp_received(300);
+    stats.streams[0].set_udp_progress(300, 0);
+    stats.streams[1].set_udp_progress(300, 0);
     let intervals_1: Vec<_> = stats.streams.iter().map(|s| s.record_interval()).collect();
     let agg_1 = stats.to_aggregate_with_direction(&intervals_1, false);
     let progress_1 = roundtrip_via_wire(&agg_1);
@@ -46,10 +46,8 @@ fn live_loss_path_carries_through_to_app_state() {
     // Interval 2: +400 received, +100 lost across the two streams. So
     // cumulative is 100/(1000+100) ≈ 9.09%, and the per-interval delta
     // is 100 lost / 500 packets in window = 20% — heavy, error-tinted.
-    stats.streams[0].add_udp_received(200);
-    stats.streams[0].add_udp_lost(40);
-    stats.streams[1].add_udp_received(200);
-    stats.streams[1].add_udp_lost(60);
+    stats.streams[0].set_udp_progress(500, 40);
+    stats.streams[1].set_udp_progress(500, 60);
     let intervals_2: Vec<_> = stats.streams.iter().map(|s| s.record_interval()).collect();
     let agg_2 = stats.to_aggregate_with_direction(&intervals_2, false);
     let progress_2 = roundtrip_via_wire(&agg_2);
