@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **Cancelling a test could hang when progress updates were not being read** — the client delivered each interval update with a blocking send outside its cancel branch, so once a stalled consumer filled the progress queue, `Client::cancel` was never acted on. Interval delivery now gives way to a cancel request, UDP feedback updates no longer block, and a `Client::run` future that is dropped (a timeout or `select!` around it) now stops its data streams instead of leaving them running. `Client::cancel` returns an error once no run is left to receive it.
 
 ## [0.10.1] - 2026-09-04
 

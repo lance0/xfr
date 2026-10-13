@@ -2113,6 +2113,102 @@ async fn test_udp_infinite_duration_with_cancel() {
 }
 
 #[tokio::test]
+async fn test_dropping_udp_run_closes_progress_channel() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = Client::new(ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        duration: Duration::ZERO,
+        bitrate: Some(1_000_000),
+        ..Default::default()
+    });
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(16);
+    let mut run = Box::pin(client.run(Some(progress_tx)));
+
+    // Wait for a full interval so the local data/feedback tasks are running.
+    // Feedback-only updates may all be suppressed when fresher TCP interval
+    // counters arrive first, but that consumer still owns a progress sender.
+    // Retain Client after dropping its run future, as library callers do
+    // when wrapping a test in a timeout or selecting a different operation.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                result = &mut run => panic!("infinite run ended before feedback: {result:?}"),
+                progress = progress_rx.recv() => {
+                    if !progress.expect("progress channel should remain open").udp_feedback_only {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("UDP upload should emit an interval");
+    drop(run);
+
+    timeout(Duration::from_secs(2), async {
+        while progress_rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("dropping a run should stop background progress producers");
+    drop(client);
+    server.abort();
+}
+
+async fn assert_cancel_with_full_progress_queue(protocol: Protocol, direction: Direction) {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = Client::new(ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol,
+        direction,
+        duration: Duration::ZERO,
+        bitrate: Some(1_000_000),
+        ..Default::default()
+    });
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Box::pin(client.run(Some(progress_tx)));
+
+    // Keep polling the client while withholding reads. The first interval
+    // fills the queue; the second blocks its producer outside select!.
+    tokio::select! {
+        result = &mut run => panic!("infinite run ended before cancel: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(2500)) => {}
+    }
+    assert_eq!(progress_rx.len(), 1, "test should fill the interval queue");
+    client.cancel().expect("test should be running");
+    let result = timeout(Duration::from_secs(2), &mut run)
+        .await
+        .expect("cancellation should interrupt a blocked progress send")
+        .expect("server should return the cancelled test summary");
+    assert!(result.bytes_total > 0);
+    // Keep the stalled receiver alive throughout cancellation; dropping it
+    // would independently unblock send() and mask the regression.
+    drop(progress_rx);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_tcp_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Tcp, Direction::Upload).await;
+}
+
+#[tokio::test]
+async fn test_quic_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Quic, Direction::Upload).await;
+}
+
+#[tokio::test]
+async fn test_udp_download_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Udp, Direction::Download).await;
+}
+
+#[tokio::test]
 async fn test_quic_infinite_duration_with_cancel() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
