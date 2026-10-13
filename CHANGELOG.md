@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **`--theme default` was ignored, and `NO_COLOR` made monochrome stick** — an explicit `--theme default` was treated as no choice, so it could not override a config or saved theme, and the client TUI saved whatever palette it ended on, so one run under `NO_COLOR` wrote `theme = "monochrome"` to `prefs.toml` for every later run. Only palettes changed in the TUI are saved now. `--theme` is also accepted after `serve --tui`, and aliases such as `mono` select the right entry in Settings.
 
 ## [0.10.1] - 2026-09-04
 
