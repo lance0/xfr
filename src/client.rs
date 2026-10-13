@@ -19,6 +19,23 @@ const STREAM_JOIN_TIMEOUT_PER_STREAM_MS: u64 = 50;
 const SINGLE_PORT_HANDSHAKE_FANOUT_MAX: usize = 16;
 const CONTROL_CANCEL_RESULT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Cancel local traffic and abort the control reader when a timeout or select
+/// drops this run's future. Client retains watch senders for its public controls,
+/// so dropping the run future alone does not close the cancellation channel.
+struct ClientRunCleanup {
+    cancel_tx: watch::Sender<bool>,
+    control_reader: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for ClientRunCleanup {
+    fn drop(&mut self) {
+        let _ = self.cancel_tx.send(true);
+        if let Some(reader) = &self.control_reader {
+            reader.abort();
+        }
+    }
+}
+
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
         Duration::from_millis(u64::from(streams).saturating_mul(STREAM_JOIN_TIMEOUT_PER_STREAM_MS));
@@ -53,6 +70,24 @@ fn start_control_cancel_wait(
     // Cancel is no longer pause time: keep the post-cancel response wait
     // bounded even if the user cancels while the test is paused.
     *pause_started_at = None;
+}
+
+async fn send_control_cancel<W>(
+    codec: &mut crate::control_crypto::ControlWriter,
+    writer: &mut W,
+    serialized: &str,
+    cancel_tx: &watch::Sender<bool>,
+    deadline: &mut tokio::time::Instant,
+    pause_started_at: &mut Option<tokio::time::Instant>,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // Stop local traffic before notifying the server. A dead TCP link or
+    // flow-controlled QUIC stream must not delay cancellation, including
+    // while paused (issue #159). The write and result share one deadline.
+    start_control_cancel_wait(tokio::time::Instant::now(), deadline, pause_started_at);
+    let _ = cancel_tx.send(true);
+    let _ = tokio::time::timeout_at(*deadline, codec.write_message(writer, serialized)).await;
 }
 
 /// Per-stream and total receive-byte deltas since the previous call,
@@ -252,6 +287,9 @@ pub struct ClientConfig {
     pub duration: Duration,
     pub direction: Direction,
     pub bitrate: Option<u64>,
+    /// Complete UDP payload size (`-l`), including the xfr header.
+    /// None preserves the 1400-byte default and compatibility with older servers.
+    pub udp_payload_size: Option<u16>,
     pub tcp_nodelay: bool,
     pub tcp_congestion: Option<String>,
     pub window_size: Option<usize>,
@@ -302,6 +340,7 @@ impl Default for ClientConfig {
             duration: Duration::from_secs(10),
             direction: Direction::Upload,
             bitrate: None,
+            udp_payload_size: None,
             tcp_nodelay: false,
             tcp_congestion: None,
             window_size: None,
@@ -323,6 +362,23 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// Validate settings before DNS resolution or socket creation.
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=128).contains(&self.streams),
+            "parallel stream count must be between 1 and 128 (got {})",
+            self.streams
+        );
+        anyhow::ensure!(
+            self.duration.as_secs() <= u64::from(u32::MAX),
+            "test duration must be at most {} seconds (use 0 for infinite)",
+            u32::MAX
+        );
+        if let Some(size) = self.udp_payload_size {
+            anyhow::ensure!(
+                !self.mtu_probe,
+                "--length cannot be combined with --probe-mtu"
+            );
+            udp::validate_payload_size(usize::from(size))?;
+        }
         if let Some(psk) = self.psk.as_deref() {
             auth::validate_psk(psk)?;
         }
@@ -359,6 +415,27 @@ pub struct TestProgress {
     /// most recent full interval — the feedback-only update knows nothing
     /// about throughput, byte counts, retransmits, RTT, or jitter.
     pub udp_feedback_only: bool,
+}
+
+async fn send_progress_until_cancelled(
+    tx: &mpsc::Sender<TestProgress>,
+    progress: TestProgress,
+    cancel_request: &watch::Receiver<bool>,
+) {
+    // Preserve backpressure for interval byte deltas, but let cancellation
+    // interrupt a stalled consumer. Observe a clone so the control loop's
+    // receiver still sees the request and can send Cancel to the server.
+    let mut cancellation = cancel_request.clone();
+    tokio::select! {
+        biased;
+        _ = async {
+            if cancellation.wait_for(|requested| *requested).await.is_err() {
+                // A closed request channel is not an affirmative cancel.
+                std::future::pending::<()>().await;
+            }
+        } => {}
+        _ = tx.send(progress) => {}
+    }
 }
 
 /// Producer-side monotonic-denominator filter. Both the TCP control
@@ -400,6 +477,8 @@ impl UdpProgressFilter {
         let denom = progress
             .packets_received
             .saturating_add(progress.packets_lost);
+        // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
+        #[allow(deprecated)]
         let result = self.max_denominator.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
@@ -483,27 +562,28 @@ fn spawn_udp_feedback_consumer(
                     }
                     if let Some(filtered) = filter.apply(aggregate) {
                         let elapsed_ms = start.elapsed().as_millis() as u64;
-                        // Feedback-only update: udp_progress carries the
-                        // truth, every other field is sentinel/None and
-                        // consumers preserve their last full-interval
-                        // values.
-                        let _ = tx
-                            .send(TestProgress {
-                                elapsed_ms,
-                                total_bytes: 0,
-                                throughput_mbps: 0.0,
-                                streams: Vec::new(),
-                                rtt_us: None,
-                                cwnd: None,
-                                total_retransmits: None,
-                                bytes_sent: None,
-                                bytes_received: None,
-                                throughput_send_mbps: None,
-                                throughput_recv_mbps: None,
-                                udp_progress: Some(filtered),
-                                udp_feedback_only: true,
-                            })
-                            .await;
+                        // Only udp_progress carries data in a feedback-only
+                        // update. Its cumulative counters can be retried next
+                        // tick if the queue is full; blocking here would keep
+                        // cancellation from stopping a stalled consumer.
+                        match tx.try_send(TestProgress {
+                            elapsed_ms,
+                            total_bytes: 0,
+                            throughput_mbps: 0.0,
+                            streams: Vec::new(),
+                            rtt_us: None,
+                            cwnd: None,
+                            total_retransmits: None,
+                            bytes_sent: None,
+                            bytes_received: None,
+                            throughput_send_mbps: None,
+                            throughput_recv_mbps: None,
+                            udp_progress: Some(filtered),
+                            udp_feedback_only: true,
+                        }) {
+                            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
                     }
                 }
                 result = cancel.changed() => {
@@ -568,6 +648,14 @@ impl Client {
         if self.config.protocol != Protocol::Tcp && self.config.tcp_congestion.is_some() {
             warn!(
                 "--congestion is only supported for TCP; ignoring for {}",
+                self.config.protocol
+            );
+        }
+        // The TUI settings modal can switch a `-u -l` run to TCP or QUIC;
+        // keep the size for a later switch back instead of failing the run.
+        if self.config.protocol != Protocol::Udp && self.config.udp_payload_size.is_some() {
+            warn!(
+                "--length is only supported for UDP; ignoring for {}",
                 self.config.protocol
             );
         }
@@ -786,6 +874,22 @@ impl Client {
         let server_supports_udp_feedback =
             crate::protocol::capability_advertised(&server_capabilities, "udp_feedback_v1");
 
+        let udp_payload_size = self
+            .config
+            .udp_payload_size
+            .filter(|_| self.config.protocol == Protocol::Udp);
+        if udp_payload_size.is_some()
+            && !crate::protocol::capability_advertised(
+                &server_capabilities,
+                crate::protocol::UDP_PAYLOAD_SIZE_CAPABILITY,
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Server does not support UDP payload sizes (udp_payload_size_v1 capability missing); \
+                 upgrade the server to use -l/--length"
+            ));
+        }
+
         // Zero-copy on the server's sends (download/bidir) rides on the
         // TestStart.zerocopy field; servers predating zerocopy_v1 silently
         // ignore it. Only an explicit -Z warns about that — with the
@@ -854,6 +958,7 @@ impl Client {
             mtu_probe: self.config.mtu_probe,
             tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
             byte_budget: self.config.byte_budget,
+            udp_payload_size,
         };
         transport
             .write_message(&mut writer, &test_start.serialize()?)
@@ -939,6 +1044,10 @@ impl Client {
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
+        let mut run_cleanup = ClientRunCleanup {
+            cancel_tx: cancel_tx.clone(),
+            control_reader: None,
+        };
         // Producer-side monotonic-denominator filter shared by the TCP
         // control udp_progress decode path and the UDP feedback aggregator.
         // Either source can update the consumer-visible loss reading; the
@@ -1076,6 +1185,7 @@ impl Client {
         // (inside select!) loses buffered bytes from the AsyncBufRead reader.
         let (ctrl_reader_half, mut ctrl_writer) = transport.split();
         let (mut cmd_rx, control_handle) = spawn_client_control_reader(reader, ctrl_reader_half);
+        run_cleanup.control_reader = Some(control_handle.abort_handle());
         let mut cancel_request_open = true;
         let mut pause_request_open = true;
 
@@ -1162,8 +1272,9 @@ impl Client {
                                         let filtered_udp_progress = aggregate
                                             .udp_progress
                                             .and_then(|p| udp_progress_filter.apply(p));
-                                        let _ = tx
-                                            .send(TestProgress {
+                                        send_progress_until_cancelled(
+                                            tx,
+                                            TestProgress {
                                                 elapsed_ms,
                                                 total_bytes,
                                                 throughput_mbps,
@@ -1177,8 +1288,9 @@ impl Client {
                                                 throughput_recv_mbps,
                                                 udp_progress: filtered_udp_progress,
                                                 udp_feedback_only: false,
-                                            })
-                                            .await;
+                                            },
+                                            &cancel_request_rx,
+                                        ).await;
                                     }
                                 }
                                 ControlMessage::Result(mut result) => {
@@ -1244,22 +1356,15 @@ impl Client {
                                 break;
                             }
                         };
-                        // Arm the post-cancel deadline before writing, and
-                        // bound the write itself: on an effectively-dead link
-                        // (issue #159) the control socket's send buffer can be
-                        // full, and an unbounded write here would hang this
-                        // loop with only the test-duration deadline armed.
-                        start_control_cancel_wait(
-                            tokio::time::Instant::now(),
+                        send_control_cancel(
+                            &mut ctrl_writer,
+                            &mut writer,
+                            &serialized,
+                            &cancel_tx,
                             &mut deadline,
                             &mut pause_started_at,
-                        );
-                        let _ = tokio::time::timeout(
-                            CONTROL_CANCEL_RESULT_TIMEOUT,
-                            ctrl_writer.write_message(&mut writer, &serialized),
                         )
                         .await;
-                        let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
                     }
                 }
@@ -1360,8 +1465,9 @@ impl Client {
                             .elapsed()
                             .saturating_sub(paused_total)
                             .as_millis() as u64;
-                        let _ = tx
-                            .send(TestProgress {
+                        send_progress_until_cancelled(
+                            tx,
+                            TestProgress {
                                 elapsed_ms,
                                 total_bytes: interval_total,
                                 throughput_mbps,
@@ -1376,8 +1482,9 @@ impl Client {
                                 udp_progress: udp_progress_filter
                                     .apply(udp_local_progress(&stats)),
                                 udp_feedback_only: false,
-                            })
-                            .await;
+                            },
+                            &cancel_request_rx,
+                        ).await;
                     }
                 }
                 _ = tokio::time::sleep_until(deadline), if pause_started_at.is_none() => {
@@ -1810,6 +1917,10 @@ impl Client {
         )?;
 
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
+        let packet_size = self
+            .config
+            .udp_payload_size
+            .map_or(udp::UDP_PAYLOAD_SIZE, usize::from);
 
         // Calculate per-stream bitrate, clamping to at least 1 bps to prevent
         // integer division underflow (e.g., 100 bps / 8 streams = 12 bps, not 0)
@@ -1869,6 +1980,7 @@ impl Client {
                         direction,
                         duration,
                         stream_bitrate,
+                        packet_size,
                         random_payload,
                         stream_stats,
                         test_stats,
@@ -1958,6 +2070,7 @@ impl Client {
                     direction,
                     duration,
                     stream_bitrate,
+                    packet_size,
                     random_payload,
                     stream_stats,
                     test_stats,
@@ -2249,6 +2362,7 @@ impl Client {
             mtu_probe: false,   // probe mode is UDP-only
             tcp_nodelay: false, // QUIC manages its own transport; Nagle is a TCP concept
             byte_budget: self.config.byte_budget,
+            udp_payload_size: None,
         };
         transport
             .write_message(&mut ctrl_send, &test_start.serialize()?)
@@ -2274,6 +2388,10 @@ impl Client {
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
+        let mut run_cleanup = ClientRunCleanup {
+            cancel_tx: cancel_tx.clone(),
+            control_reader: None,
+        };
 
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
         *self.cancel_request_tx.lock() = Some(cancel_request_tx);
@@ -2407,6 +2525,7 @@ impl Client {
         let (ctrl_reader_half, mut ctrl_writer) = transport.split();
         let (mut cmd_rx, control_handle) =
             spawn_client_control_reader(ctrl_reader, ctrl_reader_half);
+        run_cleanup.control_reader = Some(control_handle.abort_handle());
         let mut cancel_request_open = true;
         let mut pause_request_open = true;
 
@@ -2447,8 +2566,9 @@ impl Client {
                                         ..
                                     } => {
                                         if let Some(ref tx) = progress_tx {
-                                            let _ = tx
-                                                .send(TestProgress {
+                                            send_progress_until_cancelled(
+                                                tx,
+                                                TestProgress {
                                                     elapsed_ms,
                                                     total_bytes: aggregate.bytes,
                                                     throughput_mbps: aggregate.throughput_mbps,
@@ -2462,8 +2582,9 @@ impl Client {
                                                     throughput_recv_mbps: aggregate.throughput_recv_mbps,
                                                     udp_progress: aggregate.udp_progress,
                                                     udp_feedback_only: false,
-                                                })
-                                                .await;
+                                                },
+                                                &cancel_request_rx,
+                                            ).await;
                                         }
                                     }
                                     ControlMessage::Result(result) => {
@@ -2514,13 +2635,14 @@ impl Client {
                                     break 'control Err(e);
                                 }
                             };
-                            let _ = ctrl_writer.write_message(&mut ctrl_send, &serialized).await;
-                            let _ = cancel_tx.send(true);
-                            start_control_cancel_wait(
-                                tokio::time::Instant::now(),
+                            send_control_cancel(
+                                &mut ctrl_writer,
+                                &mut ctrl_send,
+                                &serialized,
+                                &cancel_tx,
                                 &mut deadline,
                                 &mut pause_started_at,
-                            );
+                            ).await;
                         }
                     }
                     res = pause_request_rx.changed(), if pause_request_open => {
@@ -2626,11 +2748,12 @@ impl Client {
     ///
     /// This sends a Cancel message to the server and signals local data stream
     /// handlers to stop. The server will respond with a Cancelled message.
+    /// Returns an error if no active run can receive the request.
     pub fn cancel(&self) -> anyhow::Result<()> {
         // Signal the control loop to send a Cancel message to server
         if let Some(tx) = self.cancel_request_tx.lock().as_ref() {
-            let _ = tx.send(true);
-            Ok(())
+            tx.send(true)
+                .map_err(|_| anyhow::anyhow!("No test is currently running"))
         } else {
             Err(anyhow::anyhow!("No test is currently running"))
         }
@@ -2666,6 +2789,7 @@ async fn run_udp_stream_io(
     direction: Direction,
     duration: Duration,
     stream_bitrate: u64,
+    packet_size: usize,
     random_payload: bool,
     stream_stats: Arc<crate::stats::StreamStats>,
     test_stats: Arc<TestStats>,
@@ -2699,6 +2823,7 @@ async fn run_udp_stream_io(
                         send_socket,
                         None,
                         stream_bitrate,
+                        packet_size,
                         duration,
                         stream_stats,
                         send_cancel,
@@ -2728,6 +2853,7 @@ async fn run_udp_stream_io(
                 socket,
                 None, // Connected socket, no target needed
                 stream_bitrate,
+                packet_size,
                 duration,
                 stream_stats,
                 cancel,
@@ -2789,6 +2915,7 @@ async fn run_udp_stream_io(
                     send_socket,
                     None, // Connected socket, no target needed
                     stream_bitrate,
+                    packet_size,
                     duration,
                     send_stats,
                     send_cancel,
@@ -3265,6 +3392,121 @@ mod tests {
     }
 
     #[test]
+    fn cancel_rejects_a_finished_run() {
+        let client = Client::new(ClientConfig::default());
+        let (tx, rx) = watch::channel(false);
+        *client.cancel_request_tx.lock() = Some(tx);
+        // Finishing or dropping run() closes its request receiver while
+        // Client remains alive with the sender for its public controls.
+        drop(rx);
+
+        let error = client.cancel().expect_err("no run can receive this cancel");
+        assert_eq!(error.to_string(), "No test is currently running");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn udp_feedback_consumer_retries_latest_counters_and_cancels_when_full() {
+        let aggregator = Arc::new(Mutex::new(vec![crate::protocol::UdpIntervalProgress {
+            packets_received: 10,
+            packets_lost: 1,
+        }]));
+        let filter = Arc::new(UdpProgressFilter::new());
+        let (progress_tx, mut progress_rx) = mpsc::channel(1);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        spawn_udp_feedback_consumer(aggregator.clone(), filter, Some(progress_tx), cancel_rx);
+
+        // Fill the queue, then let a second feedback tick encounter pressure.
+        tokio::task::yield_now().await;
+        aggregator.lock()[0].packets_received = 20;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let first = progress_rx.recv().await.unwrap();
+        assert_eq!(first.udp_progress.unwrap().packets_received, 10);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        // The next cumulative update fills the queue. Leave it full for
+        // another tick, then cancel without making room for a new update.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        cancel_tx.send(true).unwrap();
+        tokio::task::yield_now().await;
+
+        let latest = progress_rx.recv().await.unwrap();
+        assert!(latest.udp_feedback_only);
+        assert_eq!(latest.udp_progress.unwrap().packets_received, 20);
+        let next = tokio::time::timeout(Duration::from_secs(1), progress_rx.recv())
+            .await
+            .expect("cancelled feedback consumer should release its progress sender");
+        assert!(
+            next.is_none(),
+            "no feedback should be queued after cancellation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interval_progress_preserves_backpressure_and_leaves_cancel_unseen() {
+        let progress = TestProgress {
+            elapsed_ms: 1_000,
+            total_bytes: 10,
+            throughput_mbps: 0.00008,
+            streams: Vec::new(),
+            rtt_us: None,
+            cwnd: None,
+            total_retransmits: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            udp_progress: None,
+            udp_feedback_only: false,
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        tx.send(progress.clone()).await.unwrap();
+        let next_progress = TestProgress {
+            elapsed_ms: 2_000,
+            total_bytes: 20,
+            throughput_mbps: 0.00016,
+            ..progress.clone()
+        };
+
+        {
+            let send = send_progress_until_cancelled(&tx, next_progress.clone(), &cancel_rx);
+            tokio::pin!(send);
+            tokio::select! {
+                _ = &mut send => panic!("full interval queue should apply backpressure"),
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            assert_eq!(rx.recv().await.unwrap().total_bytes, 10);
+            send.await;
+            assert_eq!(rx.recv().await.unwrap().total_bytes, 20);
+        }
+
+        tx.send(progress.clone()).await.unwrap();
+        {
+            let send = send_progress_until_cancelled(&tx, next_progress, &cancel_rx);
+            tokio::pin!(send);
+            tokio::select! {
+                _ = &mut send => panic!("full interval queue should apply backpressure"),
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            cancel_tx.send(true).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), send)
+                .await
+                .expect("cancellation should unblock interval delivery");
+        }
+        assert!(cancel_rx.has_changed().unwrap());
+        cancel_rx.changed().await.unwrap();
+        assert!(*cancel_rx.borrow());
+        assert_eq!(rx.recv().await.unwrap().total_bytes, 10);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn udp_progress_filter_accepts_first_update() {
         let f = UdpProgressFilter::new();
         let p = UdpIntervalProgress {
@@ -3401,6 +3643,66 @@ mod tests {
         );
     }
 
+    async fn assert_stalled_cancel_is_bounded(mut codec: crate::control_crypto::ControlWriter) {
+        // One byte of capacity forces both plaintext and protected frames
+        // to block mid-write, as a QUIC stream with exhausted credit does.
+        let (mut writer, _unread_peer) = tokio::io::duplex(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let mut deadline = started + Duration::from_secs(60);
+        let mut pause_started_at = Some(started);
+        let serialized = ControlMessage::Cancel {
+            id: "test-id".to_string(),
+            reason: "User requested cancellation".to_string(),
+        }
+        .serialize()
+        .unwrap();
+
+        {
+            let send = send_control_cancel(
+                &mut codec,
+                &mut writer,
+                &serialized,
+                &cancel_tx,
+                &mut deadline,
+                &mut pause_started_at,
+            );
+            tokio::pin!(send);
+            tokio::time::timeout(CONTROL_CANCEL_RESULT_TIMEOUT + Duration::from_secs(1), async {
+                tokio::select! {
+                    result = cancel_rx.changed() => result.unwrap(),
+                    _ = &mut send => panic!("stalled write returned before stopping data streams"),
+                }
+                assert!(*cancel_rx.borrow());
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                send.await;
+            })
+            .await
+            .expect("cancel write should be bounded even when the peer stops reading");
+        }
+
+        assert_eq!(started.elapsed(), CONTROL_CANCEL_RESULT_TIMEOUT);
+        assert_eq!(deadline, started + CONTROL_CANCEL_RESULT_TIMEOUT);
+        assert!(pause_started_at.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_plaintext_cancel_stops_streams_and_times_out() {
+        assert_stalled_cancel_is_bounded(crate::control_crypto::ControlWriter::Plaintext).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_protected_cancel_stops_streams_and_times_out() {
+        let (send, _) = crate::control_crypto::ControlCodec::derive_pair(
+            "deadbeef",
+            "cafebabe",
+            "shared-secret",
+        )
+        .unwrap();
+        assert_stalled_cancel_is_bounded(crate::control_crypto::ControlWriter::Protected { send })
+            .await;
+    }
+
     #[test]
     fn test_control_bind_addr_uses_ephemeral_port_for_tcp_cport() {
         let config = ClientConfig {
@@ -3453,5 +3755,54 @@ mod tests {
         let error = Client::new(config).run(None).await.unwrap_err();
 
         assert!(error.to_string().contains("PSK cannot be empty"));
+    }
+
+    #[test]
+    fn config_rejects_invalid_parallel_stream_count() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for streams in [0, 129, 255] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_err(), "accepted {streams} streams");
+            }
+            for streams in [1, 128] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn config_rejects_wrapping_protocol_duration() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for seconds in [u64::from(u32::MAX) + 1, u64::MAX] {
+                let config = ClientConfig {
+                    protocol,
+                    duration: Duration::from_secs(seconds),
+                    ..Default::default()
+                };
+                assert!(config.validate().is_err());
+            }
+            for duration in [
+                Duration::ZERO,
+                Duration::from_millis(500),
+                Duration::from_millis(1500),
+                Duration::new(u64::from(u32::MAX), 999_999_999),
+            ] {
+                let config = ClientConfig {
+                    protocol,
+                    duration,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_ok());
+            }
+        }
     }
 }

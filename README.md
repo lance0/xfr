@@ -282,7 +282,22 @@ xfr ::1 -6                   # IPv6 localhost
 xfr 192.168.1.1 -u           # UDP mode
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 xfr 192.168.1.1 -u -b 100M   # UDP at 100 Mbps
+xfr 192.168.1.1 -u -b 60M -l 1368  # Smaller datagrams for a 1420-MTU tunnel
 ```
+
+`-l/--length` sets the complete UDP payload size, including xfr's 16-byte
+sequence/timestamp header (16–65507 bytes; default 1400). It applies in both
+directions and across all streams. Both peers must support `udp_payload_size_v1`;
+an explicit size fails with an upgrade message against an older server.
+
+Choose a size that fits the path: allow 28 bytes for IPv4 + UDP headers or
+48 bytes for IPv6 + UDP headers, plus any IP options or extension headers.
+For example, 1368 fits a 1420-byte MTU with either address family's basic headers.
+Use `--probe-mtu` separately to find the largest payload that survives each
+direction, then pass the smaller result to `-l`. The default remains 1400;
+throughput tests do not automatically probe or adjust the size. JSON
+`udp_stats.packet_size` reports the largest valid datagram received, or is absent
+when no data arrived.
 
 ### QUIC Mode
 
@@ -359,6 +374,9 @@ xfr discover --timeout 10s   # Extended search
 | `j` | Print JSON result |
 | `u` | Dismiss update notification |
 
+The Display settings' Timestamp choice reformats history immediately.
+`--timestamp-format` selects its initial format.
+
 ## Keybindings (Server TUI)
 
 | Key | Action |
@@ -384,7 +402,8 @@ The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
 the terminal's own default colors at maximum contrast, so it works on both
 dark and light terminal backgrounds — pair it with a light background at full
 brightness when working in direct sunlight. Loss severity in the throughput
-graph is always also encoded without color — light loss underlines the bar,
+graph is always also encoded without color — light loss underlines the bar
+(or the baseline when throughput is zero or too small to draw),
 and in a theme with no hue to spend heavy loss additionally stipples the empty
 cells above it, marking the whole column while the bar keeps its true height —
 so lossy intervals stay visible through glare, in monochrome, and for
@@ -393,9 +412,13 @@ colorblind users. Setting the standard
 automatically unless a theme is chosen explicitly.
 
 Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
-in the same platform configuration directory. The server dashboard
+in the same platform configuration directory when you change it in the TUI.
+Use `--theme default` to override a config or saved theme for a run. Automatic
+choices, including `NO_COLOR`'s monochrome palette, are not saved.
+The server dashboard
 (`xfr serve --tui`) resolves its palette through the same precedence, so
 `--theme`, a saved preference, and `NO_COLOR` all apply to it too.
+For example: `xfr serve --tui --theme default`.
 
 ## Configuration
 
@@ -407,7 +430,7 @@ xfr reads defaults from:
 ```toml
 [client]
 duration_secs = 10
-parallel_streams = 1
+parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
 tcp_nodelay = false
 window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
 # bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
@@ -433,7 +456,7 @@ no_mdns = false
 address_family = "dual"      # "ipv4", "ipv6", or "dual"
 psk = "my-secret-key"
 rate_limit = 5
-rate_limit_window = 60
+rate_limit_window = 60       # whole seconds; must be at least 1
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
 deny = []
 acl_file = "/path/to/acl.txt"
@@ -453,7 +476,13 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
 chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
 
-The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` override the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
+The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
+
+The `address_family` setting accepts `ipv4`, `ipv6`, or `dual`, including existing
+aliases such as `4`, `6`, and `both`. Unknown effective values are rejected.
+`-4`/`--ipv4` and `-6`/`--ipv6` override config defaults and cannot be used together.
+A specific server `--bind` address also selects its address family; any `-4`/`-6`
+flag must agree with that address.
 
 Environment variables override config file:
 
@@ -461,6 +490,10 @@ Environment variables override config file:
 export XFR_PORT=9000
 export XFR_DURATION=30s
 ```
+
+For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes precedence over
+`server.port` in the config file. If none is set, the server uses port 5201. An explicit
+port of 5201 also overrides the config file.
 
 ## Prometheus Metrics
 
@@ -491,6 +524,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
+| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and server `udp_payload_size_v1` support |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
 | `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
 | `--parallel` | `-P` | 1 | Parallel streams |
@@ -512,7 +546,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
 | `--quiet` | `-q` | false | Summary only |
-| `--interval` | `-i` | 1.0 | Report interval (seconds) |
+| `--interval` | `-i` | 1.0 | Report interval in seconds (must be > 0) |
 | `--omit` | | 0 | Omit first N seconds |
 | `--output` | `-o` | stdout | Output file |
 | `--no-tui` | | false | Disable TUI |
@@ -529,7 +563,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--psk` | | none | Pre-shared key for authentication |
 | `--psk-file` | | none | Read PSK from file |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
-| `--rate-limit-window` | | 60s | Rate limit time window (server) |
+| `--rate-limit-window` | | config or 60s | Rate limit time window in whole seconds, at least 1s (server) |
 | `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |

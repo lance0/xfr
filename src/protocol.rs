@@ -184,6 +184,11 @@ pub enum ControlMessage {
         /// the field and silently run a plain timed test instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         byte_budget: Option<u64>,
+        /// Complete UDP payload size, including the xfr header (`-l`).
+        /// Absent preserves the 1400-byte default. Explicit sizes require
+        /// `udp_payload_size_v1` so older servers cannot silently ignore them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_payload_size: Option<u16>,
     },
     TestAck {
         id: String,
@@ -422,12 +427,13 @@ pub struct UdpStats {
     pub out_of_order: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter_max_ms: Option<f64>,
+    /// Largest valid UDP data payload received; absent when no data arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packet_size: Option<u32>,
 }
 
 /// Timestamp format options for interval output
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TimestampFormat {
     /// Seconds since test start (default): [5.2s]
@@ -440,6 +446,30 @@ pub enum TimestampFormat {
 }
 
 impl TimestampFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Relative => "relative",
+            Self::Iso8601 => "iso8601",
+            Self::Unix => "unix",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Relative => Self::Iso8601,
+            Self::Iso8601 => Self::Unix,
+            Self::Unix => Self::Relative,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Relative => Self::Unix,
+            Self::Iso8601 => Self::Relative,
+            Self::Unix => Self::Iso8601,
+        }
+    }
+
     /// Format a timestamp based on the format type
     ///
     /// # Arguments
@@ -499,11 +529,7 @@ impl std::str::FromStr for TimestampFormat {
 
 impl std::fmt::Display for TimestampFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TimestampFormat::Relative => write!(f, "relative"),
-            TimestampFormat::Iso8601 => write!(f, "iso8601"),
-            TimestampFormat::Unix => write!(f, "unix"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -554,7 +580,11 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // field and runs a timed test, which would silently answer a different
     // question than the one asked.
     BYTE_BUDGET_CAPABILITY,
+    UDP_PAYLOAD_SIZE_CAPABILITY,
 ];
+
+/// Capability for honoring explicit UDP payload sizes (`-l/--length`).
+pub const UDP_PAYLOAD_SIZE_CAPABILITY: &str = "udp_payload_size_v1";
 
 /// Capability string for byte-budget tests (`-n`). Named because both the
 /// client's pre-flight check and the server's hello reference it.
@@ -763,6 +793,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -814,6 +845,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"window_size\":262144"));
@@ -846,6 +878,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         let decoded = ControlMessage::deserialize(&json).unwrap();
@@ -876,6 +909,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         assert!(
@@ -925,6 +959,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: true,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"tcp_nodelay\":true"));
@@ -967,6 +1002,7 @@ mod tests {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size: None,
         };
         let json = msg.serialize().unwrap();
         assert!(json.contains("\"zerocopy\":true"));

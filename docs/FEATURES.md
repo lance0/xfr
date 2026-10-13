@@ -41,10 +41,12 @@ xfr <host> -u                  # UDP mode
 xfr <host> -u -b 1G            # UDP at 1 Gbps
 xfr <host> -u -b 0             # UDP unlimited (flood test - use carefully)
 xfr <host> -u --random         # Random UDP payload bytes
+xfr <host> -u -l 1368          # 1368-byte datagrams (fits a 1420-byte tunnel MTU)
 ```
 
 UDP provides:
 - Configurable bitrate pacing
+- Configurable datagram size (`-l/--length`, 16–65507 bytes including the 16-byte xfr header; default 1400). Pick a size that fits the path MTU — a 1400-byte payload fragments on any path MTU below 1428 bytes (1448 over IPv6), such as WireGuard's 1420 default (issue #213). `--probe-mtu` finds the largest size that survives each direction. Requires a server advertising `udp_payload_size_v1`; older servers are refused rather than silently running at 1400
 - Jitter calculation (RFC 3550)
 - Packet loss detection
 - Out-of-order detection
@@ -131,7 +133,7 @@ The control protocol version is 1.1. Client and server exchange version informat
 
 ### Capability Negotiation
 
-Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, `udp_feedback_v1`, `zerocopy_v1`, `mtu_probe_v1`, `single_port_udp_v1`, `protected_control_v1`, `quic_channel_binding_v1`, and `byte_budget_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port mode); a feature activates only when both peers advertise it. Optional capabilities fall back to the prior behavior with older peers. Mandatory capabilities fail closed instead: PSK requires `protected_control_v1`, QUIC + PSK additionally requires `quic_channel_binding_v1`, and byte-budget tests require `byte_budget_v1`. Both sides of a QUIC + PSK deployment must therefore be upgraded together. The server may withhold an optional capability it can't honor at runtime (e.g. `single_port_udp_v1` when the startup self-test fails).
+Both client and server advertise capabilities in their Hello messages. Current capabilities include: `tcp`, `udp`, `quic`, `multistream`, `single_port_tcp`, `pause_resume`, `udp_feedback_v1`, `zerocopy_v1`, `mtu_probe_v1`, `single_port_udp_v1`, `protected_control_v1`, `quic_channel_binding_v1`, `byte_budget_v1`, and `udp_payload_size_v1`. The server inspects the client's capabilities to determine which features to use (e.g., single-port vs. multi-port mode); a feature activates only when both peers advertise it. Optional capabilities fall back to the prior behavior with older peers. Mandatory capabilities fail closed instead: PSK requires `protected_control_v1`, QUIC + PSK additionally requires `quic_channel_binding_v1`, byte-budget tests require `byte_budget_v1`, and an explicit UDP payload size (`-l`) requires `udp_payload_size_v1`. Both sides of a QUIC + PSK deployment must therefore be upgraded together. The server may withhold an optional capability it can't honor at runtime (e.g. `single_port_udp_v1` when the startup self-test fails).
 
 The `udp_feedback_v1` capability (added in v0.9.14) lets the server send 36-byte cumulative-counts packets back to the client at 2 Hz on the same UDP data socket, providing live UDP loss visibility without depending on the TCP control channel that may be competing for ACKs against a saturated UDP uplink.
 
@@ -363,7 +365,7 @@ no_mdns = false
 address_family = "dual"
 psk = "my-secret-key"
 rate_limit = 5
-rate_limit_window = 60
+rate_limit_window = 60       # whole seconds; must be at least 1
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
 deny = []
 acl_file = "/path/to/acl.txt"
@@ -553,7 +555,7 @@ Compare test results to detect regressions:
 
 ```bash
 xfr diff baseline.json current.json
-xfr diff baseline.json current.json --threshold 5%
+xfr diff baseline.json current.json --threshold 5   # percent; 0 flags any regression
 ```
 
 Exit code:
@@ -604,6 +606,7 @@ See `xfr --help` for complete CLI documentation.
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--udp` | `-u` | false | UDP mode |
+| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and a server with `udp_payload_size_v1` |
 | `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams (unlike iperf3 per-stream) |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |

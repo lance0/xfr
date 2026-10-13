@@ -242,6 +242,8 @@ impl StreamStats {
             0
         };
         if interval_retransmits > 0 {
+            // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
+            #[allow(deprecated)]
             let _ = self.interval_retransmits_total.fetch_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
@@ -374,9 +376,7 @@ impl TestStats {
                 jitter_max = jitter_max.max(max);
                 any_jitter_max = true;
             }
-            if total.packet_size.is_none() {
-                total.packet_size = s.packet_size;
-            }
+            total.packet_size = total.packet_size.max(s.packet_size);
         }
 
         // Average jitter across streams
@@ -881,7 +881,7 @@ mod tests {
             jitter_ms: 1.0,
             out_of_order: 0,
             jitter_max_ms: Some(2.5),
-            packet_size: Some(1400),
+            packet_size: Some(16), // short final datagram on the first stream
         });
         stats.add_udp_stats(UdpStats {
             packets_sent: 100,

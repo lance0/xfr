@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1.50.1
+      - uses: crate-ci/typos@v1.50.2
 
   doc:
     name: Doc (deny rustdoc warnings)
@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.10
+        uses: taiki-e/install-action@v2.87.14
         with:
           tool: cargo-deny@0.19.8
       # Advisories are deliberately excluded — audit.yml owns cargo-audit and
@@ -225,7 +225,7 @@ jobs:
         run: sudo ./test-control-channel-skew.sh
 
   mtu-probe:
-    name: MTU probe (#64 netns)
+    name: 'UDP MTU regressions (#64, #213 netns)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -236,3 +236,5 @@ jobs:
         run: cargo build --release --locked
       - name: Probe through a constrained middle hop
         run: sudo ./test-mtu-probe-ns.sh --ci
+      - name: Verify configurable UDP payloads on a 1420-byte MTU path
+        run: sudo ./test-udp-payload-ns.sh

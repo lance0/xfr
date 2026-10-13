@@ -12,6 +12,43 @@ use xfr::serve::{Server, ServerConfig};
 // Use different ports for each test to avoid conflicts
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
 
+#[test]
+fn test_cli_diff_invalid_threshold_cannot_report_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline_path = dir.path().join("baseline.json");
+    let current_path = dir.path().join("current.json");
+    for (path, throughput) in [(&baseline_path, 100.0), (&current_path, 1.0)] {
+        let result = serde_json::json!({
+            "id": "threshold-test", "bytes_total": 1000, "duration_ms": 1000,
+            "throughput_mbps": throughput, "streams": [],
+        });
+        std::fs::write(path, result.to_string()).unwrap();
+    }
+    for threshold in ["NaN", "inf", "-1"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("diff")
+            .arg(&baseline_path)
+            .arg(&current_path)
+            .arg(format!("--threshold={threshold}"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("threshold"));
+        assert!(output.stdout.is_empty());
+    }
+    for threshold in ["0", "5", "12.5"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("diff")
+            .arg(&baseline_path)
+            .arg(&current_path)
+            .arg(format!("--threshold={threshold}"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("REGRESSION DETECTED"));
+    }
+}
+
 fn get_test_port() -> u16 {
     PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
 }
@@ -30,6 +67,63 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
         let server = Server::new(config);
         let _ = server.run().await;
     })
+}
+
+#[tokio::test]
+async fn test_cli_json_output_is_parseable_without_quiet() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for mode in ["--json", "--json-stream"] {
+        let output = timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+                .args([
+                    "127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "-u",
+                    "-b",
+                    "2M",
+                    "-t",
+                    "2",
+                    "--no-tui",
+                    mode,
+                ])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mode == "--json" {
+            let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout)
+                .expect("summary stdout must contain exactly one JSON document");
+            assert!(result.bytes_total > 0);
+        } else {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let records: Vec<serde_json::Value> = stdout
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("every stream line is a JSON object"))
+                .collect();
+            assert!(
+                records.len() >= 2,
+                "stream must retain live interval records"
+            );
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.get("elapsed_secs").is_some())
+            );
+            assert!(records.last().unwrap()["bytes_total"].as_u64().unwrap() > 0);
+        }
+    }
+    server.abort();
 }
 
 #[tokio::test]
@@ -64,6 +158,7 @@ async fn test_tcp_single_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -119,6 +214,7 @@ async fn test_tcp_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -156,6 +252,7 @@ async fn test_connection_refused() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -193,6 +290,7 @@ async fn test_tcp_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -235,6 +333,7 @@ async fn test_tcp_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -295,6 +394,7 @@ async fn test_udp_upload() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -306,6 +406,173 @@ async fn test_udp_upload() {
 
     let result = result.unwrap();
     assert!(result.duration_ms > 0, "Should have duration");
+}
+
+/// Issue #213: both peers must use the requested size, including reverse
+/// and multistream bidir. Jumbo payloads catch silent receive truncation.
+#[tokio::test]
+async fn test_udp_custom_payload_sizes() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for size in [1368, 8192] {
+        for direction in [Direction::Upload, Direction::Download, Direction::Bidir] {
+            let config = ClientConfig {
+                port,
+                protocol: Protocol::Udp,
+                streams: 2,
+                duration: Duration::from_secs(1),
+                direction,
+                bitrate: Some(2_000_000),
+                udp_payload_size: Some(size),
+                ..Default::default()
+            };
+            let result = timeout(Duration::from_secs(10), Client::new(config).run(None))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.bytes_total > 0, "size={size}, direction={direction}");
+            let stats = result.udp_stats.expect("receiver UDP stats");
+            assert!(stats.packets_received > 0);
+            assert_eq!(stats.packet_size, Some(u32::from(size)));
+            if direction == Direction::Bidir {
+                assert!(result.bytes_sent.unwrap() > 0);
+                assert!(result.bytes_received.unwrap() > 0);
+            }
+        }
+    }
+    server.abort();
+}
+
+/// A late jumbo packet belongs to the stray lane on the wildcard socket;
+/// it must be drained without truncation or starving QUIC's receive task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_shared_udp_socket_drains_jumbo_strays() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for _ in 0..4 {
+        socket
+            .send_to(&vec![0; 8192], ("127.0.0.1", port))
+            .await
+            .unwrap();
+    }
+    let client = Client::new(ClientConfig {
+        port,
+        protocol: Protocol::Quic,
+        duration: Duration::from_secs(1),
+        bitrate: Some(1_000_000),
+        ..Default::default()
+    });
+    let result = timeout(Duration::from_secs(10), client.run(None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.bytes_total > 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_udp_payload_size_rejects_older_server() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use xfr::protocol::ControlMessage;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let hello = ControlMessage::server_hello_with_capabilities(vec!["udp".into()]);
+        write
+            .write_all(format!("{}\n", hello.serialize().unwrap()).as_bytes())
+            .await
+            .unwrap();
+        line.clear();
+        assert_eq!(
+            reader.read_line(&mut line).await.unwrap(),
+            0,
+            "client must refuse before TestStart"
+        );
+    });
+    let config = ClientConfig {
+        port,
+        protocol: Protocol::Udp,
+        direction: Direction::Download,
+        udp_payload_size: Some(1368),
+        ..Default::default()
+    };
+    let error = timeout(Duration::from_secs(5), Client::new(config).run(None))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("udp_payload_size_v1"), "{error}");
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// The TUI settings modal can switch a `-u -l` run to TCP or QUIC. The
+/// size must be ignored there, not sent to a server that rejects it.
+#[tokio::test]
+async fn test_udp_payload_size_ignored_for_tcp_and_quic() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for protocol in [Protocol::Tcp, Protocol::Quic] {
+        let config = ClientConfig {
+            port,
+            protocol,
+            duration: Duration::from_secs(1),
+            bitrate: Some(10_000_000),
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        };
+        let result = timeout(Duration::from_secs(10), Client::new(config).run(None))
+            .await
+            .unwrap();
+        assert!(result.is_ok(), "{protocol}: {result:?}");
+    }
+    server.abort();
+}
+
+#[test]
+fn test_udp_payload_size_validates_library_config() {
+    for size in [0, 15, 65508, u16::MAX] {
+        assert!(
+            ClientConfig {
+                protocol: Protocol::Udp,
+                udp_payload_size: Some(size),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    for size in [16, 1368, 65507] {
+        assert!(
+            ClientConfig {
+                protocol: Protocol::Udp,
+                udp_payload_size: Some(size),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+    assert!(
+        ClientConfig {
+            protocol: Protocol::Udp,
+            mtu_probe: true,
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 /// `--probe-mtu` end to end (issue #64): full control-channel handshake,
@@ -341,6 +608,7 @@ async fn test_mtu_probe() {
         mtu_probe: true,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -393,6 +661,7 @@ async fn test_udp_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -433,6 +702,7 @@ async fn test_udp_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -475,6 +745,7 @@ async fn test_udp_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -522,6 +793,7 @@ async fn test_multi_client_concurrent() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let config2 = ClientConfig {
@@ -546,6 +818,7 @@ async fn test_multi_client_concurrent() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client1 = Client::new(config1);
@@ -666,6 +939,7 @@ async fn test_psk_auth_success() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -712,6 +986,7 @@ async fn test_psk_auth_failure() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -758,6 +1033,7 @@ async fn test_psk_auth_missing_client_key() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -802,6 +1078,7 @@ async fn test_acl_allow() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -843,6 +1120,7 @@ async fn test_rate_limit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client1 = Client::new(config1.clone());
@@ -874,6 +1152,7 @@ async fn test_rate_limit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client2 = Client::new(config2);
@@ -927,6 +1206,7 @@ async fn test_quic_upload() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -970,6 +1250,7 @@ async fn test_quic_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1014,6 +1295,7 @@ async fn test_quic_upload_bitrate_pacing() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1065,6 +1347,7 @@ async fn test_quic_download_bitrate_pacing() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1119,6 +1402,7 @@ async fn test_quic_download_bitrate_pacing_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1180,6 +1464,7 @@ async fn test_quic_upload_bitrate_pacing_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1233,6 +1518,7 @@ async fn test_quic_download_bitrate_pacing_4_streams() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1284,6 +1570,7 @@ async fn test_quic_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1330,6 +1617,7 @@ async fn test_quic_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1373,6 +1661,7 @@ async fn test_quic_with_psk() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1501,6 +1790,7 @@ async fn test_quic_psk_rejects_server_without_channel_binding() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     });
     let error = timeout(Duration::from_secs(5), client.run(None))
         .await
@@ -1547,6 +1837,7 @@ async fn test_tcp_with_psk() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1646,6 +1937,7 @@ async fn test_acl_deny() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1691,6 +1983,7 @@ async fn test_preset_allowed_clients_allows_matching_ip() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1735,6 +2028,7 @@ async fn test_preset_allowed_clients_denies_non_matching_ip() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1798,6 +2092,7 @@ async fn test_ipv6_localhost() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1845,6 +2140,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1900,6 +2196,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -1920,6 +2217,102 @@ async fn test_udp_infinite_duration_with_cancel() {
     };
 
     let _ = result;
+}
+
+#[tokio::test]
+async fn test_dropping_udp_run_closes_progress_channel() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = Client::new(ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        duration: Duration::ZERO,
+        bitrate: Some(1_000_000),
+        ..Default::default()
+    });
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(16);
+    let mut run = Box::pin(client.run(Some(progress_tx)));
+
+    // Wait for a full interval so the local data/feedback tasks are running.
+    // Feedback-only updates may all be suppressed when fresher TCP interval
+    // counters arrive first, but that consumer still owns a progress sender.
+    // Retain Client after dropping its run future, as library callers do
+    // when wrapping a test in a timeout or selecting a different operation.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                result = &mut run => panic!("infinite run ended before feedback: {result:?}"),
+                progress = progress_rx.recv() => {
+                    if !progress.expect("progress channel should remain open").udp_feedback_only {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("UDP upload should emit an interval");
+    drop(run);
+
+    timeout(Duration::from_secs(2), async {
+        while progress_rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("dropping a run should stop background progress producers");
+    drop(client);
+    server.abort();
+}
+
+async fn assert_cancel_with_full_progress_queue(protocol: Protocol, direction: Direction) {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let client = Client::new(ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol,
+        direction,
+        duration: Duration::ZERO,
+        bitrate: Some(1_000_000),
+        ..Default::default()
+    });
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+    let mut run = Box::pin(client.run(Some(progress_tx)));
+
+    // Keep polling the client while withholding reads. The first interval
+    // fills the queue; the second blocks its producer outside select!.
+    tokio::select! {
+        result = &mut run => panic!("infinite run ended before cancel: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(2500)) => {}
+    }
+    assert_eq!(progress_rx.len(), 1, "test should fill the interval queue");
+    client.cancel().expect("test should be running");
+    let result = timeout(Duration::from_secs(2), &mut run)
+        .await
+        .expect("cancellation should interrupt a blocked progress send")
+        .expect("server should return the cancelled test summary");
+    assert!(result.bytes_total > 0);
+    // Keep the stalled receiver alive throughout cancellation; dropping it
+    // would independently unblock send() and mask the regression.
+    drop(progress_rx);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_tcp_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Tcp, Direction::Upload).await;
+}
+
+#[tokio::test]
+async fn test_quic_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Quic, Direction::Upload).await;
+}
+
+#[tokio::test]
+async fn test_udp_download_cancel_with_full_progress_queue() {
+    assert_cancel_with_full_progress_queue(Protocol::Udp, Direction::Download).await;
 }
 
 #[tokio::test]
@@ -1951,26 +2344,36 @@ async fn test_quic_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
 
-    // Run for 1 second then cancel
-    let run_future = client.run(None);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(16);
+    let run_future = client.run(Some(progress_tx));
     let cancel_future = async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ = client.cancel();
+        // Wait until the test is running so cancellation cannot race the
+        // handshake. Keep polling run_future while the result is awaited.
+        timeout(Duration::from_secs(5), progress_rx.recv())
+            .await
+            .expect("QUIC test should emit progress")
+            .expect("QUIC test should still be running");
+        client
+            .cancel()
+            .expect("QUIC cancellation should be accepted");
     };
 
-    let result = tokio::select! {
-        r = run_future => r,
-        _ = cancel_future => {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Err(anyhow::anyhow!("Cancelled"))
-        }
-    };
-
-    let _ = result;
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(run_future, cancel_future)
+    })
+    .await
+    .expect("cancelled QUIC test should finish promptly");
+    let result = result.expect("server should return the cancelled QUIC summary");
+    assert!(
+        result.bytes_total > 0,
+        "summary should preserve transferred data"
+    );
+    assert!(result.duration_ms > 0, "summary should record elapsed time");
 }
 
 // ============================================================================
@@ -2024,6 +2427,7 @@ async fn test_udp_ipv4_explicit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2084,6 +2488,7 @@ async fn test_udp_ipv6_explicit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: Some(1368),
     };
 
     let client = Client::new(config);
@@ -2144,6 +2549,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2188,6 +2594,7 @@ async fn test_tcp_cport_single_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2235,6 +2642,7 @@ async fn test_tcp_cport_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2298,6 +2706,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2357,6 +2766,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2401,6 +2811,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2452,6 +2863,7 @@ async fn test_udp_bitrate_underflow_regression() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2526,6 +2938,7 @@ async fn test_quic_ipv6() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2586,6 +2999,7 @@ async fn test_tcp_one_off_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2655,6 +3069,7 @@ async fn test_quic_one_off() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -2703,6 +3118,7 @@ fn test_pause_not_ready_before_test_run() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -3268,6 +3684,16 @@ impl RawControl {
 
     /// Send a UDP TestStart and return the TestAck's (data_ports, udp_token).
     async fn start_udp_test(&mut self, duration_secs: u32) -> (Vec<u16>, Option<String>) {
+        self.start_udp_test_with_payload(duration_secs, Direction::Upload, None)
+            .await
+    }
+
+    async fn start_udp_test_with_payload(
+        &mut self,
+        duration_secs: u32,
+        direction: Direction,
+        udp_payload_size: Option<u16>,
+    ) -> (Vec<u16>, Option<String>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         use xfr::protocol::ControlMessage;
 
@@ -3276,7 +3702,7 @@ impl RawControl {
             protocol: Protocol::Udp,
             streams: 1,
             duration_secs,
-            direction: Direction::Upload,
+            direction,
             bitrate: Some(10_000_000),
             congestion: None,
             mptcp: false,
@@ -3286,6 +3712,7 @@ impl RawControl {
             mtu_probe: false,
             tcp_nodelay: false,
             byte_budget: None,
+            udp_payload_size,
         };
         self.writer
             .write_all(format!("{}\n", start.serialize().unwrap()).as_bytes())
@@ -3323,6 +3750,137 @@ impl RawControl {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_udp_custom_payload_legacy_ports() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for size in [1368, 8192] {
+        for direction in [Direction::Upload, Direction::Download, Direction::Bidir] {
+            let capabilities = xfr::protocol::supported_capabilities_without(
+                xfr::protocol::SINGLE_PORT_UDP_CAPABILITY,
+            );
+            let mut control = RawControl::connect(port, capabilities).await;
+            let (ports, token) = control
+                .start_udp_test_with_payload(1, direction, Some(size))
+                .await;
+            assert!(token.is_none());
+            assert_eq!(ports.len(), 1);
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            socket.connect(("127.0.0.1", ports[0])).await.unwrap();
+            if direction == Direction::Download {
+                socket.send(&[0]).await.unwrap();
+            } else {
+                let mut packet = vec![0; usize::from(size)];
+                for sequence in 0..10 {
+                    xfr::udp::UdpPacketHeader {
+                        sequence,
+                        timestamp_us: 1,
+                    }
+                    .encode(&mut packet);
+                    socket.send(&packet).await.unwrap();
+                }
+            }
+            if direction != Direction::Upload {
+                let mut packet = vec![0; xfr::udp::MAX_UDP_PAYLOAD_SIZE];
+                let received = timeout(Duration::from_secs(5), socket.recv(&mut packet))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(received, usize::from(size), "legacy server sender size");
+            }
+            let result = control.wait_for_result().await;
+            if direction != Direction::Download {
+                let stats = result.udp_stats.unwrap();
+                assert!(stats.packets_received > 0);
+                assert_eq!(stats.packet_size, Some(u32::from(size)));
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_udp_payload_size_rejects_invalid_wire_requests() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use xfr::protocol::ControlMessage;
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (protocol, size, probe) in [
+        ("udp", 0, false),
+        ("udp", 15, false),
+        ("udp", 65508, false),
+        ("tcp", 1368, false),
+        ("udp", 1368, true),
+    ] {
+        let mut control = RawControl::connect(port, xfr::protocol::supported_capabilities()).await;
+        let request = serde_json::json!({
+            "type": "test_start", "id": "invalid-payload", "protocol": protocol,
+            "streams": 1, "duration_secs": 1, "direction": "upload",
+            "udp_payload_size": size, "mtu_probe": probe,
+        });
+        control
+            .writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        timeout(Duration::from_secs(5), control.reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        match ControlMessage::deserialize(line.trim()).unwrap() {
+            ControlMessage::Error { message } => assert!(message.contains("UDP payload size")),
+            other => panic!("expected invalid payload rejection, got {other:?}"),
+        }
+    }
+    server.abort();
+}
+
+async fn assert_legacy_udp_cancel_before_hello(direction: Direction) {
+    use tokio::io::AsyncWriteExt;
+    use xfr::protocol::ControlMessage;
+
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // No single_port_udp_v1 capability: use the legacy per-stream port and
+    // cancel before any data-plane hello reaches the discovery handler.
+    let mut control = RawControl::connect(port, vec![]).await;
+    let (data_ports, udp_token) = control
+        .start_udp_test_with_payload(0, direction, None)
+        .await;
+    assert_eq!(data_ports.len(), 1);
+    assert!(udp_token.is_none());
+    let cancel = ControlMessage::Cancel {
+        id: "raw-test".to_string(),
+        reason: "test cancellation before UDP hello".to_string(),
+    };
+    control
+        .writer
+        .write_all(format!("{}\n", cancel.serialize().unwrap()).as_bytes())
+        .await
+        .unwrap();
+
+    let result = timeout(Duration::from_secs(2), control.wait_for_result())
+        .await
+        .expect("cancel before UDP discovery should return a summary promptly");
+    assert_eq!(result.bytes_total, 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_legacy_udp_download_cancel_before_hello() {
+    assert_legacy_udp_cancel_before_hello(Direction::Download).await;
+}
+
+#[tokio::test]
+async fn test_legacy_udp_bidir_cancel_before_hello() {
+    assert_legacy_udp_cancel_before_hello(Direction::Bidir).await;
 }
 
 /// The TestAck shape must match what was negotiated: a server that
@@ -3539,6 +4097,7 @@ async fn test_tcp_cancel_latency_before_first_tick() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -3597,6 +4156,7 @@ async fn test_tcp_psk_cancel_infinite_duration() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);
@@ -3650,6 +4210,7 @@ async fn test_udp_pause_resume_no_burst() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let client = Client::new(config);

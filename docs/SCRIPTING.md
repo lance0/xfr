@@ -94,12 +94,16 @@ Notes:
 - `tcp_info` is present only for TCP tests.
 - `udp_stats` (with fields `packets_sent`, `packets_received`, `lost`,
   `lost_percent`, `jitter_ms`, `out_of_order`) is present only for UDP tests.
+  Its `packet_size` is the largest datagram the receiver saw (the `-l` size,
+  1400 by default) and is omitted when no data arrived.
 - Per-stream `retransmits` appears for TCP, `jitter_ms` and `lost` for UDP.
   Fields that do not apply are omitted (not set to zero).
 
 ### Streaming JSON (`--json-stream`)
 
-One JSON object per line, per interval:
+One JSON object per line, per interval. The stream ends with the final
+summary on a single line, with the same fields as `--json` (`bytes_total`,
+`duration_ms`, `streams`, ...), so every line parses on its own:
 
 ```bash
 xfr <host> --json-stream --no-tui

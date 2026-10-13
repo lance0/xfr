@@ -120,7 +120,12 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Validate settings before binding listeners or allocating server tasks.
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.auth.validate()
+        self.auth.validate()?;
+        anyhow::ensure!(
+            self.rate_limit.max_per_ip.is_none() || self.rate_limit.window_secs > 0,
+            "rate limit window must be at least 1 second when rate limiting is enabled"
+        );
+        Ok(())
     }
 }
 
@@ -1161,8 +1166,13 @@ async fn handle_quic_client(
         .map(|psk| quic::derive_psk_session_key(&connection, psk))
         .transpose()?;
 
-    // Accept control stream (bidirectional)
-    let (mut ctrl_send, ctrl_recv) = connection.accept_bi().await?;
+    // An established QUIC peer can keep the connection alive without ever
+    // opening a stream. Bound that wait as well as the subsequent Hello read
+    // so idle peers cannot retain a handler permit indefinitely.
+    let (mut ctrl_send, ctrl_recv) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+            .await
+            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for control stream"))??;
     let mut ctrl_reader = BufReader::new(ctrl_recv);
     let mut line = String::new();
 
@@ -1346,8 +1356,17 @@ async fn handle_quic_client(
             direction,
             byte_budget,
             bitrate,
+            udp_payload_size,
             ..
         } => {
+            if udp_payload_size.is_some() {
+                let error =
+                    ControlMessage::error("UDP payload size requires a UDP throughput test");
+                transport
+                    .write_message(&mut ctrl_send, &error.serialize()?)
+                    .await?;
+                return Err(anyhow::anyhow!("UDP payload size requested for QUIC"));
+            }
             if protocol != Protocol::Quic {
                 let error = ControlMessage::error("Expected QUIC protocol for QUIC connection");
                 transport
@@ -1694,7 +1713,26 @@ async fn handle_test_request(
             mtu_probe,
             tcp_nodelay,
             byte_budget,
+            udp_payload_size,
         } => {
+            if let Some(size) = udp_payload_size {
+                let validation = if protocol != Protocol::Udp || mtu_probe {
+                    Err(anyhow::anyhow!(
+                        "UDP payload size requires a UDP throughput test"
+                    ))
+                } else {
+                    udp::validate_payload_size(usize::from(size))
+                };
+                if let Err(error) = validation {
+                    transport
+                        .write_message(
+                            writer,
+                            &ControlMessage::error(error.to_string()).serialize()?,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            }
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
                 let error = ControlMessage::error(format!(
@@ -1803,6 +1841,7 @@ async fn handle_test_request(
                 mtu_probe,
                 tcp_nodelay,
                 byte_budget,
+                udp_payload_size.map_or(udp::UDP_PAYLOAD_SIZE, usize::from),
                 transport,
             )
             .await;
@@ -1985,23 +2024,38 @@ async fn run_quic_test(
                     // Server sends - open uni stream to client. The guard
                     // drops when the send ends: the `-n` delivered signal.
                     let _sending_done = sending_done;
-                    match conn.open_uni().await {
-                        Ok(send) => {
-                            if let Err(e) = quic::send_quic_data(
-                                send,
-                                stream_stats,
-                                duration,
-                                per_stream_bitrate,
-                                cancel,
-                                pause,
-                                budget,
-                            )
-                            .await
-                            {
-                                debug!("QUIC send ended: {}", e);
+                    let mut cancel_rx = cancel.clone();
+                    let send = tokio::select! {
+                        biased;
+                        _ = cancel_rx.changed() => {
+                            debug!("Cancelled while waiting to open uni stream");
+                            None
+                        }
+                        _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+                            debug!("Timeout waiting for client to allow uni stream");
+                            None
+                        }
+                        result = conn.open_uni() => match result {
+                            Ok(send) => Some(send),
+                            Err(e) => {
+                                debug!("Failed to open uni stream: {}", e);
+                                None
                             }
                         }
-                        Err(e) => debug!("Failed to open uni stream: {}", e),
+                    };
+                    if let Some(send) = send
+                        && let Err(e) = quic::send_quic_data(
+                            send,
+                            stream_stats,
+                            duration,
+                            per_stream_bitrate,
+                            cancel,
+                            pause,
+                            budget,
+                        )
+                        .await
+                    {
+                        debug!("QUIC send ended: {}", e);
                     }
                 }
                 Direction::Bidir => {
@@ -2370,6 +2424,7 @@ async fn run_test(
     mtu_probe: bool,
     tcp_nodelay: bool,
     byte_budget: Option<u64>,
+    packet_size: usize,
     mut transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<(u64, u64, f64)> {
     // For TCP: single-port mode (data connections come on control port)
@@ -2632,6 +2687,7 @@ async fn run_test(
                 direction,
                 duration,
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                packet_size,
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
@@ -2678,6 +2734,7 @@ async fn run_test(
                 direction,
                 duration,
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                packet_size,
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
@@ -3565,6 +3622,23 @@ async fn spawn_tcp_stream_handlers(
     handles
 }
 
+async fn wait_for_udp_client(
+    socket: &UdpSocket,
+    mut cancel: watch::Receiver<bool>,
+) -> anyhow::Result<Option<SocketAddr>> {
+    if *cancel.borrow() {
+        return Ok(None);
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => {
+            debug!("UDP client discovery cancelled");
+            Ok(None)
+        }
+        result = udp::wait_for_client(socket, STREAM_ACCEPT_TIMEOUT) => result.map(Some),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_udp_handlers(
     sockets: Vec<Arc<UdpSocket>>,
@@ -3572,6 +3646,7 @@ async fn spawn_udp_handlers(
     direction: Direction,
     duration: Duration,
     bitrate: u64,
+    packet_size: usize,
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
@@ -3628,8 +3703,8 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Download => {
                     // Wait for client's hello packet to learn their address
-                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
-                        Ok(client_addr) => {
+                    match wait_for_udp_client(&socket, cancel.clone()).await {
+                        Ok(Some(client_addr)) => {
                             // Server sends UDP at per-stream rate to client
                             // Dropped when the send ends — the `-n` delivered signal.
                             let _sending_done = sending_done;
@@ -3637,6 +3712,7 @@ async fn spawn_udp_handlers(
                                 socket,
                                 Some(client_addr),
                                 per_stream_bitrate,
+                                packet_size,
                                 duration,
                                 stream_stats,
                                 cancel,
@@ -3646,6 +3722,7 @@ async fn spawn_udp_handlers(
                             )
                             .await;
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             warn!("UDP reverse: failed to get client address: {}", e);
                         }
@@ -3653,8 +3730,8 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Bidir => {
                     // Wait for client's first packet to learn their address
-                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
-                        Ok(client_addr) => {
+                    match wait_for_udp_client(&socket, cancel.clone()).await {
+                        Ok(Some(client_addr)) => {
                             // UDP can send/receive concurrently on same socket
                             let send_socket = socket.clone();
                             let recv_socket = socket;
@@ -3673,6 +3750,7 @@ async fn spawn_udp_handlers(
                                     send_socket,
                                     Some(client_addr),
                                     per_stream_bitrate,
+                                    packet_size,
                                     duration,
                                     send_stats,
                                     send_cancel,
@@ -3708,6 +3786,7 @@ async fn spawn_udp_handlers(
 
                             let _ = tokio::join!(send_handle, recv_handle);
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             warn!("UDP bidir: failed to get client address: {}", e);
                         }
@@ -3736,6 +3815,7 @@ async fn spawn_single_port_udp_handlers(
     direction: Direction,
     duration: Duration,
     bitrate: u64,
+    packet_size: usize,
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
@@ -3868,6 +3948,7 @@ async fn spawn_single_port_udp_handlers(
                                 socket,
                                 None, // connected socket
                                 per_stream_bitrate,
+                                packet_size,
                                 duration,
                                 stream_stats,
                                 cancel,
@@ -3900,6 +3981,7 @@ async fn spawn_single_port_udp_handlers(
                                     send_socket,
                                     None, // connected socket
                                     per_stream_bitrate,
+                                    packet_size,
                                     duration,
                                     send_stats,
                                     send_cancel,
@@ -4029,6 +4111,99 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn quic_download_cancel_without_stream_credit_returns_result_and_cleans_up() {
+        use quinn::crypto::rustls::QuicClientConfig;
+        use tokio::io::AsyncBufReadExt;
+
+        // A peer can keep the control stream healthy while withholding all
+        // download stream credit. Cancellation must stop that pending open
+        // so teardown can return a Result and release the active-test entry.
+        let (cert, key) = quic::generate_self_signed_cert().unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert[0].clone()).unwrap();
+        let mut crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        crypto.alpn_protocols = vec![b"xfr".to_vec()];
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
+        let mut config =
+            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+        config.transport_config(Arc::new(transport));
+
+        let server = quic::create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )
+        .unwrap();
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client.set_default_client_config(config);
+        let (client_conn, server_conn) = tokio::join!(
+            async {
+                client
+                    .connect(server.local_addr().unwrap(), "xfr")
+                    .unwrap()
+                    .await
+                    .unwrap()
+            },
+            async { server.accept().await.unwrap().await.unwrap() },
+        );
+
+        let id = "blocked-quic-download";
+        let (mut send, recv) = client_conn.open_bi().await.unwrap();
+        let cancel = ControlMessage::Cancel {
+            id: id.to_string(),
+            reason: "test cancellation".to_string(),
+        };
+        send.write_all(format!("{}\n", cancel.serialize().unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let (server_send, server_recv) = server_conn.accept_bi().await.unwrap();
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let tests_for_task = active_tests.clone();
+        let task = tokio::spawn(async move {
+            run_quic_test(
+                &server_conn,
+                BufReader::new(server_recv),
+                server_send,
+                id,
+                1,
+                Duration::ZERO,
+                Direction::Download,
+                None,
+                None,
+                tests_for_task,
+                server_conn.remote_address(),
+                None,
+                &None,
+                crate::control_crypto::ProtectedControl::plaintext(),
+            )
+            .await
+        });
+
+        let mut reader = BufReader::new(recv);
+        let mut line = String::new();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                ControlMessage::deserialize(line.trim()).unwrap(),
+                ControlMessage::Cancelled { .. }
+            ));
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            ControlMessage::deserialize(line.trim()).unwrap()
+        })
+        .await
+        .expect("cancelling a blocked stream open should return a final result");
+        assert!(matches!(result, ControlMessage::Result(_)));
+        task.await.unwrap().unwrap();
+        assert!(active_tests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_remove_active_test_cleans_entry_and_sends_cancel() {
         let active_tests = Arc::new(Mutex::new(HashMap::new()));
         let id = "leak-test";
@@ -4133,6 +4308,61 @@ mod tests {
             control_peer_ip: ip,
             expected_streams: streams,
         }
+    }
+
+    #[test]
+    fn rate_limit_active_zero_window_is_rejected() {
+        for max_per_ip in [0, 1] {
+            let config = ServerConfig {
+                rate_limit: RateLimitConfig {
+                    max_per_ip: Some(max_per_ip),
+                    window_secs: 0,
+                },
+                ..Default::default()
+            };
+            let error = config.validate().unwrap_err();
+            assert!(error.to_string().contains("rate limit window"));
+        }
+    }
+
+    #[test]
+    fn rate_limit_inactive_zero_window_is_allowed() {
+        let config = ServerConfig {
+            rate_limit: RateLimitConfig {
+                max_per_ip: None,
+                window_secs: 0,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rate_limit_positive_window_is_allowed() {
+        for max_per_ip in [None, Some(0), Some(1)] {
+            let config = ServerConfig {
+                rate_limit: RateLimitConfig {
+                    max_per_ip,
+                    window_secs: 1,
+                },
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_zero_window_is_rejected_before_binding() {
+        let config = ServerConfig {
+            bind_addr: Some("203.0.113.1".parse().unwrap()),
+            rate_limit: RateLimitConfig {
+                max_per_ip: Some(1),
+                window_secs: 0,
+            },
+            ..Default::default()
+        };
+        let error = Server::new(config).run().await.unwrap_err();
+        assert!(error.to_string().contains("rate limit window"));
     }
 
     #[test]
@@ -4287,6 +4517,66 @@ mod tests {
             initial_read_timeout_for_peer(&tests, v4),
             Duration::from_millis(128 * INITIAL_READ_TIMEOUT_PER_STREAM_MS)
         );
+    }
+
+    /// A peer can complete TLS and keep its connection alive without ever
+    /// opening the control stream. Its handler permit must still expire.
+    #[tokio::test(start_paused = true)]
+    async fn quic_control_stream_timeout_releases_handler_permit() {
+        let (cert, key) = quic::generate_self_signed_cert().unwrap();
+        let server = quic::create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = quic::create_client_endpoint(address, None).unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let mut handler = tokio::spawn(async move {
+            let _permit = permit;
+            let incoming = server.accept().await.unwrap();
+            let security = SecurityContext {
+                psk: None,
+                acl: AclConfig::default().build().unwrap(),
+                preset_acl: None,
+                rate_limiter: None,
+                address_family: AddressFamily::V4Only,
+                bind_addr: None,
+                tui_tx: None,
+                push_gateway_url: None,
+                capabilities: crate::protocol::supported_capabilities(),
+                udp_hello_routes: None,
+            };
+            handle_quic_client(
+                incoming,
+                address,
+                Arc::new(Mutex::new(HashMap::new())),
+                None,
+                &security,
+            )
+            .await
+        });
+        let connection =
+            tokio::time::timeout(Duration::from_secs(5), quic::connect(&client, address))
+                .await
+                .expect("QUIC handshake should complete")
+                .unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let outcome =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(3), &mut handler).await;
+        handler.abort();
+        let error = outcome
+            .expect("idle QUIC peer must release its handler slot")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("waiting for control stream"));
+        assert_eq!(semaphore.available_permits(), 1);
+        connection.close(0u32.into(), b"test complete");
     }
 
     #[tokio::test]

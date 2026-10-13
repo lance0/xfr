@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::layout::Size;
 
@@ -73,6 +73,23 @@ impl ThroughputSample {
 pub struct LogEntry {
     pub timestamp: String,
     pub message: String,
+    elapsed: Duration,
+    recorded_at: Instant,
+}
+
+impl LogEntry {
+    fn format_timestamp(&self, format: TimestampFormat, clock: (Instant, SystemTime)) -> String {
+        match format {
+            // Keep the compact clock used by the TUI's relative history.
+            TimestampFormat::Relative => format!(
+                "{:02}:{:02}:{:02}",
+                self.elapsed.as_secs() / 3600,
+                (self.elapsed.as_secs() % 3600) / 60,
+                self.elapsed.as_secs() % 60
+            ),
+            _ => format.format(clock.0, self.recorded_at, clock.1),
+        }
+    }
 }
 
 pub struct App {
@@ -139,12 +156,16 @@ pub struct App {
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
     pub theme_index: usize,
+    theme_touched: bool,
 
     // Settings modal state
     pub settings: SettingsState,
 
     // History log
     pub history: VecDeque<LogEntry>,
+    // A session-wide wall-clock anchor. Unlike start_time, this never shifts
+    // on pause or restart, so absolute log timestamps retain their meaning.
+    history_clock: (Instant, SystemTime),
     pub average_throughput_mbps: f64,
     throughput_count: u64,
 
@@ -203,6 +224,8 @@ impl App {
         timestamp_format: TimestampFormat,
         theme: Theme,
     ) -> Self {
+        let mut settings = SettingsState::new(0, streams, protocol, duration, direction, bitrate);
+        settings.timestamp_format = timestamp_format;
         Self {
             state: AppState::Connecting,
             host,
@@ -255,9 +278,10 @@ impl App {
             theme,
             theme_index: 0,
 
-            settings: SettingsState::new(0, streams, protocol, duration, direction, bitrate),
+            settings,
 
             history: VecDeque::with_capacity(LOG_HISTORY),
+            history_clock: (Instant::now(), SystemTime::now()),
             average_throughput_mbps: 0.0,
             throughput_count: 0,
 
@@ -271,31 +295,39 @@ impl App {
             update_available: None,
             server_version: None,
             pause_started_at: None,
+            theme_touched: false,
         }
     }
 
     /// Add a log entry with current timestamp
     pub fn log(&mut self, message: impl Into<String>) {
-        let timestamp = if let Some(start) = self.start_time {
-            let elapsed = start.elapsed();
-            format!(
-                "{:02}:{:02}:{:02}",
-                elapsed.as_secs() / 3600,
-                (elapsed.as_secs() % 3600) / 60,
-                elapsed.as_secs() % 60
-            )
-        } else {
-            "00:00:00".to_string()
-        };
-
-        self.history.push_front(LogEntry {
-            timestamp,
+        let recorded_at = Instant::now();
+        let mut entry = LogEntry {
+            timestamp: String::new(),
             message: message.into(),
-        });
+            elapsed: self
+                .start_time
+                .map(|start| recorded_at.saturating_duration_since(start))
+                .unwrap_or_default(),
+            recorded_at,
+        };
+        entry.timestamp = entry.format_timestamp(self.timestamp_format, self.history_clock);
+        self.history.push_front(entry);
 
         if self.history.len() > LOG_HISTORY {
             self.history.pop_back();
         }
+    }
+
+    /// Apply a timestamp display choice to both existing and future history.
+    pub fn set_timestamp_format(&mut self, format: TimestampFormat) {
+        if self.timestamp_format != format {
+            self.timestamp_format = format;
+            for entry in &mut self.history {
+                entry.timestamp = entry.format_timestamp(format, self.history_clock);
+            }
+        }
+        self.settings.timestamp_format = format;
     }
 
     /// Create app with theme by name, setting theme_index appropriately
@@ -311,13 +343,11 @@ impl App {
         timestamp_format: TimestampFormat,
         theme_name: &str,
     ) -> Self {
-        let theme_list = Theme::list();
-        let theme_index = theme_list
-            .iter()
-            .position(|&t| t == theme_name)
-            .unwrap_or(0);
         let theme = Theme::by_name(theme_name);
-
+        let theme_index = Theme::list()
+            .iter()
+            .position(|&name| name == theme.name())
+            .unwrap_or(0);
         let mut app = Self::new(
             host,
             port,
@@ -340,12 +370,14 @@ impl App {
         self.theme_index = (self.theme_index + 1) % theme_list.len();
         self.theme = Theme::by_name(theme_list[self.theme_index]);
         self.settings.theme_index = self.theme_index;
+        self.theme_touched = true;
     }
 
     /// Set theme by index (from settings modal)
     pub fn set_theme_index(&mut self, index: usize) {
         let theme_list = Theme::list();
         if index < theme_list.len() {
+            self.theme_touched |= self.theme_index != index;
             self.theme_index = index;
             self.theme = Theme::by_name(theme_list[index]);
             self.settings.theme_index = index;
@@ -355,6 +387,12 @@ impl App {
     /// Get current theme name
     pub fn theme_name(&self) -> &str {
         self.theme.name()
+    }
+
+    /// A palette explicitly changed in this TUI session, suitable for saving.
+    /// Automatic choices such as NO_COLOR must not become saved preferences.
+    pub fn changed_theme_name(&self) -> Option<&str> {
+        self.theme_touched.then_some(self.theme_name())
     }
 
     /// Called when the run task is spawned, which is *before* any socket is
@@ -490,10 +528,10 @@ impl App {
     /// Advancing `prev_udp_progress` here is what keeps a resuming Interval
     /// from re-counting loss these bars already showed.
     ///
-    /// Throughput: repeat-last-known. A zero-mbps sample renders as a blank
-    /// cell in the Sparkline (no glyph, so nothing to tint), which would
-    /// hide the loss signal entirely; repeating the stale height keeps the
-    /// bar visible so the loss tint can mark the segment. A flat plateau
+    /// Throughput: repeat-last-known. A zero-mbps sample draws no glyph in
+    /// the Sparkline, leaving the loss to a lone baseline underline under a
+    /// segment that reads as a drop to zero; repeating the stale height keeps
+    /// the bar visible so the loss tint can mark the segment. A flat plateau
     /// with warning/error tint reads as "no fresh throughput reading, loss
     /// still arriving" rather than a frozen graph.
     fn maybe_append_stalled_bar(&mut self, now: Instant) {
@@ -1004,8 +1042,10 @@ impl App {
             timestamp_format: _, // log timestamps are formatted when the entry is logged
             theme,
             theme_index,
+            theme_touched: _, // persistence policy; the palette itself is hashed
             settings,
             history,
+            history_clock: _, // formatting anchor; its visible effects are in history
             average_throughput_mbps,
             throughput_count: _,
             peak_throughput_mbps: _, // event-detection baselines; effects land in `history`
@@ -1139,6 +1179,73 @@ impl Default for App {
 #[allow(clippy::field_reassign_with_default)] // App has too many fields to spread-construct in tests
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_honors_the_initial_timestamp_format() {
+        for format in [TimestampFormat::Iso8601, TimestampFormat::Unix] {
+            let mut app = App::new(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                format,
+                Theme::default(),
+            );
+            app.log("Connecting");
+            let timestamp = &app.history.front().unwrap().timestamp;
+            match format {
+                TimestampFormat::Iso8601 => {
+                    assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
+                }
+                TimestampFormat::Unix => assert!(timestamp.parse::<f64>().unwrap() > 1e9),
+                TimestampFormat::Relative => unreachable!(),
+            }
+            assert_eq!(app.settings.timestamp_format.as_str(), format.to_string());
+        }
+    }
+
+    #[test]
+    fn changing_timestamp_format_preserves_the_time_of_existing_events() {
+        let mut app = App::default();
+        let clock_start = Instant::now();
+        app.history_clock = (
+            clock_start,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        app.history.push_front(LogEntry {
+            timestamp: "01:02:03".into(),
+            message: "Captured event".into(),
+            elapsed: Duration::from_secs(3723),
+            recorded_at: clock_start + Duration::from_millis(4500),
+        });
+        let fingerprint = app.render_fingerprint(Size::new(120, 40));
+
+        app.set_timestamp_format(TimestampFormat::Unix);
+        assert_eq!(app.history.front().unwrap().timestamp, "1700000004.500");
+        assert_ne!(fingerprint, app.render_fingerprint(Size::new(120, 40)));
+
+        // Restart preserves history. Its clock reset must not change the
+        // absolute or relative time of a previously captured event.
+        app.reset_for_restart();
+        app.on_connected();
+        app.set_timestamp_format(TimestampFormat::Iso8601);
+        let event = app
+            .history
+            .iter()
+            .find(|entry| entry.message == "Captured event")
+            .unwrap();
+        assert_eq!(event.timestamp, "2023-11-14T22:13:24.500Z");
+        app.set_timestamp_format(TimestampFormat::Relative);
+        let event = app
+            .history
+            .iter()
+            .find(|entry| entry.message == "Captured event")
+            .unwrap();
+        assert_eq!(event.timestamp, "01:02:03");
+    }
 
     #[test]
     fn jitter_display_returns_both_instant_and_smoothed_while_running() {
@@ -2103,6 +2210,32 @@ mod tests {
         assert_eq!(app.elapsed, Duration::from_millis(3500));
         assert_eq!(app.total_bytes, 10_000);
         assert_eq!(app.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn theme_aliases_keep_the_settings_and_cycle_in_sync() {
+        for (input, canonical, next) in [
+            ("mono", "monochrome", "matrix"),
+            ("DRACULA", "dracula", "monochrome"),
+            ("default", "default", "kawaii"),
+        ] {
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                input,
+            );
+            assert_eq!(app.theme_name(), canonical);
+            assert_eq!(app.settings.theme_name(), canonical);
+            app.cycle_theme();
+            assert_eq!(app.theme_name(), next);
+            assert_eq!(app.settings.theme_name(), next);
+        }
     }
 
     #[test]

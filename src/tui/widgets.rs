@@ -125,6 +125,11 @@ impl Widget for Sparkline<'_> {
                     buf[(x, y)].set_char(ch).set_style(cell_style);
                 } else if marked {
                     buf[(x, y)].set_char(MARKED_EMPTY).set_style(cell_style);
+                } else if row == 0 && cell_style.add_modifier.contains(Modifier::UNDERLINED) {
+                    // Loss can reduce throughput to zero or below one
+                    // eighth-block. Keep its underline at the baseline
+                    // without drawing a bar that would invent throughput.
+                    buf[(x, y)].set_char(' ').set_style(cell_style);
                 }
             }
         }

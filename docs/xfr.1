@@ -41,6 +41,9 @@ Requires a server advertising the byte_budget_v1 capability. Environment: XFR_BY
 .B \-u ", " \-\-udp
 Use UDP instead of TCP
 .TP
+.BI \-l ", " \-\-length " BYTES"
+UDP payload size including the 16-byte xfr header (16\-65507 bytes; default: 1400). Requires \-u and server udp_payload_size_v1 support. Applies to upload, reverse and bidirectional tests and all streams. Cannot be combined with \-\-probe\-mtu. For a 1420-byte tunnel MTU, \-l 1368 fits both IPv4 and IPv6 basic headers. Run \-\-probe\-mtu separately to find a suitable size; throughput tests do not automatically adjust the default.
+.TP
 .B \-Q ", " \-\-quic
 Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
@@ -90,7 +93,7 @@ its true height). The server dashboard resolves its palette the same way, so
 \fB\-\-theme\fR, a saved preference and \fBNO_COLOR\fR apply to it too.
 .TP
 .BI \-i ", " \-\-interval " SECS"
-Report interval in seconds (default: 1.0)
+Report interval in positive, finite seconds (default: 1.0). CLI and config-file values that cannot be represented by the reporting timers are rejected.
 .TP
 .BI \-\-omit " N"
 Omit first N seconds from interval output (TCP ramp-up)
@@ -160,7 +163,7 @@ Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
-Listen port (default: 5201). Environment: XFR_PORT
+Listen port (default: \fBport\fR from the [server] config section, else 5201). Environment: XFR_PORT, which overrides the config file
 .TP
 .B \-\-one\-off
 Exit after a single test
@@ -196,7 +199,7 @@ Use a named server preset from the config file. Preset \fBallowed_clients\fR ent
 Max concurrent tests per IP
 .TP
 .BI \-\-rate\-limit\-window " DURATION"
-Rate limit time window (default: 60s)
+Rate limit time window in whole seconds, at least 1 (default: \fBrate_limit_window\fR from the config file, else 60s)
 .TP
 .BI \-\-allow " IP/SUBNET"
 Allow IP or subnet (can be repeated).
@@ -224,7 +227,7 @@ Force IPv6 only
 .SH DIFF OPTIONS
 .TP
 .BI \-\-threshold " PERCENT"
-Regression threshold percentage (default: 5)
+Regression threshold percentage (default: 5). Must be finite and non-negative; zero detects any regression.
 .SH DISCOVER OPTIONS
 .TP
 .BI \-\-timeout " DURATION"
@@ -397,6 +400,9 @@ Server honors a zero-copy request for its own sends in \-R/\-\-bidir TCP tests (
 .TP
 .B mtu_probe_v1
 Server answers path-MTU probe packets (ack + same-size echo) for \-\-probe\-mtu (issue #64). Hard requirement: the client refuses to probe servers without it. Available v0.9.17+.
+.TP
+.B udp_payload_size_v1
+Server honors the requested UDP payload size in TestStart for upload, reverse and bidirectional throughput tests (\-l/\-\-length, issue #213). Explicit sizes require this capability; without a size request both peers retain the 1400-byte default.
 .TP
 .B single_port_udp_v1
 All UDP stream data flows to the server's main port via per-stream connected sockets negotiated with a token-bearing hello, instead of per-stream ephemeral server ports (issue #63). Advertised only when a startup self-test proves the kernel's connected-socket routing; servers fall back to ephemeral ports for older clients or unsupported platforms. Available v0.9.18+.

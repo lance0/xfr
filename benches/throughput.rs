@@ -129,6 +129,7 @@ fn bench_protocol_serialize_test_start(c: &mut Criterion) {
         mtu_probe: false,
         tcp_nodelay: false,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     c.bench_function("protocol_serialize_test_start", |b| {

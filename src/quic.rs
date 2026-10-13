@@ -194,6 +194,11 @@ pub fn create_server_endpoint(
             // peers from clearing the bit toward us — which is what makes
             // the classifier sound.
             endpoint_config.grease_quic_bit(false);
+            // Late bulk UDP datagrams can reach the wildcard after a
+            // connected stream closes. Drain them intact before classifying:
+            // Quinn's default 1472-byte buffers truncate jumbo xfr payloads
+            // (and quinn-udp's macOS recv path can spin after MSG_TRUNC).
+            endpoint_config.max_udp_payload_size(crate::udp::MAX_UDP_PAYLOAD_SIZE as u16)?;
             Arc::new(XfrLaneTee { inner, hello_tx })
         }
         None => inner,

@@ -22,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
 use xfr::diff::{DEFAULT_DIFF_THRESHOLD_PERCENT, DiffConfig, run_diff};
+use xfr::net::AddressFamily;
 use xfr::output::{output_csv, output_json, output_plain};
 
 /// Output format options
@@ -176,6 +177,12 @@ struct Cli {
     #[arg(help_heading = "Test Options")]
     udp: bool,
 
+    /// UDP payload size in bytes, including the 16-byte xfr header (default: 1400).
+    /// Use a smaller size on VPN/tunnel paths; requires server udp_payload_size_v1 support.
+    #[arg(short = 'l', long = "length", value_name = "BYTES", requires = "udp", conflicts_with_all = ["probe_mtu", "quic", "mptcp", "zerocopy"], value_parser = clap::value_parser!(u16).range(16..=65507))]
+    #[arg(help_heading = "Test Options")]
+    udp_payload_size: Option<u16>,
+
     /// QUIC mode (encrypted, multiplexed streams)
     #[arg(short = 'Q', long, conflicts_with = "udp")]
     #[arg(help_heading = "Test Options")]
@@ -186,10 +193,10 @@ struct Cli {
     #[arg(help_heading = "Test Options")]
     bitrate: Option<u64>,
 
-    /// Number of parallel streams (1-128)
-    #[arg(short = 'P', long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=128))]
+    /// Number of parallel streams (1-128; default: config value or 1)
+    #[arg(short = 'P', long, value_parser = clap::value_parser!(u8).range(1..=128))]
     #[arg(help_heading = "Test Options")]
-    parallel: u8,
+    parallel: Option<u8>,
 
     /// Reverse direction (server sends to client)
     #[arg(short = 'R', long, conflicts_with = "bidir")]
@@ -237,12 +244,12 @@ struct Cli {
     no_update_check: bool,
 
     /// Color theme (default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized)
-    #[arg(long, default_value = "default")]
+    #[arg(long, global = true)]
     #[arg(help_heading = "Output Options")]
-    theme: String,
+    theme: Option<String>,
 
-    /// Report interval in seconds (default: 1.0)
-    #[arg(short = 'i', long)]
+    /// Report interval in positive, finite seconds (default: 1.0)
+    #[arg(short = 'i', long, value_parser = parse_report_interval)]
     #[arg(help_heading = "Output Options")]
     interval: Option<f64>,
 
@@ -308,7 +315,7 @@ struct Cli {
     psk_file: Option<PathBuf>,
 
     /// Force IPv4 only
-    #[arg(short = '4', long = "ipv4")]
+    #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6_only")]
     #[arg(help_heading = "Connection Options")]
     ipv4_only: bool,
 
@@ -421,10 +428,10 @@ enum Commands {
         #[arg(help_heading = "Server Options")]
         no_mdns: bool,
 
-        /// Server port
-        #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
+        /// Server port (default: config value or 5201)
+        #[arg(short, long, env = "XFR_PORT")]
         #[arg(help_heading = "Connection Options")]
-        port: u16,
+        port: Option<u16>,
 
         /// Bind to specific address (e.g., 192.168.1.1, ::1)
         #[arg(short = 'B', long)]
@@ -432,7 +439,7 @@ enum Commands {
         bind: Option<IpAddr>,
 
         /// Force IPv4 only
-        #[arg(short = '4', long = "ipv4")]
+        #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6_only")]
         #[arg(help_heading = "Connection Options")]
         ipv4_only: bool,
 
@@ -446,10 +453,10 @@ enum Commands {
         #[arg(help_heading = "Access Control")]
         rate_limit: Option<u32>,
 
-        /// Rate limit time window. Bare integers are seconds (`60`); must be greater than 0.
-        #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
+        /// Rate limit time window in whole seconds (default: 60s). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`). Must be at least 1 second.
+        #[arg(long, value_parser = parse_rate_limit_window)]
         #[arg(help_heading = "Access Control")]
-        rate_limit_window: Duration,
+        rate_limit_window: Option<u64>,
 
         /// Allow IP/subnet (can be repeated)
         #[arg(long = "allow", action = clap::ArgAction::Append)]
@@ -499,8 +506,8 @@ enum Commands {
         /// Current result file
         current: PathBuf,
 
-        /// Regression threshold percentage
-        #[arg(long, default_value_t = DEFAULT_DIFF_THRESHOLD_PERCENT)]
+        /// Regression threshold percentage (finite and non-negative)
+        #[arg(long, default_value_t = DEFAULT_DIFF_THRESHOLD_PERCENT, value_parser = parse_diff_threshold)]
         threshold: f64,
     },
 
@@ -521,15 +528,38 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
-/// Duration parser that rejects zero. For flags where zero is not a valid
-/// sentinel (e.g. `--rate-limit-window`, which would divide-by-zero the
-/// cleanup-task interval in `tokio::time::interval`).
+/// Duration parser for flags where zero is not a valid sentinel.
 fn parse_nonzero_duration(s: &str) -> Result<Duration, String> {
     let d = parse_duration(s)?;
     if d.is_zero() {
         return Err("Duration must be greater than 0".to_string());
     }
     Ok(d)
+}
+
+fn parse_rate_limit_window(s: &str) -> Result<u64, String> {
+    let duration = parse_nonzero_duration(s)?;
+    if duration.subsec_nanos() != 0 {
+        return Err(
+            "Rate limit window must be a whole number of seconds (at least 1 second)".into(),
+        );
+    }
+    Ok(duration.as_secs())
+}
+
+/// Resolve the rate limit window without confusing an explicit CLI value
+/// with a default. The config and public rate limiter API use whole seconds.
+fn resolve_rate_limit_window(
+    cli_window_secs: Option<u64>,
+    config_window_secs: Option<u64>,
+) -> anyhow::Result<u64> {
+    let window_secs = cli_window_secs
+        .or(config_window_secs)
+        .unwrap_or_else(|| xfr::rate_limit::RateLimitConfig::default().window_secs);
+    if window_secs == 0 {
+        anyhow::bail!("server.rate_limit_window must be at least 1 second");
+    }
+    Ok(window_secs)
 }
 
 fn parse_test_duration(s: &str) -> Result<Duration, String> {
@@ -541,7 +571,29 @@ fn parse_test_duration(s: &str) -> Result<Duration, String> {
     if duration < Duration::from_secs(1) {
         return Err("Minimum test duration is 1 second (use 0 for infinite)".to_string());
     }
+    if duration.as_secs() > u64::from(u32::MAX) {
+        return Err(format!(
+            "Maximum test duration is {} seconds (use 0 for infinite)",
+            u32::MAX
+        ));
+    }
     Ok(duration)
+}
+
+fn validate_report_interval(seconds: f64) -> Result<f64, String> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("Report interval must be finite and greater than zero".into());
+    }
+    // Stall detection scales the reporting period by 1.9; validate that
+    // duration too so a finite but enormous setting cannot panic later.
+    if Duration::try_from_secs_f64(seconds.max(1.0) * 1.9).is_err() {
+        return Err("Report interval is too large".into());
+    }
+    Ok(seconds)
+}
+
+fn parse_report_interval(value: &str) -> Result<f64, String> {
+    validate_report_interval(value.parse::<f64>().map_err(|error| error.to_string())?)
 }
 
 /// Resolve the effective server-side max test duration.
@@ -552,6 +604,11 @@ fn resolve_server_max_duration(
     preset: Option<&xfr::config::ServerPreset>,
 ) -> Option<Duration> {
     cli_max_duration.or_else(|| preset.and_then(|p| p.max_duration_secs.map(Duration::from_secs)))
+}
+
+/// An explicit CLI or environment port wins even when it equals DEFAULT_PORT.
+fn resolve_server_port(cli_port: Option<u16>, config_port: Option<u16>) -> u16 {
+    cli_port.or(config_port).unwrap_or(DEFAULT_PORT)
 }
 
 /// Resolve the effective client test duration.
@@ -583,6 +640,30 @@ fn resolve_client_duration(
     }
 }
 
+fn resolve_parallel_streams(cli_parallel: Option<u8>, config_parallel: Option<u8>) -> Result<u8> {
+    let streams = cli_parallel.or(config_parallel).unwrap_or(1);
+    anyhow::ensure!(
+        (1..=128).contains(&streams),
+        "client.parallel_streams must be between 1 and 128 (got {streams})"
+    );
+    Ok(streams)
+}
+
+fn resolve_window_size(
+    cli_window: Option<usize>,
+    config_window: Option<&str>,
+) -> Result<Option<usize>> {
+    if let Some(window) = cli_window {
+        return Ok(Some(window));
+    }
+    config_window
+        .map(|value| {
+            parse_size(value)
+                .map_err(|error| anyhow::anyhow!("invalid client.window_size {value:?}: {error}"))
+        })
+        .transpose()
+}
+
 #[derive(Debug, PartialEq)]
 struct ResolvedClientNetworkOptions {
     bitrate: Option<u64>,
@@ -605,14 +686,22 @@ fn resolve_client_network_options(
 ) -> Result<ResolvedClientNetworkOptions, String> {
     let bitrate = match cli_bitrate {
         Some(bitrate) => Some(bitrate),
-        None => defaults.bitrate.as_deref().map(parse_bitrate).transpose()?,
+        None => defaults
+            .bitrate
+            .as_deref()
+            .map(parse_bitrate)
+            .transpose()
+            .map_err(|e| format!("bitrate: {e}"))?,
     };
 
     Ok(ResolvedClientNetworkOptions {
         bitrate,
         congestion: cli_congestion.or_else(|| defaults.congestion.clone()),
         dscp: cli_dscp.or_else(|| defaults.dscp.clone()),
-        interval_secs: cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
+        interval_secs: validate_report_interval(
+            cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
+        )
+        .map_err(|e| format!("interval_secs: {e}"))?,
         bind: cli_bind.or_else(|| defaults.bind.clone()),
         cport: cli_cport.or(defaults.cport),
     })
@@ -725,6 +814,55 @@ fn parse_dscp(s: &str) -> Result<u8, String> {
             s
         )),
     }
+}
+
+fn resolve_address_family(
+    ipv4_only: bool,
+    ipv6_only: bool,
+    config_value: Option<&str>,
+    config_key: &str,
+) -> Result<AddressFamily> {
+    if ipv4_only {
+        return Ok(AddressFamily::V4Only);
+    }
+    if ipv6_only {
+        return Ok(AddressFamily::V6Only);
+    }
+    match config_value {
+        Some(value) => value.parse().map_err(|()| {
+            anyhow::anyhow!("invalid {config_key}: {value:?}; expected ipv4, ipv6, or dual")
+        }),
+        None => Ok(AddressFamily::default()),
+    }
+}
+
+fn resolve_server_address_family(
+    bind: Option<IpAddr>,
+    ipv4_only: bool,
+    ipv6_only: bool,
+    config_value: Option<&str>,
+) -> Result<AddressFamily> {
+    // A specific bind address selects the family before config defaults.
+    if let Some(ip) = bind {
+        if ip.is_unspecified() {
+            anyhow::bail!(
+                "--bind {} is an unspecified address; use -4/-6 instead to control address family",
+                ip
+            );
+        }
+        if ipv4_only && ip.is_ipv6() {
+            anyhow::bail!("--bind {} is IPv6 but -4/--ipv4 forces IPv4", ip);
+        }
+        if ipv6_only && ip.is_ipv4() {
+            anyhow::bail!("--bind {} is IPv4 but -6/--ipv6 forces IPv6", ip);
+        }
+        return Ok(if ip.is_ipv4() {
+            AddressFamily::V4Only
+        } else {
+            AddressFamily::V6Only
+        });
+    }
+    resolve_address_family(ipv4_only, ipv6_only, config_value, "server.address_family")
 }
 
 /// Parse a bind address string (can be "IP" or "IP:port")
@@ -867,6 +1005,16 @@ fn zerocopy_notice(zerocopy: ZerocopyMode, direction: Direction) -> Option<&'sta
     }
 }
 
+fn parse_diff_threshold(value: &str) -> Result<f64, String> {
+    let threshold = value.parse::<f64>().map_err(|error| error.to_string())?;
+    xfr::diff::DiffConfig {
+        threshold_percent: threshold,
+    }
+    .validate()
+    .map_err(|error| error.to_string())?;
+    Ok(threshold)
+}
+
 fn generate_completions(shell: &str) {
     use clap::CommandFactory;
     use clap_complete::{Shell, generate};
@@ -978,11 +1126,7 @@ async fn main() -> Result<()> {
             no_mdns,
         }) => {
             // Use CLI values, falling back to config file, then defaults
-            let server_port = if port != DEFAULT_PORT {
-                port
-            } else {
-                file_config.server.port.unwrap_or(DEFAULT_PORT)
-            };
+            let server_port = resolve_server_port(port, file_config.server.port);
 
             let server_one_off = one_off || file_config.server.one_off.unwrap_or(false);
 
@@ -1046,40 +1190,18 @@ async fn main() -> Result<()> {
 
             let rate_limit_config = xfr::rate_limit::RateLimitConfig {
                 max_per_ip: rate_limit.or(file_config.server.rate_limit),
-                window_secs: rate_limit_window.as_secs(),
+                window_secs: resolve_rate_limit_window(
+                    rate_limit_window,
+                    file_config.server.rate_limit_window,
+                )?,
             };
 
-            // Determine address family
-            // When --bind is specified, derive family from the IP and validate
-            // against -4/-6 to prevent contradictions (e.g., --bind 127.0.0.1 -6)
-            let address_family = if let Some(ip) = bind {
-                if ip.is_unspecified() {
-                    anyhow::bail!(
-                        "--bind {} is an unspecified address; use -4/-6 instead to control address family",
-                        ip
-                    );
-                }
-                let derived = if ip.is_ipv4() {
-                    xfr::net::AddressFamily::V4Only
-                } else {
-                    xfr::net::AddressFamily::V6Only
-                };
-                if ipv4_only && ip.is_ipv6() {
-                    anyhow::bail!("--bind {} is IPv6 but -4/--ipv4 forces IPv4", ip);
-                }
-                if ipv6_only && ip.is_ipv4() {
-                    anyhow::bail!("--bind {} is IPv4 but -6/--ipv6 forces IPv6", ip);
-                }
-                derived
-            } else if ipv4_only {
-                xfr::net::AddressFamily::V4Only
-            } else if ipv6_only {
-                xfr::net::AddressFamily::V6Only
-            } else if let Some(ref af) = file_config.server.address_family {
-                af.parse().unwrap_or_default()
-            } else {
-                xfr::net::AddressFamily::default()
-            };
+            let address_family = resolve_server_address_family(
+                bind,
+                ipv4_only,
+                ipv6_only,
+                file_config.server.address_family.as_deref(),
+            )?;
 
             let server_no_mdns = no_mdns || file_config.server.no_mdns.unwrap_or(false);
 
@@ -1109,7 +1231,7 @@ async fn main() -> Result<()> {
                 // NO_COLOR-derived default. There is no server section for a
                 // theme in config.toml, so the saved pref carries a user's
                 // choice across from the client.
-                let prefs = xfr::prefs::Prefs::load().with_overrides(Some(&cli.theme), None);
+                let prefs = xfr::prefs::Prefs::load().with_overrides(cli.theme.as_deref(), None);
                 run_server_tui(config, prefs.theme_name()).await?;
             } else {
                 let server = Server::new(config);
@@ -1184,7 +1306,7 @@ async fn main() -> Result<()> {
                 cli.cport,
                 &file_config.client,
             )
-            .map_err(|e| anyhow::anyhow!("invalid [client] bitrate: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
 
             if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
                 eprintln!("Warning: {msg}");
@@ -1237,23 +1359,21 @@ async fn main() -> Result<()> {
             let duration =
                 resolve_client_duration(cli.time, cli.probe_mtu, cli.bytes, &file_config);
 
-            let streams = if cli.parallel != 1 {
-                cli.parallel
-            } else {
-                file_config.client.parallel_streams.unwrap_or(cli.parallel)
-            };
+            let streams =
+                resolve_parallel_streams(cli.parallel, file_config.client.parallel_streams)?;
 
             let tcp_nodelay = cli.tcp_nodelay || file_config.client.tcp_nodelay.unwrap_or(false);
 
-            let window_size = cli.window.or_else(|| {
-                file_config
-                    .client
-                    .window_size
-                    .as_ref()
-                    .and_then(|s| parse_size(s).ok())
-            });
+            let window_size =
+                resolve_window_size(cli.window, file_config.client.window_size.as_deref())?;
 
-            let json_output = cli.json || file_config.client.json_output.unwrap_or(false);
+            // An explicit --json-stream or --csv overrides a config-file JSON
+            // default; otherwise the summary-JSON mode would suppress the
+            // interval rows the user asked to stream.
+            let json_output = cli.json
+                || (!cli.json_stream
+                    && !cli.csv
+                    && file_config.client.json_output.unwrap_or(false));
             let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
 
             // Determine timestamp format (CLI > config > default)
@@ -1297,15 +1417,12 @@ async fn main() -> Result<()> {
             }
 
             // Determine address family
-            let client_address_family = if cli.ipv4_only {
-                xfr::net::AddressFamily::V4Only
-            } else if cli.ipv6_only {
-                xfr::net::AddressFamily::V6Only
-            } else if let Some(ref af) = file_config.client.address_family {
-                af.parse().unwrap_or_default()
-            } else {
-                xfr::net::AddressFamily::default()
-            };
+            let client_address_family = resolve_address_family(
+                cli.ipv4_only,
+                cli.ipv6_only,
+                file_config.client.address_family.as_deref(),
+                "client.address_family",
+            )?;
 
             // Parse bind address (can be "IP" or "IP:port")
             let mut bind_addr = if let Some(ref bind_str) = network_options.bind {
@@ -1373,6 +1490,7 @@ async fn main() -> Result<()> {
                 tcp_congestion: network_options.congestion,
                 window_size,
                 byte_budget: cli.bytes,
+                udp_payload_size: cli.udp_payload_size,
                 psk: client_psk,
                 address_family: client_address_family,
                 bind_addr,
@@ -1412,7 +1530,7 @@ async fn main() -> Result<()> {
                 // TUI mode - load prefs with overrides
                 // Priority: CLI flag > config file > saved prefs > default
                 let prefs = xfr::prefs::Prefs::load()
-                    .with_overrides(Some(&cli.theme), file_config.client.theme.as_deref());
+                    .with_overrides(cli.theme.as_deref(), file_config.client.theme.as_deref());
 
                 // Update check runs unless disabled. Precedence (higher wins):
                 // compiled-out > env > CLI flag > config.toml > saved pref.
@@ -1464,7 +1582,9 @@ async fn run_client_plain(
     }
 
     let omit_secs = opts.omit_secs;
-    let quiet = opts.quiet;
+    // Summary JSON is one document; interval and feedback rows belong to
+    // the streaming modes and must not contaminate redirected JSON output.
+    let quiet = opts.quiet || opts.json;
     let json_stream = opts.json_stream;
     let csv = opts.csv;
     let interval_secs = opts.interval_secs;
@@ -1748,7 +1868,9 @@ async fn run_client_plain(
     if interrupted {
         eprintln!("Warning: partial results (server did not respond to cancel)");
     }
-    let output_str = if opts.json || opts.json_stream {
+    let output_str = if opts.json_stream {
+        serde_json::to_string(&result)?
+    } else if opts.json {
         output_json(&result)?
     } else if opts.csv {
         output_csv(&result)
@@ -1897,7 +2019,7 @@ fn tui_fallback_result(bytes: u64, elapsed_ms: u64) -> Option<xfr::protocol::Tes
 }
 
 fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
-    let client = Arc::new(Client::new(config.clone()));
+    let client = Arc::new(Client::new(tui_run_config(config)));
     let client_for_task = client.clone();
     let (progress_tx, progress_rx) = mpsc::channel::<TestProgress>(100);
     let handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
@@ -1906,6 +2028,26 @@ fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
         handle,
         progress_rx,
     }
+}
+
+fn tui_run_config(config: &ClientConfig) -> ClientConfig {
+    // Keep the user's transport-specific preferences in the settings
+    // config so switching back restores them. Only the active run drops
+    // options that do not apply to the newly selected protocol.
+    let mut active = config.clone();
+    // Fixed data ports need one socket per TCP/UDP stream. Recompute this
+    // after either protocol or stream-count edits; QUIC uses one endpoint.
+    active.sequential_ports = active.protocol != Protocol::Quic
+        && active.streams > 1
+        && active.bind_addr.is_some_and(|addr| addr.port() != 0);
+    if active.protocol != Protocol::Udp {
+        active.udp_payload_size = None;
+    }
+    if active.protocol != Protocol::Tcp {
+        active.mptcp = false;
+        active.zerocopy = ZerocopyMode::Off;
+    }
+    active
 }
 
 async fn finish_tui_run(run: TuiRun) -> Result<xfr::protocol::TestResult> {
@@ -1959,6 +2101,12 @@ fn poll_update_check(
     }
 }
 
+fn remember_tui_theme(prefs: &mut xfr::prefs::Prefs, app: &App) {
+    if let Some(theme) = app.changed_theme_name() {
+        prefs.theme = Some(theme.to_string());
+    }
+}
+
 fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> SettingsAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('s') => {
@@ -1976,11 +2124,13 @@ fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> Se
         KeyCode::Left | KeyCode::Char('h') => {
             app.settings.value_prev();
             app.set_theme_index(app.settings.theme_index);
+            app.set_timestamp_format(app.settings.timestamp_format);
             SettingsAction::None
         }
         KeyCode::Right | KeyCode::Char('l') => {
             app.settings.value_next();
             app.set_theme_index(app.settings.theme_index);
+            app.set_timestamp_format(app.settings.timestamp_format);
             SettingsAction::None
         }
         KeyCode::Tab => {
@@ -2163,6 +2313,9 @@ async fn run_tui_loop(
     let mut last_drawn: Option<u64> = None;
 
     loop {
+        // Preserve only explicit palette edits, including on cancel timeout.
+        remember_tui_theme(&mut prefs, &app);
+
         // If we're waiting for cancel result and deadline expired, exit now
         if let Some(deadline) = app.cancel_deadline
             && deadline.elapsed() > Duration::ZERO
@@ -2219,7 +2372,6 @@ async fn run_tui_loop(
             // Settings modal takes priority when visible
             if app.settings.visible {
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
-                    prefs.theme = Some(app.theme_name().to_string());
                     apply_tui_settings(&mut config, &mut app);
                     app.cancel_deadline = None;
                     fallback_bytes = 0;
@@ -2242,18 +2394,15 @@ async fn run_tui_loop(
             ) {
                 TuiQuitAction::Noop => {}
                 TuiQuitAction::ExitError => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
                 }
                 TuiQuitAction::ExitOk => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::ForceExit => {
                     if let Some(current) = run.take() {
                         abort_tui_run(current).await;
                     }
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::Ignore => {
@@ -2327,11 +2476,9 @@ async fn run_tui_loop(
                     app.show_help = false;
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Completed) => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Error) => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
                 }
                 KeyCode::Char('j') if app.result.is_some() => {
@@ -2373,7 +2520,6 @@ async fn run_tui_loop(
 
                     // If we were waiting for cancel to complete, exit now with result
                     if app.cancel_deadline.is_some() {
-                        prefs.theme = Some(app.theme_name().to_string());
                         return Ok((app.result, prefs, print_json_on_exit, false));
                     }
                     // The next iteration draws the result screen: the
@@ -2385,7 +2531,6 @@ async fn run_tui_loop(
                     // ("Timeout waiting for server response") well before the
                     // cancel deadline, and the stats shouldn't be lost with it.
                     if app.cancel_deadline.is_some() {
-                        prefs.theme = Some(app.theme_name().to_string());
                         let partial = app.result.is_none();
                         if partial {
                             app.result = tui_fallback_result(fallback_bytes, fallback_elapsed_ms);
@@ -2497,8 +2642,79 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
 mod tests {
     use super::*;
 
+    #[test]
+    fn diff_thresholds_reject_invalid_cli_values() {
+        for value in ["NaN", "inf", "-inf", "-1"] {
+            assert!(parse_diff_threshold(value).is_err(), "{value}");
+            assert!(
+                Cli::try_parse_from([
+                    "xfr",
+                    "diff",
+                    "before.json",
+                    "after.json",
+                    "--threshold",
+                    value
+                ])
+                .is_err(),
+                "{value}"
+            );
+        }
+        for value in ["0", "5", "12.5", "100"] {
+            let cli = Cli::try_parse_from([
+                "xfr",
+                "diff",
+                "before.json",
+                "after.json",
+                "--threshold",
+                value,
+            ])
+            .unwrap();
+            match cli.command.unwrap() {
+                Commands::Diff { threshold, .. } => {
+                    assert_eq!(threshold, value.parse::<f64>().unwrap())
+                }
+                _ => panic!("expected diff command"),
+            }
+        }
+    }
+
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn settings_timestamp_keys_update_the_history_format() {
+        let mut app = App::default();
+        app.settings.toggle();
+        app.settings.selected_index = 1; // Timestamp
+        app.log("Before changing the format");
+
+        assert_eq!(
+            handle_tui_settings_key(&mut app, test_key(KeyCode::Right)),
+            SettingsAction::None
+        );
+        assert_eq!(app.timestamp_format, TimestampFormat::Iso8601);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&app.history.front().unwrap().timestamp).is_ok()
+        );
+
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Char('l')));
+        assert_eq!(app.timestamp_format, TimestampFormat::Unix);
+        assert!(
+            app.history
+                .front()
+                .unwrap()
+                .timestamp
+                .parse::<f64>()
+                .is_ok()
+        );
+
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Left));
+        assert_eq!(app.timestamp_format, TimestampFormat::Iso8601);
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Char('h')));
+        assert_eq!(app.timestamp_format, TimestampFormat::Relative);
+        assert_eq!(app.history.front().unwrap().timestamp, "00:00:00");
+        assert!(!app.settings.test_params_dirty());
     }
 
     #[test]
@@ -2715,6 +2931,51 @@ mod tests {
     }
 
     #[test]
+    fn report_intervals_reject_invalid_cli_values() {
+        for value in ["NaN", "inf", "-inf", "0", "-1", "1e308", "1e19"] {
+            assert!(parse_report_interval(value).is_err(), "{value}");
+            assert!(
+                Cli::try_parse_from(["xfr", "host", "--interval", value]).is_err(),
+                "{value}"
+            );
+        }
+        for value in ["0.25", "1", "2.5"] {
+            assert_eq!(
+                Cli::try_parse_from(["xfr", "host", "--interval", value])
+                    .unwrap()
+                    .interval,
+                Some(value.parse().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn report_intervals_validate_config_and_preserve_cli_precedence() {
+        for interval in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -1.0,
+            1e308,
+            1e19,
+        ] {
+            let defaults = xfr::config::ClientDefaults {
+                interval_secs: Some(interval),
+                ..Default::default()
+            };
+            assert!(
+                resolve_client_network_options(None, None, None, None, None, None, &defaults)
+                    .is_err()
+            );
+            let options =
+                resolve_client_network_options(None, None, None, Some(1.0), None, None, &defaults)
+                    .unwrap();
+            assert_eq!(options.interval_secs, 1.0);
+        }
+    }
+
+    #[test]
     fn test_cli_probe_mtu_default_time_unset() {
         use clap::Parser;
         let cli = Cli::try_parse_from(["xfr", "host", "--probe-mtu"]).unwrap();
@@ -2732,6 +2993,105 @@ mod tests {
 
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn tui_protocol_changes_keep_udp_length_as_a_preference() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        };
+        for protocol in [Protocol::Tcp, Protocol::Quic, Protocol::Udp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert!(
+                active.validate().is_ok(),
+                "{protocol}: incompatible UDP payload setting"
+            );
+            assert_eq!(
+                active.udp_payload_size,
+                (protocol == Protocol::Udp).then_some(1368)
+            );
+            assert_eq!(
+                config.udp_payload_size,
+                Some(1368),
+                "keep the choice for switching back"
+            );
+        }
+    }
+
+    #[test]
+    fn tui_protocol_changes_scope_tcp_only_send_options() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Tcp,
+            mptcp: true,
+            zerocopy: ZerocopyMode::Requested,
+            ..Default::default()
+        };
+        for protocol in [Protocol::Udp, Protocol::Quic, Protocol::Tcp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert_eq!(active.mptcp, protocol == Protocol::Tcp);
+            assert_eq!(
+                active.zerocopy,
+                if protocol == Protocol::Tcp {
+                    ZerocopyMode::Requested
+                } else {
+                    ZerocopyMode::Off
+                }
+            );
+            assert!(config.mptcp);
+            assert_eq!(config.zerocopy, ZerocopyMode::Requested);
+        }
+    }
+
+    #[test]
+    fn tui_protocol_changes_recompute_fixed_port_assignment() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Quic,
+            streams: 2,
+            bind_addr: Some("127.0.0.1:5202".parse().unwrap()),
+            sequential_ports: false,
+            ..Default::default()
+        };
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            config.protocol = protocol;
+            assert_eq!(
+                tui_run_config(&config).sequential_ports,
+                protocol != Protocol::Quic,
+                "{protocol} must use its current socket layout"
+            );
+            assert!(!config.sequential_ports);
+        }
+    }
+
+    #[test]
+    fn tui_stream_count_changes_recompute_fixed_port_assignment() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            bind_addr: Some("127.0.0.1:5202".parse().unwrap()),
+            ..Default::default()
+        };
+        for streams in [1, 2, 1] {
+            config.streams = streams;
+            assert_eq!(tui_run_config(&config).sequential_ports, streams > 1);
+        }
+    }
+
+    #[test]
+    fn tui_ephemeral_binds_keep_independent_ports() {
+        for bind_addr in [None, Some("127.0.0.1:0".parse().unwrap())] {
+            for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+                let config = ClientConfig {
+                    protocol,
+                    streams: 2,
+                    bind_addr,
+                    ..Default::default()
+                };
+                assert!(!tui_run_config(&config).sequential_ports);
+            }
+        }
     }
 
     #[test]
@@ -2868,6 +3228,46 @@ mod tests {
     }
 
     #[test]
+    fn test_duration_rejects_wrapping_protocol_seconds() {
+        for value in ["4294967296", "4294967296s", "18446744073709551615"] {
+            assert!(parse_test_duration(value).is_err(), "accepted {value}");
+            assert!(Cli::try_parse_from(["xfr", "host", "-t", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_duration_preserves_zero_fractional_values_and_the_wire_boundary() {
+        assert_eq!(parse_test_duration("0").unwrap(), Duration::ZERO);
+        assert_eq!(
+            parse_test_duration("1s 500ms").unwrap(),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            parse_test_duration("4294967295s 500ms").unwrap(),
+            Duration::new(u64::from(u32::MAX), 500_000_000),
+        );
+        let cli = Cli::try_parse_from(["xfr", "host", "-t", "4294967295"]).unwrap();
+        assert_eq!(cli.time, Some(Duration::from_secs(u64::from(u32::MAX))));
+    }
+
+    #[test]
+    fn explicit_duration_overrides_unused_out_of_range_config() {
+        let mut config = Config::default();
+        config.client.duration_secs = Some(u64::from(u32::MAX) + 1);
+        let cli = Cli::try_parse_from(["xfr", "host", "-t", "1"]).unwrap();
+        let duration = resolve_client_duration(cli.time, false, None, &config);
+        assert_eq!(duration, Duration::from_secs(1));
+        assert!(
+            ClientConfig {
+                duration,
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn test_parse_duration_bare_integer_is_seconds() {
         // iperf3 muscle memory: `-t 10` should mean 10 seconds.
         assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
@@ -2897,10 +3297,56 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_window_cli_rejects_zero_and_fractional_seconds() {
+        for value in ["0", "0s", "0ms", "1ns", "500ms", "1500ms", "1.5s"] {
+            let error = Cli::try_parse_from(["xfr", "serve", "--rate-limit-window", value])
+                .err()
+                .unwrap_or_else(|| panic!("rate limit window {value} should be rejected"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn rate_limit_window_cli_accepts_whole_seconds_and_preserves_unset() {
+        for (value, expected) in [("1", 1), ("60s", 60), ("5min", 300), ("1000ms", 1)] {
+            let cli = Cli::try_parse_from(["xfr", "serve", "--rate-limit-window", value]).unwrap();
+            let Some(Commands::Serve {
+                rate_limit_window, ..
+            }) = cli.command
+            else {
+                panic!("expected serve command");
+            };
+            assert_eq!(rate_limit_window, Some(expected));
+        }
+
+        let cli = Cli::try_parse_from(["xfr", "serve"]).unwrap();
+        let Some(Commands::Serve {
+            rate_limit_window, ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert_eq!(rate_limit_window, None);
+    }
+
+    #[test]
+    fn rate_limit_window_uses_cli_then_config_then_default() {
+        assert_eq!(resolve_rate_limit_window(None, None).unwrap(), 60);
+        assert_eq!(resolve_rate_limit_window(None, Some(30)).unwrap(), 30);
+        // Even an explicit CLI value equal to the default wins over config.
+        assert_eq!(resolve_rate_limit_window(Some(60), Some(30)).unwrap(), 60);
+        assert_eq!(resolve_rate_limit_window(Some(1), Some(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn rate_limit_window_rejects_zero_config() {
+        let error = resolve_rate_limit_window(None, Some(0)).unwrap_err();
+        assert!(error.to_string().contains("server.rate_limit_window"));
+    }
+
+    #[test]
     fn test_parse_nonzero_duration_rejects_zero_variants() {
-        // Bare-integer 0 and any unit-suffixed zero must fail — the rate-limit
-        // cleanup task uses `window / 2` as a tokio::time::interval which
-        // panics on Duration::ZERO.
+        // Bare-integer 0 and any unit-suffixed zero must fail.
         assert!(parse_nonzero_duration("0").is_err());
         assert!(parse_nonzero_duration("0s").is_err());
         assert!(parse_nonzero_duration("0ms").is_err());
@@ -2942,6 +3388,59 @@ mod tests {
     }
 
     #[test]
+    fn parallel_streams_resolve_cli_then_config_then_default() {
+        let explicit = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
+        let unset = Cli::try_parse_from(["xfr", "host"]).unwrap();
+        assert_eq!(unset.parallel, None);
+        assert_eq!(
+            resolve_parallel_streams(explicit.parallel, Some(8)).unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_parallel_streams(unset.parallel, Some(8)).unwrap(),
+            8
+        );
+        assert_eq!(resolve_parallel_streams(unset.parallel, None).unwrap(), 1);
+        // Only the effective count is validated.
+        for invalid in [0, 129] {
+            assert_eq!(
+                resolve_parallel_streams(explicit.parallel, Some(invalid)).unwrap(),
+                1
+            );
+            let error = resolve_parallel_streams(None, Some(invalid)).unwrap_err();
+            assert!(error.to_string().contains("client.parallel_streams"));
+        }
+    }
+
+    #[test]
+    fn window_size_rejects_invalid_effective_config() {
+        for value in ["1MiB", "", "999999999999999999999G"] {
+            let error = resolve_window_size(None, Some(value)).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("client.window_size"));
+            assert!(message.contains(&format!("{value:?}")));
+        }
+    }
+
+    #[test]
+    fn window_size_uses_valid_defaults_and_explicit_overrides() {
+        assert_eq!(resolve_window_size(None, None).unwrap(), None);
+        for (value, expected) in [("512K", 512 * 1024), ("1m", 1024 * 1024), ("0", 0)] {
+            assert_eq!(
+                resolve_window_size(None, Some(value)).unwrap(),
+                Some(expected)
+            );
+        }
+        let cli = Cli::try_parse_from(["xfr", "host", "-w", "2M"]).unwrap();
+        assert_eq!(
+            resolve_window_size(cli.window, Some("1MiB")).unwrap(),
+            Some(2 * 1024 * 1024),
+        );
+        // Preserve the existing explicit zero semantics as well.
+        assert_eq!(resolve_window_size(Some(0), Some("1MiB")).unwrap(), Some(0));
+    }
+
+    #[test]
     fn test_cli_parallel_range() {
         use clap::Parser;
 
@@ -2960,6 +3459,98 @@ mod tests {
         // -P 129 should fail
         let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn theme_option_is_available_after_the_server_subcommand() {
+        assert!(Cli::try_parse_from(["xfr", "serve", "--tui", "--theme", "default"]).is_ok());
+    }
+
+    #[test]
+    fn theme_parser_distinguishes_an_explicit_default_from_no_choice() {
+        for args in [vec!["xfr", "localhost"], vec!["xfr", "serve", "--tui"]] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            assert!(cli.theme.is_none());
+            let mut explicit = args;
+            explicit.extend(["--theme", "default"]);
+            let cli = Cli::try_parse_from(explicit).unwrap();
+            assert_eq!(cli.theme.as_deref(), Some("default"));
+            let prefs = xfr::prefs::Prefs {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            }
+            .with_overrides(cli.theme.as_deref(), Some("nord"));
+            assert_eq!(prefs.theme.as_deref(), Some("default"));
+        }
+        let cli = Cli::try_parse_from(["xfr", "--theme", "default", "serve", "--tui"]).unwrap();
+        assert_eq!(cli.theme.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn automatic_theme_is_not_saved_without_an_explicit_edit() {
+        for theme in ["default", "monochrome"] {
+            let mut prefs = xfr::prefs::Prefs::default();
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert!(
+                prefs.theme.is_none(),
+                "automatic {theme} must remain transient"
+            );
+
+            // An unrelated display edit must not promote an automatic
+            // palette into an explicit saved preference either.
+            app.settings.visible = true;
+            app.settings.selected_index = 1; // Timestamp
+            handle_tui_settings_key(&mut app, test_key(KeyCode::Right));
+            remember_tui_theme(&mut prefs, &app);
+            assert!(prefs.theme.is_none());
+
+            app.cycle_theme();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(app.theme_name()));
+
+            // Returning to the initial palette is still an explicit choice,
+            // and restarting a test must preserve that intent.
+            for _ in 1..xfr::tui::Theme::list().len() {
+                app.cycle_theme();
+            }
+            app.reset_for_restart();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
+    }
+
+    #[test]
+    fn untouched_explicit_theme_preferences_are_preserved() {
+        for theme in ["default", "dracula", "mono"] {
+            let mut prefs = xfr::prefs::Prefs {
+                theme: Some(theme.into()),
+                ..Default::default()
+            };
+            let app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
     }
 
     #[test]
@@ -3050,6 +3641,29 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-b", "1G"]).is_err());
         assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-P", "4"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_udp_payload_size() {
+        assert!(
+            Cli::try_parse_from(["xfr", "host", "-u"])
+                .unwrap()
+                .udp_payload_size
+                .is_none()
+        );
+        for flag in ["-l", "--length"] {
+            for size in ["16", "1368", "65507"] {
+                let cli = Cli::try_parse_from(["xfr", "host", "-u", flag, size]).unwrap();
+                assert_eq!(cli.udp_payload_size, Some(size.parse().unwrap()));
+            }
+            for size in ["0", "15", "65508", "65536"] {
+                assert!(Cli::try_parse_from(["xfr", "host", "-u", flag, size]).is_err());
+            }
+        }
+        assert!(Cli::try_parse_from(["xfr", "host", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "-Q", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "--mptcp", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "-u", "--probe-mtu", "-l", "1368"]).is_err());
     }
 
     #[test]
@@ -3148,6 +3762,72 @@ mod tests {
     }
 
     #[test]
+    fn explicit_server_port_equal_to_default_overrides_config() {
+        let cli = Cli::try_parse_from(["xfr", "serve", "--port", "5201"]).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(resolve_server_port(port, Some(9000)), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_uses_config_then_default_when_unset() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        // Isolate the fallback case from an XFR_PORT set by the test runner.
+        let matches = Cli::command()
+            .mut_subcommand("serve", |command| {
+                command.mut_arg("port", |arg| arg.env(None::<&str>))
+            })
+            .try_get_matches_from(["xfr", "serve"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(port, None);
+        assert_eq!(resolve_server_port(port, Some(9000)), 9000);
+        assert_eq!(resolve_server_port(port, None), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_environment_and_cli_override_config() {
+        const CHILD_FLAG: &str = "XFR_SERVER_PORT_TEST_CHILD";
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            // A child process avoids mutating the environment while other
+            // parser tests are running in parallel.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::server_port_environment_and_cli_override_config",
+                ])
+                .env(CHILD_FLAG, "1")
+                .env("XFR_PORT", DEFAULT_PORT.to_string())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // `--exact` with a stale name runs zero tests and still exits 0.
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "environment precedence check failed: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        for (args, expected) in [
+            (vec!["xfr", "serve"], DEFAULT_PORT),
+            (vec!["xfr", "serve", "--port", "8000"], 8000),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Commands::Serve { port, .. }) = cli.command else {
+                panic!("expected serve command");
+            };
+            assert_eq!(resolve_server_port(port, Some(9000)), expected);
+        }
+    }
+
+    #[test]
     fn test_validate_bind_address_cport() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use xfr::protocol::Protocol;
@@ -3177,6 +3857,89 @@ mod tests {
         // --cport + QUIC multi-stream → ok (QUIC multiplexes on one socket)
         let result = validate_bind_address(addr, Protocol::Quic, 4, true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn address_family_cli_rejects_contradictory_flags() {
+        for mode in ["host", "serve"] {
+            for flags in [
+                vec!["-4", "-6"],
+                vec!["-6", "-4"],
+                vec!["--ipv4", "--ipv6"],
+                vec!["--ipv6", "--ipv4"],
+                vec!["-46"],
+            ] {
+                let error = Cli::try_parse_from(["xfr", mode].into_iter().chain(flags))
+                    .err()
+                    .expect("contradictory address-family flags should fail");
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            }
+        }
+    }
+
+    #[test]
+    fn address_family_rejects_invalid_effective_config() {
+        for key in ["client.address_family", "server.address_family"] {
+            let error = resolve_address_family(false, false, Some("ip4"), key).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(key));
+            assert!(message.contains("ip4"));
+        }
+    }
+
+    #[test]
+    fn address_family_accepts_valid_config() {
+        // Alias coverage lives with `AddressFamily::from_str` in net.rs.
+        let key = "client.address_family";
+        let resolve = |value| resolve_address_family(false, false, value, key).unwrap();
+        assert_eq!(resolve(Some("IPv6")), AddressFamily::V6Only);
+        assert_eq!(resolve(None), AddressFamily::DualStack);
+    }
+
+    #[test]
+    fn address_family_cli_overrides_unused_invalid_config() {
+        for key in ["client.address_family", "server.address_family"] {
+            assert_eq!(
+                resolve_address_family(true, false, Some("ip4"), key).unwrap(),
+                AddressFamily::V4Only,
+            );
+            assert_eq!(
+                resolve_address_family(false, true, Some("ip4"), key).unwrap(),
+                AddressFamily::V6Only,
+            );
+        }
+        for mode in ["host", "serve"] {
+            for flag in ["-4", "-6", "--ipv4", "--ipv6"] {
+                assert!(Cli::try_parse_from(["xfr", mode, flag]).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn address_family_server_bind_overrides_unused_config() {
+        for (ip, expected) in [
+            ("127.0.0.1", AddressFamily::V4Only),
+            ("::1", AddressFamily::V6Only),
+        ] {
+            assert_eq!(
+                resolve_server_address_family(Some(ip.parse().unwrap()), false, false, Some("ip4"))
+                    .unwrap(),
+                expected,
+            );
+        }
+        assert!(
+            resolve_server_address_family(Some("127.0.0.1".parse().unwrap()), false, true, None)
+                .is_err()
+        );
+        assert!(
+            resolve_server_address_family(Some("::1".parse().unwrap()), true, false, None).is_err()
+        );
+        for ip in ["0.0.0.0", "::"] {
+            assert!(
+                resolve_server_address_family(Some(ip.parse().unwrap()), false, false, None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
