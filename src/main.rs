@@ -247,8 +247,8 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     theme: String,
 
-    /// Report interval in seconds (default: 1.0)
-    #[arg(short = 'i', long)]
+    /// Report interval in positive, finite seconds (default: 1.0)
+    #[arg(short = 'i', long, value_parser = parse_report_interval)]
     #[arg(help_heading = "Output Options")]
     interval: Option<f64>,
 
@@ -550,6 +550,22 @@ fn parse_test_duration(s: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
+fn validate_report_interval(seconds: f64) -> Result<f64, String> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("Report interval must be finite and greater than zero".into());
+    }
+    // Stall detection scales the reporting period by 1.9; validate that
+    // duration too so a finite but enormous setting cannot panic later.
+    if Duration::try_from_secs_f64(seconds.max(1.0) * 1.9).is_err() {
+        return Err("Report interval is too large".into());
+    }
+    Ok(seconds)
+}
+
+fn parse_report_interval(value: &str) -> Result<f64, String> {
+    validate_report_interval(value.parse::<f64>().map_err(|error| error.to_string())?)
+}
+
 /// Resolve the effective server-side max test duration.
 /// CLI `--max-duration` always wins; otherwise a preset's
 /// `max_duration_secs` (if present) supplies the default.
@@ -618,7 +634,9 @@ fn resolve_client_network_options(
         bitrate,
         congestion: cli_congestion.or_else(|| defaults.congestion.clone()),
         dscp: cli_dscp.or_else(|| defaults.dscp.clone()),
-        interval_secs: cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
+        interval_secs: validate_report_interval(
+            cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
+        )?,
         bind: cli_bind.or_else(|| defaults.bind.clone()),
         cport: cli_cport.or(defaults.cport),
     })
@@ -2719,6 +2737,51 @@ mod tests {
                 .interval,
             Some(2.5)
         );
+    }
+
+    #[test]
+    fn report_intervals_reject_invalid_cli_values() {
+        for value in ["NaN", "inf", "-inf", "0", "-1", "1e308", "1e19"] {
+            assert!(parse_report_interval(value).is_err(), "{value}");
+            assert!(
+                Cli::try_parse_from(["xfr", "host", "--interval", value]).is_err(),
+                "{value}"
+            );
+        }
+        for value in ["0.25", "1", "2.5"] {
+            assert_eq!(
+                Cli::try_parse_from(["xfr", "host", "--interval", value])
+                    .unwrap()
+                    .interval,
+                Some(value.parse().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn report_intervals_validate_config_and_preserve_cli_precedence() {
+        for interval in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -1.0,
+            1e308,
+            1e19,
+        ] {
+            let defaults = xfr::config::ClientDefaults {
+                interval_secs: Some(interval),
+                ..Default::default()
+            };
+            assert!(
+                resolve_client_network_options(None, None, None, None, None, None, &defaults)
+                    .is_err()
+            );
+            let options =
+                resolve_client_network_options(None, None, None, Some(1.0), None, None, &defaults)
+                    .unwrap();
+            assert_eq!(options.interval_secs, 1.0);
+        }
     }
 
     #[test]

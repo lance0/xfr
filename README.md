@@ -528,7 +528,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
 | `--quiet` | `-q` | false | Summary only |
-| `--interval` | `-i` | 1.0 | Report interval (seconds) |
+| `--interval` | `-i` | 1.0 | Report interval (positive, finite seconds; also required for config defaults) |
 | `--omit` | | 0 | Omit first N seconds |
 | `--output` | `-o` | stdout | Output file |
 | `--no-tui` | | false | Disable TUI |
