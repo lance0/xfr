@@ -976,11 +976,13 @@ fn random_payload_notice(
 
 /// Resolve the zero-copy mode from CLI flags. Zero-copy is on by default
 /// for TCP (issue #33 follow-up); an explicit -Z upgrades silent fallback
-/// to a warning, and --no-zerocopy opts out. Non-TCP protocols never use
-/// it (clap already rejects an explicit -Z with -u/-Q).
-fn effective_zerocopy(cli: &Cli, protocol: Protocol) -> ZerocopyMode {
+/// to a warning, and --no-zerocopy opts out. This is the TCP preference,
+/// not scoped to the startup protocol: the TUI can switch protocols, and
+/// non-TCP runs never use it (the client gates it on TCP, and clap already
+/// rejects an explicit -Z with -u/-Q).
+fn effective_zerocopy(cli: &Cli) -> ZerocopyMode {
     debug_assert!(!(cli.zerocopy && cli.no_zerocopy));
-    if protocol != Protocol::Tcp || cli.no_zerocopy {
+    if cli.no_zerocopy {
         ZerocopyMode::Off
     } else if cli.zerocopy {
         ZerocopyMode::Requested
@@ -1296,7 +1298,7 @@ async fn main() -> Result<()> {
             };
 
             let random_payload = effective_random_payload(&cli);
-            let zerocopy = effective_zerocopy(&cli, protocol);
+            let zerocopy = effective_zerocopy(&cli);
             let network_options = resolve_client_network_options(
                 cli.bitrate,
                 cli.congestion.clone(),
@@ -1933,7 +1935,7 @@ impl Drop for TerminalGuard {
 }
 
 async fn run_client_tui(
-    config: ClientConfig,
+    mut config: ClientConfig,
     output: Option<PathBuf>,
     timestamp_format: TimestampFormat,
     prefs: xfr::prefs::Prefs,
@@ -1948,9 +1950,11 @@ async fn run_client_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // The loop applies Settings edits to `config`, so afterwards it
+    // describes the run that produced the final result.
     let result = run_tui_loop(
         &mut terminal,
-        config.clone(),
+        &mut config,
         timestamp_format,
         prefs,
         update_disabled,
@@ -1969,7 +1973,8 @@ async fn run_client_tui(
                 if print_json {
                     println!("{}", output_json(test_result)?);
                 } else {
-                    println!("{}", output_plain(test_result, config.mptcp));
+                    let mptcp = tui_run_config(&config).mptcp;
+                    println!("{}", output_plain(test_result, mptcp));
                 }
 
                 // Don't save incomplete fallback results to file — only real
@@ -2258,7 +2263,7 @@ async fn restart_tui_run(
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut config: ClientConfig,
+    config: &mut ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
     update_disabled: bool,
@@ -2293,8 +2298,8 @@ async fn run_tui_loop(
     // check is disabled so the poller never blocks on the empty channel).
     let mut update_check_done = update_disabled;
 
-    log_tui_quic_ignored_options(&mut app, &config);
-    let mut run = Some(spawn_tui_run(&config));
+    log_tui_quic_ignored_options(&mut app, config);
+    let mut run = Some(spawn_tui_run(config));
     app.on_connected();
 
     // Cumulative counters mirroring the --no-tui fallback path: if the server
@@ -2372,12 +2377,12 @@ async fn run_tui_loop(
             // Settings modal takes priority when visible
             if app.settings.visible {
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
-                    apply_tui_settings(&mut config, &mut app);
+                    apply_tui_settings(config, &mut app);
                     app.cancel_deadline = None;
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, &config).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     // `restart_tui_run` may draw a transient "restarting"
                     // frame directly. Its replacement must not be skipped
                     // against the fingerprint from before that draw.
@@ -2457,7 +2462,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, &config).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     last_drawn = None;
                 }
                 KeyCode::Char('t') => {
@@ -3047,6 +3052,40 @@ mod tests {
     }
 
     #[test]
+    fn tui_switch_to_tcp_uses_the_cli_zerocopy_preference() {
+        use clap::Parser;
+        // A `-u`/`-Q` session switched to TCP gets the TCP default, and an
+        // explicit --no-zerocopy survives the switch.
+        for (args, startup, tcp) in [
+            (
+                &["xfr", "host", "-u"][..],
+                Protocol::Udp,
+                ZerocopyMode::Auto,
+            ),
+            (
+                &["xfr", "host", "-Q"][..],
+                Protocol::Quic,
+                ZerocopyMode::Auto,
+            ),
+            (
+                &["xfr", "host", "-u", "--no-zerocopy"][..],
+                Protocol::Udp,
+                ZerocopyMode::Off,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let mut config = ClientConfig {
+                protocol: startup,
+                zerocopy: effective_zerocopy(&cli),
+                ..Default::default()
+            };
+            assert_eq!(tui_run_config(&config).zerocopy, ZerocopyMode::Off);
+            config.protocol = Protocol::Tcp;
+            assert_eq!(tui_run_config(&config).zerocopy, tcp, "{args:?}");
+        }
+    }
+
+    #[test]
     fn tui_protocol_changes_recompute_fixed_port_assignment() {
         let mut config = ClientConfig {
             protocol: Protocol::Quic,
@@ -3575,24 +3614,18 @@ mod tests {
         let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
         assert!(!cli.zerocopy);
         assert!(!cli.no_zerocopy);
-        assert_eq!(effective_zerocopy(&cli, Protocol::Tcp), ZerocopyMode::Auto);
-        // Non-TCP protocols never use zero-copy, even in Auto mode.
-        assert_eq!(effective_zerocopy(&cli, Protocol::Udp), ZerocopyMode::Off);
-        assert_eq!(effective_zerocopy(&cli, Protocol::Quic), ZerocopyMode::Off);
+        assert_eq!(effective_zerocopy(&cli), ZerocopyMode::Auto);
 
         let cli = Cli::try_parse_from(["xfr", "host", "-Z"]).unwrap();
         assert!(cli.zerocopy);
-        assert_eq!(
-            effective_zerocopy(&cli, Protocol::Tcp),
-            ZerocopyMode::Requested
-        );
+        assert_eq!(effective_zerocopy(&cli), ZerocopyMode::Requested);
 
         let cli = Cli::try_parse_from(["xfr", "host", "--zerocopy"]).unwrap();
         assert!(cli.zerocopy);
 
         let cli = Cli::try_parse_from(["xfr", "host", "--no-zerocopy"]).unwrap();
         assert!(cli.no_zerocopy);
-        assert_eq!(effective_zerocopy(&cli, Protocol::Tcp), ZerocopyMode::Off);
+        assert_eq!(effective_zerocopy(&cli), ZerocopyMode::Off);
 
         // Opt-in and opt-out are mutually exclusive
         assert!(Cli::try_parse_from(["xfr", "host", "-Z", "--no-zerocopy"]).is_err());
