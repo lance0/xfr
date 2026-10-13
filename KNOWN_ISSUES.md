@@ -20,7 +20,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 **Impact:** The default can fragment on paths with a smaller MTU, including some tunnels. Larger payloads can also fragment if they exceed the path's available space after IP/UDP headers.
 
-**Workaround:** Choose a length that fits the path. For example, `xfr <host> -u -l 1368` fits a 1420-byte MTU with either IPv4 or IPv6 headers. The default remains compatible with older servers.
+**Workaround:** Choose a length that fits the path; `--probe-mtu` finds the largest payload that survives each direction. For example, `xfr <host> -u -l 1368` fits a 1420-byte MTU with either IPv4 or IPv6 headers. The default remains compatible with older servers.
 
 ---
 
