@@ -2253,22 +2253,31 @@ async fn test_quic_infinite_duration_with_cancel() {
 
     let client = Client::new(config);
 
-    // Run for 1 second then cancel
-    let run_future = client.run(None);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(16);
+    let run_future = client.run(Some(progress_tx));
     let cancel_future = async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ = client.cancel();
+        // Wait until the test is running so cancellation cannot race the
+        // handshake. Keep polling run_future while the result is awaited.
+        timeout(Duration::from_secs(5), progress_rx.recv())
+            .await
+            .expect("QUIC test should emit progress")
+            .expect("QUIC test should still be running");
+        client
+            .cancel()
+            .expect("QUIC cancellation should be accepted");
     };
 
-    let result = tokio::select! {
-        r = run_future => r,
-        _ = cancel_future => {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Err(anyhow::anyhow!("Cancelled"))
-        }
-    };
-
-    let _ = result;
+    let (result, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(run_future, cancel_future)
+    })
+    .await
+    .expect("cancelled QUIC test should finish promptly");
+    let result = result.expect("server should return the cancelled QUIC summary");
+    assert!(
+        result.bytes_total > 0,
+        "summary should preserve transferred data"
+    );
+    assert!(result.duration_ms > 0, "summary should record elapsed time");
 }
 
 // ============================================================================

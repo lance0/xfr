@@ -55,6 +55,24 @@ fn start_control_cancel_wait(
     *pause_started_at = None;
 }
 
+async fn send_control_cancel<W>(
+    codec: &mut crate::control_crypto::ControlWriter,
+    writer: &mut W,
+    serialized: &str,
+    cancel_tx: &watch::Sender<bool>,
+    deadline: &mut tokio::time::Instant,
+    pause_started_at: &mut Option<tokio::time::Instant>,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // Stop local traffic before notifying the server. A dead TCP link or
+    // flow-controlled QUIC stream must not delay cancellation, including
+    // while paused (issue #159). The write and result share one deadline.
+    start_control_cancel_wait(tokio::time::Instant::now(), deadline, pause_started_at);
+    let _ = cancel_tx.send(true);
+    let _ = tokio::time::timeout_at(*deadline, codec.write_message(writer, serialized)).await;
+}
+
 /// Per-stream and total receive-byte deltas since the previous call,
 /// advancing `last_recv_bytes` in place. Used in download mode to derive
 /// interval throughput from the client's own receive counters instead of
@@ -1282,22 +1300,15 @@ impl Client {
                                 break;
                             }
                         };
-                        // Arm the post-cancel deadline before writing, and
-                        // bound the write itself: on an effectively-dead link
-                        // (issue #159) the control socket's send buffer can be
-                        // full, and an unbounded write here would hang this
-                        // loop with only the test-duration deadline armed.
-                        start_control_cancel_wait(
-                            tokio::time::Instant::now(),
+                        send_control_cancel(
+                            &mut ctrl_writer,
+                            &mut writer,
+                            &serialized,
+                            &cancel_tx,
                             &mut deadline,
                             &mut pause_started_at,
-                        );
-                        let _ = tokio::time::timeout(
-                            CONTROL_CANCEL_RESULT_TIMEOUT,
-                            ctrl_writer.write_message(&mut writer, &serialized),
                         )
                         .await;
-                        let _ = cancel_tx.send(true);
                         // Continue loop to receive Cancelled response
                     }
                 }
@@ -2559,13 +2570,14 @@ impl Client {
                                     break 'control Err(e);
                                 }
                             };
-                            let _ = ctrl_writer.write_message(&mut ctrl_send, &serialized).await;
-                            let _ = cancel_tx.send(true);
-                            start_control_cancel_wait(
-                                tokio::time::Instant::now(),
+                            send_control_cancel(
+                                &mut ctrl_writer,
+                                &mut ctrl_send,
+                                &serialized,
+                                &cancel_tx,
                                 &mut deadline,
                                 &mut pause_started_at,
-                            );
+                            ).await;
                         }
                     }
                     res = pause_request_rx.changed(), if pause_request_open => {
@@ -3448,6 +3460,66 @@ mod tests {
             pause_started_at.is_none(),
             "cancel wait must not remain frozen by a prior pause"
         );
+    }
+
+    async fn assert_stalled_cancel_is_bounded(mut codec: crate::control_crypto::ControlWriter) {
+        // One byte of capacity forces both plaintext and protected frames
+        // to block mid-write, as a QUIC stream with exhausted credit does.
+        let (mut writer, _unread_peer) = tokio::io::duplex(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let mut deadline = started + Duration::from_secs(60);
+        let mut pause_started_at = Some(started);
+        let serialized = ControlMessage::Cancel {
+            id: "test-id".to_string(),
+            reason: "User requested cancellation".to_string(),
+        }
+        .serialize()
+        .unwrap();
+
+        {
+            let send = send_control_cancel(
+                &mut codec,
+                &mut writer,
+                &serialized,
+                &cancel_tx,
+                &mut deadline,
+                &mut pause_started_at,
+            );
+            tokio::pin!(send);
+            tokio::time::timeout(CONTROL_CANCEL_RESULT_TIMEOUT + Duration::from_secs(1), async {
+                tokio::select! {
+                    result = cancel_rx.changed() => result.unwrap(),
+                    _ = &mut send => panic!("stalled write returned before stopping data streams"),
+                }
+                assert!(*cancel_rx.borrow());
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                send.await;
+            })
+            .await
+            .expect("cancel write should be bounded even when the peer stops reading");
+        }
+
+        assert_eq!(started.elapsed(), CONTROL_CANCEL_RESULT_TIMEOUT);
+        assert_eq!(deadline, started + CONTROL_CANCEL_RESULT_TIMEOUT);
+        assert!(pause_started_at.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_plaintext_cancel_stops_streams_and_times_out() {
+        assert_stalled_cancel_is_bounded(crate::control_crypto::ControlWriter::Plaintext).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_protected_cancel_stops_streams_and_times_out() {
+        let (send, _) = crate::control_crypto::ControlCodec::derive_pair(
+            "deadbeef",
+            "cafebabe",
+            "shared-secret",
+        )
+        .unwrap();
+        assert_stalled_cancel_is_bounded(crate::control_crypto::ControlWriter::Protected { send })
+            .await;
     }
 
     #[test]
