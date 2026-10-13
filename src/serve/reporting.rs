@@ -15,8 +15,7 @@ use crate::stats::{IntervalStats, TestStats};
 use crate::tui::server::ServerEvent;
 
 use super::{
-    ActiveTest, ControlCommand, STATS_INTERVAL, active_elapsed, budget_transfer_complete,
-    finish_drain_grace,
+    ActiveTest, ControlCommand, STATS_INTERVAL, budget_transfer_complete, finish_drain_grace,
 };
 
 const CANCEL_FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -160,10 +159,20 @@ impl Sample {
     }
 }
 
+/// Test time excluding pauses, including one still in progress.
+fn active_elapsed(
+    start: Instant,
+    paused_total: Duration,
+    pause_start: Option<Instant>,
+) -> Duration {
+    let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
+    start.elapsed().saturating_sub(paused_total + active_pause)
+}
+
 pub(super) struct Reporting {
-    pub(super) start: Instant,
-    pub(super) paused_total: Duration,
-    pub(super) pause_start: Option<Instant>,
+    start: Instant,
+    paused_total: Duration,
+    pause_start: Option<Instant>,
     codec: Option<ControlWriter>,
     current: Option<Frame>,
     pending: Option<String>,
@@ -172,6 +181,12 @@ pub(super) struct Reporting {
 }
 
 impl Reporting {
+    /// Active test duration so far. Read it before `finish`, so terminal
+    /// flushing does not count as test time.
+    pub(super) fn duration_ms(&self) -> u64 {
+        active_elapsed(self.start, self.paused_total, self.pause_start).as_millis() as u64
+    }
+
     /// Finish the exact in-flight frame before any terminal messages. A timeout
     /// consumes the codec too: callers must terminate this stream on error,
     /// because abandoning even one byte or sequence number makes reuse unsafe.
@@ -832,7 +847,7 @@ mod tests {
         let reporting = (&mut reporter.task).await.unwrap().unwrap();
         assert!(reporting.paused_total >= Duration::from_millis(1_200));
         assert!(reporting.pause_start.is_none());
-        assert!(active_elapsed(reporting.start, reporting.paused_total, None) >= duration);
+        assert!(reporting.duration_ms() >= duration.as_millis() as u64);
         assert!(reporting.cancelled.is_none());
         assert!(reporting.current.is_some());
     }

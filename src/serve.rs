@@ -1921,23 +1921,6 @@ fn directional_totals(
     )
 }
 
-fn active_elapsed(
-    start: std::time::Instant,
-    paused_total: Duration,
-    pause_start: Option<std::time::Instant>,
-) -> Duration {
-    let active_pause = pause_start.map(|p| p.elapsed()).unwrap_or_default();
-    start.elapsed().saturating_sub(paused_total + active_pause)
-}
-
-fn active_elapsed_ms(
-    start: std::time::Instant,
-    paused_total: Duration,
-    pause_start: Option<std::time::Instant>,
-) -> u64 {
-    active_elapsed(start, paused_total, pause_start).as_millis() as u64
-}
-
 /// Run a QUIC bandwidth test
 #[allow(clippy::too_many_arguments)]
 async fn run_quic_test(
@@ -2190,8 +2173,7 @@ async fn run_quic_test(
         }
 
         // Capture the data duration before any terminal control flushing.
-        let duration_ms =
-            active_elapsed_ms(reports.start, reports.paused_total, reports.pause_start);
+        let duration_ms = reports.duration_ms();
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
@@ -2717,8 +2699,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
         }
 
         // Capture the data duration before any terminal control flushing.
-        let duration_ms =
-            active_elapsed_ms(reports.start, reports.paused_total, reports.pause_start);
+        let duration_ms = reports.duration_ms();
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
