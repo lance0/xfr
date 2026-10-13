@@ -263,6 +263,7 @@ xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complet
 xfr serve --psk mysecret     # Require PSK authentication
 xfr serve --rate-limit 2     # Max 2 concurrent tests per IP
 xfr serve --allow 192.168.0.0/16  # Only allow the local subnet
+xfr serve --preset internal  # Apply a [[presets]] entry from the config file
 ```
 
 ### Client
@@ -465,6 +466,11 @@ acl_file = "/path/to/acl.txt"
 push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
+
+[[presets]]                  # selected with `xfr serve --preset internal`
+name = "internal"
+allowed_clients = ["192.168.1.0/24"]  # extra allowlist on top of allow/deny
+max_duration_secs = 60       # applies when --max-duration is not given
 ```
 
 On Unix, a config containing either `psk` must grant no access to group or

@@ -18,6 +18,14 @@ xfr \- modern network bandwidth testing with TUI
 is a fast, modern network bandwidth testing tool with a terminal user interface.
 It is designed as a replacement for iperf with additional features like live TUI,
 multi-client server support, QUIC transport, and result comparison.
+.PP
+When standard output is a terminal, the client TUI and
+.B xfr serve \-\-tui
+report test status through OSC 7501 (Program Status Protocol), so terminals
+that implement it can show it in tab headers and session pickers: working with
+a progress percentage and the current rate, paused, done with the summary, or
+the error. Terminals without support ignore the sequence. Plain, JSON and CSV
+output never emit it.
 .SH CLIENT OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"

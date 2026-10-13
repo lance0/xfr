@@ -17,7 +17,7 @@ fn direction_columns(measurement: Option<&UdpDirectionProgress>) -> String {
                 .unwrap_or_default(),
             measurement
                 .jitter_ms
-                .map(|j| format!("{j:.2}"))
+                .map(|j| format!("{j:.3}"))
                 .unwrap_or_default()
         ),
         None => ",,,".to_string(),
@@ -314,7 +314,9 @@ mod tests {
         );
         let columns: Vec<_> = row.trim_end().split(',').collect();
         assert_eq!(&columns[9..13], &["400", "624", "3.00", "5.00"]);
-        assert_eq!(&columns[13..17], &["10", "0", "0.00", "0.00"]);
+        // Jitter keeps the microsecond resolution (three decimals) of the
+        // interval `jitter_ms` column.
+        assert_eq!(&columns[13..17], &["10", "0", "0.00", "0.000"]);
         assert_eq!(&columns[17..21], &["", "", "", ""]);
         assert_eq!(
             columns.len(),

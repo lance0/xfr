@@ -114,6 +114,12 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
                 bytes_to_human(stream.bytes),
                 mbps_to_human(stream.throughput_mbps)
             ));
+            if let Some(rtx) = stream.retransmits {
+                output.push_str(&format!("  rtx: {}", rtx));
+            }
+            output.push('\n');
+            // The bidir split gets its own indented line: on one line it
+            // ran to ~100 columns and wrapped on an 80-column terminal.
             if let (Some(sent), Some(recv), Some(send_rate), Some(recv_rate)) = (
                 stream.bytes_sent,
                 stream.bytes_received,
@@ -121,17 +127,13 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
                 stream.throughput_recv_mbps,
             ) {
                 output.push_str(&format!(
-                    "  Upload: {} @ {}  Download: {} @ {}",
+                    "        Upload: {} @ {}  Download: {} @ {}\n",
                     bytes_to_human(sent),
                     mbps_to_human(send_rate),
                     bytes_to_human(recv),
                     mbps_to_human(recv_rate)
                 ));
             }
-            if let Some(rtx) = stream.retransmits {
-                output.push_str(&format!("  rtx: {}", rtx));
-            }
-            output.push('\n');
         }
         output.push('\n');
     }
@@ -546,6 +548,37 @@ mod tests {
         assert!(output.contains("Upload: 400 B @ 3.0 Mbps  Download: 624 B @ 5.0 Mbps"));
         result.udp_stats_send = None;
         assert!(output_plain(&result, false).contains("Upload UDP Stats:\n    Not reported\n"));
+    }
+
+    #[test]
+    fn bidir_per_stream_lines_fit_80_columns() {
+        // Widest realistic values: a three-digit stream index, totals just
+        // under 1 TB (rounds to "1024.00 GB"), rates rounding to
+        // "1000.00 Gbps", and six-digit retransmit counts.
+        let mut result = make_result_with_tcp_info();
+        let stream = StreamResult {
+            id: 127,
+            bytes: (1 << 40) - 1,
+            throughput_mbps: 999_999.0,
+            retransmits: Some(999_999),
+            jitter_ms: None,
+            lost: None,
+            bytes_sent: Some((1 << 40) - 1),
+            bytes_received: Some((1 << 40) - 1),
+            throughput_send_mbps: Some(999_999.0),
+            throughput_recv_mbps: Some(999_999.0),
+        };
+        result.streams = vec![stream.clone(), stream];
+        let output = output_plain(&result, false);
+        assert!(output.contains("1000.00 Gbps"), "{output}");
+        assert!(output.contains("        Upload: 1024.00 GB @ 1000.00 Gbps  Download:"));
+        for line in output.lines() {
+            assert!(
+                line.chars().count() <= 80,
+                "{} cols: {line}",
+                line.chars().count()
+            );
+        }
     }
 
     #[test]

@@ -11,12 +11,20 @@ src/
 │
 ├── client.rs        # Client-side test orchestration
 ├── serve.rs         # Server-side connection handling
+├── serve/
+│   ├── reporting.rs # Interval reports that survive a stalled control writer
+│   ├── tcp_backpressure_tests.rs  # Stalled control writes, TCP (tests)
+│   └── quic_backpressure_tests.rs # Stalled control writes, QUIC (tests)
 │
 ├── protocol.rs      # Control protocol (JSON messages)
 ├── tcp.rs           # TCP data transfer with bitrate pacing
 ├── udp.rs           # UDP data transfer with bitrate pacing
 ├── quic.rs          # QUIC transport (quinn)
 ├── net.rs           # Network utilities (address resolution, sockets)
+├── budget.rs        # Shared byte budget for `-n` tests
+├── pause.rs         # Pause/resume helpers for data streams
+├── probe.rs         # UDP path-MTU probe (`--probe-mtu`)
+├── zerocopy.rs      # Zero-copy TCP sends (memfd + sendfile)
 │
 ├── stats.rs         # Statistics collection and aggregation
 ├── tcp_info.rs      # Platform-specific TCP_INFO extraction
@@ -25,6 +33,7 @@ src/
 ├── prefs.rs         # User preferences (theme)
 │
 ├── auth.rs          # PSK authentication (HMAC-SHA256)
+├── control_crypto.rs # AEAD-protected control channel after PSK auth
 ├── acl.rs           # IP access control lists
 ├── rate_limit.rs    # Per-IP rate limiting
 │
@@ -46,6 +55,7 @@ src/
     ├── ui.rs        # Layout and rendering
     ├── server.rs    # Server dashboard
     ├── settings.rs  # Settings modal
+    ├── program_status.rs # OSC 7501 terminal status reports
     ├── widgets.rs   # Sparkline, per-stream bars
     └── theme.rs     # Color themes
 ```

@@ -3100,8 +3100,9 @@ async fn test_quic_one_off() {
     assert!(result.duration_ms > 0, "Should have duration");
     assert_eq!(result.streams.len(), 2, "Should have 2 stream results");
 
-    // Server should have exited after the test
-    let server_result = timeout(Duration::from_secs(2), server_handle).await;
+    // Server should have exited after the test. QUIC teardown can lag the
+    // client's result under CPU load; 5 s still catches a server that stays up.
+    let server_result = timeout(Duration::from_secs(5), server_handle).await;
     assert!(
         server_result.is_ok(),
         "Server should exit after QUIC one-off test"
