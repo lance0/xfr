@@ -3260,35 +3260,12 @@ mod tests {
     }
 
     #[test]
-    fn address_family_preserves_aliases_and_case_insensitivity() {
-        for (aliases, expected) in [
-            (
-                vec!["4", "v4", "ipv4", "v4only", "ipv4-only"],
-                AddressFamily::V4Only,
-            ),
-            (
-                vec!["6", "v6", "ipv6", "v6only", "ipv6-only"],
-                AddressFamily::V6Only,
-            ),
-            (
-                vec!["dual", "dualstack", "dual-stack", "both"],
-                AddressFamily::DualStack,
-            ),
-        ] {
-            for alias in aliases {
-                for value in [alias.to_string(), alias.to_uppercase()] {
-                    assert_eq!(
-                        resolve_address_family(false, false, Some(&value), "client.address_family")
-                            .unwrap(),
-                        expected,
-                    );
-                }
-            }
-        }
-        assert_eq!(
-            resolve_address_family(false, false, None, "client.address_family").unwrap(),
-            AddressFamily::DualStack,
-        );
+    fn address_family_accepts_valid_config() {
+        // Alias coverage lives with `AddressFamily::from_str` in net.rs.
+        let key = "client.address_family";
+        let resolve = |value| resolve_address_family(false, false, value, key).unwrap();
+        assert_eq!(resolve(Some("IPv6")), AddressFamily::V6Only);
+        assert_eq!(resolve(None), AddressFamily::DualStack);
     }
 
     #[test]
