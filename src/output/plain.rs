@@ -302,25 +302,36 @@ pub fn output_feedback_plain(
     }
 }
 
-fn directional_quality(label: &str, measurement: Option<&UdpDirectionProgress>) -> String {
-    let Some(measurement) = measurement else {
-        return format!("{label} loss: --%  jitter: --ms");
+/// Bidir UDP quality as fixed-width columns, so streaming rows keep their
+/// shape as values grow. `--` marks a receiver without a reading yet.
+fn directional_quality(
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+    upload_jitter_fallback: Option<f64>,
+) -> String {
+    let loss = |m: Option<&UdpDirectionProgress>| match m.and_then(|m| m.progress.lost_percent()) {
+        Some(percent) => format!("{percent:>5.1}%"),
+        None => format!("{:>6}", "--%"),
     };
-    let loss = measurement
-        .progress
-        .lost_percent()
-        .map(|percent| format!("{percent:.1}%"))
-        .unwrap_or_else(|| "--%".to_string());
-    let jitter = measurement
-        .jitter_ms
-        .map(|jitter| format!("{jitter:.2}ms"))
-        .unwrap_or_else(|| "--ms".to_string());
+    let jitter = |jitter: Option<f64>| match jitter {
+        Some(jitter) => format!("{jitter:>5.2}ms"),
+        None => format!("{:>7}", "--ms"),
+    };
     format!(
-        "{label} lost so far: {} ({loss})  jitter: {jitter}",
-        measurement.progress.packets_lost
+        "  loss ↑{} ↓{}  jitter ↑{} ↓{}",
+        loss(udp_send),
+        loss(udp_recv),
+        jitter(
+            udp_send
+                .and_then(|m| m.jitter_ms)
+                .or(upload_jitter_fallback)
+        ),
+        jitter(udp_recv.and_then(|m| m.jitter_ms)),
     )
 }
 
+/// Bidir UDP rows replace the single upload-only `jitter`/`lost` columns
+/// with per-direction readings rather than printing upload twice.
 #[allow(clippy::too_many_arguments)]
 pub fn output_interval_plain_with_udp_directions(
     timestamp: &str,
@@ -334,24 +345,31 @@ pub fn output_interval_plain_with_udp_directions(
     udp_send: Option<&UdpDirectionProgress>,
     udp_recv: Option<&UdpDirectionProgress>,
 ) -> String {
+    if udp_send.is_none() && udp_recv.is_none() {
+        return output_interval_plain(
+            timestamp,
+            elapsed_secs,
+            throughput_mbps,
+            bytes,
+            retransmits,
+            jitter_ms,
+            lost,
+            rtt_us,
+        );
+    }
     let mut output = output_interval_plain(
         timestamp,
         elapsed_secs,
         throughput_mbps,
         bytes,
-        retransmits,
-        jitter_ms,
-        lost,
-        rtt_us,
+        None,
+        None,
+        None,
+        None,
     );
-    if udp_send.is_some() || udp_recv.is_some() {
-        output.pop();
-        output.push_str(&format!(
-            "  {}  |  {}\n",
-            directional_quality("Upload", udp_send),
-            directional_quality("Download", udp_recv)
-        ));
-    }
+    output.pop();
+    output.push_str(&directional_quality(udp_send, udp_recv, jitter_ms));
+    output.push('\n');
     output
 }
 
@@ -362,9 +380,8 @@ pub fn output_directional_feedback_plain(
     udp_recv: Option<&UdpDirectionProgress>,
 ) -> String {
     format!(
-        "[{timestamp}]  (reports stalled)  {}  |  {}\n",
-        directional_quality("Upload", udp_send),
-        directional_quality("Download", udp_recv)
+        "[{timestamp}]  (reports stalled){}\n",
+        directional_quality(udp_send, udp_recv, None)
     )
 }
 
@@ -446,8 +463,10 @@ mod tests {
             jitter_ms: Some(0.0),
         };
         let output = output_directional_feedback_plain("2.0", 2.0, None, Some(&recv));
-        assert!(output.contains("Upload loss: --%  jitter: --ms"));
-        assert!(output.contains("Download lost so far: 0 (0.0%)  jitter: 0.00ms"));
+        assert_eq!(
+            output,
+            "[2.0]  (reports stalled)  loss ↑   --% ↓  0.0%  jitter ↑   --ms ↓ 0.00ms\n"
+        );
         assert!(!output.contains("Mbps"));
         let interval = output_interval_plain_with_udp_directions(
             "2.0",
@@ -461,8 +480,33 @@ mod tests {
             None,
             Some(&recv),
         );
-        assert!(interval.contains("Upload loss: --%"));
-        assert!(interval.contains("Download lost so far: 0 (0.0%)"));
+        assert!(interval.ends_with("loss ↑   --% ↓  0.0%  jitter ↑   --ms ↓ 0.00ms\n"));
+        assert!(!interval.contains("lost:"), "upload must not print twice");
+        // Columns stay put as readings grow (and as unknowns resolve).
+        let lossy = UdpDirectionProgress {
+            progress: crate::protocol::UdpIntervalProgress {
+                packets_received: 877,
+                packets_lost: 123,
+            },
+            jitter_ms: Some(12.34),
+        };
+        let grown = output_interval_plain_with_udp_directions(
+            "2.0",
+            2.0,
+            8.0,
+            1000,
+            None,
+            None,
+            None,
+            None,
+            Some(&lossy),
+            Some(&lossy),
+        );
+        assert_eq!(
+            grown.chars().count(),
+            interval.chars().count(),
+            "{grown}{interval}"
+        );
     }
 
     #[test]
