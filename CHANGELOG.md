@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **JSON `udp_stats.packet_size` reports what the receiver actually saw** — it was hard-coded to 1400. It is now the largest xfr datagram received, so it reflects `-l`, and it is omitted when no data arrived instead of claiming a size for packets that never came. Multi-stream results take the largest across streams.
-- **Dependency refresh** — `dirs` 6 → 7, `toml` 1.1.6, `uuid` 1.26.1. The `dirs` major bump changes one thing: on Windows, `preference_dir()` now resolves to the roaming rather than the local AppData folder. xfr locates `config.toml` and `prefs.toml` through `config_dir()`, which is unchanged, so no configuration or saved preference moves on any platform.
+- **Dependency refresh** — `dirs` 6 → 7, `toml` 1.1.7, `uuid` 1.26.1, `tokio` 1.53.2, `clap` 4.6.7 / `clap_complete` 4.6.11, `hyper` 1.12.0 / `hyper-util` 0.1.21, `quinn` 0.11.12, `rand` 0.10.3, `libc` 0.2.190, and `mdns-sd` 0.21.5 (bug fixes only: monotonic timers, and record TTLs that stay correct across system sleep). The `dirs` major bump changes one thing: on Windows, `preference_dir()` now resolves to the roaming rather than the local AppData folder. xfr locates `config.toml` and `prefs.toml` through `config_dir()`, which is unchanged, so no configuration or saved preference moves on any platform.
 
 ### Maintenance
 - **CI action pin** — `taiki-e/install-action` 2.87.4 → 2.87.10.
