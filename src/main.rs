@@ -427,10 +427,10 @@ enum Commands {
         #[arg(help_heading = "Server Options")]
         no_mdns: bool,
 
-        /// Server port
-        #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
+        /// Server port (default: config value or 5201)
+        #[arg(short, long, env = "XFR_PORT")]
         #[arg(help_heading = "Connection Options")]
-        port: u16,
+        port: Option<u16>,
 
         /// Bind to specific address (e.g., 192.168.1.1, ::1)
         #[arg(short = 'B', long)]
@@ -558,6 +558,11 @@ fn resolve_server_max_duration(
     preset: Option<&xfr::config::ServerPreset>,
 ) -> Option<Duration> {
     cli_max_duration.or_else(|| preset.and_then(|p| p.max_duration_secs.map(Duration::from_secs)))
+}
+
+/// An explicit CLI or environment port wins even when it equals DEFAULT_PORT.
+fn resolve_server_port(cli_port: Option<u16>, config_port: Option<u16>) -> u16 {
+    cli_port.or(config_port).unwrap_or(DEFAULT_PORT)
 }
 
 /// Resolve the effective client test duration.
@@ -984,11 +989,7 @@ async fn main() -> Result<()> {
             no_mdns,
         }) => {
             // Use CLI values, falling back to config file, then defaults
-            let server_port = if port != DEFAULT_PORT {
-                port
-            } else {
-                file_config.server.port.unwrap_or(DEFAULT_PORT)
-            };
+            let server_port = resolve_server_port(port, file_config.server.port);
 
             let server_one_off = one_off || file_config.server.one_off.unwrap_or(false);
 
@@ -2506,6 +2507,71 @@ mod tests {
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn explicit_server_port_equal_to_default_overrides_config() {
+        let cli = Cli::try_parse_from(["xfr", "serve", "--port", "5201"]).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(resolve_server_port(port, Some(9000)), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_uses_config_then_default_when_unset() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        // Isolate the fallback case from an XFR_PORT set by the test runner.
+        let matches = Cli::command()
+            .mut_subcommand("serve", |command| {
+                command.mut_arg("port", |arg| arg.env(None::<&str>))
+            })
+            .try_get_matches_from(["xfr", "serve"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(port, None);
+        assert_eq!(resolve_server_port(port, Some(9000)), 9000);
+        assert_eq!(resolve_server_port(port, None), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_environment_and_cli_override_config() {
+        const CHILD_FLAG: &str = "XFR_SERVER_PORT_TEST_CHILD";
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            // A child process avoids mutating the environment while other
+            // parser tests are running in parallel.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::server_port_environment_and_cli_override_config",
+                ])
+                .env(CHILD_FLAG, "1")
+                .env("XFR_PORT", DEFAULT_PORT.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "environment precedence check failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        for (args, expected) in [
+            (vec!["xfr", "serve"], DEFAULT_PORT),
+            (vec!["xfr", "serve", "--port", "8000"], 8000),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Commands::Serve { port, .. }) = cli.command else {
+                panic!("expected serve command");
+            };
+            assert_eq!(resolve_server_port(port, Some(9000)), expected);
+        }
     }
 
     #[test]

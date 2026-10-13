@@ -477,6 +477,10 @@ export XFR_PORT=9000
 export XFR_DURATION=30s
 ```
 
+For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes precedence over
+`server.port` in the config file. If none is set, the server uses port 5201. An explicit
+port of 5201 also overrides the config file.
+
 ## Prometheus Metrics
 
 Enable with `--features prometheus`:
