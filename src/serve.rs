@@ -2213,6 +2213,12 @@ async fn run_quic_test(
         // Finish the control stream to ensure result is sent
         ctrl_send.finish()?;
 
+        // Quinn accepts the Result into its send buffer long before a slow
+        // peer has it, and closing the connection discards unacknowledged
+        // stream data. Wait for the peer's acknowledgement under the same
+        // terminal deadline that bounded the writes.
+        let _ = tokio::time::timeout_at(reports.finish_deadline, ctrl_send.stopped()).await;
+
         // Give client time to receive the result before connection closes
         tokio::time::sleep(RESULT_FLUSH_DELAY).await;
 

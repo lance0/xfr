@@ -179,7 +179,7 @@ pub(super) struct Reporting {
     current: Option<Frame>,
     pending: Option<String>,
     cancelled: Option<String>,
-    finish_deadline: tokio::time::Instant,
+    pub(super) finish_deadline: tokio::time::Instant,
 }
 
 impl Reporting {
