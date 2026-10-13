@@ -527,16 +527,6 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
-fn parse_diff_threshold(value: &str) -> Result<f64, String> {
-    let threshold = value.parse::<f64>().map_err(|error| error.to_string())?;
-    xfr::diff::DiffConfig {
-        threshold_percent: threshold,
-    }
-    .validate()
-    .map_err(|error| error.to_string())?;
-    Ok(threshold)
-}
-
 /// Duration parser that rejects zero. For flags where zero is not a valid
 /// sentinel (e.g. `--rate-limit-window`, which would divide-by-zero the
 /// cleanup-task interval in `tokio::time::interval`).
@@ -881,6 +871,16 @@ fn zerocopy_notice(zerocopy: ZerocopyMode, direction: Direction) -> Option<&'sta
             "--zerocopy requires Linux sendfile(2); client-sent traffic will use regular writes",
         ),
     }
+}
+
+fn parse_diff_threshold(value: &str) -> Result<f64, String> {
+    let threshold = value.parse::<f64>().map_err(|error| error.to_string())?;
+    xfr::diff::DiffConfig {
+        threshold_percent: threshold,
+    }
+    .validate()
+    .map_err(|error| error.to_string())?;
+    Ok(threshold)
 }
 
 fn generate_completions(shell: &str) {
