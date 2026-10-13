@@ -225,7 +225,7 @@ jobs:
         run: sudo ./test-control-channel-skew.sh
 
   mtu-probe:
-    name: UDP MTU regressions (#64, #213 netns)
+    name: 'UDP MTU regressions (#64, #213 netns)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
