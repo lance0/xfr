@@ -45,8 +45,6 @@ pub struct StreamData {
     pub throughput_mbps: f64,
     pub retransmits: u64,
     pub jitter_ms: Option<f64>,
-    pub bytes_sent: Option<u64>,
-    pub bytes_received: Option<u64>,
     pub throughput_send_mbps: Option<f64>,
     pub throughput_recv_mbps: Option<f64>,
 }
@@ -306,8 +304,6 @@ impl App {
                     throughput_mbps: 0.0,
                     retransmits: 0,
                     jitter_ms: None,
-                    bytes_sent: None,
-                    bytes_received: None,
                     throughput_send_mbps: None,
                     throughput_recv_mbps: None,
                 })
@@ -488,8 +484,6 @@ impl App {
                 throughput_mbps: 0.0,
                 retransmits: 0,
                 jitter_ms: None,
-                bytes_sent: None,
-                bytes_received: None,
                 throughput_send_mbps: None,
                 throughput_recv_mbps: None,
             })
@@ -511,8 +505,6 @@ impl App {
             stream.throughput_mbps = 0.0;
             stream.retransmits = 0;
             stream.jitter_ms = None;
-            stream.bytes_sent = None;
-            stream.bytes_received = None;
             stream.throughput_send_mbps = None;
             stream.throughput_recv_mbps = None;
         }
@@ -739,8 +731,6 @@ impl App {
                     };
                 stream.retransmits = interval.retransmits.unwrap_or(0);
                 stream.jitter_ms = interval.jitter_ms;
-                stream.bytes_sent = interval.bytes_sent;
-                stream.bytes_received = interval.bytes_received;
                 stream.throughput_send_mbps = interval.throughput_send_mbps;
                 stream.throughput_recv_mbps = interval.throughput_recv_mbps;
             }
@@ -926,8 +916,6 @@ impl App {
             if let Some(stream) = self.streams.get_mut(reported.id as usize) {
                 stream.bytes = reported.bytes;
                 stream.throughput_mbps = reported.throughput_mbps;
-                stream.bytes_sent = reported.bytes_sent;
-                stream.bytes_received = reported.bytes_received;
                 stream.throughput_send_mbps = reported.throughput_send_mbps;
                 stream.throughput_recv_mbps = reported.throughput_recv_mbps;
                 stream.retransmits = reported.retransmits.unwrap_or(0);
@@ -1218,8 +1206,6 @@ impl App {
             throughput_mbps,
             retransmits,
             jitter_ms,
-            bytes_sent: _,
-            bytes_received: _,
             throughput_send_mbps,
             throughput_recv_mbps,
         } in streams
@@ -1906,13 +1892,11 @@ mod tests {
         });
         assert_eq!(app.streams[0].throughput_send_mbps, Some(4.0));
         assert_eq!(app.streams[0].throughput_recv_mbps, Some(4.0));
-        assert_eq!(app.streams[0].bytes_sent, Some(2_000_000));
         assert_eq!(app.udp_send.lost_percent(), None);
         assert_eq!(app.udp_recv.lost_percent(), Some(20.0));
         assert_eq!(app.udp_recv.jitter_ms, Some(0.25));
         app.reset_for_restart();
         assert_eq!(app.streams[0].throughput_send_mbps, None);
-        assert_eq!(app.streams[0].bytes_received, None);
     }
 
     #[test]
