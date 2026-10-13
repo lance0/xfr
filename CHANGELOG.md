@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **`xfr diff --threshold NaN` hid regressions** — a NaN or infinite threshold made every comparison false, so a 99% throughput drop reported `Verdict: OK` and exited 0; a negative threshold produced misleading verdicts. `--threshold` must now be a finite, non-negative percentage (0 still flags any regression), and invalid values exit with status 2 before any verdict is printed.
 
 ## [0.10.1] - 2026-09-04
 
