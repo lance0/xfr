@@ -161,6 +161,10 @@ fn test_interval_message() {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
                 rtt_us: Some(1234),
                 cwnd: Some(65535),
             },
@@ -171,6 +175,10 @@ fn test_interval_message() {
                 jitter_ms: None,
                 lost: None,
                 error: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
                 rtt_us: Some(1200),
                 cwnd: Some(32768),
             },
@@ -306,11 +314,17 @@ fn test_udp_interval_progress_lost_percent_zero_traffic() {
 #[test]
 fn test_result_message() {
     let result = TestResult {
+        udp_stats_send: None,
+        udp_stats_recv: None,
         id: "test-123".to_string(),
         bytes_total: 1_250_000_000,
         duration_ms: 10_000,
         throughput_mbps: 1000.0,
         streams: vec![StreamResult {
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
             id: 0,
             bytes: 1_250_000_000,
             throughput_mbps: 1000.0,
@@ -379,6 +393,12 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
     // - new guard (65536) should still provide DoS protection
     let streams: Vec<StreamResult> = (0u8..128u8)
         .map(|i| StreamResult {
+            // Worst-case bidir rows: every direction split populated with
+            // maximal integers and full-precision floats.
+            bytes_sent: Some(u64::MAX),
+            bytes_received: Some(u64::MAX),
+            throughput_send_mbps: Some(1e8 / 3.0),
+            throughput_recv_mbps: Some(1e8 / 3.0),
             id: i,
             bytes: u64::MAX,
             throughput_mbps: 99_999_999.9,
@@ -389,6 +409,8 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
         .collect();
 
     let result = TestResult {
+        udp_stats_send: None,
+        udp_stats_recv: None,
         id: "wide-result".to_string(),
         bytes_total: u64::MAX,
         duration_ms: 10_000,

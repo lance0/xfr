@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 use ratatui::layout::Size;
 
 use crate::client::TestProgress;
-use crate::protocol::{Direction, Protocol, TestResult, TimestampFormat};
+use crate::protocol::{
+    Direction, Protocol, TestResult, TimestampFormat, UdpDirectionProgress, UdpIntervalProgress,
+};
 
 use super::settings::SettingsState;
 use super::theme::Theme;
@@ -43,6 +45,53 @@ pub struct StreamData {
     pub throughput_mbps: f64,
     pub retransmits: u64,
     pub jitter_ms: Option<f64>,
+    pub throughput_send_mbps: Option<f64>,
+    pub throughput_recv_mbps: Option<f64>,
+}
+
+#[derive(Default)]
+pub struct UdpDirectionState {
+    pub progress: Option<UdpIntervalProgress>,
+    pub jitter_ms: Option<f64>,
+}
+
+impl UdpDirectionState {
+    pub fn lost_percent(&self) -> Option<f64> {
+        self.progress.and_then(|p| p.lost_percent())
+    }
+
+    fn update(&mut self, measurement: &UdpDirectionProgress) {
+        if let Some(previous) = self.progress {
+            let previous_total = previous
+                .packets_received
+                .saturating_add(previous.packets_lost);
+            let next_total = measurement
+                .progress
+                .packets_received
+                .saturating_add(measurement.progress.packets_lost);
+            if next_total < previous_total
+                || (next_total == previous_total
+                    && measurement.progress.packets_received < previous.packets_received)
+            {
+                return;
+            }
+        }
+        self.progress = Some(measurement.progress);
+        // Feedback packets omit jitter; retain the last measured value.
+        if let Some(jitter) = measurement.jitter_ms {
+            self.jitter_ms = Some(jitter);
+        }
+    }
+
+    fn from_result(stats: Option<&crate::protocol::UdpStats>) -> Self {
+        stats.map_or_else(Self::default, |stats| Self {
+            progress: Some(UdpIntervalProgress {
+                packets_received: stats.packets_received,
+                packets_lost: stats.lost,
+            }),
+            jitter_ms: (stats.packets_received > 0).then_some(stats.jitter_ms),
+        })
+    }
 }
 
 /// One throughput sparkline sample. The renderer uses `lost_packets`
@@ -141,6 +190,8 @@ pub struct App {
     pub udp_lost_percent: Option<f64>,
     pub udp_packets_sent: u64,
     pub udp_packets_lost: u64,
+    pub udp_send: UdpDirectionState,
+    pub udp_recv: UdpDirectionState,
 
     pub result: Option<TestResult>,
     pub error: Option<String>,
@@ -253,6 +304,8 @@ impl App {
                     throughput_mbps: 0.0,
                     retransmits: 0,
                     jitter_ms: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
                 })
                 .collect(),
 
@@ -265,6 +318,8 @@ impl App {
             udp_lost_percent: None,
             udp_packets_sent: 0,
             udp_packets_lost: 0,
+            udp_send: UdpDirectionState::default(),
+            udp_recv: UdpDirectionState::default(),
 
             result: None,
             error: None,
@@ -429,6 +484,8 @@ impl App {
                 throughput_mbps: 0.0,
                 retransmits: 0,
                 jitter_ms: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
             })
             .collect();
         self.settings.mark_applied();
@@ -448,6 +505,8 @@ impl App {
             stream.throughput_mbps = 0.0;
             stream.retransmits = 0;
             stream.jitter_ms = None;
+            stream.throughput_send_mbps = None;
+            stream.throughput_recv_mbps = None;
         }
 
         self.bidir_bytes_sent = 0;
@@ -464,6 +523,8 @@ impl App {
         self.udp_lost_percent = None;
         self.udp_packets_sent = 0;
         self.udp_packets_lost = 0;
+        self.udp_send = UdpDirectionState::default();
+        self.udp_recv = UdpDirectionState::default();
 
         self.result = None;
         self.error = None;
@@ -597,6 +658,14 @@ impl App {
     }
 
     pub fn on_progress(&mut self, progress: TestProgress) {
+        // Each receiver advances independently, including directional-only
+        // feedback events that carry no throughput or stream deltas.
+        if let Some(measurement) = &progress.udp_send {
+            self.udp_send.update(measurement);
+        }
+        if let Some(measurement) = &progress.udp_recv {
+            self.udp_recv.update(measurement);
+        }
         // Feedback-only updates carry just `udp_progress`; everything
         // else is sentinel/None and consumers must preserve their last
         // full-interval values. Record the freshest cumulative for the
@@ -651,13 +720,19 @@ impl App {
         for interval in &progress.streams {
             if let Some(stream) = self.streams.get_mut(interval.id as usize) {
                 stream.bytes = interval.bytes;
-                stream.throughput_mbps = if progress.total_bytes > 0 {
-                    progress.throughput_mbps * interval.bytes as f64 / progress.total_bytes as f64
-                } else {
-                    0.0
-                };
+                stream.throughput_mbps =
+                    match (interval.throughput_send_mbps, interval.throughput_recv_mbps) {
+                        (Some(send), Some(recv)) => send + recv,
+                        _ if progress.total_bytes > 0 => {
+                            progress.throughput_mbps * interval.bytes as f64
+                                / progress.total_bytes as f64
+                        }
+                        _ => 0.0,
+                    };
                 stream.retransmits = interval.retransmits.unwrap_or(0);
                 stream.jitter_ms = interval.jitter_ms;
+                stream.throughput_send_mbps = interval.throughput_send_mbps;
+                stream.throughput_recv_mbps = interval.throughput_recv_mbps;
             }
 
             // Accumulate UDP stats from intervals
@@ -753,6 +828,14 @@ impl App {
         // rolling window so the stats panel can display a smoothed value.
         if jitter_count > 0 {
             self.udp_jitter_ms = total_jitter / jitter_count as f64;
+            // Legacy peers can report upload jitter before they support
+            // cumulative packet counts; loss remains unknown in that case.
+            if self.protocol == Protocol::Udp
+                && self.direction == Direction::Bidir
+                && self.udp_send.progress.is_none()
+            {
+                self.udp_send.jitter_ms = Some(self.udp_jitter_ms);
+            }
             self.jitter_history.push_back(self.udp_jitter_ms);
             if self.jitter_history.len() > JITTER_HISTORY_SAMPLES {
                 self.jitter_history.pop_front();
@@ -829,6 +912,20 @@ impl App {
             self.elapsed = self.duration; // Show full duration on completion
         }
         self.total_bytes = result.bytes_total;
+        for reported in &result.streams {
+            if let Some(stream) = self.streams.get_mut(reported.id as usize) {
+                stream.bytes = reported.bytes;
+                stream.throughput_mbps = reported.throughput_mbps;
+                stream.throughput_send_mbps = reported.throughput_send_mbps;
+                stream.throughput_recv_mbps = reported.throughput_recv_mbps;
+                stream.retransmits = reported.retransmits.unwrap_or(0);
+                // Servers never put jitter in per-stream results; keep the
+                // last interval's reading instead of blanking it on completion.
+                stream.jitter_ms = reported.jitter_ms.or(stream.jitter_ms);
+            }
+        }
+        self.udp_send = UdpDirectionState::from_result(result.udp_stats_send.as_deref());
+        self.udp_recv = UdpDirectionState::from_result(result.udp_stats_recv.as_deref());
         // Pin the average to the server-authoritative figure rather than
         // whatever the last interval left behind, so the panel and the
         // "Test completed. Avg:" log agree with the JSON/CSV output.
@@ -1046,6 +1143,8 @@ impl App {
             udp_lost_percent,
             udp_packets_sent: _, // event-log inputs; the log line lands in `history`
             udp_packets_lost: _,
+            udp_send,
+            udp_recv,
             result: _, // never read by draw; on_result mirrors what is shown into the fields above
             error,
             cancel_deadline: _, // hashed as whole seconds via cancel_wait_secs()
@@ -1109,12 +1208,16 @@ impl App {
             throughput_mbps,
             retransmits,
             jitter_ms,
+            throughput_send_mbps,
+            throughput_recv_mbps,
         } in streams
         {
             id.hash(&mut h);
             throughput_mbps.to_bits().hash(&mut h);
             retransmits.hash(&mut h);
             jitter_ms.map(f64::to_bits).hash(&mut h);
+            throughput_send_mbps.map(f64::to_bits).hash(&mut h);
+            throughput_recv_mbps.map(f64::to_bits).hash(&mut h);
         }
         throughput_send_mbps.to_bits().hash(&mut h);
         throughput_recv_mbps.to_bits().hash(&mut h);
@@ -1122,6 +1225,10 @@ impl App {
         rtt_us.hash(&mut h);
         udp_jitter_ms.to_bits().hash(&mut h);
         udp_lost_percent.map(f64::to_bits).hash(&mut h);
+        for direction in [udp_send, udp_recv] {
+            direction.lost_percent().map(f64::to_bits).hash(&mut h);
+            direction.jitter_ms.map(f64::to_bits).hash(&mut h);
+        }
         error.hash(&mut h);
         self.cancel_wait_secs().hash(&mut h);
         show_help.hash(&mut h);
@@ -1459,6 +1566,8 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
         });
         app.set_server_version("xfr/0.9.18".to_string());
         app.update_available = Some("xfr/0.9.19".to_string());
@@ -1540,6 +1649,8 @@ mod tests {
             throughput_recv_mbps: None,
             udp_progress: None,
             udp_feedback_only: false,
+            udp_send: None,
+            udp_recv: None,
         });
 
         assert_eq!(
@@ -1607,7 +1718,189 @@ mod tests {
             throughput_recv_mbps: None,
             udp_progress,
             udp_feedback_only: false,
+            udp_send: None,
+            udp_recv: None,
         }
+    }
+
+    fn directional_measurement(
+        received: u64,
+        lost: u64,
+        jitter: Option<f64>,
+    ) -> UdpDirectionProgress {
+        UdpDirectionProgress {
+            progress: UdpIntervalProgress {
+                packets_received: received,
+                packets_lost: lost,
+            },
+            jitter_ms: jitter,
+        }
+    }
+
+    #[test]
+    fn directional_feedback_updates_only_its_receiver_and_preserves_jitter() {
+        let mut app = App::default();
+        let mut full = make_progress(80.0, None);
+        full.total_bytes = 10_000_000;
+        full.udp_send = Some(directional_measurement(80, 20, Some(1.25)));
+        full.udp_recv = Some(directional_measurement(100, 0, Some(0.0)));
+        app.on_progress(full);
+        let fingerprint = app.render_fingerprint(Size::new(80, 24));
+
+        let mut feedback = make_progress(0.0, None);
+        feedback.udp_feedback_only = true;
+        feedback.udp_recv = Some(directional_measurement(180, 20, None));
+        app.on_progress(feedback);
+        assert_eq!(app.udp_send.lost_percent(), Some(20.0));
+        assert_eq!(app.udp_send.jitter_ms, Some(1.25));
+        assert_eq!(app.udp_recv.lost_percent(), Some(10.0));
+        assert_eq!(app.udp_recv.jitter_ms, Some(0.0));
+        assert_eq!(app.total_bytes, 10_000_000);
+        assert_eq!(app.current_throughput_mbps, 80.0);
+        assert_eq!(app.throughput_history.len(), 1);
+        assert_ne!(app.render_fingerprint(Size::new(80, 24)), fingerprint);
+
+        let mut stale = make_progress(80.0, None);
+        stale.udp_send = Some(directional_measurement(200, 0, Some(0.5)));
+        stale.udp_recv = Some(directional_measurement(100, 0, Some(9.0)));
+        app.on_progress(stale);
+        assert_eq!(app.udp_send.lost_percent(), Some(0.0));
+        assert_eq!(app.udp_send.jitter_ms, Some(0.5));
+        assert_eq!(app.udp_recv.lost_percent(), Some(10.0));
+        assert_eq!(app.udp_recv.jitter_ms, Some(0.0));
+    }
+
+    #[test]
+    fn legacy_bidir_jitter_is_visible_while_upload_loss_is_unknown() {
+        let mut app = App::default();
+        app.apply_test_params(
+            Protocol::Udp,
+            Direction::Bidir,
+            1,
+            Duration::from_secs(10),
+            None,
+        );
+        let mut progress = make_progress(8.0, None);
+        progress.streams.push(crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 1000,
+            retransmits: None,
+            jitter_ms: Some(1.25),
+            lost: Some(2),
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+        });
+        app.on_progress(progress);
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_send.jitter_ms, Some(1.25));
+        let mut local = make_progress(0.0, None);
+        local.udp_feedback_only = true;
+        local.udp_recv = Some(directional_measurement(10, 0, Some(0.0)));
+        app.on_progress(local);
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_send.jitter_ms, Some(1.25));
+        assert_eq!(app.udp_recv.lost_percent(), Some(0.0));
+    }
+
+    #[test]
+    fn directional_state_distinguishes_unknown_and_resets_on_restart() {
+        let mut app = App::default();
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_recv.jitter_ms, None);
+        let mut feedback = make_progress(0.0, None);
+        feedback.udp_feedback_only = true;
+        feedback.udp_recv = Some(directional_measurement(10, 0, Some(0.0)));
+        app.on_progress(feedback);
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_send.jitter_ms, None);
+        assert_eq!(app.udp_recv.lost_percent(), Some(0.0));
+        assert_eq!(app.udp_recv.jitter_ms, Some(0.0));
+        app.reset_for_restart();
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_recv.lost_percent(), None);
+        assert_eq!(app.udp_recv.jitter_ms, None);
+    }
+
+    #[test]
+    fn stream_direction_rates_are_retained_through_feedback_and_final_result() {
+        let mut app = App::default();
+        let mut full = make_progress(8.0, None);
+        full.elapsed_ms = 4_000;
+        full.total_bytes = 4_000_000;
+        full.streams = vec![crate::protocol::StreamInterval {
+            id: 0,
+            bytes: 4_000_000,
+            retransmits: None,
+            jitter_ms: Some(0.42),
+            lost: None,
+            error: None,
+            rtt_us: None,
+            cwnd: None,
+            bytes_sent: Some(1_500_000),
+            bytes_received: Some(2_500_000),
+            throughput_send_mbps: Some(3.0),
+            throughput_recv_mbps: Some(5.0),
+        }];
+        app.on_progress(full);
+        assert_eq!(app.streams[0].throughput_mbps, 8.0);
+        let mut feedback = make_progress(0.0, None);
+        feedback.udp_feedback_only = true;
+        feedback.udp_recv = Some(directional_measurement(10, 0, None));
+        app.on_progress(feedback);
+        assert_eq!(app.streams[0].throughput_send_mbps, Some(3.0));
+        assert_eq!(app.streams[0].throughput_recv_mbps, Some(5.0));
+        app.on_result(TestResult {
+            id: "directions".to_string(),
+            bytes_total: 4_000_000,
+            duration_ms: 4_000,
+            throughput_mbps: 8.0,
+            streams: vec![crate::protocol::StreamResult {
+                id: 0,
+                bytes: 4_000_000,
+                throughput_mbps: 8.0,
+                retransmits: None,
+                jitter_ms: None,
+                lost: None,
+                bytes_sent: Some(2_000_000),
+                bytes_received: Some(2_000_000),
+                throughput_send_mbps: Some(4.0),
+                throughput_recv_mbps: Some(4.0),
+            }],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: Some(2_000_000),
+            bytes_received: Some(2_000_000),
+            throughput_send_mbps: Some(4.0),
+            throughput_recv_mbps: Some(4.0),
+            mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
+            udp_stats_send: None,
+            udp_stats_recv: Some(Box::new(crate::protocol::UdpStats {
+                packets_sent: 100,
+                packets_received: 80,
+                lost: 20,
+                lost_percent: 20.0,
+                jitter_ms: 0.25,
+                out_of_order: 0,
+                jitter_max_ms: None,
+                packet_size: None,
+            })),
+        });
+        assert_eq!(app.streams[0].throughput_send_mbps, Some(4.0));
+        assert_eq!(app.streams[0].throughput_recv_mbps, Some(4.0));
+        // Per-stream results carry no jitter; the last measured value stays.
+        assert_eq!(app.streams[0].jitter_ms, Some(0.42));
+        assert_eq!(app.udp_send.lost_percent(), None);
+        assert_eq!(app.udp_recv.lost_percent(), Some(20.0));
+        assert_eq!(app.udp_recv.jitter_ms, Some(0.25));
+        app.reset_for_restart();
+        assert_eq!(app.streams[0].throughput_send_mbps, None);
     }
 
     #[test]
@@ -2040,6 +2333,11 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(id, bytes)| crate::protocol::StreamInterval {
+                    bytes_sent: None,
+                    bytes_received: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
+
                     id: id as u8,
                     bytes,
                     retransmits: None,
@@ -2071,6 +2369,11 @@ mod tests {
         let mut progress = make_progress(0.0, None);
         progress.elapsed_ms = 4_000;
         progress.streams = vec![crate::protocol::StreamInterval {
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+
             id: 0,
             bytes: 0,
             retransmits: None,
@@ -2146,6 +2449,10 @@ mod tests {
             error: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }];
         app.on_progress(p1);
         assert_eq!(app.total_retransmits, 5);
@@ -2160,6 +2467,10 @@ mod tests {
             error: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }];
         app.on_progress(p2);
         assert_eq!(app.total_retransmits, 8);
@@ -2183,6 +2494,10 @@ mod tests {
             error: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }];
         app.on_progress(p);
         assert_eq!(app.total_retransmits, 42);
@@ -2208,6 +2523,10 @@ mod tests {
             error: None,
             rtt_us: None,
             cwnd: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
         }];
         app.on_progress(fallback);
         assert_eq!(
@@ -2264,6 +2583,8 @@ mod tests {
             throughput_recv_mbps: None,
             udp_progress: None,
             udp_feedback_only: false,
+            udp_send: None,
+            udp_recv: None,
         };
         app.on_progress(progress.clone());
         assert_eq!(app.total_bytes, 1000);
@@ -2296,6 +2617,8 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
         };
         app.on_result(result);
         assert_eq!(app.elapsed, Duration::from_millis(3500));
@@ -2319,6 +2642,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
             server_udp_send_errors: Some(crate::protocol::UdpSendErrors {
                 count: 1,
                 last_error: "Connection refused (os error 111)".to_string(),
@@ -2432,6 +2757,8 @@ mod tests {
                     mtu_probe: None,
                     server_udp_send_errors: None,
                     client_udp_send_errors: None,
+                    udp_stats_send: None,
+                    udp_stats_recv: None,
                 })
             }),
         ];

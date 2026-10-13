@@ -2184,7 +2184,7 @@ async fn run_quic_test(
         let stream_results: Vec<_> = stats
             .streams
             .iter()
-            .map(|s| s.to_result(duration_ms))
+            .map(|s| s.to_result_with_direction(duration_ms, direction == Direction::Bidir))
             .collect();
 
         // Bidir: split up/down reporting for asymmetric links (issue #56).
@@ -2192,6 +2192,8 @@ async fn run_quic_test(
             directional_totals(direction, &stats, duration_ms);
 
         let result = ControlMessage::Result(TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: id.to_string(),
             bytes_total,
             duration_ms,
@@ -2716,7 +2718,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
         let stream_results: Vec<_> = stats
             .streams
             .iter()
-            .map(|s| s.to_result(duration_ms))
+            .map(|s| s.to_result_with_direction(duration_ms, direction == Direction::Bidir))
             .collect();
 
         // For bidir tests, expose per-direction totals so clients can distinguish
@@ -2725,6 +2727,12 @@ async fn run_test<W: AsyncWrite + Unpin>(
             directional_totals(direction, &stats, duration_ms);
 
         let result = ControlMessage::Result(TestResult {
+            udp_stats_send: if protocol == Protocol::Udp && direction == Direction::Bidir {
+                stats.aggregate_udp_receiver_stats().map(Box::new)
+            } else {
+                None
+            },
+            udp_stats_recv: None,
             id: id.to_string(),
             bytes_total,
             duration_ms,

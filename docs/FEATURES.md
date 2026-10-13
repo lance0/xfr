@@ -198,6 +198,18 @@ shows `↑` / `↓` throughput in the stats panel. Unidirectional tests
 continue to report only the combined number (which equals the
 single-direction throughput).
 
+Bidirectional UDP (`-u --bidir`) also reports upload and download loss and
+jitter separately. Upload measurements come from the server receiver;
+download measurements come from the client receiver and keep updating on a
+local clock when control reports stall. Final JSON contains `udp_stats_send`
+and `udp_stats_recv`; `udp_stats` retains its upload meaning for existing
+scripts. Stream intervals and final rows include the same client-relative
+byte/rate splits as the aggregate. Against older servers, missing per-stream
+upload splits remain absent; download splits still use local receive counters.
+
+UDP loss counts sequence gaps observed by each receiver. Completely unseen
+trailing packets cannot be inferred from these measurements.
+
 ## Direction Control
 
 ```bash

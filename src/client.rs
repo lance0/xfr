@@ -192,6 +192,10 @@ fn local_udp_recv_intervals(
                 jitter_ms,
                 lost: None,
                 error: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
                 rtt_us: None,
                 cwnd: None,
             }
@@ -213,6 +217,52 @@ fn udp_local_progress(stats: &crate::stats::TestStats) -> crate::protocol::UdpIn
             acc
         },
     )
+}
+
+/// Download-direction measurements come only from local UDP receivers. A
+/// missing snapshot means no packets have been observed, not measured zero loss.
+fn udp_local_direction_progress(
+    stats: &crate::stats::TestStats,
+) -> Option<crate::protocol::UdpDirectionProgress> {
+    let progress = udp_local_progress(stats);
+    if progress.packets_received == 0 && progress.packets_lost == 0 {
+        return None;
+    }
+    let jitters: Vec<f64> = stats
+        .streams
+        .iter()
+        .filter(|stream| stream.udp_progress_snapshot().packets_received > 0)
+        .map(|stream| stream.udp_jitter_ms())
+        .collect();
+    Some(crate::protocol::UdpDirectionProgress {
+        progress,
+        jitter_ms: (!jitters.is_empty())
+            .then(|| jitters.iter().sum::<f64>() / jitters.len() as f64),
+    })
+}
+
+/// Overlay each download delta by stream id. Older servers cannot tell us the
+/// upload split, so their combined row remains untouched rather than inferred
+/// from sender counters or subtraction of mismatched sampling windows.
+fn overlay_udp_bidir_intervals(
+    streams: &mut [crate::protocol::StreamInterval],
+    received: &[u64],
+    duration_secs: f64,
+) {
+    for stream in streams {
+        let Some(&bytes) = received.get(usize::from(stream.id)) else {
+            continue;
+        };
+        stream.bytes_received = Some(bytes);
+        stream.throughput_recv_mbps = Some(if duration_secs > 0.0 {
+            bytes as f64 * 8.0 / duration_secs / 1_000_000.0
+        } else {
+            0.0
+        });
+        if let Some(sent) = stream.bytes_sent {
+            stream.bytes = sent.saturating_add(bytes);
+        }
+    }
 }
 
 /// Replace the sender-side byte accounting in a download-mode UDP result
@@ -269,12 +319,40 @@ fn overlay_udp_bidir_result(result: &mut TestResult, stats: &crate::stats::TestS
             0.0
         }
     };
+    // A receiver with no observed packets has no loss/jitter measurement.
+    // Keep the legacy aggregate intact, but omit empty directional readings.
+    result.udp_stats_send = result
+        .udp_stats_send
+        .take()
+        .filter(|stats| stats.packets_received > 0 || stats.lost > 0)
+        .or_else(|| {
+            result
+                .udp_stats
+                .clone()
+                .filter(|stats| stats.packets_received > 0 || stats.lost > 0)
+                .map(Box::new)
+        });
+    result.udp_stats_recv = stats.aggregate_udp_receiver_stats().map(Box::new);
     let received = stats.total_bytes_received();
     result.bytes_received = Some(received);
     result.throughput_recv_mbps = Some(mbps(received));
     if let Some(sent) = result.bytes_sent {
         result.bytes_total = sent + received;
         result.throughput_mbps = mbps(sent + received);
+    }
+    for stream in &mut result.streams {
+        let Some(local) = stats.streams.get(usize::from(stream.id)) else {
+            continue;
+        };
+        let received = local
+            .bytes_received
+            .load(std::sync::atomic::Ordering::Relaxed);
+        stream.bytes_received = Some(received);
+        stream.throughput_recv_mbps = Some(mbps(received));
+        if let Some(sent) = stream.bytes_sent {
+            stream.bytes = sent.saturating_add(received);
+            stream.throughput_mbps = mbps(stream.bytes);
+        }
     }
 }
 
@@ -452,14 +530,14 @@ pub struct TestProgress {
     /// a pre-0.9.11 server). The TUI distinguishes None from a real zero so
     /// stale/unknown data renders as a freshness signal, not as "no loss".
     pub udp_progress: Option<crate::protocol::UdpIntervalProgress>,
-    /// True when this update was synthesized from a UDP-receiver-feedback
-    /// path (server emitted cumulative counts back over UDP at 2 Hz under
-    /// the `udp_feedback_v1` capability) rather than from a TCP control
-    /// `Interval` message. Consumers should update only `udp_progress` /
-    /// derived loss state and preserve all other field values from the
-    /// most recent full interval — the feedback-only update knows nothing
-    /// about throughput, byte counts, retransmits, RTT, or jitter.
+    /// A quality-only update from upload UDP feedback or the locally clocked
+    /// bidirectional download receiver. Consumers update any supplied UDP
+    /// measurements and preserve throughput, byte deltas, streams, and TCP
+    /// readings. Directional download updates can include measured jitter.
     pub udp_feedback_only: bool,
+    /// Independent client-relative UDP receiver measurements.
+    pub udp_send: Option<crate::protocol::UdpDirectionProgress>,
+    pub udp_recv: Option<crate::protocol::UdpDirectionProgress>,
 }
 
 async fn send_progress_until_cancelled(
@@ -625,6 +703,8 @@ fn spawn_udp_feedback_consumer(
                             throughput_recv_mbps: None,
                             udp_progress: Some(filtered),
                             udp_feedback_only: true,
+                            udp_send: None,
+                            udp_recv: None,
                         }) {
                             Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -1271,7 +1351,7 @@ impl Client {
                             match *msg {
                                 ControlMessage::Interval {
                                     elapsed_ms,
-                                    streams,
+                                    mut streams,
                                     aggregate,
                                     ..
                                 } => {
@@ -1306,8 +1386,9 @@ impl Client {
                                                 let now = tokio::time::Instant::now();
                                                 let dt = now.duration_since(last_recv_instant).as_secs_f64();
                                                 last_recv_instant = now;
-                                                let (interval_recv, _) =
+                                                let (interval_recv, deltas) =
                                                     udp_recv_interval_deltas(&stats, &mut last_recv_bytes);
+                                                overlay_udp_bidir_intervals(&mut streams, &deltas, dt);
                                                 let recv_mbps = if dt > 0.0 {
                                                     (interval_recv as f64 * 8.0) / dt / 1_000_000.0
                                                 } else {
@@ -1354,6 +1435,13 @@ impl Client {
                                                 throughput_recv_mbps,
                                                 udp_progress: filtered_udp_progress,
                                                 udp_feedback_only: false,
+                                                udp_send: if udp_bidir {
+                                                    filtered_udp_progress.map(|progress| crate::protocol::UdpDirectionProgress {
+                                                        progress,
+                                                        jitter_ms: aggregate.jitter_ms,
+                                                    })
+                                                } else { None },
+                                                udp_recv: if udp_bidir { udp_local_direction_progress(&stats) } else { None },
                                             },
                                             &cancel_request_rx,
                                         ).await;
@@ -1509,7 +1597,7 @@ impl Client {
                         Err(e) => warn!("Failed to serialize finish message: {}", e),
                     }
                 }
-                _ = local_interval.tick(), if udp_download && !local_stop_sent && pause_started_at.is_none() => {
+                _ = local_interval.tick(), if (udp_download || udp_bidir) && !local_stop_sent && pause_started_at.is_none() => {
                     // (`local_stop_sent` gate: once the timed test has ended
                     // locally, don't print zero-rate rows while the final
                     // Result crosses a possibly-lossy control channel.)
@@ -1517,6 +1605,24 @@ impl Client {
                     // full progress update from our own receive counters,
                     // independent of the (saturation-prone) control channel.
                     if let Some(ref tx) = progress_tx {
+                        if udp_bidir {
+                            // A directional-only snapshot does not advance byte
+                            // baselines or replace stale/unknown upload readings.
+                            let _ = tx.try_send(TestProgress {
+                                elapsed_ms: progress_start.elapsed().saturating_sub(paused_total).as_millis() as u64,
+                                total_bytes: 0,
+                                throughput_mbps: 0.0,
+                                streams: Vec::new(),
+                                rtt_us: None, cwnd: None, total_retransmits: None,
+                                bytes_sent: None, bytes_received: None,
+                                throughput_send_mbps: None, throughput_recv_mbps: None,
+                                udp_progress: None,
+                                udp_feedback_only: true,
+                                udp_send: None,
+                                udp_recv: udp_local_direction_progress(&stats),
+                            });
+                            continue;
+                        }
                         let now = tokio::time::Instant::now();
                         let dt = now.duration_since(last_recv_instant).as_secs_f64();
                         last_recv_instant = now;
@@ -1548,6 +1654,8 @@ impl Client {
                                 udp_progress: udp_progress_filter
                                     .apply(udp_local_progress(&stats)),
                                 udp_feedback_only: false,
+                                udp_send: None,
+                                udp_recv: None,
                             },
                             &cancel_request_rx,
                         ).await;
@@ -2656,6 +2764,8 @@ impl Client {
                                                     throughput_recv_mbps: aggregate.throughput_recv_mbps,
                                                     udp_progress: aggregate.udp_progress,
                                                     udp_feedback_only: false,
+                                                    udp_send: None,
+                                                    udp_recv: None,
                                                 },
                                                 &cancel_request_rx,
                                             ).await;
@@ -3004,7 +3114,7 @@ async fn run_udp_stream_io(
             });
 
             let recv_handle = tokio::spawn(async move {
-                if let Err(e) = udp::receive_udp(
+                match udp::receive_udp(
                     recv_socket,
                     recv_stats,
                     recv_cancel,
@@ -3014,7 +3124,8 @@ async fn run_udp_stream_io(
                 )
                 .await
                 {
-                    error!("UDP bidir receive error: {}", e);
+                    Ok((udp_stats, _bytes)) => test_stats.add_udp_stats(udp_stats),
+                    Err(e) => error!("UDP bidir receive error: {}", e),
                 }
             });
 
@@ -3331,12 +3442,18 @@ mod tests {
 
         // ...but the server reported 300 MB of send-side attempts.
         let mut result = TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: "t".to_string(),
             bytes_total: 300_000_000,
             duration_ms: 1_000,
             throughput_mbps: 2_400.0,
             streams: vec![
                 StreamResult {
+                    bytes_sent: None,
+                    bytes_received: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
                     id: 0,
                     bytes: 200_000_000,
                     throughput_mbps: 1_600.0,
@@ -3345,6 +3462,10 @@ mod tests {
                     lost: None,
                 },
                 StreamResult {
+                    bytes_sent: None,
+                    bytes_received: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
                     id: 1,
                     bytes: 100_000_000,
                     throughput_mbps: 800.0,
@@ -3380,6 +3501,8 @@ mod tests {
     fn overlay_udp_download_result_zero_duration_yields_zero_mbps() {
         let stats = test_stats_with_recv_bytes(&[1_000]);
         let mut result = TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: "t".to_string(),
             bytes_total: 5_000,
             duration_ms: 0,
@@ -3400,6 +3523,152 @@ mod tests {
         assert_eq!(result.throughput_mbps, 0.0);
     }
 
+    #[test]
+    fn bidir_stream_overlay_uses_ids_and_keeps_unknown_upload_unknown() {
+        let mut streams = vec![
+            crate::protocol::StreamInterval {
+                id: 1,
+                bytes: 9000,
+                bytes_sent: Some(200),
+                bytes_received: Some(8800),
+                throughput_send_mbps: Some(0.0008),
+                throughput_recv_mbps: Some(99.0),
+                retransmits: None,
+                jitter_ms: None,
+                lost: None,
+                error: None,
+                rtt_us: None,
+                cwnd: None,
+            },
+            crate::protocol::StreamInterval {
+                id: 0,
+                bytes: 7000,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
+                retransmits: None,
+                jitter_ms: None,
+                lost: None,
+                error: None,
+                rtt_us: None,
+                cwnd: None,
+            },
+        ];
+        overlay_udp_bidir_intervals(&mut streams, &[100, 300], 2.0);
+        assert_eq!(streams[0].bytes, 500);
+        assert_eq!(streams[0].bytes_sent, Some(200));
+        assert_eq!(streams[0].bytes_received, Some(300));
+        assert_eq!(streams[0].throughput_recv_mbps, Some(0.0012));
+        assert_eq!(streams[1].bytes, 7000);
+        assert_eq!(streams[1].bytes_sent, None);
+        assert_eq!(streams[1].throughput_send_mbps, None);
+        assert_eq!(streams[1].bytes_received, Some(100));
+        overlay_udp_bidir_intervals(&mut streams, &[100, 300], 0.0);
+        assert_eq!(streams[0].throughput_recv_mbps, Some(0.0));
+    }
+
+    #[test]
+    fn directional_local_progress_distinguishes_no_packets_from_zero_jitter() {
+        let stats = TestStats::new("directions".into(), 2);
+        assert!(udp_local_direction_progress(&stats).is_none());
+        stats.streams[0].add_udp_received(8);
+        let progress = udp_local_direction_progress(&stats).unwrap();
+        assert_eq!(progress.progress.packets_received, 8);
+        assert_eq!(progress.progress.lost_percent(), Some(0.0));
+        assert_eq!(progress.jitter_ms, Some(0.0));
+        stats.streams[1].add_udp_received(2);
+        stats.streams[1].add_udp_lost(5);
+        stats.streams[1].set_udp_jitter_us(6000);
+        let progress = udp_local_direction_progress(&stats).unwrap();
+        assert_eq!(progress.progress.packets_received, 10);
+        assert_eq!(progress.progress.packets_lost, 5);
+        assert_eq!(progress.jitter_ms, Some(3.0));
+    }
+
+    #[test]
+    fn final_bidir_without_observed_packets_omits_quality_measurements() {
+        let stats = test_stats_with_recv_bytes(&[0]);
+        let empty = crate::protocol::UdpStats {
+            packets_sent: 0,
+            packets_received: 0,
+            lost: 0,
+            lost_percent: 0.0,
+            jitter_ms: 0.0,
+            out_of_order: 0,
+            jitter_max_ms: None,
+            packet_size: None,
+        };
+        stats.add_udp_stats(empty.clone());
+        let mut result: TestResult = serde_json::from_value(serde_json::json!({
+            "id": "empty", "bytes_total": 0, "duration_ms": 2000,
+            "throughput_mbps": 0.0, "streams": [], "udp_stats": empty,
+            "udp_stats_send": empty, "bytes_sent": 0,
+        }))
+        .unwrap();
+        overlay_udp_bidir_result(&mut result, &stats);
+        assert!(result.udp_stats.is_some());
+        assert!(result.udp_stats_send.is_none());
+        assert!(result.udp_stats_recv.is_none());
+    }
+
+    #[test]
+    fn final_bidir_overlay_retains_both_receiver_stats_and_corrects_each_stream() {
+        let stats = test_stats_with_recv_bytes(&[100, 300]);
+        let upload = crate::protocol::UdpStats {
+            packets_sent: 1000,
+            packets_received: 900,
+            lost: 100,
+            lost_percent: 10.0,
+            jitter_ms: 1.25,
+            out_of_order: 2,
+            jitter_max_ms: Some(2.0),
+            packet_size: Some(100),
+        };
+        let download = crate::protocol::UdpStats {
+            packets_sent: 200,
+            packets_received: 100,
+            lost: 100,
+            lost_percent: 50.0,
+            jitter_ms: 7.5,
+            out_of_order: 4,
+            jitter_max_ms: Some(12.0),
+            packet_size: Some(200),
+        };
+        stats.add_udp_stats(download.clone());
+        let mut result: TestResult = serde_json::from_value(serde_json::json!({
+            "id": "bidir", "bytes_total": 10000, "duration_ms": 2000,
+            "throughput_mbps": 99.0, "bytes_sent": 600,
+            "udp_stats": upload,
+            "streams": [
+                {"id": 1, "bytes": 9000, "throughput_mbps": 90.0, "bytes_sent": 400},
+                {"id": 0, "bytes": 7000, "throughput_mbps": 70.0, "bytes_sent": 200}
+            ]
+        }))
+        .unwrap();
+        overlay_udp_bidir_result(&mut result, &stats);
+        assert_eq!(result.bytes_total, 1000);
+        assert_eq!(result.bytes_received, Some(400));
+        assert_eq!(result.streams[0].bytes, 700);
+        assert_eq!(result.streams[0].bytes_received, Some(300));
+        assert_eq!(result.streams[1].bytes, 300);
+        assert_eq!(
+            result
+                .streams
+                .iter()
+                .map(|stream| stream.bytes)
+                .sum::<u64>(),
+            result.bytes_total
+        );
+        let send = result.udp_stats_send.unwrap();
+        let recv = result.udp_stats_recv.unwrap();
+        assert_eq!(send.lost_percent, 10.0);
+        assert_eq!(send.jitter_ms, 1.25);
+        assert_eq!(recv.lost_percent, 50.0);
+        assert_eq!(recv.jitter_ms, 7.5);
+        assert_eq!(result.udp_stats.unwrap().lost_percent, 10.0);
+    }
+
     /// Bidir UDP: the download half of the server's split is its send-side
     /// counter and must be replaced with the client's receive totals. The
     /// upload half is already receiver-truth (counted by the server as it
@@ -3410,6 +3679,8 @@ mod tests {
         let stats = test_stats_with_recv_bytes(&[10_000_000, 5_000_000]);
 
         let mut result = TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: "t".to_string(),
             // Server combined: 20 MB upload truth + 300 MB send-side attempts.
             bytes_total: 320_000_000,
@@ -3449,6 +3720,8 @@ mod tests {
         let stats = test_stats_with_recv_bytes(&[15_000_000]);
 
         let mut result = TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: "t".to_string(),
             bytes_total: 320_000_000,
             duration_ms: 1_000,
@@ -3542,6 +3815,8 @@ mod tests {
             throughput_recv_mbps: None,
             udp_progress: None,
             udp_feedback_only: false,
+            udp_send: None,
+            udp_recv: None,
         };
         let (tx, mut rx) = mpsc::channel(1);
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -3738,6 +4013,8 @@ mod tests {
                 throughput_send_mbps: None,
                 throughput_recv_mbps: None,
                 mtu_probe: None,
+                udp_stats_send: None,
+                udp_stats_recv: None,
                 server_udp_send_errors: Some(crate::protocol::UdpSendErrors {
                     count: 30,
                     last_error: "failed to create UDP socket to 10.9.0.2:4000:\x1b[2J \

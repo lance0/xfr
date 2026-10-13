@@ -143,6 +143,8 @@ pub struct StreamBar {
     pub max_throughput: f64,
     pub retransmits: u64,
     pub jitter_ms: Option<f64>,
+    pub throughput_send_mbps: Option<f64>,
+    pub throughput_recv_mbps: Option<f64>,
     pub bar_color: Color,
     pub text_color: Color,
 }
@@ -155,6 +157,8 @@ impl StreamBar {
             max_throughput,
             retransmits,
             jitter_ms: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
             bar_color: Color::Green,
             text_color: Color::White,
         }
@@ -162,6 +166,12 @@ impl StreamBar {
 
     pub fn jitter(mut self, jitter_ms: Option<f64>) -> Self {
         self.jitter_ms = jitter_ms;
+        self
+    }
+
+    pub fn directions(mut self, send: Option<f64>, recv: Option<f64>) -> Self {
+        self.throughput_send_mbps = send;
+        self.throughput_recv_mbps = recv;
         self
     }
 
@@ -186,7 +196,15 @@ impl Widget for StreamBar {
         //         [0] ████████████────  1.2 Gbps  jitter: 0.42ms  (UDP)
         let label = format!("[{}] ", self.stream_id);
         let throughput_str = mbps_to_human(self.throughput_mbps);
-        let stats = if let Some(jitter) = self.jitter_ms {
+        let stats = if self.throughput_send_mbps.is_some() || self.throughput_recv_mbps.is_some() {
+            let rate =
+                |rate: Option<f64>| rate.map(mbps_to_human).unwrap_or_else(|| "--".to_string());
+            format!(
+                " ↑ {}  ↓ {}",
+                rate(self.throughput_send_mbps),
+                rate(self.throughput_recv_mbps)
+            )
+        } else if let Some(jitter) = self.jitter_ms {
             format!(" {}  jitter: {:.2}ms", throughput_str, jitter)
         } else if self.retransmits > 0 {
             format!(" {}  rtx: {}", throughput_str, self.retransmits)
@@ -195,7 +213,7 @@ impl Widget for StreamBar {
         };
 
         let label_width = label.len() as u16;
-        let stats_width = stats.len() as u16;
+        let stats_width = stats.chars().count() as u16;
         let bar_width = area.width.saturating_sub(label_width + stats_width);
 
         // Render label
@@ -222,10 +240,11 @@ impl Widget for StreamBar {
         }
 
         // Render stats
-        buf.set_string(
+        buf.set_stringn(
             area.x + label_width + bar_width,
             area.y,
             &stats,
+            area.width.saturating_sub(label_width + bar_width) as usize,
             Style::default().fg(self.text_color),
         );
     }
@@ -238,6 +257,27 @@ mod tests {
     #[test]
     fn test_sparkline_chars() {
         assert_eq!(SPARKLINE_CHARS.len(), 8);
+    }
+
+    #[test]
+    fn directional_stream_bar_keeps_zero_distinct_from_unknown() {
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buffer = Buffer::empty(area);
+        StreamBar::new(0, 8.0, 100.0, 0)
+            .directions(Some(0.0), None)
+            .render(area, &mut buffer);
+        let row: String = (0..60).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(row.contains("↑ 0.0 Mbps  ↓ --"), "{row}");
+    }
+
+    #[test]
+    fn directional_stream_bar_clips_at_its_own_boundary() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 1));
+        buffer[(32, 0)].set_symbol("|");
+        StreamBar::new(0, 100_000.0, 100_000.0, 0)
+            .directions(Some(99_999.0), Some(99_999.0))
+            .render(Rect::new(2, 0, 30, 1), &mut buffer);
+        assert_eq!(buffer[(32, 0)].symbol(), "|");
     }
 
     #[test]

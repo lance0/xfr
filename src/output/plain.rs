@@ -1,7 +1,7 @@
 //! Plain text output
 
 use crate::probe::{MtuProbeReport, SizeVerdict};
-use crate::protocol::TestResult;
+use crate::protocol::{TestResult, UdpDirectionProgress, UdpStats};
 use crate::stats::{bytes_to_human, mbps_to_human};
 
 pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
@@ -76,8 +76,75 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         output.push('\n');
     }
 
-    if let Some(ref udp_stats) = result.udp_stats {
-        output.push_str("  UDP Stats:\n");
+    if result.udp_stats_send.is_some() || result.udp_stats_recv.is_some() {
+        append_udp_stats(
+            &mut output,
+            "Upload UDP Stats",
+            result.udp_stats_send.as_deref(),
+        );
+        append_udp_stats(
+            &mut output,
+            "Download UDP Stats",
+            result.udp_stats_recv.as_deref(),
+        );
+    } else if let Some(ref udp_stats) = result.udp_stats {
+        append_udp_stats(&mut output, "UDP Stats", Some(udp_stats));
+    }
+
+    for (side, errors) in [
+        ("Server", &result.server_udp_send_errors),
+        ("Client", &result.client_udp_send_errors),
+    ] {
+        if let Some(errors) = errors {
+            output.push_str(&format!("  Warning: {}\n\n", errors.describe(side)));
+        }
+    }
+
+    if result.streams.len() > 1
+        || result
+            .streams
+            .iter()
+            .any(|s| s.bytes_sent.is_some() || s.bytes_received.is_some())
+    {
+        output.push_str("  Per-Stream Results:\n");
+        for stream in &result.streams {
+            output.push_str(&format!(
+                "    [{}] {} @ {}",
+                stream.id,
+                bytes_to_human(stream.bytes),
+                mbps_to_human(stream.throughput_mbps)
+            ));
+            if let (Some(sent), Some(recv), Some(send_rate), Some(recv_rate)) = (
+                stream.bytes_sent,
+                stream.bytes_received,
+                stream.throughput_send_mbps,
+                stream.throughput_recv_mbps,
+            ) {
+                output.push_str(&format!(
+                    "  Upload: {} @ {}  Download: {} @ {}",
+                    bytes_to_human(sent),
+                    mbps_to_human(send_rate),
+                    bytes_to_human(recv),
+                    mbps_to_human(recv_rate)
+                ));
+            }
+            if let Some(rtx) = stream.retransmits {
+                output.push_str(&format!("  rtx: {}", rtx));
+            }
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+
+    output.push_str("─".repeat(60).as_str());
+    output.push('\n');
+
+    output
+}
+
+fn append_udp_stats(output: &mut String, title: &str, stats: Option<&UdpStats>) {
+    output.push_str(&format!("  {title}:\n"));
+    if let Some(udp_stats) = stats {
         output.push_str(&format!(
             "    Packets Sent:     {}\n",
             udp_stats.packets_sent
@@ -105,38 +172,9 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
             output.push_str(&format!("    Packet Size:      {} bytes\n", size));
         }
         output.push('\n');
+    } else {
+        output.push_str("    Not reported\n\n");
     }
-
-    for (side, errors) in [
-        ("Server", &result.server_udp_send_errors),
-        ("Client", &result.client_udp_send_errors),
-    ] {
-        if let Some(errors) = errors {
-            output.push_str(&format!("  Warning: {}\n\n", errors.describe(side)));
-        }
-    }
-
-    if result.streams.len() > 1 {
-        output.push_str("  Per-Stream Results:\n");
-        for stream in &result.streams {
-            output.push_str(&format!(
-                "    [{}] {} @ {}",
-                stream.id,
-                bytes_to_human(stream.bytes),
-                mbps_to_human(stream.throughput_mbps)
-            ));
-            if let Some(rtx) = stream.retransmits {
-                output.push_str(&format!("  rtx: {}", rtx));
-            }
-            output.push('\n');
-        }
-        output.push('\n');
-    }
-
-    output.push_str("─".repeat(60).as_str());
-    output.push('\n');
-
-    output
 }
 
 /// Render a `--probe-mtu` report (issue #64): the per-size walk, then
@@ -264,6 +302,89 @@ pub fn output_feedback_plain(
     }
 }
 
+/// Bidir UDP quality as fixed-width columns, so streaming rows keep their
+/// shape as values grow. `--` marks a receiver without a reading yet.
+fn directional_quality(
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+    upload_jitter_fallback: Option<f64>,
+) -> String {
+    let loss = |m: Option<&UdpDirectionProgress>| match m.and_then(|m| m.progress.lost_percent()) {
+        Some(percent) => format!("{percent:>5.1}%"),
+        None => format!("{:>6}", "--%"),
+    };
+    let jitter = |jitter: Option<f64>| match jitter {
+        Some(jitter) => format!("{jitter:>5.2}ms"),
+        None => format!("{:>7}", "--ms"),
+    };
+    format!(
+        "  loss ↑{} ↓{}  jitter ↑{} ↓{}",
+        loss(udp_send),
+        loss(udp_recv),
+        jitter(
+            udp_send
+                .and_then(|m| m.jitter_ms)
+                .or(upload_jitter_fallback)
+        ),
+        jitter(udp_recv.and_then(|m| m.jitter_ms)),
+    )
+}
+
+/// Bidir UDP rows replace the single upload-only `jitter`/`lost` columns
+/// with per-direction readings rather than printing upload twice.
+#[allow(clippy::too_many_arguments)]
+pub fn output_interval_plain_with_udp_directions(
+    timestamp: &str,
+    elapsed_secs: f64,
+    throughput_mbps: f64,
+    bytes: u64,
+    retransmits: Option<u64>,
+    jitter_ms: Option<f64>,
+    lost: Option<u64>,
+    rtt_us: Option<u32>,
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+) -> String {
+    if udp_send.is_none() && udp_recv.is_none() {
+        return output_interval_plain(
+            timestamp,
+            elapsed_secs,
+            throughput_mbps,
+            bytes,
+            retransmits,
+            jitter_ms,
+            lost,
+            rtt_us,
+        );
+    }
+    let mut output = output_interval_plain(
+        timestamp,
+        elapsed_secs,
+        throughput_mbps,
+        bytes,
+        None,
+        None,
+        None,
+        None,
+    );
+    output.pop();
+    output.push_str(&directional_quality(udp_send, udp_recv, jitter_ms));
+    output.push('\n');
+    output
+}
+
+pub fn output_directional_feedback_plain(
+    timestamp: &str,
+    _elapsed_secs: f64,
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+) -> String {
+    format!(
+        "[{timestamp}]  (reports stalled){}\n",
+        directional_quality(udp_send, udp_recv, None)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +403,10 @@ mod tests {
                 retransmits: Some(1),
                 jitter_ms: None,
                 lost: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
             }],
             tcp_info: Some(TcpInfoSnapshot {
                 retransmits: 1,
@@ -298,6 +423,8 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
         }
     }
 
@@ -324,6 +451,101 @@ mod tests {
         assert!(output_plain(&result, false).contains(
             "  Warning: Server reported 42 UDP send errors (last: Connection refused (os error 111))\n"
         ));
+    }
+
+    #[test]
+    fn directional_feedback_keeps_unknown_upload_distinct_from_clean_download() {
+        let recv = UdpDirectionProgress {
+            progress: crate::protocol::UdpIntervalProgress {
+                packets_received: 10,
+                packets_lost: 0,
+            },
+            jitter_ms: Some(0.0),
+        };
+        let output = output_directional_feedback_plain("2.0", 2.0, None, Some(&recv));
+        assert_eq!(
+            output,
+            "[2.0]  (reports stalled)  loss ↑   --% ↓  0.0%  jitter ↑   --ms ↓ 0.00ms\n"
+        );
+        assert!(!output.contains("Mbps"));
+        let interval = output_interval_plain_with_udp_directions(
+            "2.0",
+            2.0,
+            8.0,
+            1000,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&recv),
+        );
+        assert!(interval.ends_with("loss ↑   --% ↓  0.0%  jitter ↑   --ms ↓ 0.00ms\n"));
+        assert!(!interval.contains("lost:"), "upload must not print twice");
+        // Columns stay put as readings grow (and as unknowns resolve).
+        let lossy = UdpDirectionProgress {
+            progress: crate::protocol::UdpIntervalProgress {
+                packets_received: 877,
+                packets_lost: 123,
+            },
+            jitter_ms: Some(12.34),
+        };
+        let grown = output_interval_plain_with_udp_directions(
+            "2.0",
+            2.0,
+            8.0,
+            1000,
+            None,
+            None,
+            None,
+            None,
+            Some(&lossy),
+            Some(&lossy),
+        );
+        assert_eq!(
+            grown.chars().count(),
+            interval.chars().count(),
+            "{grown}{interval}"
+        );
+    }
+
+    #[test]
+    fn final_plain_shows_both_udp_directions_and_one_stream_split() {
+        let mut result = make_result_with_tcp_info();
+        result.tcp_info = None;
+        result.udp_stats_send = Some(Box::new(UdpStats {
+            packets_sent: 100,
+            packets_received: 80,
+            lost: 20,
+            lost_percent: 20.0,
+            jitter_ms: 0.5,
+            out_of_order: 0,
+            jitter_max_ms: None,
+            packet_size: None,
+        }));
+        result.udp_stats_recv = Some(Box::new(UdpStats {
+            packets_sent: 100,
+            packets_received: 100,
+            lost: 0,
+            lost_percent: 0.0,
+            jitter_ms: 0.0,
+            out_of_order: 0,
+            jitter_max_ms: None,
+            packet_size: None,
+        }));
+        result.streams[0].bytes_sent = Some(400);
+        result.streams[0].bytes_received = Some(624);
+        result.streams[0].throughput_send_mbps = Some(3.0);
+        result.streams[0].throughput_recv_mbps = Some(5.0);
+        let output = output_plain(&result, false);
+        assert!(output.contains("Upload UDP Stats:\n"));
+        assert!(output.contains("Lost:             20 (20.00%)"));
+        assert!(output.contains("Download UDP Stats:\n"));
+        assert!(output.contains("Lost:             0 (0.00%)"));
+        assert!(output.contains("Per-Stream Results:"));
+        assert!(output.contains("Upload: 400 B @ 3.0 Mbps  Download: 624 B @ 5.0 Mbps"));
+        result.udp_stats_send = None;
+        assert!(output_plain(&result, false).contains("Upload UDP Stats:\n    Not reported\n"));
     }
 
     #[test]

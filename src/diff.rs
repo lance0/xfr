@@ -192,6 +192,8 @@ mod tests {
 
     fn make_result(throughput: f64, retransmits: u64, rtt_us: u32) -> TestResult {
         TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: "test".to_string(),
             bytes_total: 1_000_000_000,
             duration_ms: 10_000,
