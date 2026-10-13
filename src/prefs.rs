@@ -63,7 +63,7 @@ impl Prefs {
     /// CLI values take precedence, then config, then saved prefs
     pub fn with_overrides(mut self, cli_theme: Option<&str>, config_theme: Option<&str>) -> Self {
         // Theme priority: CLI > config > saved
-        if let Some(t) = cli_theme.filter(|t| *t != "default") {
+        if let Some(t) = cli_theme {
             self.theme = Some(t.to_string());
         } else if let Some(t) = config_theme {
             self.theme = Some(t.to_string());
@@ -154,12 +154,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_default_theme_overrides_config_saved_and_no_color() {
+        for config in [None, Some("nord")] {
+            let prefs = Prefs {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            }
+            .with_overrides(Some("default"), config);
+            assert_eq!(prefs.theme.as_deref(), Some("default"));
+            assert_eq!(prefs.effective_theme_name(false), "default");
+            assert_eq!(prefs.effective_theme_name(true), "default");
+        }
+    }
+
+    #[test]
     fn test_with_overrides_config_wins_over_saved() {
         let prefs = Prefs {
             theme: Some("saved".to_string()),
             ..Default::default()
         };
-        let result = prefs.with_overrides(Some("default"), Some("config"));
+        let result = prefs.with_overrides(None, Some("config"));
         assert_eq!(result.theme, Some("config".to_string()));
     }
 
@@ -169,7 +183,7 @@ mod tests {
             theme: Some("saved".to_string()),
             ..Default::default()
         };
-        let result = prefs.with_overrides(Some("default"), None);
+        let result = prefs.with_overrides(None, None);
         assert_eq!(result.theme, Some("saved".to_string()));
     }
 
