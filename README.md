@@ -36,6 +36,7 @@ See [Installation](#installation) below for setup instructions.
 
 - **Live TUI** with real-time throughput graphs and per-stream stats
 - **Server dashboard** - `xfr serve --tui` for monitoring active tests
+- **Terminal status** - both TUIs report test status via OSC 7501 (Program Status Protocol) for tab headers and session pickers; terminals without support ignore it
 - **Multi-client server** - handle multiple simultaneous tests
 - **TCP, UDP, QUIC, and MPTCP** with configurable bitrate pacing and parallel streams
 - **Firewall-friendly** - single-port TCP *and* UDP (all traffic on 5201), QUIC multiplexing, and `--cport` for pinning data source ports
