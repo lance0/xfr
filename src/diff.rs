@@ -23,6 +23,17 @@ impl Default for DiffConfig {
     }
 }
 
+impl DiffConfig {
+    /// Reject thresholds that would silently disable regression detection.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.threshold_percent.is_finite() && self.threshold_percent >= 0.0,
+            "Regression threshold must be finite and non-negative"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct DiffResult {
     pub baseline: TestResult,
@@ -99,6 +110,7 @@ pub fn load_result(path: &Path) -> anyhow::Result<TestResult> {
     Ok(result)
 }
 
+/// Compare results using a config checked with [`DiffConfig::validate`].
 pub fn compare(baseline: TestResult, current: TestResult, config: &DiffConfig) -> DiffResult {
     let throughput_change_percent = if baseline.throughput_mbps > 0.0 {
         ((current.throughput_mbps - baseline.throughput_mbps) / baseline.throughput_mbps) * 100.0
@@ -142,6 +154,7 @@ pub fn run_diff(
     current_path: &Path,
     config: &DiffConfig,
 ) -> anyhow::Result<DiffResult> {
+    config.validate()?;
     let baseline = load_result(baseline_path)?;
     let current = load_result(current_path)?;
     Ok(compare(baseline, current, config))
@@ -151,6 +164,31 @@ pub fn run_diff(
 mod tests {
     use super::*;
     use crate::protocol::TcpInfoSnapshot;
+
+    #[test]
+    fn invalid_thresholds_fail_before_loading_result_files() {
+        for threshold in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let config = DiffConfig {
+                threshold_percent: threshold,
+            };
+            let error = run_diff(
+                Path::new("missing-baseline.json"),
+                Path::new("missing-current.json"),
+                &config,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("threshold"), "{error}");
+        }
+        for threshold in [0.0, 5.0, 12.5, 100.0] {
+            assert!(
+                DiffConfig {
+                    threshold_percent: threshold
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+    }
 
     fn make_result(throughput: f64, retransmits: u64, rtt_us: u32) -> TestResult {
         TestResult {

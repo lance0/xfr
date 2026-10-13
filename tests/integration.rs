@@ -12,6 +12,43 @@ use xfr::serve::{Server, ServerConfig};
 // Use different ports for each test to avoid conflicts
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
 
+#[test]
+fn test_cli_diff_invalid_threshold_cannot_report_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline_path = dir.path().join("baseline.json");
+    let current_path = dir.path().join("current.json");
+    for (path, throughput) in [(&baseline_path, 100.0), (&current_path, 1.0)] {
+        let result = serde_json::json!({
+            "id": "threshold-test", "bytes_total": 1000, "duration_ms": 1000,
+            "throughput_mbps": throughput, "streams": [],
+        });
+        std::fs::write(path, result.to_string()).unwrap();
+    }
+    for threshold in ["NaN", "inf", "-1"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("diff")
+            .arg(&baseline_path)
+            .arg(&current_path)
+            .arg(format!("--threshold={threshold}"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("threshold"));
+        assert!(output.stdout.is_empty());
+    }
+    for threshold in ["0", "5", "12.5"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("diff")
+            .arg(&baseline_path)
+            .arg(&current_path)
+            .arg(format!("--threshold={threshold}"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("REGRESSION DETECTED"));
+    }
+}
+
 fn get_test_port() -> u16 {
     PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
 }

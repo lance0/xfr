@@ -505,8 +505,8 @@ enum Commands {
         /// Current result file
         current: PathBuf,
 
-        /// Regression threshold percentage
-        #[arg(long, default_value_t = DEFAULT_DIFF_THRESHOLD_PERCENT)]
+        /// Regression threshold percentage (finite and non-negative)
+        #[arg(long, default_value_t = DEFAULT_DIFF_THRESHOLD_PERCENT, value_parser = parse_diff_threshold)]
         threshold: f64,
     },
 
@@ -525,6 +525,16 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         return Ok(Duration::from_secs(secs));
     }
     humantime::parse_duration(s).map_err(|e| e.to_string())
+}
+
+fn parse_diff_threshold(value: &str) -> Result<f64, String> {
+    let threshold = value.parse::<f64>().map_err(|error| error.to_string())?;
+    xfr::diff::DiffConfig {
+        threshold_percent: threshold,
+    }
+    .validate()
+    .map_err(|error| error.to_string())?;
+    Ok(threshold)
 }
 
 /// Duration parser that rejects zero. For flags where zero is not a valid
@@ -2503,6 +2513,42 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_thresholds_reject_invalid_cli_values() {
+        for value in ["NaN", "inf", "-inf", "-1"] {
+            assert!(parse_diff_threshold(value).is_err(), "{value}");
+            assert!(
+                Cli::try_parse_from([
+                    "xfr",
+                    "diff",
+                    "before.json",
+                    "after.json",
+                    "--threshold",
+                    value
+                ])
+                .is_err(),
+                "{value}"
+            );
+        }
+        for value in ["0", "5", "12.5", "100"] {
+            let cli = Cli::try_parse_from([
+                "xfr",
+                "diff",
+                "before.json",
+                "after.json",
+                "--threshold",
+                value,
+            ])
+            .unwrap();
+            match cli.command.unwrap() {
+                Commands::Diff { threshold, .. } => {
+                    assert_eq!(threshold, value.parse::<f64>().unwrap())
+                }
+                _ => panic!("expected diff command"),
+            }
+        }
+    }
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
