@@ -4,6 +4,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ## Low Priority / Edge Cases
 
+### QUIC Throughput Collapses on Paths That Reorder Packets
+
+**Issue:** QUIC (`-Q`) throughput drops by orders of magnitude on a path that reorders packets, even when nothing is dropped. In a Docker network-namespace pair shaped with netem `delay 20ms 10ms` (jitter that reorders packets, zero drops), `xfr <host> -Q` measured about 2.5 Mbps while TCP measured about 640 Mbps on the same path. The same path at a constant 20 ms (no reordering) gave QUIC about 227 Mbps, and with 3% random loss about 700 Mbps. Also present in v0.10.1. The likely cause is quinn's loss detection treating reordered packets as lost (its packet-threshold and time-threshold rules) and backing off its sending rate; this has not been confirmed.
+
+**Impact:** QUIC results understate the path badly on links with jitter-induced reordering, including netem test beds that add delay jitter.
+
+**Workaround:** Use TCP or UDP (`-u`) on paths that reorder packets. UDP receivers count reordered packets as out of order, not lost.
+
+---
+
 ### UDP Reordering Window and Unseen Tail Loss
 
 **Issue:** Each UDP receiver keeps an 8 KiB bitmap covering the latest 65,536 sequence numbers. Unique late packets within that window repair previously reported loss; duplicates do not affect packet counts. Once a sequence leaves the window, its gap is final: an older arrival cannot be distinguished from an old duplicate and does not repair it. All data datagrams still contribute to wire byte counts.
@@ -58,7 +68,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 **Issue:** Under tc netem `loss 50%` (or higher) on lo with short test durations (`-t 10sec`), the client's connected UDP socket can get stuck returning `ECONNREFUSED` on every send. The mechanism: TCP control handshake under heavy loss takes several seconds (retransmits), eating into test duration; if the server's test-end fires before the client's first UDP packet reaches the server's data port, the kernel returns ICMP port-unreachable, which sticks on the connected socket and rejects all subsequent sends.
 
-**Impact:** A run that should report ~50% loss instead emits a flood of `Connection refused (os error 111)` warnings. Sometimes the test still completes correctly via the TCP Result message; sometimes it ends with `Timeout waiting for server response`. Pre-existing behavior — reproduces on v0.9.13 at the same or higher rate than v0.9.14.
+**Impact:** A run that should report ~50% loss instead fails most of its sends with `Connection refused (os error 111)`. Each stream logs one warning on its first failed send and one with the total when it stops sending, and the final summary reports the count and last error (`Warning: Client reported N UDP send errors (last: ...)`, `client_udp_send_errors` in `--json`). Sometimes the test still completes correctly via the TCP Result message; sometimes it ends with `Timeout waiting for server response`. Pre-existing behavior — reproduces on v0.9.13 at the same or higher rate than v0.9.14.
 
 **Workaround:** Use longer test durations (`-t 60sec` or more) so the handshake delay is amortized. The issue does not occur in real-world conditions where tc netem isn't applied to TCP control as well as UDP data.
 
