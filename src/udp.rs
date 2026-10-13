@@ -2175,6 +2175,98 @@ mod tests {
         }
     }
 
+    /// Differential check against an unbounded set over long streams. Unlike
+    /// the oracle above, the stream is mostly sequential with drops replayed
+    /// late, so recycled bitmap slots are probed for sequences that were
+    /// never received; forward jumps hit both sides of the window size and
+    /// word boundaries, and some streams start nonzero or run into u64::MAX.
+    #[test]
+    fn packet_tracker_matches_unbounded_reference_over_long_streams() {
+        use std::collections::HashSet;
+        const EVENTS: usize = 250_000;
+        let window = PACKET_TRACKER_WINDOW as u64;
+        let starts = [0, 7, window, 1 << 40];
+        for (seed, start) in [0x9e37_79b9_7f4a_7c15u64, 1, 0xdead_beef, 42]
+            .into_iter()
+            .zip(starts)
+        {
+            let mut random = seed;
+            let mut next_random = move || {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                random
+            };
+            let mut tracker = PacketTracker::new();
+            let mut unique = HashSet::new();
+            let mut highest: Option<u64> = None;
+            let mut reordered = 0u64;
+            let mut late = Vec::new();
+            let (mut repairs, mut expired, mut duplicates) = (0, 0, 0);
+            for step in 0..EVENTS {
+                let top = highest.unwrap_or(start);
+                let roll = next_random() % 1000;
+                let sequence = if highest.is_none() {
+                    start
+                } else if step == EVENTS - 2000 && seed == 42 {
+                    u64::MAX - 1000
+                } else if roll < 700 {
+                    let skip = if next_random() % 10 == 0 {
+                        1 + next_random() % 4
+                    } else {
+                        0
+                    };
+                    for missing in 1..=skip {
+                        if late.len() < 4096 {
+                            late.push(top.saturating_add(missing));
+                        }
+                    }
+                    top.saturating_add(1 + skip)
+                } else if roll < 820 && !late.is_empty() {
+                    let index = next_random() as usize % late.len();
+                    late.swap_remove(index)
+                } else if roll < 900 {
+                    top.saturating_sub(next_random() % 128)
+                } else if roll < 989 {
+                    let back = [window - 1, window, window + 1, window - 64, window + 64];
+                    top.saturating_sub(match next_random() % 6 {
+                        5 => next_random() % (2 * window),
+                        pick => back[pick as usize],
+                    })
+                } else if roll < 999 {
+                    let jump = [63, 64, 65, window - 1, window, window + 1, 2 * window];
+                    top.saturating_add(match next_random() % 8 {
+                        7 => 1 + next_random() % window,
+                        pick => jump[pick as usize],
+                    })
+                } else {
+                    top.saturating_add(1 << 40)
+                };
+
+                let too_old = highest.is_some_and(|h| sequence <= h && h - sequence >= window);
+                let accepted = !too_old && unique.insert(sequence);
+                if accepted {
+                    if highest.is_some_and(|h| sequence < h) {
+                        reordered += 1;
+                        repairs += 1;
+                    }
+                    highest = Some(highest.map_or(sequence, |h| h.max(sequence)));
+                } else if too_old {
+                    expired += 1;
+                } else {
+                    duplicates += 1;
+                }
+                let context = format!("seed {seed:#x} step {step} sequence {sequence}");
+                assert_eq!(tracker.record_unique(sequence), accepted, "{context}");
+                assert_eq!(tracker.received, unique.len() as u64, "{context}");
+                let expected_lost = u128::from(highest.unwrap()) + 1 - unique.len() as u128;
+                assert_eq!(u128::from(tracker.lost), expected_lost, "{context}");
+                assert_eq!(tracker.out_of_order, reordered, "{context}");
+            }
+            assert!(repairs > 1000 && expired > 1000 && duplicates > 1000);
+        }
+    }
+
     #[test]
     fn jitter_handles_extreme_timestamps_without_signed_overflow() {
         let mut jitter = JitterCalculator::new();
