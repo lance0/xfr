@@ -14,13 +14,13 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP Payload Size Hardcoded to 1400 Bytes
+### UDP Payload Size Requires Manual Selection
 
-**Issue:** UDP payload size is hardcoded to 1400 bytes, leaving headroom for IP/UDP headers and tunneling overhead.
+**Issue:** UDP defaults to a 1400-byte payload and does not automatically adapt to path MTU. `-l/--length` selects the complete UDP payload, including the 16-byte xfr header (valid range: 16–65507 bytes). Explicit lengths require a server advertising `udp_payload_size_v1`.
 
-**Impact:** May not be optimal for jumbo frames or networks with different MTUs.
+**Impact:** The default can fragment on paths with a smaller MTU, including some tunnels. Larger payloads can also fragment if they exceed the path's available space after IP/UDP headers.
 
-**Workaround:** Works correctly for the vast majority of networks.
+**Workaround:** Choose a length that fits the path. For example, `xfr <host> -u -l 1368` fits a 1420-byte MTU with either IPv4 or IPv6 headers. The default remains compatible with older servers.
 
 ---
 
@@ -44,16 +44,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### QUIC Client DualStack Binding
-
-**Issue:** QUIC client endpoint in DualStack mode binds to IPv4 (`0.0.0.0:0`) by default, which may not work when connecting to an IPv6-only server.
-
-**Impact:** Edge case - only affects DualStack clients connecting to IPv6-only QUIC servers.
-
-**Workaround:** Use `-6` flag to force IPv6 mode when connecting to IPv6-only servers.
-
----
-
 ### UDP Reverse Mode Error Handling
 
 **Issue:** In UDP reverse (download) mode, send errors on the server side are logged but not reported back to the client.
@@ -74,23 +64,23 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP Download-Mode Live Loss Still Routed Through TCP Control
+### UDP Bidir Loss Has No Separate Download-Direction Reading
 
-**Issue:** v0.9.14's `udp_feedback_v1` capability surfaces live UDP loss over UDP for upload-mode tests, sidestepping the TCP control channel. Download mode (`-R`) and the receive half of bidir still rely on TCP control `Interval` messages for live loss visibility. The client is the receiver in download mode and has authoritative receive-side stats locally, but those stats are not plumbed to consumers (TUI/plain/JSON-stream).
+**Issue:** Download-only mode (`-u -R`) builds live throughput, jitter, and cumulative loss from the client's local receive counters on a local interval clock. Bidirectional UDP still exposes one live loss reading from the server's receive side (the upload direction), rather than separate readings for both directions. Its final result also has only one `udp_stats` field.
 
-**Impact:** Under a saturated download path with TCP control back-pressure, download-mode live loss can lag the actual receive-side state. The end-of-test summary remains correct.
+**Impact:** A bidirectional run does not separately show loss and jitter for the download direction, even though its download byte counts are corrected from the client's receive counters.
 
-**Mitigation:** Use upload mode for the most responsive live-loss reporting. A follow-up will plumb client-side recv stats directly to consumers (tracked in ROADMAP.md).
+**Workaround:** Use a download-only run to measure download loss and jitter. Separate bidirectional direction metrics require protocol additions and remain tracked in ROADMAP.md.
 
 ---
 
 ### Non-TUI Interval Row Cadence Can Still Bunch Under Extreme Loss
 
-**Issue:** v0.9.14's upload-mode UDP feedback path keeps the TUI live Packet Loss counter current and refreshes the cumulative loss cache used by plain text, CSV, and JSON-stream output. Those non-TUI formats still print rows only when a TCP control `Interval` message reaches the client. Under aggressive synthetic loss, the kernel can still deliver already-sent TCP interval messages in bursts.
+**Issue:** Upload-mode full interval rows still follow TCP control `Interval` arrival, which can bunch under aggressive loss or bufferbloat. UDP feedback updates keep cumulative loss current. When full rows stall for roughly two report periods, plain text emits a `(reports stalled)` loss line and `--json-stream` emits a marked `udp_feedback` event. CSV remains interval-only to preserve its fixed columns. Download-only UDP intervals use local receive counters and a local clock.
 
-**Impact:** The `lost` value on each printed non-TUI row reflects the freshest accepted cumulative UDP reading, but the row timestamps/cadence can still bunch under pathological loss. This is most visible with `--json-stream` diagnostics.
+**Impact:** Upload throughput rows and CSV cadence can lag or arrive in bursts, even while feedback loss events remain current. A feedback event carries cumulative loss rather than a full throughput interval.
 
-**Mitigation:** Use the TUI for the most responsive live Packet Loss display. A follow-up will either emit explicit feedback-only stream events or decouple scripted interval output cadence from TCP control-message arrival.
+**Workaround:** Consume `udp_feedback` events in JSON-stream scripts when live loss matters. Use fair queuing to reduce control-channel stalls; decoupling server stats sampling from control writes remains tracked in ROADMAP.md.
 
 ---
 
@@ -100,7 +90,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 **Impact:** Live interval rows (plain/CSV/JSON-stream) batch up under pathological bufferbloat. The TUI live loss counter and sparkline are unaffected (they ride `udp_feedback_v1` over UDP and the local-tick sparkline cadence). End-of-test results are always correct.
 
-**Mitigation:** This is inherent to sharing a FIFO-bloated link with the traffic being tested; AQM (fq_codel, the modern Linux default) eliminates it entirely. The durable in-product improvements are tracked in ROADMAP.md: decoupling stats sampling from control writes, and feedback-driven scripted output cadence.
+**Mitigation:** This is inherent to sharing a FIFO-bloated link with the traffic being tested; AQM (fq_codel, the modern Linux default) eliminates it entirely. Feedback-driven plain-text and JSON-stream loss events already provide visibility while full intervals stall. Decoupling stats sampling from control writes remains tracked in ROADMAP.md.
 
 ---
 
@@ -162,6 +152,7 @@ The following issues have been fixed and are listed here for reference.
 - **QUIC bitrate limiting** - QUIC previously accepted `-b/--bitrate` on the CLI and dropped it on the send paths, so a rate-limited QUIC test ran at line rate and only logged a warning. Both directions are now paced with the same cumulative byte-budget approach used for TCP and UDP, split per stream, with the send buffer capped so a rate limit cannot be overshot by the first write.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC control-stream wait** - Accepted QUIC peers now have 30 seconds to open their control stream. Idle peers cannot keep a handler slot indefinitely by maintaining a connection without sending a Hello. The subsequent Hello read retains its own 30-second timeout.
+- **QUIC client DualStack binding** - The default local endpoint now matches the resolved remote address family, so IPv6 targets work without forcing `-6`. Explicit local binds are matched to the remote family as well. IPv6 and dual-stack client-port regressions cover this behavior.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 

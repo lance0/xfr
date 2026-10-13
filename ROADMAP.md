@@ -158,7 +158,7 @@
 - [x] **Add SAFETY comments** - document invariants for 4 unsafe blocks in tcp_info.rs, tcp.rs, net.rs
 - [x] **Audit unwrap()/expect() calls** (PR #156) - audit complete: auth.rs HMAC init and the serve.rs/client.rs PSK paths already propagate errors or carry infallibility messages; the one remaining bare unwrap (control_crypto frame-header conversion) now documents why it cannot fail
 - [ ] **Audit swallowed channel sends** - ~15 `let _ =` sites on `try_send`/`send` in serve.rs (TUI event channel, cancel/shutdown signals). Most are benign watch-channel semantics, but the cancel-path ones could mask a test that didn't actually stop; classify each and log the ones that matter
-- [ ] **Finish the settings-modal restart path** - `src/main.rs` has a live TODO ("Return restart signal with new params"); settings changed mid-test from the TUI modal may not fully apply
+- [x] **Finish the settings-modal restart path** - Apply & Restart cancels the previous run, applies test settings, resets the TUI, and starts a fresh run in place; the event loop consumes the modal restart action
 - [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime (async-trait is gone: it was declared but never used)
 - [x] **Join client data tasks** - Client::run now collects JoinHandles and joins with 2s timeout + abort before returning
 - [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
