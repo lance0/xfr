@@ -1920,6 +1920,11 @@ fn tui_run_config(config: &ClientConfig) -> ClientConfig {
     // config so switching back restores them. Only the active run drops
     // options that do not apply to the newly selected protocol.
     let mut active = config.clone();
+    // Fixed data ports need one socket per TCP/UDP stream. Recompute this
+    // after either protocol or stream-count edits; QUIC uses one endpoint.
+    active.sequential_ports = active.protocol != Protocol::Quic
+        && active.streams > 1
+        && active.bind_addr.is_some_and(|addr| addr.port() != 0);
     if active.protocol != Protocol::Udp {
         active.udp_payload_size = None;
     }
@@ -2804,6 +2809,54 @@ mod tests {
             );
             assert!(config.mptcp);
             assert_eq!(config.zerocopy, ZerocopyMode::Requested);
+        }
+    }
+
+    #[test]
+    fn tui_protocol_changes_recompute_fixed_port_assignment() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Quic,
+            streams: 2,
+            bind_addr: Some("127.0.0.1:5202".parse().unwrap()),
+            sequential_ports: false,
+            ..Default::default()
+        };
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            config.protocol = protocol;
+            assert_eq!(
+                tui_run_config(&config).sequential_ports,
+                protocol != Protocol::Quic,
+                "{protocol} must use its current socket layout"
+            );
+            assert!(!config.sequential_ports);
+        }
+    }
+
+    #[test]
+    fn tui_stream_count_changes_recompute_fixed_port_assignment() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            bind_addr: Some("127.0.0.1:5202".parse().unwrap()),
+            ..Default::default()
+        };
+        for streams in [1, 2, 1] {
+            config.streams = streams;
+            assert_eq!(tui_run_config(&config).sequential_ports, streams > 1);
+        }
+    }
+
+    #[test]
+    fn tui_ephemeral_binds_keep_independent_ports() {
+        for bind_addr in [None, Some("127.0.0.1:0".parse().unwrap())] {
+            for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+                let config = ClientConfig {
+                    protocol,
+                    streams: 2,
+                    bind_addr,
+                    ..Default::default()
+                };
+                assert!(!tui_run_config(&config).sequential_ports);
+            }
         }
     }
 
