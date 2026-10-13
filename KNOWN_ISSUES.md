@@ -4,6 +4,16 @@ This document tracks known limitations and edge cases that are documented but no
 
 ## Low Priority / Edge Cases
 
+### UDP Reordering Window and Unseen Tail Loss
+
+**Issue:** Each UDP receiver keeps an 8 KiB bitmap covering the latest 65,536 sequence numbers. Unique late packets within that window repair previously reported loss; duplicates do not affect packet counts. Once a sequence leaves the window, its gap is final: an older arrival cannot be distinguished from an old duplicate and does not repair it. All data datagrams still contribute to wire byte counts.
+
+**Impact:** Extreme reordering beyond 65,535 positions can leave delivered packets counted as lost. Receiver-inferred `packets_sent` also ends at the highest sequence observed, so packets lost after the last received sequence remain unknown. Cumulative `packets_lost` can decrease while gaps are repaired; consumers must not assume it is monotonic.
+
+**Mitigation:** Keep the window bound in mind when analyzing extreme reordering. Separate duplicate and beyond-window diagnostics remain on the roadmap.
+
+---
+
 ### Timestamp Overflow for Very Long Tests
 
 **Issue:** `elapsed.as_millis()` returns `u128` but is cast to `u64` in interval reporting.

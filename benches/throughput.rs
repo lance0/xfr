@@ -10,7 +10,41 @@ use xfr::protocol::{
     AggregateInterval, ControlMessage, Direction, Protocol, StreamInterval, TestResult,
 };
 use xfr::stats::StreamStats;
-use xfr::udp::{JitterCalculator, UdpPacketHeader};
+use xfr::udp::{JitterCalculator, PacketTracker, UdpPacketHeader};
+
+fn bench_udp_packet_tracker(c: &mut Criterion) {
+    c.bench_function("udp_packet_tracker_sequential", |b| {
+        let mut tracker = PacketTracker::new();
+        let mut sequence = 0u64;
+        b.iter(|| {
+            tracker.record(black_box(sequence));
+            sequence += 1;
+        });
+        black_box(tracker);
+    });
+    c.bench_function("udp_packet_tracker_reordered_duplicates", |b| {
+        let mut tracker = PacketTracker::new();
+        let mut sequence = 0u64;
+        b.iter(|| {
+            for offset in [0, 2, 0, 1, 2] {
+                tracker.record(black_box(sequence + offset));
+            }
+            sequence += 3;
+        });
+        black_box(tracker);
+    });
+}
+
+fn bench_udp_progress_publish(c: &mut Criterion) {
+    let stats = StreamStats::new(0);
+    let mut received = 0u64;
+    c.bench_function("udp_progress_publish", |b| {
+        b.iter(|| {
+            received += 1;
+            stats.set_udp_progress(black_box(received), black_box(0));
+        });
+    });
+}
 
 fn bench_stats_add_bytes(c: &mut Criterion) {
     let stats = StreamStats::new(0);
@@ -263,6 +297,8 @@ criterion_group!(
     bench_stats_add_bytes,
     bench_udp_header_encode,
     bench_udp_header_decode,
+    bench_udp_packet_tracker,
+    bench_udp_progress_publish,
     bench_interval_record,
     bench_jitter_calculation,
     bench_tcp_send_loop_overhead,

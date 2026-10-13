@@ -222,9 +222,9 @@ impl PushGatewayClient {
             let mut total_lost = 0u64;
             let mut max_jitter = 0.0f64;
             for udp in udp_stats_vec.iter() {
-                total_sent += udp.packets_sent;
-                total_received += udp.packets_received;
-                total_lost += udp.lost;
+                total_sent = total_sent.saturating_add(udp.packets_sent);
+                total_received = total_received.saturating_add(udp.packets_received);
+                total_lost = total_lost.saturating_add(udp.lost);
                 max_jitter = max_jitter.max(udp.jitter_ms);
             }
             let lost_percent = if total_sent > 0 {
@@ -305,6 +305,27 @@ mod tests {
     use crate::output::push_gateway::PushGatewayClient;
     use crate::protocol::{TcpInfoSnapshot, UdpStats};
     use crate::stats::TestStats;
+
+    #[test]
+    fn extreme_udp_sequence_gaps_cannot_overflow_metrics() {
+        let stats = TestStats::new("extreme".to_string(), 2);
+        for _ in 0..2 {
+            stats.add_udp_stats(UdpStats {
+                packets_sent: u64::MAX,
+                packets_received: 1,
+                lost: u64::MAX - 1,
+                lost_percent: 100.0,
+                jitter_ms: 0.0,
+                jitter_max_ms: None,
+                out_of_order: 0,
+                packet_size: Some(16),
+            });
+        }
+        let client = PushGatewayClient::new("http://example.com".to_string()).unwrap();
+        let metrics = client.format_metrics(&stats);
+        assert!(metrics.contains(&format!("xfr_udp_packets_lost {}", u64::MAX as f64)));
+        assert!(metrics.contains("xfr_udp_packets_received 2"));
+    }
 
     #[tokio::test]
     async fn test_push_with_retry_honors_timeout() {

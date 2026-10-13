@@ -94,6 +94,15 @@ Notes:
 - `tcp_info` is present only for TCP tests.
 - `udp_stats` (with fields `packets_sent`, `packets_received`, `lost`,
   `lost_percent`, `jitter_ms`, `out_of_order`) is present only for UDP tests.
+  Updated receivers count unique packets, repair loss for late arrivals within
+  the latest 65,536 sequence numbers, and exclude duplicates from `out_of_order`.
+  `lost` can decrease as gaps fill. `packets_sent` is inferred through the
+  highest sequence received; unseen tail loss is unknown. Datagrams older than
+  the tracking window cannot repair gaps. Wire byte totals still include
+  duplicate datagrams. The wire format is unchanged, and the counts from an
+  older receiver retain that receiver's accounting behavior.
+  Interval `lost` reports nonnegative net growth in outstanding gaps; gap
+  repairs do not emit negative interval counts.
   Its `packet_size` is the largest datagram the receiver saw (the `-l` size,
   1400 by default) and is omitted when no data arrived.
 - `server_udp_send_errors` and `client_udp_send_errors` appear only when that

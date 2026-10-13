@@ -29,15 +29,19 @@ pub struct StreamStats {
     pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64, // Jitter in microseconds (convert to ms when reading)
-    pub udp_lost: AtomicU64,      // Total lost packets
+    pub udp_lost: AtomicU64,      // Unfilled sequence gaps; late packets can reduce this
     pub last_udp_lost: AtomicU64, // For interval calculation
     /// Cumulative UDP packets received on this stream — counted only on
-    /// successful header decode (valid xfr packets). Junk/foreign datagrams
+    /// successful header decode and sequence deduplication. Junk/foreign datagrams
     /// still bump `bytes_received` because they consumed wire bandwidth, but
     /// must not dilute the loss denominator. Used by the aggregator to
     /// compute a running loss percentage that matches what the sequence
     /// tracker actually saw.
     pub udp_packets_received: AtomicU64,
+    /// Serialize receiver updates and snapshots of the pair. A repaired gap
+    /// increases received while decreasing lost, so two independent atomic
+    /// loads could otherwise observe an impossible denominator.
+    udp_progress_lock: Mutex<()>,
     /// Mid-test UDP send failures on this stream (teardown-window errors
     /// excluded) and the most recent message, reported in the final result.
     udp_send_errors: Mutex<Option<UdpSendErrors>>,
@@ -92,6 +96,7 @@ impl StreamStats {
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
             udp_packets_received: AtomicU64::new(0),
+            udp_progress_lock: Mutex::new(()),
             udp_send_errors: Mutex::new(None),
             tcp_info_fd: AtomicI32::new(-1),
             final_tcp_info: Mutex::new(None),
@@ -169,20 +174,29 @@ impl StreamStats {
 
     /// Add lost packets to cumulative count
     pub fn add_udp_lost(&self, count: u64) {
+        let _guard = self.udp_progress_lock.lock();
         self.udp_lost.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Add to cumulative UDP packets-received count.
     pub fn add_udp_received(&self, count: u64) {
+        let _guard = self.udp_progress_lock.lock();
         self.udp_packets_received
             .fetch_add(count, Ordering::Relaxed);
     }
 
-    /// Snapshot the cumulative UDP `(received, lost)` pair as a single
-    /// `UdpIntervalProgress`. Reads under Relaxed ordering — packaged so
-    /// callers cannot accidentally read received and lost at independently
-    /// drifting points in time.
+    /// Publish the receiver's unique packet count and current unfilled gaps
+    /// together. Unlike received, lost may decrease when a late packet arrives.
+    pub fn set_udp_progress(&self, received: u64, lost: u64) {
+        let _guard = self.udp_progress_lock.lock();
+        self.udp_packets_received.store(received, Ordering::Relaxed);
+        self.udp_lost.store(lost, Ordering::Relaxed);
+    }
+
+    /// Snapshot a coherent UDP `(received, lost)` pair. Receiver updates use
+    /// `set_udp_progress` rather than writing the public counters separately.
     pub fn udp_progress_snapshot(&self) -> UdpIntervalProgress {
+        let _guard = self.udp_progress_lock.lock();
         UdpIntervalProgress {
             packets_received: self.udp_packets_received.load(Ordering::Relaxed),
             packets_lost: self.udp_lost.load(Ordering::Relaxed),
@@ -247,10 +261,11 @@ impl StreamStats {
         // `to_aggregate_with_direction` would attribute packets that arrived
         // between the two reads to the wrong sparkline sample.
         let jitter_ms = self.udp_jitter_ms();
-        let total_lost = self.udp_lost.load(Ordering::Relaxed);
+        let udp_progress = self.udp_progress_snapshot();
+        let total_lost = udp_progress.packets_lost;
         let last_lost = self.last_udp_lost.swap(total_lost, Ordering::Relaxed);
         let interval_lost = total_lost.saturating_sub(last_lost);
-        let cumulative_packets_received = self.udp_packets_received.load(Ordering::Relaxed);
+        let cumulative_packets_received = udp_progress.packets_received;
         let cumulative_packets_lost = total_lost;
 
         // TCP_INFO: live RTT, cwnd, and retransmit deltas
@@ -443,10 +458,10 @@ impl TestStats {
         let mut any_jitter_max = false;
         let mut jitter_count = 0;
         for s in stats.iter() {
-            total.packets_sent += s.packets_sent;
-            total.packets_received += s.packets_received;
-            total.lost += s.lost;
-            total.out_of_order += s.out_of_order;
+            total.packets_sent = total.packets_sent.saturating_add(s.packets_sent);
+            total.packets_received = total.packets_received.saturating_add(s.packets_received);
+            total.lost = total.lost.saturating_add(s.lost);
+            total.out_of_order = total.out_of_order.saturating_add(s.out_of_order);
             if !receiver_only || s.packets_received > 0 {
                 total.jitter_ms += s.jitter_ms;
                 jitter_count += 1;
@@ -509,7 +524,10 @@ impl TestStats {
         let total_bytes: u64 = intervals.iter().map(|i| i.bytes).sum();
         let total_throughput: f64 = intervals.iter().map(|i| i.throughput_mbps).sum();
         let total_retransmits: u64 = intervals.iter().map(|i| i.retransmits).sum();
-        let total_lost: u64 = intervals.iter().map(|i| i.lost).sum();
+        let total_lost: u64 = intervals
+            .iter()
+            .map(|i| i.lost)
+            .fold(0, u64::saturating_add);
 
         // Per-direction interval deltas from the reporting side, swapped for
         // the client's perspective when this is bidirectional.
@@ -560,8 +578,11 @@ impl TestStats {
         let cumulative_received: u64 = intervals
             .iter()
             .map(|i| i.cumulative_packets_received)
-            .sum();
-        let cumulative_lost: u64 = intervals.iter().map(|i| i.cumulative_packets_lost).sum();
+            .fold(0, u64::saturating_add);
+        let cumulative_lost: u64 = intervals
+            .iter()
+            .map(|i| i.cumulative_packets_lost)
+            .fold(0, u64::saturating_add);
         let udp_progress = if cumulative_received > 0 || cumulative_lost > 0 {
             Some(UdpIntervalProgress {
                 packets_received: cumulative_received,
@@ -745,6 +766,47 @@ pub fn mbps_to_human(mbps: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_gap_repairs_publish_a_coherent_progress_pair() {
+        use std::sync::Barrier;
+        let stats = Arc::new(StreamStats::new(0));
+        stats.set_udp_progress(0, 40_000);
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_stats = stats.clone();
+        let writer_barrier = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for received in 1..=40_000 {
+                writer_stats.set_udp_progress(received, 40_000 - received);
+            }
+        });
+        barrier.wait();
+        for _ in 0..40_000 {
+            let snapshot = stats.udp_progress_snapshot();
+            assert_eq!(snapshot.packets_received + snapshot.packets_lost, 40_000);
+            let interval = stats.record_interval();
+            assert_eq!(
+                interval.cumulative_packets_received + interval.cumulative_packets_lost,
+                40_000
+            );
+        }
+        writer.join().unwrap();
+        assert_eq!(stats.udp_progress_snapshot().packets_lost, 0);
+    }
+
+    #[test]
+    fn extreme_udp_sequence_gaps_saturate_across_streams() {
+        let stats = TestStats::new("extreme".to_string(), 2);
+        for stream in &stats.streams {
+            stream.set_udp_progress(1, u64::MAX - 1);
+        }
+        let aggregate = stats.to_aggregate(&stats.record_intervals());
+        let progress = aggregate.udp_progress.unwrap();
+        assert_eq!(progress.packets_received, 2);
+        assert_eq!(progress.packets_lost, u64::MAX);
+        assert_eq!(aggregate.lost, Some(u64::MAX));
+    }
 
     #[test]
     fn test_stream_stats_bytes() {

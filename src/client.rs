@@ -212,8 +212,8 @@ fn udp_local_progress(stats: &crate::stats::TestStats) -> crate::protocol::UdpIn
         crate::protocol::UdpIntervalProgress::default(),
         |mut acc, stream| {
             let p = stream.udp_progress_snapshot();
-            acc.packets_received += p.packets_received;
-            acc.packets_lost += p.packets_lost;
+            acc.packets_received = acc.packets_received.saturating_add(p.packets_received);
+            acc.packets_lost = acc.packets_lost.saturating_add(p.packets_lost);
             acc
         },
     )
@@ -561,58 +561,47 @@ async fn send_progress_until_cancelled(
     }
 }
 
-/// Producer-side monotonic-denominator filter. Both the TCP control
+/// Producer-side UDP progress filter. Both the TCP control
 /// `udp_progress` decode path and the UDP feedback aggregator route
 /// updates through this so a delayed TCP `Interval` message can never
 /// clobber a fresher feedback reading (or vice versa). Both paths
-/// report cumulative monotonic counts from the same `StreamStats`
-/// atomics on the server, so last-monotonic-write-wins is correct.
+/// report cumulative unique packets from the same `StreamStats` counters.
+/// Received packets and the expected denominator grow monotonically;
+/// lost packets can fall as reordered packets fill earlier gaps.
 ///
 /// This also rejects an injected feedback packet that carries a lower
 /// count than what we've seen — a minor anti-spoofing property.
 pub struct UdpProgressFilter {
-    max_denominator: std::sync::atomic::AtomicU64,
+    latest: Mutex<Option<crate::protocol::UdpIntervalProgress>>,
 }
 
 impl UdpProgressFilter {
     pub fn new() -> Self {
         Self {
-            max_denominator: std::sync::atomic::AtomicU64::new(0),
+            latest: Mutex::new(None),
         }
     }
 
-    /// Returns `Some(progress)` if the cumulative `(received + lost)`
-    /// denominator is at-least-as-fresh as anything we've seen before;
-    /// `None` to reject the update as stale.
+    /// Accept a snapshot only when both unique received packets and the
+    /// expected denominator are at least as fresh as the previous snapshot.
+    /// Equal snapshots remain valid so a full progress queue can retry them.
     ///
-    /// Uses `fetch_update` for an atomic compare-and-swap rather than a
-    /// load/store pair: two producers (TCP control decode site and the
-    /// UDP feedback aggregator) can race here, and a load-compare-store
-    /// can let the *lower* denominator win the store after the higher
-    /// one already committed, which would re-admit a later stale update
-    /// and weaken the freshness guarantee. `fetch_update` retries until
-    /// the CAS succeeds, so the post-condition is "no smaller value
-    /// ever overwrites a larger one."
+    /// TCP reports and UDP feedback can race. Compare and store the pair
+    /// under one lock: a denominator-only maximum would allow a delayed
+    /// snapshot to restore loss after a same-denominator gap repair.
     pub fn apply(
         &self,
         progress: crate::protocol::UdpIntervalProgress,
     ) -> Option<crate::protocol::UdpIntervalProgress> {
-        let denom = progress
-            .packets_received
-            .saturating_add(progress.packets_lost);
-        // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
-        #[allow(deprecated)]
-        let result = self.max_denominator.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| {
-                if denom >= current { Some(denom) } else { None }
-            },
-        );
-        match result {
-            Ok(_) => Some(progress),
-            Err(_) => None,
+        let mut latest = self.latest.lock();
+        if latest
+            .as_ref()
+            .is_some_and(|previous| !progress.is_at_least_as_fresh_as(previous))
+        {
+            return None;
         }
+        *latest = Some(progress);
+        Some(progress)
     }
 }
 
@@ -3874,6 +3863,17 @@ mod tests {
     }
 
     #[test]
+    fn udp_local_progress_saturates_extreme_multistream_counters() {
+        let stats = TestStats::new("extreme-progress".to_string(), 3);
+        stats.streams[0].set_udp_progress(u64::MAX - 1, 1);
+        stats.streams[1].set_udp_progress(1, u64::MAX - 1);
+        stats.streams[2].set_udp_progress(1, 1);
+        let aggregate = udp_local_progress(&stats);
+        assert_eq!(aggregate.packets_received, u64::MAX);
+        assert_eq!(aggregate.packets_lost, u64::MAX);
+    }
+
+    #[test]
     fn udp_progress_filter_accepts_higher_denominator() {
         let f = UdpProgressFilter::new();
         f.apply(UdpIntervalProgress {
@@ -3903,9 +3903,8 @@ mod tests {
 
     #[test]
     fn udp_progress_filter_accepts_equal_denominator() {
-        // Cumulative monotonic counts: equal denominator means the
-        // same observation, which should pass through unchanged so
-        // duplicate updates are idempotent.
+        // An unchanged pair should pass through so feedback consumers can
+        // retry the same cumulative snapshot after their queue was full.
         let f = UdpProgressFilter::new();
         f.apply(UdpIntervalProgress {
             packets_received: 100,
@@ -3919,15 +3918,94 @@ mod tests {
     }
 
     #[test]
+    fn udp_progress_filter_accepts_gap_repair_and_rejects_older_loss() {
+        let filter = UdpProgressFilter::new();
+        let gap = UdpIntervalProgress {
+            packets_received: 2,
+            packets_lost: 2,
+        };
+        let repaired = UdpIntervalProgress {
+            packets_received: 4,
+            packets_lost: 0,
+        };
+        assert!(filter.apply(gap).is_some());
+        let accepted = filter
+            .apply(repaired)
+            .expect("late packets repair gaps without advancing the denominator");
+        assert_eq!(accepted.lost_percent(), Some(0.0));
+        assert!(
+            filter.apply(gap).is_none(),
+            "delayed TCP/UDP reports must not restore repaired loss"
+        );
+        assert!(
+            filter.apply(repaired).is_some(),
+            "unchanged corrected counts must remain retryable"
+        );
+    }
+
+    #[test]
+    fn udp_progress_filter_rejects_backwards_received_with_larger_denominator() {
+        let filter = UdpProgressFilter::new();
+        filter.apply(UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 0,
+        });
+        assert!(
+            filter
+                .apply(UdpIntervalProgress {
+                    packets_received: 90,
+                    packets_lost: 20
+                })
+                .is_none()
+        );
+        assert!(
+            filter
+                .apply(UdpIntervalProgress {
+                    packets_received: 100,
+                    packets_lost: 20
+                })
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn udp_progress_filter_concurrent_gap_repair_cannot_be_undone() {
+        for _ in 0..64 {
+            let filter = Arc::new(UdpProgressFilter::new());
+            let gate = Arc::new(std::sync::Barrier::new(3));
+            let mut threads = Vec::new();
+            for progress in [
+                UdpIntervalProgress {
+                    packets_received: 2,
+                    packets_lost: 2,
+                },
+                UdpIntervalProgress {
+                    packets_received: 4,
+                    packets_lost: 0,
+                },
+            ] {
+                let filter = filter.clone();
+                let gate = gate.clone();
+                threads.push(std::thread::spawn(move || {
+                    gate.wait();
+                    filter.apply(progress);
+                }));
+            }
+            gate.wait();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            let latest = filter.latest.lock().unwrap();
+            assert_eq!(latest.packets_received, 4);
+            assert_eq!(latest.packets_lost, 0);
+        }
+    }
+
+    #[test]
     fn udp_progress_filter_concurrent_max_holds() {
-        // Two threads racing through apply() with denominators
-        // straddling a current max. After both complete, the
-        // observable max must equal the larger denominator — never
-        // the smaller one. A naive load/compare/store implementation
-        // would let the lower writer win the final store under
-        // interleaving; fetch_update retries until the CAS succeeds.
+        // Both monotonic coordinates must remain at the freshest snapshot
+        // when TCP reports and UDP feedback race.
         use std::sync::Arc;
-        use std::sync::atomic::Ordering;
         use std::thread;
 
         for _ in 0..256 {
@@ -3949,7 +4027,7 @@ mod tests {
             h1.join().unwrap();
             h2.join().unwrap();
             assert_eq!(
-                f.max_denominator.load(Ordering::Relaxed),
+                f.latest.lock().unwrap().packets_received,
                 1_000_000,
                 "lower-denominator producer must not clobber higher"
             );

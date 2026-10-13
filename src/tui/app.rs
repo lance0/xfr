@@ -61,20 +61,11 @@ impl UdpDirectionState {
     }
 
     fn update(&mut self, measurement: &UdpDirectionProgress) {
-        if let Some(previous) = self.progress {
-            let previous_total = previous
-                .packets_received
-                .saturating_add(previous.packets_lost);
-            let next_total = measurement
-                .progress
-                .packets_received
-                .saturating_add(measurement.progress.packets_lost);
-            if next_total < previous_total
-                || (next_total == previous_total
-                    && measurement.progress.packets_received < previous.packets_received)
-            {
-                return;
-            }
+        if self
+            .progress
+            .is_some_and(|previous| !measurement.progress.is_at_least_as_fresh_as(&previous))
+        {
+            return;
         }
         self.progress = Some(measurement.progress);
         // Feedback packets omit jitter; retain the last measured value.
@@ -608,8 +599,9 @@ impl App {
             match (self.latest_udp_progress, self.prev_udp_progress) {
                 (Some(curr), Some(prev)) => {
                     let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
-                    let received = curr.packets_received.saturating_sub(prev.packets_received);
-                    (received.saturating_add(lost), lost)
+                    let expected = curr.packets_received.saturating_add(curr.packets_lost);
+                    let previous = prev.packets_received.saturating_add(prev.packets_lost);
+                    (expected.saturating_sub(previous), lost)
                 }
                 // First cumulative sample (or none at all): baseline
                 // silently, mirroring `on_progress` — magnitude unknown,
@@ -657,7 +649,7 @@ impl App {
         self.server_version = Some(sanitize_server_version(&version));
     }
 
-    pub fn on_progress(&mut self, progress: TestProgress) {
+    pub fn on_progress(&mut self, mut progress: TestProgress) {
         // Each receiver advances independently, including directional-only
         // feedback events that carry no throughput or stream deltas.
         if let Some(measurement) = &progress.udp_send {
@@ -666,6 +658,13 @@ impl App {
         if let Some(measurement) = &progress.udp_recv {
             self.udp_recv.update(measurement);
         }
+        // Producers can pass their filter in one order and enqueue in another.
+        // Recheck at consumption so a delayed pre-repair reading cannot restore
+        // a gap that a fresher UDP or TCP snapshot already filled.
+        progress.udp_progress = progress.udp_progress.filter(|candidate| {
+            self.latest_udp_progress
+                .is_none_or(|previous| candidate.is_at_least_as_fresh_as(&previous))
+        });
         // Feedback-only updates carry just `udp_progress`; everything
         // else is sentinel/None and consumers must preserve their last
         // full-interval values. Record the freshest cumulative for the
@@ -741,7 +740,7 @@ impl App {
                 jitter_count += 1;
             }
             if let Some(lost) = interval.lost {
-                total_lost += lost;
+                total_lost = total_lost.saturating_add(lost);
             }
         }
 
@@ -750,10 +749,8 @@ impl App {
         // light loss, heavy loss) instead of collapsing all loss to a flat
         // yellow bar.
         //
-        // `progress.udp_progress` passed the producer-side monotonic filter,
-        // so when it is `Some` it is fresher-or-equal to anything we hold;
-        // when the filter swallowed a stale cumulative (delayed Interval) we
-        // still have the freshest state from the 2 Hz feedback path.
+        // Retain the freshest cumulative from either channel. A delayed full
+        // interval still carries its byte delta even when its UDP counts are stale.
         if let Some(curr) = progress.udp_progress {
             self.latest_udp_progress = Some(curr);
         }
@@ -781,8 +778,9 @@ impl App {
                 match (self.latest_udp_progress, self.prev_udp_progress) {
                     (Some(curr), Some(prev)) => {
                         let lost = curr.packets_lost.saturating_sub(prev.packets_lost);
-                        let received = curr.packets_received.saturating_sub(prev.packets_received);
-                        (received.saturating_add(lost), lost)
+                        let expected = curr.packets_received.saturating_add(curr.packets_lost);
+                        let previous = prev.packets_received.saturating_add(prev.packets_lost);
+                        (expected.saturating_sub(previous), lost)
                     }
                     _ => (0, 0),
                 };
@@ -1901,6 +1899,77 @@ mod tests {
         assert_eq!(app.udp_recv.jitter_ms, Some(0.25));
         app.reset_for_restart();
         assert_eq!(app.streams[0].throughput_send_mbps, None);
+    }
+
+    #[test]
+    fn extreme_udp_stream_gaps_cannot_overflow_the_tui() {
+        let mut app = App::default();
+        let mut progress = make_progress(0.0, None);
+        progress.streams = (0..2)
+            .map(|id| crate::protocol::StreamInterval {
+                id,
+                bytes: 0,
+                retransmits: None,
+                jitter_ms: None,
+                lost: Some(u64::MAX),
+                error: None,
+                rtt_us: None,
+                cwnd: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
+            })
+            .collect();
+        app.on_progress(progress);
+        assert_eq!(app.udp_packets_lost, u64::MAX);
+    }
+
+    #[test]
+    fn directional_udp_gap_repairs_survive_delayed_reports() {
+        let mut app = App::default();
+        let mut gap = make_progress(0.0, None);
+        gap.udp_feedback_only = true;
+        gap.udp_send = Some(directional_measurement(2, 1, Some(1.0)));
+        gap.udp_recv = Some(directional_measurement(2, 1, Some(2.0)));
+        app.on_progress(gap.clone());
+        let mut repaired = gap.clone();
+        repaired.udp_send = Some(directional_measurement(3, 0, None));
+        repaired.udp_recv = Some(directional_measurement(3, 0, None));
+        app.on_progress(repaired);
+        app.on_progress(gap);
+        assert_eq!(app.udp_send.lost_percent(), Some(0.0));
+        assert_eq!(app.udp_recv.lost_percent(), Some(0.0));
+        assert_eq!(app.udp_send.jitter_ms, Some(1.0));
+        assert_eq!(app.udp_recv.jitter_ms, Some(2.0));
+    }
+
+    #[test]
+    fn sparkline_packet_window_does_not_count_gap_repairs_as_new_packets() {
+        let mut app = App::default();
+        app.state = AppState::Running;
+        app.on_progress(make_progress(
+            10.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 2,
+                packets_lost: 1,
+            }),
+        ));
+        // Sequence 1 fills the old gap and sequence 3 advances the frontier:
+        // two arrivals, but only one new expected packet in this window.
+        age_last_bar(&mut app);
+        app.on_progress(make_progress(
+            10.0,
+            Some(crate::protocol::UdpIntervalProgress {
+                packets_received: 4,
+                packets_lost: 0,
+            }),
+        ));
+        let sample = app.throughput_history.back().unwrap();
+        assert_eq!(sample.interval_packets, 1);
+        assert_eq!(sample.lost_packets, 0);
+        assert_eq!(sample.loss_rate_percent(), Some(0.0));
+        assert_eq!(app.udp_lost_percent, Some(0.0));
     }
 
     #[test]

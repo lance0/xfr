@@ -275,7 +275,8 @@ Client behind strict firewall → which protocol?
 - [ ] **Test profiles** - save/load named test configurations
 - [ ] **Side-by-side comparison mode** - compare baseline vs current in TUI
 - [ ] **Server health check** (`--health-check`) - simple HTTP endpoint for load balancer integration; tiny listener on separate port or same port responding to `GET /health`
-- [ ] **UDP out-of-order & duplicate counting** - report reordered and duplicate packets separately from lost packets; important for lossy WAN analysis. One-way delay is the natural companion (iperf2's headline differentiator; needs honest clock-sync caveats)
+- [x] **UDP loss accounting under reordering and duplication** - unique late packets repair sequence gaps within a bounded 65,536-packet window, duplicates cannot dilute loss, and `out_of_order` counts unique late arrivals rather than duplicates. Live feedback and final receiver results use the same counts
+- [ ] **UDP duplicate diagnostics** - expose separate duplicate and beyond-window arrival counts for WAN analysis. One-way delay is the natural companion (iperf2's headline differentiator; needs honest clock-sync caveats)
 - [ ] **QUIC-specific metrics** - report handshake time, 0-RTT resumption bytes, stream multiplexing overhead. Extends existing QUIC support with diagnostic detail
 
 ---

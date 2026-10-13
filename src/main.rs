@@ -940,6 +940,26 @@ fn effective_random_payload(cli: &Cli) -> bool {
     !cli.zeros
 }
 
+fn cache_udp_direction(
+    cache: &mut Option<xfr::protocol::UdpDirectionProgress>,
+    update: Option<xfr::protocol::UdpDirectionProgress>,
+) -> Option<xfr::protocol::UdpDirectionProgress> {
+    let mut update = update?;
+    if cache
+        .as_ref()
+        .is_some_and(|previous| !update.progress.is_at_least_as_fresh_as(&previous.progress))
+    {
+        return None;
+    }
+    // Upload feedback carries counts without jitter. Keep the last observed
+    // jitter while accepting a fresher gap repair from that sideband.
+    update.jitter_ms = update
+        .jitter_ms
+        .or_else(|| cache.as_ref().and_then(|previous| previous.jitter_ms));
+    *cache = Some(update);
+    Some(update)
+}
+
 fn interval_retransmits(progress: &TestProgress, last_retransmits: &mut u64) -> Option<u64> {
     if let Some(cumulative) = progress.total_retransmits {
         let delta = cumulative.saturating_sub(*last_retransmits);
@@ -1624,6 +1644,8 @@ async fn run_client_plain(
         // channel stall, since Skip on the server interval timer can
         // drop a tick while feedback continues to flow over UDP).
         let mut cached_udp_progress: Option<xfr::protocol::UdpIntervalProgress> = None;
+        let mut cached_udp_send = None;
+        let mut cached_udp_recv = None;
         let mut last_printed_cumulative_lost: u64 = 0;
         // Stall detection for scripted output (issue #70 follow-up, the
         // non-TUI half of issue #93): full-interval rows print on control
@@ -1634,12 +1656,20 @@ async fn run_client_plain(
         let mut last_feedback_row_at = std::time::Instant::now();
         let row_period = std::time::Duration::from_secs_f64(interval_secs.max(1.0));
 
-        while let Some(progress) = rx.recv().await {
-            // Update the cache from any update that carries udp_progress.
-            // The producer-side filter already gated this for monotonicity,
-            // so a non-None value is always at-least-as-fresh as the
-            // cached one.
-            if let Some(p) = progress.udp_progress {
+        while let Some(mut progress) = rx.recv().await {
+            progress.udp_send = cache_udp_direction(&mut cached_udp_send, progress.udp_send);
+            progress.udp_recv = cache_udp_direction(&mut cached_udp_recv, progress.udp_recv);
+            if !progress.udp_feedback_only {
+                // Full interval rows use the freshest quality from either
+                // channel, including receive-only feedback between reports.
+                progress.udp_send = cached_udp_send;
+                progress.udp_recv = cached_udp_recv;
+            }
+            // Producers can enqueue in a different order from their freshness
+            // checks. Keep a late TCP/UDP snapshot from undoing a gap repair.
+            if let Some(p) = progress.udp_progress
+                && cached_udp_progress.is_none_or(|previous| p.is_at_least_as_fresh_as(&previous))
+            {
                 cached_udp_progress = Some(p);
             }
             // Feedback-only updates have no bytes/throughput to print, and
@@ -4125,6 +4155,36 @@ mod tests {
             random_payload_notice(Protocol::Quic, Direction::Download, false),
             None
         );
+    }
+
+    #[test]
+    fn scripted_udp_direction_cache_keeps_gap_repairs_and_measured_jitter() {
+        use xfr::protocol::{UdpDirectionProgress, UdpIntervalProgress};
+        let gap = UdpDirectionProgress {
+            progress: UdpIntervalProgress {
+                packets_received: 2,
+                packets_lost: 1,
+            },
+            jitter_ms: Some(0.0),
+        };
+        let repair = UdpDirectionProgress {
+            progress: UdpIntervalProgress {
+                packets_received: 3,
+                packets_lost: 0,
+            },
+            jitter_ms: None,
+        };
+        let mut cache = None;
+        assert!(cache_udp_direction(&mut cache, None).is_none());
+        assert!(cache.is_none());
+        cache_udp_direction(&mut cache, Some(gap));
+        let accepted = cache_udp_direction(&mut cache, Some(repair)).unwrap();
+        assert_eq!(accepted.progress.lost_percent(), Some(0.0));
+        assert_eq!(accepted.jitter_ms, Some(0.0));
+        assert!(cache_udp_direction(&mut cache, Some(gap)).is_none());
+        assert_eq!(cache.unwrap().progress.packets_received, 3);
+        assert!(cache_udp_direction(&mut cache, None).is_none());
+        assert_eq!(cache.unwrap().jitter_ms, Some(0.0));
     }
 
     fn make_progress(
