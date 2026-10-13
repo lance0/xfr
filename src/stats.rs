@@ -143,11 +143,19 @@ impl StreamStats {
     }
 
     /// Count a failed UDP send and keep its message as the latest.
-    pub fn record_udp_send_error(&self, error: &std::io::Error) {
+    /// Returns true for the stream's first failure, so callers can warn
+    /// once instead of once per packet.
+    pub fn record_udp_send_error(&self, error: &std::io::Error) -> bool {
         let last_error = UdpSendErrors::sanitize_message(&error.to_string());
         let mut slot = self.udp_send_errors.lock();
         let count = slot.as_ref().map_or(0, |e| e.count) + 1;
         *slot = Some(UdpSendErrors { count, last_error });
+        count == 1
+    }
+
+    /// This stream's UDP send failures so far, if any.
+    pub fn udp_send_errors(&self) -> Option<UdpSendErrors> {
+        self.udp_send_errors.lock().clone()
     }
 
     pub fn add_retransmits(&self, count: u64) {
@@ -411,7 +419,7 @@ impl TestStats {
     pub fn udp_send_errors(&self) -> Option<UdpSendErrors> {
         self.streams
             .iter()
-            .filter_map(|s| s.udp_send_errors.lock().clone())
+            .filter_map(|s| s.udp_send_errors())
             .reduce(|acc, e| UdpSendErrors {
                 count: acc.count + e.count,
                 last_error: e.last_error,
@@ -893,11 +901,12 @@ mod tests {
         assert_eq!(stats.udp_send_errors(), None);
 
         let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
-        stats.streams[0].record_udp_send_error(&refused);
-        stats.streams[0].record_udp_send_error(&refused);
+        // Only each stream's first failure asks the caller to warn.
+        assert!(stats.streams[0].record_udp_send_error(&refused));
+        assert!(!stats.streams[0].record_udp_send_error(&refused));
         // Control characters from the OS message must not reach the report.
         let dirty = std::io::Error::other("no\x1b[2J buffer\nspace");
-        stats.streams[2].record_udp_send_error(&dirty);
+        assert!(stats.streams[2].record_udp_send_error(&dirty));
 
         let agg = stats.udp_send_errors().expect("errors recorded");
         assert_eq!(agg.count, 3);

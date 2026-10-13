@@ -611,6 +611,17 @@ fn is_teardown_send_error(
     cancelled || (!is_infinite && now + SEND_TEARDOWN_GRACE >= deadline)
 }
 
+/// One warn per stream for repeated send failures; the first already warned
+/// individually and the rest were logged at debug.
+fn warn_send_error_summary(stats: &StreamStats) {
+    if let Some(errors) = stats.udp_send_errors().filter(|e| e.count > 1) {
+        warn!(
+            "UDP send errors: {} total (last: {})",
+            errors.count, errors.last_error
+        );
+    }
+}
+
 /// Send UDP data at a paced rate (or unlimited if target_bitrate is 0)
 ///
 /// If `target` is Some, uses send_to() for unconnected sockets (server reverse mode).
@@ -756,9 +767,10 @@ pub async fn send_udp_paced(
                         deadline,
                     ) {
                         debug!("UDP send error during teardown: {}", e);
-                    } else {
+                    } else if stats.record_udp_send_error(&e) {
                         warn!("UDP send error: {}", e);
-                        stats.record_udp_send_error(&e);
+                    } else {
+                        debug!("UDP send error: {}", e);
                     }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                     // Continue sending - UDP is best-effort
@@ -772,6 +784,7 @@ pub async fn send_udp_paced(
         }
     }
 
+    warn_send_error_summary(&stats);
     Ok(UdpSendStats {
         packets_sent: sequence,
         bytes_sent,
@@ -881,9 +894,10 @@ async fn send_udp_unlimited(
                         deadline,
                     ) {
                         debug!("UDP send error during teardown: {}", e);
-                    } else {
+                    } else if stats.record_udp_send_error(&e) {
                         warn!("UDP send error: {}", e);
-                        stats.record_udp_send_error(&e);
+                    } else {
+                        debug!("UDP send error: {}", e);
                     }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                 }
@@ -899,6 +913,7 @@ async fn send_udp_unlimited(
         tokio::task::yield_now().await;
     }
 
+    warn_send_error_summary(&stats);
     Ok(UdpSendStats {
         packets_sent: sequence,
         bytes_sent,
