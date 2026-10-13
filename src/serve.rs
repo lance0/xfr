@@ -4334,7 +4334,7 @@ mod tests {
 
     /// A peer can complete TLS and keep its connection alive without ever
     /// opening the control stream. Its handler permit must still expire.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn quic_control_stream_timeout_releases_handler_permit() {
         let (cert, key) = quic::generate_self_signed_cert().unwrap();
         let server = quic::create_server_endpoint(
