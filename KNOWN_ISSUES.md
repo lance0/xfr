@@ -54,16 +54,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### QUIC Accept Loop Timeout
-
-**Issue:** If a QUIC connection is accepted but the client never opens a stream, the server waits indefinitely in `accept_bi()`.
-
-**Impact:** Low probability - requires malicious client holding connections.
-
-**Mitigation:** Handshake timeout covers most DoS scenarios. Connection eventually times out at QUIC layer.
-
----
-
 ### UDP Reverse Mode Error Handling
 
 **Issue:** In UDP reverse (download) mode, send errors on the server side are logged but not reported back to the client.
@@ -171,6 +161,7 @@ The following issues have been fixed and are listed here for reference.
 - **TCP bitrate limiting** - TCP bitrate pacing (`-b` for TCP) was added in v0.6.1 using a byte-budget sleep approach with interruptible sleeps and buffer auto-capping.
 - **QUIC bitrate limiting** - QUIC previously accepted `-b/--bitrate` on the CLI and dropped it on the send paths, so a rate-limited QUIC test ran at line rate and only logged a warning. Both directions are now paced with the same cumulative byte-budget approach used for TCP and UDP, split per stream, with the send buffer capped so a rate limit cannot be overshot by the first write.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
+- **QUIC control-stream wait** - Accepted QUIC peers now have 30 seconds to open their control stream. Idle peers cannot keep a handler slot indefinitely by maintaining a connection without sending a Hello. The subsequent Hello read retains its own 30-second timeout.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 

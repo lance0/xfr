@@ -1161,8 +1161,13 @@ async fn handle_quic_client(
         .map(|psk| quic::derive_psk_session_key(&connection, psk))
         .transpose()?;
 
-    // Accept control stream (bidirectional)
-    let (mut ctrl_send, ctrl_recv) = connection.accept_bi().await?;
+    // An established QUIC peer can keep the connection alive without ever
+    // opening a stream. Bound that wait as well as the subsequent Hello read
+    // so idle peers cannot retain a handler permit indefinitely.
+    let (mut ctrl_send, ctrl_recv) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+            .await
+            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for control stream"))??;
     let mut ctrl_reader = BufReader::new(ctrl_recv);
     let mut line = String::new();
 
@@ -4325,6 +4330,66 @@ mod tests {
             initial_read_timeout_for_peer(&tests, v4),
             Duration::from_millis(128 * INITIAL_READ_TIMEOUT_PER_STREAM_MS)
         );
+    }
+
+    /// A peer can complete TLS and keep its connection alive without ever
+    /// opening the control stream. Its handler permit must still expire.
+    #[tokio::test]
+    async fn quic_control_stream_timeout_releases_handler_permit() {
+        let (cert, key) = quic::generate_self_signed_cert().unwrap();
+        let server = quic::create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let client = quic::create_client_endpoint(address, None).unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let mut handler = tokio::spawn(async move {
+            let _permit = permit;
+            let incoming = server.accept().await.unwrap();
+            let security = SecurityContext {
+                psk: None,
+                acl: AclConfig::default().build().unwrap(),
+                preset_acl: None,
+                rate_limiter: None,
+                address_family: AddressFamily::V4Only,
+                bind_addr: None,
+                tui_tx: None,
+                push_gateway_url: None,
+                capabilities: crate::protocol::supported_capabilities(),
+                udp_hello_routes: None,
+            };
+            handle_quic_client(
+                incoming,
+                address,
+                Arc::new(Mutex::new(HashMap::new())),
+                None,
+                &security,
+            )
+            .await
+        });
+        let connection =
+            tokio::time::timeout(Duration::from_secs(5), quic::connect(&client, address))
+                .await
+                .expect("QUIC handshake should complete")
+                .unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let outcome =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(3), &mut handler).await;
+        handler.abort();
+        let error = outcome
+            .expect("idle QUIC peer must release its handler slot")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("waiting for control stream"));
+        assert_eq!(semaphore.available_permits(), 1);
+        connection.close(0u32.into(), b"test complete");
     }
 
     #[tokio::test]
