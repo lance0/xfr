@@ -611,6 +611,17 @@ fn is_teardown_send_error(
     cancelled || (!is_infinite && now + SEND_TEARDOWN_GRACE >= deadline)
 }
 
+/// One warn per stream for repeated send failures; the first already warned
+/// individually and the rest were logged at debug.
+fn warn_send_error_summary(stats: &StreamStats) {
+    if let Some(errors) = stats.udp_send_errors().filter(|e| e.count > 1) {
+        warn!(
+            "UDP send errors: {} total (last: {})",
+            errors.count, errors.last_error
+        );
+    }
+}
+
 /// Send UDP data at a paced rate (or unlimited if target_bitrate is 0)
 ///
 /// If `target` is Some, uses send_to() for unconnected sockets (server reverse mode).
@@ -756,8 +767,10 @@ pub async fn send_udp_paced(
                         deadline,
                     ) {
                         debug!("UDP send error during teardown: {}", e);
-                    } else {
+                    } else if stats.record_udp_send_error(&e) {
                         warn!("UDP send error: {}", e);
+                    } else {
+                        debug!("UDP send error: {}", e);
                     }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                     // Continue sending - UDP is best-effort
@@ -771,6 +784,7 @@ pub async fn send_udp_paced(
         }
     }
 
+    warn_send_error_summary(&stats);
     Ok(UdpSendStats {
         packets_sent: sequence,
         bytes_sent,
@@ -880,8 +894,10 @@ async fn send_udp_unlimited(
                         deadline,
                     ) {
                         debug!("UDP send error during teardown: {}", e);
-                    } else {
+                    } else if stats.record_udp_send_error(&e) {
                         warn!("UDP send error: {}", e);
+                    } else {
+                        debug!("UDP send error: {}", e);
                     }
                     crate::budget::refund_unwritten(budget.as_ref(), send_len, 0);
                 }
@@ -897,6 +913,7 @@ async fn send_udp_unlimited(
         tokio::task::yield_now().await;
     }
 
+    warn_send_error_summary(&stats);
     Ok(UdpSendStats {
         packets_sent: sequence,
         bytes_sent,
@@ -1475,6 +1492,49 @@ mod tests {
         let decoded = UdpPacketHeader::decode(&buffer).unwrap();
         assert_eq!(decoded.sequence, 12345);
         assert_eq!(decoded.timestamp_us, 67890);
+    }
+
+    /// Mid-test send failures must land in the stream's stats so the server
+    /// can report them. An IPv4 socket cannot send to an IPv6 target, which
+    /// fails every send deterministically without privileges or traffic.
+    #[tokio::test]
+    async fn mid_test_send_errors_are_counted() {
+        for (bitrate, duration_ms, counted) in [
+            (10_000_000, 500, true),
+            (0, 500, true),
+            // Shorter than SEND_TEARDOWN_GRACE: every failure is teardown.
+            (10_000_000, 200, false),
+            (0, 200, false),
+        ] {
+            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let test_stats = crate::stats::TestStats::new("t".into(), 1);
+            let (_cancel_tx, cancel) = watch::channel(false);
+            let (_pause_tx, pause) = watch::channel(false);
+            let sent = send_udp_paced(
+                socket,
+                Some("[::1]:9".parse().unwrap()),
+                bitrate,
+                UDP_PAYLOAD_SIZE,
+                Duration::from_millis(duration_ms),
+                test_stats.streams[0].clone(),
+                cancel,
+                pause,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(sent.packets_sent, 0);
+            let errors = test_stats.udp_send_errors();
+            let case = format!("bitrate {bitrate}, {duration_ms} ms");
+            if counted {
+                let errors = errors.expect(&case);
+                assert!(errors.count > 0, "{case}");
+                assert!(!errors.last_error.is_empty(), "{case}");
+            } else {
+                assert_eq!(errors, None, "{case}");
+            }
+        }
     }
 
     #[test]

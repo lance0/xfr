@@ -389,6 +389,49 @@ pub struct TestResult {
     /// never sets it; wire-additive, absent for throughput tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu_probe: Option<crate::probe::MtuProbeReport>,
+    /// UDP datagrams the server failed to send mid-test (download, or the
+    /// server half of bidir). Wire-additive: absent when there were none,
+    /// and older servers never send it; older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_udp_send_errors: Option<UdpSendErrors>,
+    /// UDP datagrams the client failed to send mid-test (upload, or the
+    /// client half of bidir). Populated client-side only, like `mtu_probe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_udp_send_errors: Option<UdpSendErrors>,
+}
+
+/// Count of failed UDP sends plus the most recent error message. Errors in
+/// the teardown window (see `udp::is_teardown_send_error`) are not counted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UdpSendErrors {
+    pub count: u64,
+    pub last_error: String,
+}
+
+impl UdpSendErrors {
+    /// Longest `last_error` kept; longer messages are truncated.
+    pub const MAX_ERROR_LEN: usize = 128;
+
+    /// Strip control characters and bound the length. Applied where the
+    /// message is recorded and again on the client, since a server's
+    /// message crosses a trust boundary before reaching the terminal.
+    pub fn sanitize_message(raw: &str) -> String {
+        raw.chars()
+            .filter(|c| !c.is_control())
+            .take(Self::MAX_ERROR_LEN)
+            .collect()
+    }
+
+    /// One-line human summary, e.g. `Server reported 3 UDP send errors (last: ...)`.
+    pub fn describe(&self, side: &str) -> String {
+        format!(
+            "{} reported {} UDP send error{} (last: {})",
+            side,
+            self.count,
+            if self.count == 1 { "" } else { "s" },
+            self.last_error
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

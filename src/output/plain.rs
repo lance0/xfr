@@ -107,6 +107,15 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         output.push('\n');
     }
 
+    for (side, errors) in [
+        ("Server", &result.server_udp_send_errors),
+        ("Client", &result.client_udp_send_errors),
+    ] {
+        if let Some(errors) = errors {
+            output.push_str(&format!("  Warning: {}\n\n", errors.describe(side)));
+        }
+    }
+
     if result.streams.len() > 1 {
         output.push_str("  Per-Stream Results:\n");
         for stream in &result.streams {
@@ -287,6 +296,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         }
     }
 
@@ -300,6 +311,19 @@ mod tests {
         // No receiver feedback decoded yet: counts without a percent.
         let line = output_feedback_plain("00:00:07", 0, None);
         assert_eq!(line, "[00:00:07]  (reports stalled)  lost so far: 0\n");
+    }
+
+    #[test]
+    fn test_output_plain_reports_udp_send_errors() {
+        let mut result = make_result_with_tcp_info();
+        assert!(!output_plain(&result, false).contains("UDP send error"));
+        result.server_udp_send_errors = Some(crate::protocol::UdpSendErrors {
+            count: 42,
+            last_error: "Connection refused (os error 111)".to_string(),
+        });
+        assert!(output_plain(&result, false).contains(
+            "  Warning: Server reported 42 UDP send errors (last: Connection refused (os error 111))\n"
+        ));
     }
 
     #[test]

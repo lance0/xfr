@@ -179,6 +179,9 @@ struct UdpHelloRoute {
     /// ack was lost before the kernel started routing retries to the
     /// connected socket) gets a fresh ack instead of a duplicate socket.
     sockets: Vec<Option<Arc<UdpSocket>>>,
+    /// The test's stats, so a failed socket setup is counted in the
+    /// result's `server_udp_send_errors` instead of only being logged.
+    stats: Arc<TestStats>,
 }
 
 /// Synchronous mutex: the dispatcher only holds it across map operations,
@@ -272,6 +275,7 @@ fn spawn_udp_hello_dispatcher(
                 Create {
                     socket_tx: mpsc::Sender<(Arc<UdpSocket>, u16)>,
                     udp_buffer: Option<usize>,
+                    stream_stats: Arc<crate::stats::StreamStats>,
                 },
                 Resend(Arc<UdpSocket>),
                 Drop,
@@ -285,6 +289,8 @@ fn spawn_udp_hello_dispatcher(
                         Action::Create {
                             socket_tx: route.socket_tx.clone(),
                             udp_buffer: route.udp_buffer,
+                            stream_stats: route.stats.streams[usize::from(pkt.stream_index)]
+                                .clone(),
                         }
                     }
                     UdpHelloVerdict::Resend => {
@@ -312,15 +318,27 @@ fn spawn_udp_hello_dispatcher(
                 Action::Create {
                     socket_tx,
                     udp_buffer,
+                    stream_stats,
                 } => {
                     let socket =
                         match net::create_connected_udp_same_port(local_addr, v6only, src).await {
                             Ok(s) => Arc::new(s),
                             Err(e) => {
-                                warn!(
-                                    "single-port UDP: failed to create connected socket for {}: {}",
-                                    src, e
+                                // The client retries its hello every 100 ms,
+                                // and each retry fails the same way: warn on
+                                // the stream's first failure only, and count
+                                // them all so the client's result says why
+                                // no ack came.
+                                let peer = SocketAddr::new(net::normalize_ip(src.ip()), src.port());
+                                let e = std::io::Error::new(
+                                    e.kind(),
+                                    format!("failed to create UDP socket to {}: {}", peer, e),
                                 );
+                                if stream_stats.record_udp_send_error(&e) {
+                                    warn!("single-port UDP: {}", e);
+                                } else {
+                                    debug!("single-port UDP: {}", e);
+                                }
                                 continue;
                             }
                         };
@@ -329,8 +347,14 @@ fn spawn_udp_hello_dispatcher(
                     {
                         warn!("Failed to set UDP buffer size to {}: {}", size, e);
                     }
+                    // An outbound firewall drop fails here rather than at
+                    // connect; count it the same way.
                     if let Err(e) = socket.send(&ack).await {
-                        debug!("UDP hello ack to {} failed: {}", src, e);
+                        if stream_stats.record_udp_send_error(&e) {
+                            warn!("single-port UDP: hello ack to {} failed: {}", src, e);
+                        } else {
+                            debug!("UDP hello ack to {} failed: {}", src, e);
+                        }
                     }
                     // Store for ack-resend dedupe; the route may have been
                     // removed if the test ended while we were creating the
@@ -2339,6 +2363,8 @@ async fn run_quic_test(
             throughput_send_mbps,
             throughput_recv_mbps,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         });
 
         writer_half
@@ -2440,6 +2466,10 @@ async fn run_test(
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (pause_tx, pause_rx) = watch::channel(false);
 
+    // Created before the single-port UDP route, which records socket setup
+    // failures into it.
+    let stats = Arc::new(TestStats::new(id.to_string(), streams));
+
     let (data_stream_tx, data_stream_rx) = match protocol {
         Protocol::Tcp if client_supports_single_port => {
             // Single-port mode: data connections will be routed via channel
@@ -2516,6 +2546,7 @@ async fn run_test(
                             expected_streams: streams,
                             udp_buffer: client_window_to_host(client_window_size),
                             sockets: vec![None; streams as usize],
+                            stats: stats.clone(),
                         });
                         break candidate;
                     }
@@ -2559,9 +2590,6 @@ async fn run_test(
             ));
         }
     };
-
-    // Create test stats
-    let stats = Arc::new(TestStats::new(id.to_string(), streams));
 
     // Store active test BEFORE sending TestAck to avoid race condition
     // (client may send DataHello immediately after receiving TestAck)
@@ -3011,6 +3039,8 @@ async fn run_test(
         throughput_send_mbps,
         throughput_recv_mbps,
         mtu_probe: None,
+        server_udp_send_errors: stats.udp_send_errors(),
+        client_udp_send_errors: None,
     });
 
     // Send result FIRST so the client isn't blocked by slow post-processing
@@ -4432,6 +4462,7 @@ mod tests {
             expected_streams: streams,
             udp_buffer: None,
             sockets: vec![None; streams as usize],
+            stats: Arc::new(TestStats::new("t".to_string(), streams)),
         }
     }
 
@@ -4504,6 +4535,47 @@ mod tests {
         assert_eq!(
             check_udp_hello(Some(&route), &retry, src),
             UdpHelloVerdict::Resend
+        );
+    }
+
+    /// A connected socket that cannot be created (e.g. EACCES from a
+    /// firewall) fails on every hello retry. Each failure must be counted
+    /// on its own stream, so only the stream's first one warns and the
+    /// test's result tells the client why no ack came.
+    #[tokio::test]
+    async fn udp_hello_setup_failures_reach_the_test_result() {
+        let token = [7; 16];
+        let route = make_udp_route(2, "::1".parse().unwrap());
+        let stats = route.stats.clone();
+        let routes: UdpHelloRoutes =
+            Arc::new(parking_lot::Mutex::new(HashMap::from([(token, route)])));
+        let (hello_tx, hello_rx) = mpsc::channel(8);
+        // An IPv4 socket cannot connect to an IPv6 peer, so every setup
+        // fails deterministically without privileges.
+        spawn_udp_hello_dispatcher(hello_rx, routes, "127.0.0.1:0".parse().unwrap(), None);
+        let src: SocketAddr = "[::1]:9".parse().unwrap();
+        for stream in [0, 0, 1] {
+            hello_tx
+                .send((make_hello(stream, token).encode().to_vec(), src))
+                .await
+                .unwrap();
+        }
+        let count = |i: usize| stats.streams[i].udp_send_errors().map_or(0, |e| e.count);
+        for _ in 0..200 {
+            if count(0) + count(1) == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!((count(0), count(1)), (2, 1));
+        let errors = stats.udp_send_errors().expect("setup failures recorded");
+        assert_eq!(errors.count, 3);
+        assert!(
+            errors
+                .last_error
+                .starts_with("failed to create UDP socket to [::1]:9: "),
+            "{}",
+            errors.last_error
         );
     }
 

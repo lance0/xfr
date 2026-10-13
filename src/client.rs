@@ -90,6 +90,51 @@ async fn send_control_cancel<W>(
     let _ = tokio::time::timeout_at(*deadline, codec.write_message(writer, serialized)).await;
 }
 
+/// UDP stream setup failed (e.g. no single-port handshake ack), so the test
+/// is over before any Result arrived. Cancel it and read the server's Result
+/// anyway: its `server_udp_send_errors` can say why, such as the server
+/// being unable to create its socket toward us. Bounded by
+/// `CONTROL_CANCEL_RESULT_TIMEOUT`; `None` if the server reports nothing.
+async fn cancel_and_fetch_server_udp_send_errors<R, W>(
+    transport: &mut crate::control_crypto::ProtectedControl,
+    reader: &mut R,
+    writer: &mut W,
+    test_id: &str,
+) -> Option<crate::protocol::UdpSendErrors>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let cancel = ControlMessage::Cancel {
+        id: test_id.to_string(),
+        reason: "UDP stream setup failed".to_string(),
+    }
+    .serialize()
+    .ok()?;
+    tokio::time::timeout(CONTROL_CANCEL_RESULT_TIMEOUT, async {
+        transport.write_message(writer, &cancel).await.ok()?;
+        let mut line = String::new();
+        loop {
+            transport.read_message(reader, &mut line).await.ok()?;
+            if line.is_empty() {
+                return None; // EOF
+            }
+            // Skip the Intervals queued while we were handshaking.
+            if let Ok(ControlMessage::Result(result)) = ControlMessage::deserialize(line.trim()) {
+                return result.server_udp_send_errors;
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+    .map(|mut errors| {
+        // Untrusted text bound for the terminal.
+        errors.last_error = crate::protocol::UdpSendErrors::sanitize_message(&errors.last_error);
+        errors
+    })
+}
+
 /// Per-stream and total receive-byte deltas since the previous call,
 /// advancing `last_recv_bytes` in place. Used in download mode to derive
 /// interval throughput from the client's own receive counters instead of
@@ -1110,17 +1155,38 @@ impl Client {
                     } else {
                         None
                     };
-                self.spawn_udp_streams(
-                    &data_ports,
-                    server_ip,
-                    stats.clone(),
-                    cancel_rx.clone(),
-                    pause_rx.clone(),
-                    feedback_aggregator,
-                    single_port_udp_token,
-                    sending_done_tx.clone(),
-                )
-                .await?
+                match self
+                    .spawn_udp_streams(
+                        &data_ports,
+                        server_ip,
+                        stats.clone(),
+                        cancel_rx.clone(),
+                        pause_rx.clone(),
+                        feedback_aggregator,
+                        single_port_udp_token,
+                        sending_done_tx.clone(),
+                    )
+                    .await
+                {
+                    Ok(handles) => handles,
+                    Err(e) => {
+                        return Err(
+                            match cancel_and_fetch_server_udp_send_errors(
+                                &mut transport,
+                                &mut reader,
+                                &mut writer,
+                                &test_id,
+                            )
+                            .await
+                            {
+                                Some(errors) => {
+                                    anyhow::anyhow!("{} {}", e, errors.describe("Server"))
+                                }
+                                None => e,
+                            },
+                        );
+                    }
+                }
             }
             Protocol::Quic => {
                 // QUIC uses its own connection model - should not reach here
@@ -1543,6 +1609,14 @@ impl Client {
         // download half of the split (upload is already receiver-truth).
         if udp_bidir && let Ok(ref mut result) = test_result {
             overlay_udp_bidir_result(result, &stats);
+        }
+        if let Ok(ref mut result) = test_result {
+            // The server's message is untrusted text bound for the terminal.
+            if let Some(errors) = result.server_udp_send_errors.as_mut() {
+                errors.last_error =
+                    crate::protocol::UdpSendErrors::sanitize_message(&errors.last_error);
+            }
+            result.client_udp_send_errors = stats.udp_send_errors();
         }
 
         test_result
@@ -3286,6 +3360,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_download_result(&mut result, &stats);
@@ -3316,6 +3392,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
         overlay_udp_download_result(&mut result, &stats);
         assert_eq!(result.bytes_total, 1_000);
@@ -3345,6 +3423,8 @@ mod tests {
             throughput_send_mbps: Some(160.0),
             throughput_recv_mbps: Some(2_400.0),
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -3381,6 +3461,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -3626,6 +3708,71 @@ mod tests {
         let start = tokio::time::Instant::now();
         let duration = Duration::from_secs(10);
         assert_eq!(local_stop_deadline(start, duration), Some(start + duration));
+    }
+
+    /// A failed UDP setup must still surface the server's send-error report:
+    /// the helper cancels the test, skips other control messages, and takes
+    /// the (sanitized) errors from the server's Result.
+    #[tokio::test]
+    async fn failed_udp_setup_fetches_server_send_errors() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (client_r, mut client_w) = tokio::io::split(client);
+        let (server_r, mut server_w) = tokio::io::split(server);
+        let peer = tokio::spawn(async move {
+            let mut line = String::new();
+            BufReader::new(server_r).read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                ControlMessage::deserialize(line.trim()),
+                Ok(ControlMessage::Cancel { ref id, .. }) if id == "t"
+            ));
+            let result = TestResult {
+                id: "t".to_string(),
+                bytes_total: 0,
+                duration_ms: 0,
+                throughput_mbps: 0.0,
+                streams: vec![],
+                tcp_info: None,
+                udp_stats: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
+                mtu_probe: None,
+                server_udp_send_errors: Some(crate::protocol::UdpSendErrors {
+                    count: 30,
+                    last_error: "failed to create UDP socket to 10.9.0.2:4000:\x1b[2J \
+                                 Permission denied (os error 13)"
+                        .to_string(),
+                }),
+                client_udp_send_errors: None,
+            };
+            for msg in [
+                ControlMessage::Cancelled {
+                    id: "t".to_string(),
+                },
+                ControlMessage::Result(result),
+            ] {
+                let line = format!("{}\n", msg.serialize().unwrap());
+                server_w.write_all(line.as_bytes()).await.unwrap();
+            }
+        });
+        let errors = cancel_and_fetch_server_udp_send_errors(
+            &mut crate::control_crypto::ProtectedControl::plaintext(),
+            &mut BufReader::new(client_r),
+            &mut client_w,
+            "t",
+        )
+        .await;
+        peer.await.unwrap();
+        assert_eq!(
+            errors,
+            Some(crate::protocol::UdpSendErrors {
+                count: 30,
+                last_error: "failed to create UDP socket to 10.9.0.2:4000:[2J \
+                             Permission denied (os error 13)"
+                    .to_string(),
+            })
+        );
     }
 
     #[test]

@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::protocol::{
-    AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpIntervalProgress, UdpStats,
+    AggregateInterval, StreamInterval, StreamResult, TcpInfoSnapshot, UdpIntervalProgress,
+    UdpSendErrors, UdpStats,
 };
 
 /// Maximum number of intervals to keep in history (1 minute at 1-second intervals)
@@ -37,6 +38,9 @@ pub struct StreamStats {
     /// compute a running loss percentage that matches what the sequence
     /// tracker actually saw.
     pub udp_packets_received: AtomicU64,
+    /// Mid-test UDP send failures on this stream (teardown-window errors
+    /// excluded) and the most recent message, reported in the final result.
+    udp_send_errors: Mutex<Option<UdpSendErrors>>,
     /// Raw file descriptor for TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
     /// Final TCP_INFO snapshot captured when the stream task exits.
@@ -88,6 +92,7 @@ impl StreamStats {
             udp_lost: AtomicU64::new(0),
             last_udp_lost: AtomicU64::new(0),
             udp_packets_received: AtomicU64::new(0),
+            udp_send_errors: Mutex::new(None),
             tcp_info_fd: AtomicI32::new(-1),
             final_tcp_info: Mutex::new(None),
         }
@@ -135,6 +140,22 @@ impl StreamStats {
 
     pub fn add_bytes_received(&self, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Count a failed UDP send and keep its message as the latest.
+    /// Returns true for the stream's first failure, so callers can warn
+    /// once instead of once per packet.
+    pub fn record_udp_send_error(&self, error: &std::io::Error) -> bool {
+        let last_error = UdpSendErrors::sanitize_message(&error.to_string());
+        let mut slot = self.udp_send_errors.lock();
+        let count = slot.as_ref().map_or(0, |e| e.count) + 1;
+        *slot = Some(UdpSendErrors { count, last_error });
+        count == 1
+    }
+
+    /// This stream's UDP send failures so far, if any.
+    pub fn udp_send_errors(&self) -> Option<UdpSendErrors> {
+        self.udp_send_errors.lock().clone()
     }
 
     pub fn add_retransmits(&self, count: u64) {
@@ -391,6 +412,18 @@ impl TestStats {
         }
 
         Some(total)
+    }
+
+    /// Sum of per-stream UDP send errors, carrying the last message from the
+    /// highest-numbered stream that failed. `None` when no stream failed.
+    pub fn udp_send_errors(&self) -> Option<UdpSendErrors> {
+        self.streams
+            .iter()
+            .filter_map(|s| s.udp_send_errors())
+            .reduce(|acc, e| UdpSendErrors {
+                count: acc.count + e.count,
+                last_error: e.last_error,
+            })
     }
 
     pub fn elapsed_ms(&self) -> u64 {
@@ -860,6 +893,24 @@ mod tests {
         });
 
         assert_eq!(stats.to_aggregate(&intervals).cwnd, Some(u32::MAX));
+    }
+
+    #[test]
+    fn udp_send_errors_sum_across_streams_and_keep_a_message() {
+        let stats = TestStats::new("test".to_string(), 3);
+        assert_eq!(stats.udp_send_errors(), None);
+
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        // Only each stream's first failure asks the caller to warn.
+        assert!(stats.streams[0].record_udp_send_error(&refused));
+        assert!(!stats.streams[0].record_udp_send_error(&refused));
+        // Control characters from the OS message must not reach the report.
+        let dirty = std::io::Error::other("no\x1b[2J buffer\nspace");
+        assert!(stats.streams[2].record_udp_send_error(&dirty));
+
+        let agg = stats.udp_send_errors().expect("errors recorded");
+        assert_eq!(agg.count, 3);
+        assert_eq!(agg.last_error, "no[2J bufferspace");
     }
 
     #[test]

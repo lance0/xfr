@@ -857,11 +857,20 @@ impl App {
             self.throughput_send_mbps = ts;
             self.throughput_recv_mbps = tr;
         }
-        self.result = Some(result);
         self.log(format!(
             "Test completed. Avg: {:.0} Mbps.",
             self.average_throughput_mbps
         ));
+        // Logged after completion so the warning sits at the top of history.
+        for (side, errors) in [
+            ("Server", &result.server_udp_send_errors),
+            ("Client", &result.client_udp_send_errors),
+        ] {
+            if let Some(errors) = errors {
+                self.log(errors.describe(side));
+            }
+        }
+        self.result = Some(result);
     }
 
     pub fn on_error(&mut self, error: String) {
@@ -1444,6 +1453,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         });
         app.set_server_version("xfr/0.9.18".to_string());
         app.update_available = Some("xfr/0.9.19".to_string());
@@ -2205,11 +2216,42 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
         app.on_result(result);
         assert_eq!(app.elapsed, Duration::from_millis(3500));
         assert_eq!(app.total_bytes, 10_000);
         assert_eq!(app.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn on_result_logs_udp_send_errors_above_completion() {
+        let mut app = App::default();
+        app.on_result(TestResult {
+            id: "t".to_string(),
+            duration_ms: 1000,
+            bytes_total: 0,
+            throughput_mbps: 0.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+            server_udp_send_errors: Some(crate::protocol::UdpSendErrors {
+                count: 1,
+                last_error: "Connection refused (os error 111)".to_string(),
+            }),
+            client_udp_send_errors: None,
+        });
+        assert_eq!(
+            app.history[0].message,
+            "Server reported 1 UDP send error (last: Connection refused (os error 111))"
+        );
+        assert!(app.history[1].message.starts_with("Test completed."));
     }
 
     #[test]
@@ -2310,6 +2352,8 @@ mod tests {
                     throughput_send_mbps: None,
                     throughput_recv_mbps: None,
                     mtu_probe: None,
+                    server_udp_send_errors: None,
+                    client_udp_send_errors: None,
                 })
             }),
         ];

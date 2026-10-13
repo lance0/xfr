@@ -96,6 +96,12 @@ Notes:
   `lost_percent`, `jitter_ms`, `out_of_order`) is present only for UDP tests.
   Its `packet_size` is the largest datagram the receiver saw (the `-l` size,
   1400 by default) and is omitted when no data arrived.
+- `server_udp_send_errors` and `client_udp_send_errors` appear only when that
+  side failed to send UDP datagrams mid-test: `{"count": 5498, "last_error":
+  "Connection refused (os error 111)"}`. The server reports its sends in `-R`
+  and `--bidir`, the client its own in upload and `--bidir`. Failures in the
+  last 250 ms before the deadline are expected teardown and not counted.
+  Servers older than this field never send it.
 - Per-stream `retransmits` appears for TCP, `jitter_ms` and `lost` for UDP.
   Fields that do not apply are omitted (not set to zero).
 

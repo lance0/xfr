@@ -234,6 +234,8 @@ fn bench_protocol_serialize_result(c: &mut Criterion) {
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
         mtu_probe: None,
+        server_udp_send_errors: None,
+        client_udp_send_errors: None,
     };
     let msg = ControlMessage::Result(result);
 

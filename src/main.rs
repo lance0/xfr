@@ -1921,6 +1921,8 @@ fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protoco
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
         mtu_probe: None,
+        server_udp_send_errors: None,
+        client_udp_send_errors: None,
     }
 }
 
