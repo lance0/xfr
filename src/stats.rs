@@ -242,6 +242,8 @@ impl StreamStats {
             0
         };
         if interval_retransmits > 0 {
+            // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
+            #[allow(deprecated)]
             let _ = self.interval_retransmits_total.fetch_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,

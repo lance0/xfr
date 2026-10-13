@@ -56,7 +56,7 @@ fragments() {
 # Prove the fixture detects the original oversized default. Delivery may be
 # zero here, as reported in the issue; only require evidence of fragmentation.
 before=$(fragments)
-ip netns exec "$CLIENT_NS" timeout 20 "$XFR" 10.9.0.2 -4 -p 5202 -u -b 60M -t 1 --json --no-tui >"$TEST_TMP/baseline.json"
+ip netns exec "$CLIENT_NS" timeout 20 "$XFR" 10.9.0.2 -4 -p 5202 -u -b 60M -t 1 --json --no-tui -o "$TEST_TMP/baseline.json" >/dev/null
 after=$(fragments)
 (( after > before )) || { echo "FAIL: baseline did not produce IPv4 fragments"; exit 1; }
 echo "Baseline: $((after - before)) fragments with the 1400-byte default"
@@ -71,7 +71,7 @@ for family in 4 6; do
         for run in 1 2 3; do
             before=$(fragments)
             result="$TEST_TMP/result.json"
-            ip netns exec "$CLIENT_NS" timeout 20 "$XFR" "$host" "-$family" -p 5202 -u -b 60M -t 2 -l 1368 "${flags[@]}" --json --no-tui >"$result"
+            ip netns exec "$CLIENT_NS" timeout 20 "$XFR" "$host" "-$family" -p 5202 -u -b 60M -t 2 -l 1368 "${flags[@]}" --json --no-tui -o "$result" >/dev/null
             after=$(fragments)
             [[ "$after" == "$before" ]] || { echo "FAIL: IPv$family $direction fragmented"; exit 1; }
             python3 - "$result" "$family" "$direction" "$run" <<'PY'

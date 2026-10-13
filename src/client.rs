@@ -411,6 +411,8 @@ impl UdpProgressFilter {
         let denom = progress
             .packets_received
             .saturating_add(progress.packets_lost);
+        // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
+        #[allow(deprecated)]
         let result = self.max_denominator.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
