@@ -15,11 +15,14 @@ use crate::stats::{IntervalStats, TestStats};
 use crate::tui::server::ServerEvent;
 
 use super::{
-    ActiveTest, ControlCommand, HANDSHAKE_TIMEOUT, STATS_INTERVAL, active_elapsed,
-    budget_transfer_complete, finish_drain_grace,
+    ActiveTest, ControlCommand, STATS_INTERVAL, active_elapsed, budget_transfer_complete,
+    finish_drain_grace,
 };
 
 const CANCEL_FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bound on terminal output after a normal ending: a slow but live client
+/// still gets its Result, while a peer that never reads releases the test.
+const RESULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct ReportLoopConfig<'a> {
     pub(super) id: &'a str,
@@ -386,7 +389,7 @@ async fn run_inner<W: AsyncWrite + Unpin>(
         + if cancelled {
             CANCEL_FLUSH_TIMEOUT
         } else {
-            HANDSHAKE_TIMEOUT
+            RESULT_FLUSH_TIMEOUT
         };
     let pending = if cancelled {
         None
