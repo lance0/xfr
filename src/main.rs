@@ -2510,98 +2510,6 @@ mod tests {
     }
 
     #[test]
-    fn theme_option_is_available_after_the_server_subcommand() {
-        assert!(Cli::try_parse_from(["xfr", "serve", "--tui", "--theme", "default"]).is_ok());
-    }
-
-    #[test]
-    fn theme_parser_distinguishes_an_explicit_default_from_no_choice() {
-        for args in [vec!["xfr", "localhost"], vec!["xfr", "serve", "--tui"]] {
-            let cli = Cli::try_parse_from(&args).unwrap();
-            assert!(cli.theme.is_none());
-            let mut explicit = args;
-            explicit.extend(["--theme", "default"]);
-            let cli = Cli::try_parse_from(explicit).unwrap();
-            assert_eq!(cli.theme.as_deref(), Some("default"));
-            let prefs = xfr::prefs::Prefs {
-                theme: Some("dracula".into()),
-                ..Default::default()
-            }
-            .with_overrides(cli.theme.as_deref(), Some("nord"));
-            assert_eq!(prefs.theme.as_deref(), Some("default"));
-        }
-        let cli = Cli::try_parse_from(["xfr", "--theme", "default", "serve", "--tui"]).unwrap();
-        assert_eq!(cli.theme.as_deref(), Some("default"));
-    }
-
-    #[test]
-    fn automatic_theme_is_not_saved_without_an_explicit_edit() {
-        for theme in ["default", "monochrome"] {
-            let mut prefs = xfr::prefs::Prefs::default();
-            let mut app = App::with_theme_name(
-                "localhost".into(),
-                5201,
-                Protocol::Tcp,
-                Direction::Upload,
-                1,
-                Duration::from_secs(10),
-                None,
-                TimestampFormat::Relative,
-                theme,
-            );
-            remember_tui_theme(&mut prefs, &app);
-            assert!(
-                prefs.theme.is_none(),
-                "automatic {theme} must remain transient"
-            );
-
-            // An unrelated display edit must not promote an automatic
-            // palette into an explicit saved preference either.
-            app.settings.visible = true;
-            app.settings.selected_index = 1; // Timestamp
-            handle_tui_settings_key(&mut app, test_key(KeyCode::Right));
-            remember_tui_theme(&mut prefs, &app);
-            assert!(prefs.theme.is_none());
-
-            app.cycle_theme();
-            remember_tui_theme(&mut prefs, &app);
-            assert_eq!(prefs.theme.as_deref(), Some(app.theme_name()));
-
-            // Returning to the initial palette is still an explicit choice,
-            // and restarting a test must preserve that intent.
-            for _ in 1..xfr::tui::Theme::list().len() {
-                app.cycle_theme();
-            }
-            app.reset_for_restart();
-            remember_tui_theme(&mut prefs, &app);
-            assert_eq!(prefs.theme.as_deref(), Some(theme));
-        }
-    }
-
-    #[test]
-    fn untouched_explicit_theme_preferences_are_preserved() {
-        for theme in ["default", "dracula", "mono"] {
-            let mut prefs = xfr::prefs::Prefs {
-                theme: Some(theme.into()),
-                ..Default::default()
-            };
-            let app = App::with_theme_name(
-                "localhost".into(),
-                5201,
-                Protocol::Tcp,
-                Direction::Upload,
-                1,
-                Duration::from_secs(10),
-                None,
-                TimestampFormat::Relative,
-                theme,
-            );
-            remember_tui_theme(&mut prefs, &app);
-            assert_eq!(prefs.theme.as_deref(), Some(theme));
-        }
-    }
-
-    #[test]
     fn resolve_server_max_duration_cli_overrides_preset() {
         let preset = xfr::config::ServerPreset {
             name: "limited".into(),
@@ -3060,6 +2968,98 @@ mod tests {
         // -P 129 should fail
         let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn theme_option_is_available_after_the_server_subcommand() {
+        assert!(Cli::try_parse_from(["xfr", "serve", "--tui", "--theme", "default"]).is_ok());
+    }
+
+    #[test]
+    fn theme_parser_distinguishes_an_explicit_default_from_no_choice() {
+        for args in [vec!["xfr", "localhost"], vec!["xfr", "serve", "--tui"]] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            assert!(cli.theme.is_none());
+            let mut explicit = args;
+            explicit.extend(["--theme", "default"]);
+            let cli = Cli::try_parse_from(explicit).unwrap();
+            assert_eq!(cli.theme.as_deref(), Some("default"));
+            let prefs = xfr::prefs::Prefs {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            }
+            .with_overrides(cli.theme.as_deref(), Some("nord"));
+            assert_eq!(prefs.theme.as_deref(), Some("default"));
+        }
+        let cli = Cli::try_parse_from(["xfr", "--theme", "default", "serve", "--tui"]).unwrap();
+        assert_eq!(cli.theme.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn automatic_theme_is_not_saved_without_an_explicit_edit() {
+        for theme in ["default", "monochrome"] {
+            let mut prefs = xfr::prefs::Prefs::default();
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert!(
+                prefs.theme.is_none(),
+                "automatic {theme} must remain transient"
+            );
+
+            // An unrelated display edit must not promote an automatic
+            // palette into an explicit saved preference either.
+            app.settings.visible = true;
+            app.settings.selected_index = 1; // Timestamp
+            handle_tui_settings_key(&mut app, test_key(KeyCode::Right));
+            remember_tui_theme(&mut prefs, &app);
+            assert!(prefs.theme.is_none());
+
+            app.cycle_theme();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(app.theme_name()));
+
+            // Returning to the initial palette is still an explicit choice,
+            // and restarting a test must preserve that intent.
+            for _ in 1..xfr::tui::Theme::list().len() {
+                app.cycle_theme();
+            }
+            app.reset_for_restart();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
+    }
+
+    #[test]
+    fn untouched_explicit_theme_preferences_are_preserved() {
+        for theme in ["default", "dracula", "mono"] {
+            let mut prefs = xfr::prefs::Prefs {
+                theme: Some(theme.into()),
+                ..Default::default()
+            };
+            let app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
     }
 
     #[test]

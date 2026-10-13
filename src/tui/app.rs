@@ -1150,32 +1150,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theme_aliases_keep_the_settings_and_cycle_in_sync() {
-        for (input, canonical, next) in [
-            ("mono", "monochrome", "matrix"),
-            ("DRACULA", "dracula", "monochrome"),
-            ("default", "default", "kawaii"),
-        ] {
-            let mut app = App::with_theme_name(
-                "localhost".into(),
-                5201,
-                Protocol::Tcp,
-                Direction::Upload,
-                1,
-                Duration::from_secs(10),
-                None,
-                TimestampFormat::Relative,
-                input,
-            );
-            assert_eq!(app.theme_name(), canonical);
-            assert_eq!(app.settings.theme_name(), canonical);
-            app.cycle_theme();
-            assert_eq!(app.theme_name(), next);
-            assert_eq!(app.settings.theme_name(), next);
-        }
-    }
-
-    #[test]
     fn jitter_display_returns_both_instant_and_smoothed_while_running() {
         let mut app = App::default();
         app.state = AppState::Running;
@@ -2138,6 +2112,32 @@ mod tests {
         assert_eq!(app.elapsed, Duration::from_millis(3500));
         assert_eq!(app.total_bytes, 10_000);
         assert_eq!(app.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn theme_aliases_keep_the_settings_and_cycle_in_sync() {
+        for (input, canonical, next) in [
+            ("mono", "monochrome", "matrix"),
+            ("DRACULA", "dracula", "monochrome"),
+            ("default", "default", "kawaii"),
+        ] {
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                input,
+            );
+            assert_eq!(app.theme_name(), canonical);
+            assert_eq!(app.settings.theme_name(), canonical);
+            app.cycle_theme();
+            assert_eq!(app.theme_name(), next);
+            assert_eq!(app.settings.theme_name(), next);
+        }
     }
 
     #[test]
