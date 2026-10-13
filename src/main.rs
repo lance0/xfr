@@ -547,6 +547,12 @@ fn parse_test_duration(s: &str) -> Result<Duration, String> {
     if duration < Duration::from_secs(1) {
         return Err("Minimum test duration is 1 second (use 0 for infinite)".to_string());
     }
+    if duration.as_secs() > u64::from(u32::MAX) {
+        return Err(format!(
+            "Maximum test duration is {} seconds (use 0 for infinite)",
+            u32::MAX
+        ));
+    }
     Ok(duration)
 }
 
@@ -558,30 +564,6 @@ fn resolve_server_max_duration(
     preset: Option<&xfr::config::ServerPreset>,
 ) -> Option<Duration> {
     cli_max_duration.or_else(|| preset.and_then(|p| p.max_duration_secs.map(Duration::from_secs)))
-}
-
-fn resolve_parallel_streams(cli_parallel: Option<u8>, config_parallel: Option<u8>) -> Result<u8> {
-    let streams = cli_parallel.or(config_parallel).unwrap_or(1);
-    anyhow::ensure!(
-        (1..=128).contains(&streams),
-        "client.parallel_streams must be between 1 and 128 (got {streams})"
-    );
-    Ok(streams)
-}
-
-fn resolve_window_size(
-    cli_window: Option<usize>,
-    config_window: Option<&str>,
-) -> Result<Option<usize>> {
-    if let Some(window) = cli_window {
-        return Ok(Some(window));
-    }
-    config_window
-        .map(|value| {
-            parse_size(value)
-                .map_err(|error| anyhow::anyhow!("invalid client.window_size {value:?}: {error}"))
-        })
-        .transpose()
 }
 
 /// Resolve the effective client test duration.
@@ -611,6 +593,30 @@ fn resolve_client_duration(
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(10))
     }
+}
+
+fn resolve_parallel_streams(cli_parallel: Option<u8>, config_parallel: Option<u8>) -> Result<u8> {
+    let streams = cli_parallel.or(config_parallel).unwrap_or(1);
+    anyhow::ensure!(
+        (1..=128).contains(&streams),
+        "client.parallel_streams must be between 1 and 128 (got {streams})"
+    );
+    Ok(streams)
+}
+
+fn resolve_window_size(
+    cli_window: Option<usize>,
+    config_window: Option<&str>,
+) -> Result<Option<usize>> {
+    if let Some(window) = cli_window {
+        return Ok(Some(window));
+    }
+    config_window
+        .map(|value| {
+            parse_size(value)
+                .map_err(|error| anyhow::anyhow!("invalid client.window_size {value:?}: {error}"))
+        })
+        .transpose()
 }
 
 #[derive(Debug, PartialEq)]
@@ -2525,64 +2531,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_parallel_one_overrides_config() {
-        let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
-        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 1);
-    }
-
-    #[test]
-    fn parallel_streams_use_config_then_default_when_unset() {
-        let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
-        assert_eq!(cli.parallel, None);
-        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 8);
-        assert_eq!(resolve_parallel_streams(cli.parallel, None).unwrap(), 1);
-    }
-
-    #[test]
-    fn parallel_streams_validate_only_the_effective_count() {
-        for invalid in [0, 129, 255] {
-            let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
-            assert_eq!(
-                resolve_parallel_streams(cli.parallel, Some(invalid)).unwrap(),
-                1
-            );
-            let error = resolve_parallel_streams(None, Some(invalid)).unwrap_err();
-            assert!(error.to_string().contains("client.parallel_streams"));
-        }
-        for valid in [1, 128] {
-            assert_eq!(resolve_parallel_streams(None, Some(valid)).unwrap(), valid);
-        }
-    }
-
-    #[test]
-    fn window_size_rejects_invalid_effective_config() {
-        for value in ["1MiB", "", "999999999999999999999G"] {
-            let error = resolve_window_size(None, Some(value)).unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("client.window_size"));
-            assert!(message.contains(&format!("{value:?}")));
-        }
-    }
-
-    #[test]
-    fn window_size_uses_valid_defaults_and_explicit_overrides() {
-        assert_eq!(resolve_window_size(None, None).unwrap(), None);
-        for (value, expected) in [("512K", 512 * 1024), ("1m", 1024 * 1024), ("0", 0)] {
-            assert_eq!(
-                resolve_window_size(None, Some(value)).unwrap(),
-                Some(expected)
-            );
-        }
-        let cli = Cli::try_parse_from(["xfr", "host", "-w", "2M"]).unwrap();
-        assert_eq!(
-            resolve_window_size(cli.window, Some("1MiB")).unwrap(),
-            Some(2 * 1024 * 1024),
-        );
-        // Preserve the existing explicit zero semantics as well.
-        assert_eq!(resolve_window_size(Some(0), Some("1MiB")).unwrap(), Some(0));
-    }
-
-    #[test]
     fn resolve_server_max_duration_cli_overrides_preset() {
         let preset = xfr::config::ServerPreset {
             name: "limited".into(),
@@ -2949,6 +2897,46 @@ mod tests {
     }
 
     #[test]
+    fn test_duration_rejects_wrapping_protocol_seconds() {
+        for value in ["4294967296", "4294967296s", "18446744073709551615"] {
+            assert!(parse_test_duration(value).is_err(), "accepted {value}");
+            assert!(Cli::try_parse_from(["xfr", "host", "-t", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_duration_preserves_zero_fractional_values_and_the_wire_boundary() {
+        assert_eq!(parse_test_duration("0").unwrap(), Duration::ZERO);
+        assert_eq!(
+            parse_test_duration("1s 500ms").unwrap(),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            parse_test_duration("4294967295s 500ms").unwrap(),
+            Duration::new(u64::from(u32::MAX), 500_000_000),
+        );
+        let cli = Cli::try_parse_from(["xfr", "host", "-t", "4294967295"]).unwrap();
+        assert_eq!(cli.time, Some(Duration::from_secs(u64::from(u32::MAX))));
+    }
+
+    #[test]
+    fn explicit_duration_overrides_unused_out_of_range_config() {
+        let mut config = Config::default();
+        config.client.duration_secs = Some(u64::from(u32::MAX) + 1);
+        let cli = Cli::try_parse_from(["xfr", "host", "-t", "1"]).unwrap();
+        let duration = resolve_client_duration(cli.time, false, None, &config);
+        assert_eq!(duration, Duration::from_secs(1));
+        assert!(
+            ClientConfig {
+                duration,
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn test_parse_duration_bare_integer_is_seconds() {
         // iperf3 muscle memory: `-t 10` should mean 10 seconds.
         assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
@@ -3020,6 +3008,64 @@ mod tests {
         // --random and --zeros should conflict
         let result = Cli::try_parse_from(["xfr", "host", "--random", "--zeros"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn explicit_parallel_one_overrides_config() {
+        let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
+        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 1);
+    }
+
+    #[test]
+    fn parallel_streams_use_config_then_default_when_unset() {
+        let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
+        assert_eq!(cli.parallel, None);
+        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 8);
+        assert_eq!(resolve_parallel_streams(cli.parallel, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn parallel_streams_validate_only_the_effective_count() {
+        for invalid in [0, 129, 255] {
+            let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
+            assert_eq!(
+                resolve_parallel_streams(cli.parallel, Some(invalid)).unwrap(),
+                1
+            );
+            let error = resolve_parallel_streams(None, Some(invalid)).unwrap_err();
+            assert!(error.to_string().contains("client.parallel_streams"));
+        }
+        for valid in [1, 128] {
+            assert_eq!(resolve_parallel_streams(None, Some(valid)).unwrap(), valid);
+        }
+    }
+
+    #[test]
+    fn window_size_rejects_invalid_effective_config() {
+        for value in ["1MiB", "", "999999999999999999999G"] {
+            let error = resolve_window_size(None, Some(value)).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("client.window_size"));
+            assert!(message.contains(&format!("{value:?}")));
+        }
+    }
+
+    #[test]
+    fn window_size_uses_valid_defaults_and_explicit_overrides() {
+        assert_eq!(resolve_window_size(None, None).unwrap(), None);
+        for (value, expected) in [("512K", 512 * 1024), ("1m", 1024 * 1024), ("0", 0)] {
+            assert_eq!(
+                resolve_window_size(None, Some(value)).unwrap(),
+                Some(expected)
+            );
+        }
+        let cli = Cli::try_parse_from(["xfr", "host", "-w", "2M"]).unwrap();
+        assert_eq!(
+            resolve_window_size(cli.window, Some("1MiB")).unwrap(),
+            Some(2 * 1024 * 1024),
+        );
+        // Preserve the existing explicit zero semantics as well.
+        assert_eq!(resolve_window_size(Some(0), Some("1MiB")).unwrap(), Some(0));
     }
 
     #[test]
