@@ -2283,9 +2283,22 @@ async fn assert_cancel_with_full_progress_queue(protocol: Protocol, direction: D
 
     // Keep polling the client while withholding reads. The first interval
     // fills the queue; the second blocks its producer outside select!.
+    // Wait for the fill rather than a fixed sleep: under load the first
+    // interval can land well after 1 s.
+    let fill = async {
+        timeout(Duration::from_secs(15), async {
+            while progress_rx.is_empty() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("test should fill the interval queue");
+        // One more 1 s interval period so the next send parks on the full queue.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    };
     tokio::select! {
         result = &mut run => panic!("infinite run ended before cancel: {result:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(2500)) => {}
+        () = fill => {}
     }
     assert_eq!(progress_rx.len(), 1, "test should fill the interval queue");
     client.cancel().expect("test should be running");
