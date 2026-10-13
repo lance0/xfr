@@ -76,7 +76,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 ### Non-TUI Interval Row Cadence Can Still Bunch Under Extreme Loss
 
-**Issue:** Upload-mode full interval rows still follow TCP control `Interval` arrival, which can bunch under aggressive loss or bufferbloat. UDP feedback updates keep cumulative loss current. When full rows stall for roughly two report periods, plain text emits a `(reports stalled)` loss line and `--json-stream` emits a marked `udp_feedback` event. CSV remains interval-only to preserve its fixed columns. Download-only UDP intervals use local receive counters and a local clock.
+**Issue:** Upload-mode full interval rows still follow TCP control `Interval` arrival, which can bunch under aggressive loss or bufferbloat. UDP feedback updates keep cumulative loss current. When full rows stall for roughly two report periods, plain text emits a `(reports stalled)` loss line and `--json-stream` emits a marked `udp_feedback` event. CSV remains interval-only to preserve its fixed columns. Download-only UDP intervals use local receive counters and a local clock. The source interval clocks sample once per second; `--interval` filters those updates, so values below one second do not create faster sampling.
 
 **Impact:** Upload throughput rows and CSV cadence can lag or arrive in bursts, even while feedback loss events remain current. A feedback event carries cumulative loss rather than a full throughput interval.
 
@@ -114,11 +114,11 @@ QUIC transport uses self-signed certificates and does not verify the server's id
 
 **Mitigation:** Do not treat QUIC's self-signed certificate as server identity on unauthenticated sessions. Use `--psk-file` on untrusted networks: current PSK sessions bind mutual authentication and protected-control keys to the exact TLS connection through the RFC 9266 exporter. Both peers must support `quic_channel_binding_v1`; QUIC + PSK fails closed otherwise. The self-signed QUIC certificate is still not a public PKI identity.
 
-### Protocol Extensions Require Major Version Bump
+### Protocol Extensions Require Capability Negotiation
 
-The control protocol uses a tagged JSON enum for message types. Unknown fields within known message types are silently ignored (serde default), but unrecognized message *types* cause parse errors. Adding new message types requires a protocol version bump.
+The control protocol uses a tagged JSON enum for message types. Unknown fields within known message types are silently ignored (serde default), but unrecognized message *types* cause parse errors. New optional message types must be gated on peer capabilities before use. For example, `byte_budget_v1` lets a client send `Finish`; a client refuses a byte-budget test if the server lacks that capability. Breaking changes without a compatible negotiated path still require a major protocol version bump.
 
-**Rationale:** This favors simplicity over complex version negotiation. The version handshake and client capabilities negotiation ensure compatibility.
+**Rationale:** The version handshake protects basic compatibility, while capability checks keep older peers from receiving messages they cannot parse.
 
 ### UDP Data Plane Unauthenticated
 
