@@ -329,8 +329,8 @@ impl ClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if let Some(size) = self.udp_payload_size {
             anyhow::ensure!(
-                self.protocol == Protocol::Udp && !self.mtu_probe,
-                "--length requires a UDP throughput test (-u)"
+                !self.mtu_probe,
+                "--length cannot be combined with --probe-mtu"
             );
             udp::validate_payload_size(usize::from(size))?;
         }
@@ -584,6 +584,14 @@ impl Client {
                 self.config.protocol
             );
         }
+        // The TUI settings modal can switch a `-u -l` run to TCP or QUIC;
+        // keep the size for a later switch back instead of failing the run.
+        if self.config.protocol != Protocol::Udp && self.config.udp_payload_size.is_some() {
+            warn!(
+                "--length is only supported for UDP; ignoring for {}",
+                self.config.protocol
+            );
+        }
 
         // Use QUIC transport if selected
         if self.config.protocol == Protocol::Quic {
@@ -799,7 +807,11 @@ impl Client {
         let server_supports_udp_feedback =
             crate::protocol::capability_advertised(&server_capabilities, "udp_feedback_v1");
 
-        if self.config.udp_payload_size.is_some()
+        let udp_payload_size = self
+            .config
+            .udp_payload_size
+            .filter(|_| self.config.protocol == Protocol::Udp);
+        if udp_payload_size.is_some()
             && !crate::protocol::capability_advertised(
                 &server_capabilities,
                 crate::protocol::UDP_PAYLOAD_SIZE_CAPABILITY,
@@ -879,7 +891,7 @@ impl Client {
             mtu_probe: self.config.mtu_probe,
             tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
             byte_budget: self.config.byte_budget,
-            udp_payload_size: self.config.udp_payload_size,
+            udp_payload_size,
         };
         transport
             .write_message(&mut writer, &test_start.serialize()?)

@@ -421,6 +421,30 @@ async fn test_udp_payload_size_rejects_older_server() {
         .unwrap();
 }
 
+/// The TUI settings modal can switch a `-u -l` run to TCP or QUIC. The
+/// size must be ignored there, not sent to a server that rejects it.
+#[tokio::test]
+async fn test_udp_payload_size_ignored_for_tcp_and_quic() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for protocol in [Protocol::Tcp, Protocol::Quic] {
+        let config = ClientConfig {
+            port,
+            protocol,
+            duration: Duration::from_secs(1),
+            bitrate: Some(10_000_000),
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        };
+        let result = timeout(Duration::from_secs(10), Client::new(config).run(None))
+            .await
+            .unwrap();
+        assert!(result.is_ok(), "{protocol}: {result:?}");
+    }
+    server.abort();
+}
+
 #[test]
 fn test_udp_payload_size_validates_library_config() {
     for size in [0, 15, 65508, u16::MAX] {
@@ -443,17 +467,6 @@ fn test_udp_payload_size_validates_library_config() {
             }
             .validate()
             .is_ok()
-        );
-    }
-    for protocol in [Protocol::Tcp, Protocol::Quic] {
-        assert!(
-            ClientConfig {
-                protocol,
-                udp_payload_size: Some(1368),
-                ..Default::default()
-            }
-            .validate()
-            .is_err()
         );
     }
     assert!(
