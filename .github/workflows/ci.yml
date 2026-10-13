@@ -240,3 +240,5 @@ jobs:
         run: sudo ./test-udp-payload-ns.sh
       - name: Verify IPv6 link-local hosts with zone IDs
         run: sudo ./test-link-local-ns.sh
+      - name: Verify UDP replies leave from the address the client targeted
+        run: sudo ./test-udp-source-addr-ns.sh

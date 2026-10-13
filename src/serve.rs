@@ -177,6 +177,12 @@ struct UdpHelloRoute {
     /// Hellos must come from the control connection's IP, mirroring the
     /// DataHello check for single-port TCP.
     control_peer_ip: IpAddr,
+    /// Server-side address of the control connection — the address the
+    /// client targeted, which its UDP goes to as well. Each connected
+    /// socket binds this IP (and IPv6 scope) on the shared port so acks
+    /// and data leave from it rather than from whatever source the
+    /// kernel would pick for a wildcard socket on a multi-address host.
+    control_local: SocketAddr,
     expected_streams: u8,
     /// Client's `-w` request, applied to each connected socket.
     udp_buffer: Option<usize>,
@@ -278,6 +284,8 @@ fn spawn_udp_hello_dispatcher(
             // Create decision for the same stream between lock drops.
             enum Action {
                 Create {
+                    /// The control connection's local IP on the shared port.
+                    local_addr: SocketAddr,
                     socket_tx: mpsc::Sender<(Arc<UdpSocket>, u16)>,
                     udp_buffer: Option<usize>,
                     stream_stats: Arc<crate::stats::StreamStats>,
@@ -292,6 +300,7 @@ fn spawn_udp_hello_dispatcher(
                     UdpHelloVerdict::Accept => {
                         let route = route.expect("Accept implies route exists");
                         Action::Create {
+                            local_addr: net::with_port(route.control_local, local_addr.port()),
                             socket_tx: route.socket_tx.clone(),
                             udp_buffer: route.udp_buffer,
                             stream_stats: route.stats.streams[usize::from(pkt.stream_index)]
@@ -321,6 +330,7 @@ fn spawn_udp_hello_dispatcher(
                     }
                 }
                 Action::Create {
+                    local_addr,
                     socket_tx,
                     udp_buffer,
                     stream_stats,
@@ -433,6 +443,18 @@ struct ActiveTest {
     control_peer_ip: std::net::IpAddr,
     /// Number of streams expected for this test (for adaptive DataHello timeout).
     expected_streams: u8,
+}
+
+/// Bind address for legacy per-stream UDP sockets: `--bind` when set,
+/// else the control connection's local address (port 0) so reverse data
+/// and feedback leave from the address the client targeted instead of
+/// the interface's preferred one. IPv4-mapped is unmapped: a concrete
+/// IPv6 bind is V6ONLY, which cannot take a mapped address.
+fn legacy_udp_bind_addr(bind_addr: Option<IpAddr>, control_local: SocketAddr) -> SocketAddr {
+    match bind_addr {
+        Some(ip) => SocketAddr::new(ip, 0),
+        None => net::with_port(net::normalize_addr(control_local), 0),
+    }
 }
 
 /// Convert a wire-format window size (u64) to a host usize for setsockopt.
@@ -2308,6 +2330,9 @@ async fn run_test<W: AsyncWrite + Unpin>(
     let mut udp_token: Option<[u8; 16]> = None;
     let mut udp_socket_rx: Option<mpsc::Receiver<(Arc<UdpSocket>, u16)>> = None;
     let mut _udp_route_guard: Option<UdpRouteGuard> = None;
+    // The address the client reached us on; UDP data sockets bind it so
+    // replies leave from the address the client's connected socket expects.
+    let control_local = reader.get_ref().local_addr()?;
 
     // Create cancel channel early so fallback listeners can use it
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -2390,6 +2415,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
                         entry.insert(UdpHelloRoute {
                             socket_tx,
                             control_peer_ip: peer_addr.ip(),
+                            control_local,
                             expected_streams: streams,
                             udp_buffer: client_window_to_host(client_window_size),
                             sockets: vec![None; streams as usize],
@@ -2413,12 +2439,9 @@ async fn run_test<W: AsyncWrite + Unpin>(
             // the kernel UDP buffer and cause silent tail drops that don't
             // surface as sequence-gap loss until traffic stops (issue #70).
             let udp_buffer = client_window_to_host(client_window_size);
+            let local = legacy_udp_bind_addr(bind_addr, control_local);
             for _ in 0..streams {
-                let socket = if let Some(ip) = bind_addr {
-                    net::create_udp_socket_bound(SocketAddr::new(ip, 0), address_family).await?
-                } else {
-                    net::create_udp_socket(0, address_family).await?
-                };
+                let socket = net::create_udp_socket_bound(local, address_family).await?;
                 if let Some(size) = udp_buffer
                     && let Err(e) = net::set_udp_buffer_size(&socket, size)
                 {
@@ -4163,6 +4186,7 @@ mod tests {
         UdpHelloRoute {
             socket_tx,
             control_peer_ip: ip,
+            control_local: "127.0.0.1:5201".parse().unwrap(),
             expected_streams: streams,
             udp_buffer: None,
             sockets: vec![None; streams as usize],
@@ -4280,6 +4304,65 @@ mod tests {
                 .starts_with("failed to create UDP socket to [::1]:9: "),
             "{}",
             errors.last_error
+        );
+    }
+
+    /// The per-stream socket must leave from the address the client
+    /// targeted (the control connection's local IP) on the shared port —
+    /// a wildcard bind lets the kernel pick another source on a
+    /// multi-address host and the client's connected socket drops it.
+    /// Linux-only: the whole of 127/8 is local there, so 127.0.0.2 is a
+    /// second address the kernel would never pick toward 127.0.0.1.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn udp_hello_socket_binds_the_control_local_address() {
+        let shared = net::create_shared_udp_socket("0.0.0.0:0".parse().unwrap(), None)
+            .await
+            .unwrap();
+        let shared_addr = shared.local_addr().unwrap();
+        let token = [3; 16];
+        let (socket_tx, mut socket_rx) = mpsc::channel(1);
+        let mut route = make_udp_route(1, "127.0.0.1".parse().unwrap());
+        route.socket_tx = socket_tx;
+        route.control_local = "127.0.0.2:5201".parse().unwrap();
+        let routes: UdpHelloRoutes =
+            Arc::new(parking_lot::Mutex::new(HashMap::from([(token, route)])));
+        let (hello_tx, hello_rx) = mpsc::channel(8);
+        spawn_udp_hello_dispatcher(hello_rx, routes, shared_addr, None);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        hello_tx
+            .send((
+                make_hello(0, token).encode().to_vec(),
+                client.local_addr().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(5), socket_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let expected: SocketAddr = format!("127.0.0.2:{}", shared_addr.port()).parse().unwrap();
+        assert_eq!(socket.local_addr().unwrap(), expected);
+    }
+
+    #[test]
+    fn legacy_udp_bind_addr_follows_the_control_connection() {
+        let control: SocketAddr = "[::ffff:10.9.0.3]:5201".parse().unwrap();
+        // Dual-stack control over IPv4: unmapped, since a concrete IPv6
+        // bind is V6ONLY.
+        assert_eq!(
+            legacy_udp_bind_addr(None, control),
+            "10.9.0.3:0".parse().unwrap()
+        );
+        // Link-local keeps its scope.
+        let ll: SocketAddr = "[fe80::2%7]:5201".parse().unwrap();
+        let bound = legacy_udp_bind_addr(None, ll);
+        assert_eq!(bound, "[fe80::2%7]:0".parse().unwrap());
+        assert!(matches!(bound, SocketAddr::V6(v6) if v6.scope_id() == 7));
+        // --bind still wins.
+        assert_eq!(
+            legacy_udp_bind_addr(Some("10.9.0.1".parse().unwrap()), control),
+            "10.9.0.1:0".parse().unwrap()
         );
     }
 

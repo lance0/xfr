@@ -411,10 +411,14 @@ pub async fn create_shared_udp_socket(
 }
 
 /// Create a per-stream data socket for single-port UDP (issue #63):
-/// bound to the same local address as the shared socket (SO_REUSEPORT)
-/// and `connect()`ed to the client's source address. Once connected, the
-/// kernel's UDP lookup scores it above the shared wildcard socket, so
-/// line-rate data flows here and never touches the shared-socket tee.
+/// bound to the shared socket's port (SO_REUSEPORT) on the address the
+/// client targeted, and `connect()`ed to the client's source address.
+/// Once connected, the kernel's UDP lookup scores it above the shared
+/// wildcard socket, so line-rate data flows here and never touches the
+/// shared-socket tee. The concrete local IP pins the reply source: a
+/// wildcard bind lets the kernel pick the interface's preferred
+/// address, which the client's connected socket drops when it targeted
+/// a secondary one.
 #[cfg(unix)]
 pub async fn create_connected_udp_same_port(
     local: SocketAddr,
@@ -443,7 +447,11 @@ fn new_reuseport_udp_socket(addr: SocketAddr, v6only: Option<bool>) -> io::Resul
     // whose load-balancing group semantics would defeat the
     // connected-socket-wins routing this feature depends on.
     socket.set_reuse_port(true)?;
-    if let Some(v6only) = v6only {
+    // IPV6_V6ONLY doesn't exist on an IPv4 socket (`--bind <ipv4>` on a
+    // dual-stack server).
+    if let Some(v6only) = v6only
+        && addr.is_ipv6()
+    {
         socket.set_only_v6(v6only)?;
     }
     Ok(socket)
@@ -515,15 +523,12 @@ async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()
     let wildcard = family.bind_addr(0);
     let shared = create_shared_udp_socket(wildcard, v6only).await?;
     let port = shared.local_addr()?.port();
-    // Production passes the shared socket's own local address when
-    // binding each connected socket; mirror that.
-    let local = SocketAddr::new(wildcard.ip(), port);
 
     let native_loopback: IpAddr = match family {
         AddressFamily::V4Only => IpAddr::V4(Ipv4Addr::LOCALHOST),
         AddressFamily::V6Only | AddressFamily::DualStack => IpAddr::V6(Ipv6Addr::LOCALHOST),
     };
-    check_connected_precedence(&shared, local, v6only, native_loopback, port, false).await?;
+    check_connected_precedence(&shared, v6only, native_loopback, port, false).await?;
 
     // A dual-stack lane also serves IPv4 clients, whose source addresses
     // arrive as ::ffff:x.x.x.x and whose connected sockets are
@@ -531,15 +536,8 @@ async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()
     // IPv4 client takes, so prove it separately — native-IPv6 routing
     // passing says nothing about mapped-address routing.
     if family == AddressFamily::DualStack {
-        check_connected_precedence(
-            &shared,
-            local,
-            v6only,
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port,
-            true,
-        )
-        .await?;
+        check_connected_precedence(&shared, v6only, IpAddr::V4(Ipv4Addr::LOCALHOST), port, true)
+            .await?;
     }
     Ok(())
 }
@@ -554,7 +552,6 @@ async fn single_port_udp_self_test_inner(family: AddressFamily) -> io::Result<()
 /// new-client hellos in production.
 async fn check_connected_precedence(
     shared: &UdpSocket,
-    local: SocketAddr,
     v6only: Option<bool>,
     peer_loopback: IpAddr,
     port: u16,
@@ -564,12 +561,15 @@ async fn check_connected_precedence(
 
     let peer = UdpSocket::bind(SocketAddr::new(peer_loopback, 0)).await?;
     let peer_addr = peer.local_addr()?;
-    let connect_to = match (map_peer, peer_addr.ip()) {
-        (true, IpAddr::V4(v4)) => {
-            SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), peer_addr.port())
-        }
-        _ => peer_addr,
+    let mapped = |addr: SocketAddr| match (map_peer, addr.ip()) {
+        (true, IpAddr::V4(v4)) => SocketAddr::new(IpAddr::V6(v4.to_ipv6_mapped()), addr.port()),
+        _ => addr,
     };
+    let connect_to = mapped(peer_addr);
+    // Production binds each connected socket to the address the client
+    // targeted (the control connection's local address, mapped on a
+    // dual-stack lane); mirror that.
+    let local = mapped(SocketAddr::new(peer_loopback, port));
     let connected = create_connected_udp_same_port(local, v6only, connect_to).await?;
     // The shared socket is wildcard-bound; the peer reaches it via its
     // own family's loopback at the shared port.
