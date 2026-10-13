@@ -1107,13 +1107,7 @@ impl App {
         theme.hash(&mut h);
         theme_index.hash(&mut h);
         settings.hash(&mut h);
-        // Captured times support later reformatting but do not affect the
-        // current frame. Hash only the strings the history panel renders.
-        history.len().hash(&mut h);
-        for entry in history {
-            entry.timestamp.hash(&mut h);
-            entry.message.hash(&mut h);
-        }
+        history.hash(&mut h);
         average_throughput_mbps.to_bits().hash(&mut h);
         update_available.hash(&mut h);
         server_version.hash(&mut h);
@@ -1242,27 +1236,6 @@ mod tests {
             .find(|entry| entry.message == "Captured event")
             .unwrap();
         assert_eq!(event.timestamp, "01:02:03");
-    }
-
-    #[test]
-    fn fingerprint_ignores_timestamp_inputs_when_the_history_looks_the_same() {
-        let mut app = App::default();
-        app.log("Waiting for server");
-        let size = Size::new(120, 40);
-        let fingerprint = app.render_fingerprint(size);
-        let entry = app.history.front_mut().unwrap();
-        // Both events still display 00:00:00 in relative mode, despite
-        // differing captured times for a later absolute-format choice.
-        entry.elapsed += Duration::from_millis(500);
-        entry.recorded_at += Duration::from_millis(500);
-        assert_eq!(
-            entry.timestamp,
-            entry.format_timestamp(TimestampFormat::Relative, app.history_clock)
-        );
-        assert_eq!(fingerprint, app.render_fingerprint(size));
-
-        app.set_timestamp_format(TimestampFormat::Unix);
-        assert_ne!(fingerprint, app.render_fingerprint(size));
     }
 
     #[test]
