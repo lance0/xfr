@@ -3597,6 +3597,23 @@ async fn spawn_tcp_stream_handlers(
     handles
 }
 
+async fn wait_for_udp_client(
+    socket: &UdpSocket,
+    mut cancel: watch::Receiver<bool>,
+) -> anyhow::Result<Option<SocketAddr>> {
+    if *cancel.borrow() {
+        return Ok(None);
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => {
+            debug!("UDP client discovery cancelled");
+            Ok(None)
+        }
+        result = udp::wait_for_client(socket, STREAM_ACCEPT_TIMEOUT) => result.map(Some),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_udp_handlers(
     sockets: Vec<Arc<UdpSocket>>,
@@ -3661,8 +3678,8 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Download => {
                     // Wait for client's hello packet to learn their address
-                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
-                        Ok(client_addr) => {
+                    match wait_for_udp_client(&socket, cancel.clone()).await {
+                        Ok(Some(client_addr)) => {
                             // Server sends UDP at per-stream rate to client
                             // Dropped when the send ends — the `-n` delivered signal.
                             let _sending_done = sending_done;
@@ -3680,6 +3697,7 @@ async fn spawn_udp_handlers(
                             )
                             .await;
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             warn!("UDP reverse: failed to get client address: {}", e);
                         }
@@ -3687,8 +3705,8 @@ async fn spawn_udp_handlers(
                 }
                 Direction::Bidir => {
                     // Wait for client's first packet to learn their address
-                    match udp::wait_for_client(&socket, STREAM_ACCEPT_TIMEOUT).await {
-                        Ok(client_addr) => {
+                    match wait_for_udp_client(&socket, cancel.clone()).await {
+                        Ok(Some(client_addr)) => {
                             // UDP can send/receive concurrently on same socket
                             let send_socket = socket.clone();
                             let recv_socket = socket;
@@ -3743,6 +3761,7 @@ async fn spawn_udp_handlers(
 
                             let _ = tokio::join!(send_handle, recv_handle);
                         }
+                        Ok(None) => {}
                         Err(e) => {
                             warn!("UDP bidir: failed to get client address: {}", e);
                         }

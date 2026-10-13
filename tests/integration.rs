@@ -3628,6 +3628,49 @@ impl RawControl {
     }
 }
 
+async fn assert_legacy_udp_cancel_before_hello(direction: Direction) {
+    use tokio::io::AsyncWriteExt;
+    use xfr::protocol::ControlMessage;
+
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // No single_port_udp_v1 capability: use the legacy per-stream port and
+    // cancel before any data-plane hello reaches the discovery handler.
+    let mut control = RawControl::connect(port, vec![]).await;
+    let (data_ports, udp_token) = control
+        .start_udp_test_with_payload(0, direction, None)
+        .await;
+    assert_eq!(data_ports.len(), 1);
+    assert!(udp_token.is_none());
+    let cancel = ControlMessage::Cancel {
+        id: "raw-test".to_string(),
+        reason: "test cancellation before UDP hello".to_string(),
+    };
+    control
+        .writer
+        .write_all(format!("{}\n", cancel.serialize().unwrap()).as_bytes())
+        .await
+        .unwrap();
+
+    let result = timeout(Duration::from_secs(2), control.wait_for_result())
+        .await
+        .expect("cancel before UDP discovery should return a summary promptly");
+    assert_eq!(result.bytes_total, 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_legacy_udp_download_cancel_before_hello() {
+    assert_legacy_udp_cancel_before_hello(Direction::Download).await;
+}
+
+#[tokio::test]
+async fn test_legacy_udp_bidir_cancel_before_hello() {
+    assert_legacy_udp_cancel_before_hello(Direction::Bidir).await;
+}
+
 /// The TestAck shape must match what was negotiated: a server that
 /// advertises single_port_udp_v1 (self-test passed) answers a capable
 /// client with no data ports plus a routing token; a server that
