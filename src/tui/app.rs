@@ -490,10 +490,10 @@ impl App {
     /// Advancing `prev_udp_progress` here is what keeps a resuming Interval
     /// from re-counting loss these bars already showed.
     ///
-    /// Throughput: repeat-last-known. A zero-mbps sample renders as a blank
-    /// cell in the Sparkline (no glyph, so nothing to tint), which would
-    /// hide the loss signal entirely; repeating the stale height keeps the
-    /// bar visible so the loss tint can mark the segment. A flat plateau
+    /// Throughput: repeat-last-known. A zero-mbps sample draws no glyph in
+    /// the Sparkline, leaving the loss to a lone baseline underline under a
+    /// segment that reads as a drop to zero; repeating the stale height keeps
+    /// the bar visible so the loss tint can mark the segment. A flat plateau
     /// with warning/error tint reads as "no fresh throughput reading, loss
     /// still arriving" rather than a frozen graph.
     fn maybe_append_stalled_bar(&mut self, now: Instant) {
