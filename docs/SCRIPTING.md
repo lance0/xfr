@@ -159,7 +159,8 @@ xfr <host> -u --bidir --json --no-tui | jq '{upload: .udp_stats_send, download: 
 ```
 
 Full streaming intervals add `udp_send` and `udp_recv`, each containing
-cumulative `packets_received`, `packets_lost`, and an optional `jitter_ms`.
+cumulative `packets_received` and `packets_lost`, plus `lost_percent`
+(omitted until packets are counted) and an optional `jitter_ms`.
 Download snapshots can also arrive in a marked `event: "udp_feedback"` row
 while full intervals stall. That row has no throughput or byte deltas; a
 missing upload snapshot does not mean zero upload loss. The original
