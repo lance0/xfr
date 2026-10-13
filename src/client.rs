@@ -327,6 +327,11 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// Validate settings before DNS resolution or socket creation.
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=128).contains(&self.streams),
+            "parallel stream count must be between 1 and 128 (got {})",
+            self.streams
+        );
         if let Some(size) = self.udp_payload_size {
             anyhow::ensure!(
                 self.protocol == Protocol::Udp && !self.mtu_probe,
@@ -3490,5 +3495,41 @@ mod tests {
         let error = Client::new(config).run(None).await.unwrap_err();
 
         assert!(error.to_string().contains("PSK cannot be empty"));
+    }
+
+    #[test]
+    fn config_rejects_invalid_parallel_stream_count() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for streams in [0, 129, 255] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_err(), "accepted {streams} streams");
+            }
+            for streams in [1, 128] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_rejects_invalid_parallel_stream_count_before_network_io() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            let config = ClientConfig {
+                host: "this-host-must-not-be-resolved.invalid".to_string(),
+                protocol,
+                streams: 0,
+                ..Default::default()
+            };
+            let error = Client::new(config).run(None).await.unwrap_err();
+            assert!(error.to_string().contains("parallel stream count"));
+        }
     }
 }
