@@ -362,6 +362,16 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// Validate settings before DNS resolution or socket creation.
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=128).contains(&self.streams),
+            "parallel stream count must be between 1 and 128 (got {})",
+            self.streams
+        );
+        anyhow::ensure!(
+            self.duration.as_secs() <= u64::from(u32::MAX),
+            "test duration must be at most {} seconds (use 0 for infinite)",
+            u32::MAX
+        );
         if let Some(size) = self.udp_payload_size {
             anyhow::ensure!(
                 !self.mtu_probe,
@@ -3745,5 +3755,54 @@ mod tests {
         let error = Client::new(config).run(None).await.unwrap_err();
 
         assert!(error.to_string().contains("PSK cannot be empty"));
+    }
+
+    #[test]
+    fn config_rejects_invalid_parallel_stream_count() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for streams in [0, 129, 255] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_err(), "accepted {streams} streams");
+            }
+            for streams in [1, 128] {
+                let config = ClientConfig {
+                    protocol,
+                    streams,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn config_rejects_wrapping_protocol_duration() {
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for seconds in [u64::from(u32::MAX) + 1, u64::MAX] {
+                let config = ClientConfig {
+                    protocol,
+                    duration: Duration::from_secs(seconds),
+                    ..Default::default()
+                };
+                assert!(config.validate().is_err());
+            }
+            for duration in [
+                Duration::ZERO,
+                Duration::from_millis(500),
+                Duration::from_millis(1500),
+                Duration::new(u64::from(u32::MAX), 999_999_999),
+            ] {
+                let config = ClientConfig {
+                    protocol,
+                    duration,
+                    ..Default::default()
+                };
+                assert!(config.validate().is_ok());
+            }
+        }
     }
 }

@@ -426,7 +426,7 @@ xfr reads defaults from:
 ```toml
 [client]
 duration_secs = 10
-parallel_streams = 1
+parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
 tcp_nodelay = false
 window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
 # bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
@@ -472,7 +472,7 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
 chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
 
-The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` override the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
+The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
 The `address_family` setting accepts `ipv4`, `ipv6`, or `dual`, including existing
 aliases such as `4`, `6`, and `both`. Unknown effective values are rejected.
