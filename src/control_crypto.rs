@@ -559,6 +559,26 @@ impl ControlReader {
 }
 
 impl ControlWriter {
+    /// Encode one complete control message without writing it.
+    ///
+    /// Encoding advances the protected sequence number once. Retain this
+    /// frame across partial writes; re-encoding it or discarding it while
+    /// reusing this writer would skip a sequence number on the wire.
+    pub(crate) fn encode_message(&mut self, serialized: &str) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Plaintext => Ok(format!("{serialized}\n").into_bytes()),
+            Self::Protected { send } => {
+                let payload = send
+                    .seal(serialized.as_bytes())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let mut frame = Vec::with_capacity(4 + payload.len());
+                frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&payload);
+                Ok(frame)
+            }
+        }
+    }
+
     /// Write a serialized control message.
     ///
     /// Plaintext: appends `\n` and writes raw.
@@ -572,17 +592,7 @@ impl ControlWriter {
         W: tokio::io::AsyncWrite + Unpin,
     {
         use tokio::io::AsyncWriteExt;
-        match self {
-            Self::Plaintext => writer.write_all(format!("{serialized}\n").as_bytes()).await,
-            Self::Protected { send } => {
-                let payload = send
-                    .seal(serialized.as_bytes())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                let len = payload.len() as u32;
-                writer.write_all(&len.to_be_bytes()).await?;
-                writer.write_all(&payload).await
-            }
-        }
+        writer.write_all(&self.encode_message(serialized)?).await
     }
 }
 
@@ -675,6 +685,63 @@ mod tests {
             .unwrap(),
             "c038a4929ae7dccb6b8ad3799cb00cf544878239e3a10b983b1e9d5458cbd2a3",
         );
+    }
+
+    #[test]
+    fn control_writer_encodes_known_wire_bytes() {
+        let mut plaintext = ControlWriter::Plaintext;
+        assert_eq!(
+            plaintext.encode_message("{\"type\":\"ping\"}").unwrap(),
+            b"{\"type\":\"ping\"}\n"
+        );
+
+        let (send, _) = ControlCodec::derive_pair(
+            "client-nonce-kat",
+            "server-nonce-kat",
+            "correct horse battery",
+        )
+        .unwrap();
+        let mut protected = ControlWriter::Protected { send };
+        // Pin the existing payload vectors together with their length prefix.
+        // Consecutive frames also prove encoding consumes one sequence each.
+        assert_eq!(
+            hex::encode(&protected.encode_message("{\"type\":\"ping\"}").unwrap()),
+            "00000027000000000000000023caf9761c0896387ca9f022e5601dd02bc58916daa52e20f61b266ef84de7"
+        );
+        assert_eq!(
+            hex::encode(&protected.encode_message("second frame").unwrap()),
+            "000000240100000000000000209ac414bc87110901827d9df057b0073dcbb3d5d4f188cb972f644d"
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_control_frames_roundtrip() {
+        let (key, _, _) = test_keys();
+        for protected in [false, true] {
+            let (mut writer, mut reader) = if protected {
+                (
+                    ControlWriter::Protected {
+                        send: ControlCodec::new(&key, Direction::C2S),
+                    },
+                    ControlReader::Protected {
+                        recv: ControlCodec::new(&key, Direction::C2S),
+                    },
+                )
+            } else {
+                (ControlWriter::Plaintext, ControlReader::Plaintext)
+            };
+            let messages = ["{\"type\":\"ping\"}", "{\"message\":\"hello 🌍\"}"];
+            let mut wire = Vec::new();
+            for message in messages {
+                wire.extend_from_slice(&writer.encode_message(message).unwrap());
+            }
+            let mut input = tokio::io::BufReader::new(wire.as_slice());
+            for message in messages {
+                let mut decoded = String::new();
+                reader.read_message(&mut input, &mut decoded).await.unwrap();
+                assert_eq!(decoded.trim_end_matches('\n'), message);
+            }
+        }
     }
 
     #[test]
