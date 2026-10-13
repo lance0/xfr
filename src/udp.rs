@@ -501,11 +501,18 @@ const PACKET_TRACKER_WORD_BITS: usize = u64::BITS as usize;
 /// Older packets cannot be distinguished from duplicates and are ignored;
 /// gaps outside the window remain counted as lost. Unseen trailing packets
 /// cannot be inferred without an authoritative sender count.
+///
+/// A forward jump that would expire the whole window is held until a second
+/// packet lands within a window of it, so one stray or spoofed datagram with
+/// a far-future sequence cannot strand every real packet behind it as too
+/// old. A real outage confirms on the next packet after recovery and the
+/// held packet is replayed, so its gap is still counted in full.
 pub struct PacketTracker {
     received: u64,
     lost: u64,
     out_of_order: u64,
     highest_seen: Option<u64>,
+    unconfirmed_jump: Option<u64>,
     seen: Box<[u64]>,
 }
 
@@ -516,6 +523,7 @@ impl PacketTracker {
             lost: 0,
             out_of_order: 0,
             highest_seen: None,
+            unconfirmed_jump: None,
             seen: vec![0; PACKET_TRACKER_WINDOW / PACKET_TRACKER_WORD_BITS].into_boxed_slice(),
         }
     }
@@ -526,6 +534,34 @@ impl PacketTracker {
 
     /// Returns true only for a new packet whose sequence can still be tracked.
     fn record_unique(&mut self, sequence: u64) -> bool {
+        // Distance past the high-water mark (sequence numbering starts at 0).
+        let jump = match self.highest_seen {
+            Some(highest) => sequence.saturating_sub(highest),
+            None => sequence.saturating_add(1),
+        };
+        if jump > PACKET_TRACKER_WINDOW as u64 && !self.confirm_jump(sequence) {
+            return false;
+        }
+        self.record_tracked(sequence)
+    }
+
+    /// Accept a far jump only when it agrees with the previously held one.
+    /// ponytail: two strays within a window of each other still confirm;
+    /// authenticated data packets are the upgrade if that ever matters.
+    fn confirm_jump(&mut self, sequence: u64) -> bool {
+        match self.unconfirmed_jump.take() {
+            Some(held) if held.abs_diff(sequence) < PACKET_TRACKER_WINDOW as u64 => {
+                self.record_tracked(held);
+                true
+            }
+            _ => {
+                self.unconfirmed_jump = Some(sequence);
+                false
+            }
+        }
+    }
+
+    fn record_tracked(&mut self, sequence: u64) -> bool {
         let index = sequence as usize & (PACKET_TRACKER_WINDOW - 1);
         let word = index / PACKET_TRACKER_WORD_BITS;
         let bit = 1u64 << (index % PACKET_TRACKER_WORD_BITS);
@@ -2121,21 +2157,65 @@ mod tests {
     fn packet_tracker_large_jumps_and_maximum_sequence_are_bounded() {
         let mut tracker = PacketTracker::new();
         tracker.record(0);
-        tracker.record(1_000_000_000_000);
+        tracker.record(1_000_000_000_000); // held until confirmed
+        assert_eq!((tracker.received, tracker.lost), (1, 0));
+        assert!(tracker.record_unique(1_000_000_000_001));
         assert_eq!(tracker.lost, 999_999_999_999);
+        assert_eq!(tracker.received, 3);
         assert!(!tracker.record_unique(0));
+        assert!(!tracker.record_unique(1_000_000_000_000));
         assert!(tracker.record_unique(999_999_999_999));
         assert_eq!(tracker.lost, 999_999_999_998);
         tracker.record(u64::MAX);
-        assert!(!tracker.record_unique(u64::MAX));
         assert!(tracker.record_unique(u64::MAX - 1));
+        assert!(!tracker.record_unique(u64::MAX));
 
         let mut initial_maximum = PacketTracker::new();
         initial_maximum.record(u64::MAX);
-        assert_eq!(initial_maximum.lost, u64::MAX);
-        assert_eq!(initial_maximum.received, 1);
+        assert_eq!((initial_maximum.received, initial_maximum.lost), (0, 0));
         assert!(initial_maximum.record_unique(u64::MAX - 1));
         assert_eq!(initial_maximum.lost, u64::MAX - 1);
+        assert_eq!(initial_maximum.received, 2);
+    }
+
+    /// One far-future datagram (stray, corrupt or spoofed) must not strand
+    /// every later packet as too old; the run must count exactly as if it
+    /// never arrived, including as the very first datagram.
+    #[test]
+    fn packet_tracker_ignores_a_lone_far_future_sequence() {
+        let mut stream: Vec<u64> = (0..200_000u64).filter(|s| s % 97 != 3).collect();
+        for pair in stream.chunks_mut(50) {
+            pair.swap(0, pair.len() - 1); // reorder within the window
+        }
+        let run = |inject_at: Option<usize>| {
+            let mut tracker = PacketTracker::new();
+            for (index, &sequence) in stream.iter().enumerate() {
+                if inject_at == Some(index) {
+                    assert!(!tracker.record_unique(u64::MAX - 1));
+                }
+                tracker.record(sequence);
+            }
+            (tracker.received, tracker.lost, tracker.out_of_order)
+        };
+        let baseline = run(None);
+        assert_eq!(baseline.0, stream.len() as u64);
+        assert!(baseline.1 > 2000 && baseline.2 > 2000);
+        assert_eq!(run(Some(100_000)), baseline);
+        assert_eq!(run(Some(0)), baseline);
+    }
+
+    /// A real outage at a high packet rate is a far jump too; the packet
+    /// after recovery confirms it and the whole gap still counts as lost.
+    #[test]
+    fn packet_tracker_counts_a_long_outage_as_loss() {
+        let outage = 10_000_000 * 60; // 60 s at 10 Mpps
+        let mut tracker = PacketTracker::new();
+        for sequence in (0..1000).chain(1000 + outage..2000 + outage) {
+            tracker.record(sequence);
+        }
+        assert_eq!(tracker.received, 2000);
+        assert_eq!(tracker.lost, outage);
+        assert_eq!(tracker.out_of_order, 0);
     }
 
     #[test]
@@ -2180,6 +2260,8 @@ mod tests {
     /// late, so recycled bitmap slots are probed for sequences that were
     /// never received; forward jumps hit both sides of the window size and
     /// word boundaries, and some streams start nonzero or run into u64::MAX.
+    /// Far jumps are held until a nearby packet confirms them; the generator
+    /// both confirms and narrowly misses held jumps.
     #[test]
     fn packet_tracker_matches_unbounded_reference_over_long_streams() {
         use std::collections::HashSet;
@@ -2202,14 +2284,15 @@ mod tests {
             let mut highest: Option<u64> = None;
             let mut reordered = 0u64;
             let mut late = Vec::new();
-            let (mut repairs, mut expired, mut duplicates) = (0, 0, 0);
+            let mut held: Option<u64> = None;
+            let (mut repairs, mut expired, mut duplicates, mut confirmed) = (0, 0, 0, 0);
             for step in 0..EVENTS {
                 let top = highest.unwrap_or(start);
                 let roll = next_random() % 1000;
                 let sequence = if highest.is_none() {
                     start
-                } else if step == EVENTS - 2000 && seed == 42 {
-                    u64::MAX - 1000
+                } else if (step == EVENTS - 2000 || step == EVENTS - 1999) && seed == 42 {
+                    u64::MAX - 1000 + step as u64 % 2
                 } else if roll < 700 {
                     let skip = if next_random() % 10 == 0 {
                         1 + next_random() % 4
@@ -2233,6 +2316,10 @@ mod tests {
                         5 => next_random() % (2 * window),
                         pick => back[pick as usize],
                     })
+                } else if let Some(far) = held.filter(|_| roll < 993) {
+                    // Confirm (or narrowly miss) a held jump, as recovery would.
+                    far.saturating_sub(window / 2)
+                        .saturating_add(next_random() % (window + 64))
                 } else if roll < 999 {
                     let jump = [63, 64, 65, window - 1, window, window + 1, 2 * window];
                     top.saturating_add(match next_random() % 8 {
@@ -2243,27 +2330,48 @@ mod tests {
                     top.saturating_add(1 << 40)
                 };
 
-                let too_old = highest.is_some_and(|h| sequence <= h && h - sequence >= window);
-                let accepted = !too_old && unique.insert(sequence);
-                if accepted {
-                    if highest.is_some_and(|h| sequence < h) {
-                        reordered += 1;
-                        repairs += 1;
+                // A jump that would expire the whole window waits for a
+                // second packet within a window of it, then both count.
+                let jump =
+                    highest.map_or(sequence.saturating_add(1), |h| sequence.saturating_sub(h));
+                let mut candidates = vec![sequence];
+                if jump > window {
+                    match held.take() {
+                        Some(far) if far.abs_diff(sequence) < window => {
+                            candidates.insert(0, far);
+                            confirmed += 1;
+                        }
+                        _ => {
+                            held = Some(sequence);
+                            candidates.clear();
+                        }
                     }
-                    highest = Some(highest.map_or(sequence, |h| h.max(sequence)));
-                } else if too_old {
-                    expired += 1;
-                } else {
-                    duplicates += 1;
+                }
+                let mut accepted = false;
+                for candidate in candidates {
+                    let too_old =
+                        highest.is_some_and(|h| candidate <= h && h - candidate >= window);
+                    accepted = !too_old && unique.insert(candidate);
+                    if accepted {
+                        if highest.is_some_and(|h| candidate < h) {
+                            reordered += 1;
+                            repairs += 1;
+                        }
+                        highest = Some(highest.map_or(candidate, |h| h.max(candidate)));
+                    } else if too_old {
+                        expired += 1;
+                    } else {
+                        duplicates += 1;
+                    }
                 }
                 let context = format!("seed {seed:#x} step {step} sequence {sequence}");
                 assert_eq!(tracker.record_unique(sequence), accepted, "{context}");
                 assert_eq!(tracker.received, unique.len() as u64, "{context}");
-                let expected_lost = u128::from(highest.unwrap()) + 1 - unique.len() as u128;
+                let expected_lost = highest.map_or(0, |h| u128::from(h) + 1) - unique.len() as u128;
                 assert_eq!(u128::from(tracker.lost), expected_lost, "{context}");
                 assert_eq!(tracker.out_of_order, reordered, "{context}");
             }
-            assert!(repairs > 1000 && expired > 1000 && duplicates > 1000);
+            assert!(repairs > 1000 && expired > 1000 && duplicates > 1000 && confirmed > 100);
         }
     }
 
