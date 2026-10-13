@@ -298,6 +298,8 @@ xfr <host> --no-tui            # Plain text output
 xfr <host> -q                  # Quiet mode (summary only)
 ```
 
+The client TUI and `xfr serve --tui` report test status to the terminal through OSC 7501 ([Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)): working with a progress percentage and the current rate, paused, done with the summary, or the error. Terminals that do not implement it ignore the sequence. Plain, JSON and CSV output never emit it.
+
 ### JSON
 
 Machine-readable JSON output:

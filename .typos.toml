@@ -1,3 +1,7 @@
+[default]
+# Base64 OSC 7501 msg payloads in tests are not words.
+extend-ignore-re = ["msg=[A-Za-z0-9+/]+=*"]
+
 [default.extend-words]
 RTO = "RTO"
 Snet = "Snet"

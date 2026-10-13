@@ -1,4 +1,5 @@
 pub mod app;
+pub mod program_status;
 pub mod server;
 pub mod settings;
 pub mod theme;

@@ -1,6 +1,6 @@
 //! xfr - Modern network bandwidth testing with TUI
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +39,7 @@ use xfr::client::PauseResult;
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
 use xfr::tui::app::AppState;
+use xfr::tui::program_status::{StatusReporter, client_status};
 use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
 use xfr::tui::settings::SettingsAction;
 use xfr::tui::{App, draw};
@@ -1949,17 +1950,20 @@ async fn run_client_tui(
     stdout.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let mut status = StatusReporter::new(io::stdout().is_terminal());
 
     // The loop applies Settings edits to `config`, so afterwards it
     // describes the run that produced the final result.
     let result = run_tui_loop(
         &mut terminal,
+        &mut status,
         &mut config,
         timestamp_format,
         prefs,
         update_disabled,
     )
     .await;
+    status.finish(terminal.backend_mut());
 
     // Restore terminal
     drop(_guard);
@@ -2263,6 +2267,7 @@ async fn restart_tui_run(
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    status: &mut StatusReporter,
     config: &mut ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
@@ -2368,6 +2373,8 @@ async fn run_tui_loop(
             terminal.draw(|f| draw(f, &app))?;
             last_drawn = Some(fingerprint);
         }
+        let (state, progress, msg) = client_status(&app);
+        status.update(terminal.backend_mut(), state, progress, Some(&msg));
 
         // Handle events with timeout
         if event::poll(Duration::from_millis(50))?
@@ -2568,6 +2575,7 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
     stdout.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let mut status = StatusReporter::new(io::stdout().is_terminal());
 
     let server = Server::new(config);
     let server_handle = tokio::spawn(async move { server.run().await });
@@ -2583,6 +2591,15 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
         if last_drawn != Some(fingerprint) {
             terminal.draw(|f| server_draw(f, &app, &theme))?;
             last_drawn = Some(fingerprint);
+        }
+        match app.active_tests.len() {
+            0 => status.update(terminal.backend_mut(), "idle", None, None),
+            n => status.update(
+                terminal.backend_mut(),
+                "working",
+                None,
+                Some(&format!("{n} active test(s)")),
+            ),
         }
 
         // Handle keyboard events with timeout
@@ -2637,6 +2654,7 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
             break;
         }
     }
+    status.finish(terminal.backend_mut());
 
     // Restore terminal
     drop(_guard);
