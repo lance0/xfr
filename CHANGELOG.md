@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **An idle QUIC peer could hold a server handler slot indefinitely** — after the TLS handshake the server waited without a deadline for the client to open its control stream, and QUIC keepalives kept such a connection open, so a peer that connected and sent nothing tied up one of the concurrent-handler slots for as long as it stayed connected. The wait is now bounded by the 30-second handshake timeout.
 
 ## [0.10.1] - 2026-09-04
 
