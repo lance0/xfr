@@ -235,6 +235,7 @@ Bind the client to a specific local IP (useful for multi-homed hosts):
 xfr <host> --bind 192.168.1.100         # Bind to specific IPv4
 xfr <host> --bind 10.0.0.1:0            # IP with auto-assigned port
 xfr <host> --bind [::1]                 # IPv6 address
+xfr <host> --bind fe80::1%eth0          # IPv6 link-local (zone required)
 ```
 
 **Note:** Plain `--bind IP:PORT` is still not supported for TCP control sockets. Use `--bind IP` for source-IP selection, or combine `--bind IP --cport PORT` to pin TCP data-stream source ports.
@@ -283,6 +284,8 @@ xfr serve -6                   # IPv6 only
 xfr <host> -4                  # Client: force IPv4
 xfr <host> -6                  # Client: force IPv6
 ```
+
+IPv6 link-local addresses need a zone naming the interface, as in `xfr fe80::2%eth0` or `xfr [fe80::2%eth0]`; a numeric interface index (`%3`) also works, and is the only form accepted on non-Unix platforms. The zone is carried through to every control, data and QUIC socket, which makes a direct cable between two machines testable with no IP configuration at all. `xfr discover` prints link-local answers with their zone. `xfr serve --bind` takes a plain IP, so serve link-local clients from the default wildcard listener.
 
 IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically normalized to their IPv4 form when comparing peer IPs. This ensures consistent behavior in dual-stack environments, such as when validating that a DataHello connection comes from the same client as the control connection.
 

@@ -875,21 +875,23 @@ fn parse_bind_address(s: &str) -> anyhow::Result<std::net::SocketAddr> {
         return Ok(addr);
     }
 
-    // Try parsing as IP only (use port 0 for auto-assign)
-    if let Ok(ip) = s.parse::<std::net::IpAddr>() {
-        return Ok(SocketAddr::new(ip, 0));
-    }
-
-    // Handle bracketed IPv6 without port: [::1] -> ::1
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = &s[1..s.len() - 1];
-        if let Ok(ip) = inner.parse::<std::net::IpAddr>() {
-            return Ok(SocketAddr::new(ip, 0));
-        }
+    // IP only (port 0 = auto-assign), [IPv6]:port with a zone name, or an
+    // IPv6 zone on a link-local address (fe80::1%eth0).
+    let (host, port) = match s.strip_prefix('[').and_then(|r| r.split_once("]:")) {
+        Some((host, port)) => (
+            host,
+            port.parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("Invalid bind port in {}", s))?,
+        ),
+        None => (s, 0),
+    };
+    if let Some(addr) = xfr::net::parse_ip_literal(host, port)? {
+        return Ok(addr);
     }
 
     anyhow::bail!(
-        "Invalid bind address: {}. Use IP or IP:port format (for IPv6: [::1] or [::1]:port).",
+        "Invalid bind address: {}. Use IP or IP:port format \
+         (for IPv6: [::1], [::1]:port, or fe80::1%eth0 for link-local).",
         s
     )
 }
@@ -1466,7 +1468,7 @@ async fn main() -> Result<()> {
                         );
                     }
                     // --bind IP + --cport PORT → combine
-                    bind_addr = Some(std::net::SocketAddr::new(addr.ip(), port));
+                    bind_addr = Some(xfr::net::with_port(*addr, port));
                 } else {
                     // --cport only → use unspecified IP with the given port
                     let ip = if client_address_family == xfr::net::AddressFamily::V6Only {
@@ -4025,6 +4027,25 @@ mod tests {
         // Invalid address should fail
         assert!(parse_bind_address("invalid").is_err());
         assert!(parse_bind_address("[invalid]").is_err());
+        assert!(parse_bind_address("[::1]:notaport").is_err());
+    }
+
+    #[test]
+    fn test_parse_bind_address_ipv6_zone() {
+        let scope = |addr: std::net::SocketAddr| match addr {
+            std::net::SocketAddr::V6(v6) => (v6.scope_id(), v6.port()),
+            _ => panic!("expected IPv6"),
+        };
+        assert_eq!(scope(parse_bind_address("fe80::1%3").unwrap()), (3, 0));
+        assert_eq!(scope(parse_bind_address("[fe80::1%3]").unwrap()), (3, 0));
+        assert_eq!(
+            scope(parse_bind_address("[fe80::1%3]:5000").unwrap()),
+            (3, 5000)
+        );
+        #[cfg(target_os = "linux")]
+        assert_ne!(scope(parse_bind_address("[fe80::1%lo]:5000").unwrap()).0, 0);
+        let err = parse_bind_address("fe80::1%xfr-no-such-if0").unwrap_err();
+        assert!(err.to_string().contains("xfr-no-such-if0"), "{err}");
     }
 
     #[test]

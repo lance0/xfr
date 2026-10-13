@@ -8,6 +8,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct DiscoveredServer {
     pub ip: IpAddr,
+    /// IPv6 zone (interface) for a link-local `ip`, as `xfr <ip>%<zone>` takes it.
+    pub zone: Option<String>,
     pub port: u16,
     pub hostname: Option<String>,
     pub version: Option<String>,
@@ -66,6 +68,25 @@ mod mdns_impl {
 
     const SERVICE_TYPE: &str = "_xfr._tcp.local.";
 
+    /// The interface a link-local IPv6 answer arrived on: without it the
+    /// printed address cannot be connected to. Names need `if_nametoindex`,
+    /// which xfr only uses on unix, so other platforms get the index.
+    fn link_local_zone(addr: &mdns_sd::ScopedIp) -> Option<String> {
+        match addr {
+            mdns_sd::ScopedIp::V6(v6)
+                if v6.addr().is_unicast_link_local() && v6.scope_id().index != 0 =>
+            {
+                let id = v6.scope_id();
+                Some(if cfg!(unix) && !id.name.is_empty() {
+                    id.name.clone()
+                } else {
+                    id.index.to_string()
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub async fn discover(timeout: Duration) -> anyhow::Result<Vec<DiscoveredServer>> {
         let mdns = ServiceDaemon::new()?;
         let receiver = mdns.browse(SERVICE_TYPE)?;
@@ -93,6 +114,7 @@ mod mdns_impl {
                     for addr in info.get_addresses() {
                         let server = DiscoveredServer {
                             ip: addr.to_ip_addr(),
+                            zone: link_local_zone(addr),
                             port: info.get_port(),
                             hostname: Some(info.get_hostname().to_string()),
                             version: info
@@ -102,16 +124,10 @@ mod mdns_impl {
                         };
 
                         // Avoid duplicates (same IP and port)
-                        if !servers
-                            .iter()
-                            .any(|s: &DiscoveredServer| s.ip == server.ip && s.port == server.port)
-                        {
-                            info!(
-                                "Found server: {}:{} ({})",
-                                server.ip,
-                                server.port,
-                                server.hostname.as_deref().unwrap_or("unknown")
-                            );
+                        if !servers.iter().any(|s: &DiscoveredServer| {
+                            s.ip == server.ip && s.zone == server.zone && s.port == server.port
+                        }) {
+                            info!("Found server: {}", server);
                             servers.push(server);
                         }
                     }
@@ -201,7 +217,11 @@ pub use fallback::discover;
 
 impl std::fmt::Display for DiscoveredServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.ip, self.port)?;
+        write!(f, "{}", self.ip)?;
+        if let Some(ref zone) = self.zone {
+            write!(f, "%{}", zone)?;
+        }
+        write!(f, ":{}", self.port)?;
         if let Some(ref hostname) = self.hostname {
             write!(f, " ({})", hostname)?;
         }
@@ -214,7 +234,19 @@ impl std::fmt::Display for DiscoveredServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{DNS_LABEL_MAX, dns_label};
+    use super::{DNS_LABEL_MAX, DiscoveredServer, dns_label};
+
+    #[test]
+    fn display_keeps_link_local_zone() {
+        let server = DiscoveredServer {
+            ip: "fe80::2".parse().unwrap(),
+            zone: Some("eth0".to_string()),
+            port: 5201,
+            hostname: None,
+            version: None,
+        };
+        assert_eq!(server.to_string(), "fe80::2%eth0:5201");
+    }
 
     #[test]
     fn short_hostname_is_unchanged() {

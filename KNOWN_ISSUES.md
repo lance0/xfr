@@ -118,14 +118,6 @@ In UDP reverse/bidir mode, the server uses the source address of the first recei
 
 **Mitigation:** Use `--psk` authentication on untrusted networks. The control-plane PSK challenge validates client identity before data transfer begins.
 
-### IPv6 Zone IDs Not Supported
-
-IPv6 link-local addresses with zone IDs (e.g., `fe80::1%eth0`) are not supported in socket addresses.
-
-**Impact:** Cannot bind to or connect to link-local addresses that require zone specification.
-
-**Workaround:** Use global or unique-local IPv6 addresses instead.
-
 ---
 
 ## Previously Known Issues (Resolved)
@@ -146,6 +138,7 @@ The following issues have been fixed and are listed here for reference.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 - **UDP payload size hardcoded to 1400 bytes** - every UDP datagram fragmented on paths with an MTU below 1428 bytes (1448 over IPv6), including WireGuard's 1420 default (issue #213). `-l/--length` now sets the datagram size (16–65507 bytes) for all streams and directions; servers advertise `udp_payload_size_v1`, and the client refuses an explicit size against an older server. The default stays 1400.
 - **UDP reverse mode send errors hidden from the client** - in `-u -R` and the server half of `--bidir`, the server only logged failed sends, so the client saw lower throughput with no explanation. The final result now carries `server_udp_send_errors` (count plus the last error message; teardown-window errors excluded), and plain output, `--json` and the TUI history report it. The client's own failed sends in upload/bidir are reported the same way as `client_udp_send_errors`. Older peers ignore or omit the field.
+- **IPv6 zone IDs dropped** - `xfr fe80::1%eth0` parsed the zone and then discarded it, so every link-local connection failed with `Invalid argument` (QUIC hung until timeout). The zone (interface name, or numeric index) now becomes the address's scope id and survives into the control connection, TCP/UDP data sockets, the MTU probe and the QUIC endpoint; client `--bind` accepts `fe80::1%eth0` too, and `xfr discover` prints the zone for link-local answers. Interface names need a Unix host; elsewhere use the numeric index (`%12`). `xfr serve --bind` still takes a plain IP — leave it unset to serve link-local clients on the wildcard.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 
 ---

@@ -129,7 +129,7 @@ Force IPv4 only
 Force IPv6 only
 .TP
 .BI \-\-bind " ADDR"
-Local address to bind to (e.g., 192.168.1.100 or ::1)
+Local address to bind to (e.g., 192.168.1.100, ::1, or fe80::1%eth0 for an IPv6 link-local address)
 .TP
 .BI \-\-cport " PORT"
 Client source port for firewall traversal (UDP/QUIC/TCP data streams)
@@ -337,6 +337,9 @@ UDP test at 1 Gbps
 .TP
 .B xfr 192.168.1.1 \-\-quic
 QUIC encrypted test
+.TP
+.B xfr fe80::2%eth0
+Test over an IPv6 link-local address; the zone names the interface (or its numeric index, e.g. %3) and is required for link-local hosts
 .TP
 .B xfr 192.168.1.1 \-\-json \-\-no\-tui
 JSON output for scripting
