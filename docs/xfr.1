@@ -199,7 +199,7 @@ Use a named server preset from the config file. Preset \fBallowed_clients\fR ent
 Max concurrent tests per IP
 .TP
 .BI \-\-rate\-limit\-window " DURATION"
-Rate limit time window (default: 60s)
+Rate limit time window in whole seconds, at least 1 (default: \fBrate_limit_window\fR from the config file, else 60s)
 .TP
 .BI \-\-allow " IP/SUBNET"
 Allow IP or subnet (can be repeated).
