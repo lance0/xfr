@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **`-4` and `-6` together, or an unknown `address_family` in `config.toml`, no longer pick a family silently** — `-4 -6` used to mean IPv4 and a typo such as `address_family = "ip4"` fell back to dual-stack, which on `xfr serve` widens the listener to both families. Contradictory flags are now a usage error and an unrecognised config value fails with the key and the accepted values (`ipv4`, `ipv6`, `dual`, plus the existing aliases); an explicit `-4`/`-6` or `serve --bind` still overrides the config.
 
 ## [0.10.1] - 2026-09-04
 
