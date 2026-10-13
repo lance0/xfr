@@ -3523,11 +3523,6 @@ mod tests {
         assert_eq!(result.throughput_mbps, 0.0);
     }
 
-    /// Bidir UDP: the download half of the server's split is its send-side
-    /// counter and must be replaced with the client's receive totals. The
-    /// upload half is already receiver-truth (counted by the server as it
-    /// arrived) and must be preserved; the combined totals are rebuilt from
-    /// the corrected pair.
     #[test]
     fn bidir_stream_overlay_uses_ids_and_keeps_unknown_upload_unknown() {
         let mut streams = vec![
@@ -3674,6 +3669,11 @@ mod tests {
         assert_eq!(result.udp_stats.unwrap().lost_percent, 10.0);
     }
 
+    /// Bidir UDP: the download half of the server's split is its send-side
+    /// counter and must be replaced with the client's receive totals. The
+    /// upload half is already receiver-truth (counted by the server as it
+    /// arrived) and must be preserved; the combined totals are rebuilt from
+    /// the corrected pair.
     #[test]
     fn overlay_udp_bidir_result_replaces_download_half_only() {
         let stats = test_stats_with_recv_bytes(&[10_000_000, 5_000_000]);
