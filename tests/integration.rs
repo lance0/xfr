@@ -3442,94 +3442,6 @@ struct RawControl {
     server_capabilities: Vec<String>,
 }
 
-#[tokio::test]
-async fn test_udp_custom_payload_legacy_ports() {
-    let port = get_test_port();
-    let server = start_test_server(port).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    for size in [1368, 8192] {
-        for direction in [Direction::Upload, Direction::Download, Direction::Bidir] {
-            let capabilities = xfr::protocol::supported_capabilities_without(
-                xfr::protocol::SINGLE_PORT_UDP_CAPABILITY,
-            );
-            let mut control = RawControl::connect(port, capabilities).await;
-            let (ports, token) = control
-                .start_udp_test_with_payload(1, direction, Some(size))
-                .await;
-            assert!(token.is_none());
-            assert_eq!(ports.len(), 1);
-            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            socket.connect(("127.0.0.1", ports[0])).await.unwrap();
-            if direction == Direction::Download {
-                socket.send(&[0]).await.unwrap();
-            } else {
-                let mut packet = vec![0; usize::from(size)];
-                for sequence in 0..10 {
-                    xfr::udp::UdpPacketHeader {
-                        sequence,
-                        timestamp_us: 1,
-                    }
-                    .encode(&mut packet);
-                    socket.send(&packet).await.unwrap();
-                }
-            }
-            if direction != Direction::Upload {
-                let mut packet = vec![0; xfr::udp::MAX_UDP_PAYLOAD_SIZE];
-                let received = timeout(Duration::from_secs(5), socket.recv(&mut packet))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(received, usize::from(size), "legacy server sender size");
-            }
-            let result = control.wait_for_result().await;
-            if direction != Direction::Download {
-                let stats = result.udp_stats.unwrap();
-                assert!(stats.packets_received > 0);
-                assert_eq!(stats.packet_size, Some(u32::from(size)));
-            }
-        }
-    }
-    server.abort();
-}
-
-#[tokio::test]
-async fn test_udp_payload_size_rejects_invalid_wire_requests() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use xfr::protocol::ControlMessage;
-    let port = get_test_port();
-    let server = start_test_server(port).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    for (protocol, size, probe) in [
-        ("udp", 0, false),
-        ("udp", 15, false),
-        ("udp", 65508, false),
-        ("tcp", 1368, false),
-        ("udp", 1368, true),
-    ] {
-        let mut control = RawControl::connect(port, xfr::protocol::supported_capabilities()).await;
-        let request = serde_json::json!({
-            "type": "test_start", "id": "invalid-payload", "protocol": protocol,
-            "streams": 1, "duration_secs": 1, "direction": "upload",
-            "udp_payload_size": size, "mtu_probe": probe,
-        });
-        control
-            .writer
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        timeout(Duration::from_secs(5), control.reader.read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap();
-        match ControlMessage::deserialize(line.trim()).unwrap() {
-            ControlMessage::Error { message } => assert!(message.contains("UDP payload size")),
-            other => panic!("expected invalid payload rejection, got {other:?}"),
-        }
-    }
-    server.abort();
-}
-
 impl RawControl {
     async fn connect(port: u16, capabilities: Vec<String>) -> Self {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -3639,6 +3551,94 @@ impl RawControl {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_udp_custom_payload_legacy_ports() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for size in [1368, 8192] {
+        for direction in [Direction::Upload, Direction::Download, Direction::Bidir] {
+            let capabilities = xfr::protocol::supported_capabilities_without(
+                xfr::protocol::SINGLE_PORT_UDP_CAPABILITY,
+            );
+            let mut control = RawControl::connect(port, capabilities).await;
+            let (ports, token) = control
+                .start_udp_test_with_payload(1, direction, Some(size))
+                .await;
+            assert!(token.is_none());
+            assert_eq!(ports.len(), 1);
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            socket.connect(("127.0.0.1", ports[0])).await.unwrap();
+            if direction == Direction::Download {
+                socket.send(&[0]).await.unwrap();
+            } else {
+                let mut packet = vec![0; usize::from(size)];
+                for sequence in 0..10 {
+                    xfr::udp::UdpPacketHeader {
+                        sequence,
+                        timestamp_us: 1,
+                    }
+                    .encode(&mut packet);
+                    socket.send(&packet).await.unwrap();
+                }
+            }
+            if direction != Direction::Upload {
+                let mut packet = vec![0; xfr::udp::MAX_UDP_PAYLOAD_SIZE];
+                let received = timeout(Duration::from_secs(5), socket.recv(&mut packet))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(received, usize::from(size), "legacy server sender size");
+            }
+            let result = control.wait_for_result().await;
+            if direction != Direction::Download {
+                let stats = result.udp_stats.unwrap();
+                assert!(stats.packets_received > 0);
+                assert_eq!(stats.packet_size, Some(u32::from(size)));
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_udp_payload_size_rejects_invalid_wire_requests() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use xfr::protocol::ControlMessage;
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (protocol, size, probe) in [
+        ("udp", 0, false),
+        ("udp", 15, false),
+        ("udp", 65508, false),
+        ("tcp", 1368, false),
+        ("udp", 1368, true),
+    ] {
+        let mut control = RawControl::connect(port, xfr::protocol::supported_capabilities()).await;
+        let request = serde_json::json!({
+            "type": "test_start", "id": "invalid-payload", "protocol": protocol,
+            "streams": 1, "duration_secs": 1, "direction": "upload",
+            "udp_payload_size": size, "mtu_probe": probe,
+        });
+        control
+            .writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        timeout(Duration::from_secs(5), control.reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        match ControlMessage::deserialize(line.trim()).unwrap() {
+            ControlMessage::Error { message } => assert!(message.contains("UDP payload size")),
+            other => panic!("expected invalid payload rejection, got {other:?}"),
+        }
+    }
+    server.abort();
 }
 
 /// The TestAck shape must match what was negotiated: a server that
