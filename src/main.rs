@@ -2519,57 +2519,6 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
 mod tests {
     use super::*;
 
-    #[test]
-    fn tui_protocol_changes_keep_udp_length_as_a_preference() {
-        let mut config = ClientConfig {
-            protocol: Protocol::Udp,
-            udp_payload_size: Some(1368),
-            ..Default::default()
-        };
-        for protocol in [Protocol::Tcp, Protocol::Quic, Protocol::Udp] {
-            config.protocol = protocol;
-            let active = tui_run_config(&config);
-            assert!(
-                active.validate().is_ok(),
-                "{protocol}: incompatible UDP payload setting"
-            );
-            assert_eq!(
-                active.udp_payload_size,
-                (protocol == Protocol::Udp).then_some(1368)
-            );
-            assert_eq!(
-                config.udp_payload_size,
-                Some(1368),
-                "keep the choice for switching back"
-            );
-        }
-    }
-
-    #[test]
-    fn tui_protocol_changes_scope_tcp_only_send_options() {
-        let mut config = ClientConfig {
-            protocol: Protocol::Tcp,
-            mptcp: true,
-            zerocopy: ZerocopyMode::Requested,
-            ..Default::default()
-        };
-        for protocol in [Protocol::Udp, Protocol::Quic, Protocol::Tcp] {
-            config.protocol = protocol;
-            let active = tui_run_config(&config);
-            assert_eq!(active.mptcp, protocol == Protocol::Tcp);
-            assert_eq!(
-                active.zerocopy,
-                if protocol == Protocol::Tcp {
-                    ZerocopyMode::Requested
-                } else {
-                    ZerocopyMode::Off
-                }
-            );
-            assert!(config.mptcp);
-            assert_eq!(config.zerocopy, ZerocopyMode::Requested);
-        }
-    }
-
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -2805,6 +2754,57 @@ mod tests {
 
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn tui_protocol_changes_keep_udp_length_as_a_preference() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        };
+        for protocol in [Protocol::Tcp, Protocol::Quic, Protocol::Udp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert!(
+                active.validate().is_ok(),
+                "{protocol}: incompatible UDP payload setting"
+            );
+            assert_eq!(
+                active.udp_payload_size,
+                (protocol == Protocol::Udp).then_some(1368)
+            );
+            assert_eq!(
+                config.udp_payload_size,
+                Some(1368),
+                "keep the choice for switching back"
+            );
+        }
+    }
+
+    #[test]
+    fn tui_protocol_changes_scope_tcp_only_send_options() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Tcp,
+            mptcp: true,
+            zerocopy: ZerocopyMode::Requested,
+            ..Default::default()
+        };
+        for protocol in [Protocol::Udp, Protocol::Quic, Protocol::Tcp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert_eq!(active.mptcp, protocol == Protocol::Tcp);
+            assert_eq!(
+                active.zerocopy,
+                if protocol == Protocol::Tcp {
+                    ZerocopyMode::Requested
+                } else {
+                    ZerocopyMode::Off
+                }
+            );
+            assert!(config.mptcp);
+            assert_eq!(config.zerocopy, ZerocopyMode::Requested);
+        }
     }
 
     #[test]
