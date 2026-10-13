@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+// The active clock runs on Tokio's clock so paused-time tests can drive it.
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::control_crypto::ControlWriter;
@@ -256,11 +258,10 @@ async fn run_inner<W: AsyncWrite + Unpin>(
     sending_done_rx: &mut mpsc::Receiver<()>,
     recv_done_rx: &mut mpsc::Receiver<()>,
 ) -> anyhow::Result<Reporting> {
-    // Start the active clock before the timer so a tick never lands just
-    // short of the finite deadline it coincides with.
+    // Ticks share the active clock's origin, so with no pause the final tick
+    // lands exactly on the finite deadline.
     let start = Instant::now();
-    let mut timer =
-        tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
+    let mut timer = tokio::time::interval_at(start + STATS_INTERVAL, STATS_INTERVAL);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut paused_total = Duration::ZERO;
     let mut pause_start = None;
@@ -284,7 +285,9 @@ async fn run_inner<W: AsyncWrite + Unpin>(
         let duration_until = if config.duration.is_zero() || pause_start.is_some() {
             None
         } else {
-            Some(tokio::time::Instant::now() + config.duration.saturating_sub(elapsed))
+            // Pauses can leave the deadline between ticks; waking on it keeps
+            // the Result duration from overshooting by up to one interval.
+            Some(start + paused_total + config.duration)
         };
 
         tokio::select! {
@@ -523,7 +526,7 @@ mod tests {
         }
     }
 
-    fn interval(timestamp: Instant, bytes: u64) -> IntervalStats {
+    fn interval(timestamp: std::time::Instant, bytes: u64) -> IntervalStats {
         IntervalStats {
             timestamp,
             bytes,
@@ -551,7 +554,7 @@ mod tests {
     #[test]
     fn capture_uses_predecessor_before_recording_new_interval() {
         let stats = TestStats::new("capture".to_owned(), 2);
-        let predecessor = Instant::now() - Duration::from_secs(2);
+        let predecessor = std::time::Instant::now() - Duration::from_secs(2);
         stats.streams[0]
             .intervals
             .lock()
@@ -574,7 +577,7 @@ mod tests {
 
     #[test]
     fn coalescing_keeps_empty_spans_and_latest_gauges() {
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         let mut first = interval(now, 1_000_000);
         first.retransmits = 2;
         first.lost = 3;
@@ -639,7 +642,7 @@ mod tests {
 
     #[test]
     fn coalescing_saturates_delta_counters() {
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         let mut maximum = interval(now, u64::MAX);
         maximum.retransmits = u64::MAX;
         maximum.lost = u64::MAX;
@@ -811,11 +814,10 @@ mod tests {
         assert!(reporting.current.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn finite_deadline_excludes_pause_while_writer_is_blocked() {
-        // The production active clock uses std::Instant; this case deliberately
-        // uses real time rather than Tokio's virtual clock.
         let duration = Duration::from_secs(2);
+        // Returns once the first tick (t = 1 s) starts a frame that then blocks.
         let mut reporter = blocked_reporter(Protocol::Tcp, Direction::Upload, duration).await;
         reporter.commands.send(ControlCommand::Pause).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), reporter.paused.changed())
@@ -823,8 +825,10 @@ mod tests {
             .expect("Pause must be processed while the writer is stalled")
             .unwrap();
         assert!(*reporter.paused.borrow_and_update());
+        // Hold the pause for a non-whole interval, so the active deadline
+        // falls between ticks: 1 s active before the pause, 1 s after it.
         assert!(
-            tokio::time::timeout(Duration::from_millis(1_200), reporter.cancelled.changed())
+            tokio::time::timeout(Duration::from_millis(1_500), reporter.cancelled.changed())
                 .await
                 .is_err(),
             "the original wall-clock deadline must not expire a paused test"
@@ -839,15 +843,17 @@ mod tests {
             .expect("Resume must be processed while the writer is stalled")
             .unwrap();
         assert!(!*reporter.paused.borrow());
-        tokio::time::timeout(Duration::from_secs(2), reporter.cancelled.changed())
+        // The next tick is 1.5 s away; only the deadline wakes the loop at 1 s.
+        tokio::time::timeout(Duration::from_millis(1_100), reporter.cancelled.changed())
             .await
-            .expect("resumed finite test must reach its active deadline")
+            .expect("resumed finite test must stop at its active deadline, not the next tick")
             .unwrap();
         assert!(*reporter.cancelled.borrow());
         let reporting = (&mut reporter.task).await.unwrap().unwrap();
-        assert!(reporting.paused_total >= Duration::from_millis(1_200));
+        assert!(reporting.paused_total >= Duration::from_millis(1_500));
         assert!(reporting.pause_start.is_none());
-        assert!(reporting.duration_ms() >= duration.as_millis() as u64);
+        let duration_ms = reporting.duration_ms();
+        assert!((2_000..2_050).contains(&duration_ms), "{duration_ms}");
         assert!(reporting.cancelled.is_none());
         assert!(reporting.current.is_some());
     }
