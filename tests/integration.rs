@@ -33,6 +33,63 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
 }
 
 #[tokio::test]
+async fn test_cli_json_output_is_parseable_without_quiet() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for mode in ["--json", "--json-stream"] {
+        let output = timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+                .args([
+                    "127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "-u",
+                    "-b",
+                    "2M",
+                    "-t",
+                    "2",
+                    "--no-tui",
+                    mode,
+                ])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if mode == "--json" {
+            let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout)
+                .expect("summary stdout must contain exactly one JSON document");
+            assert!(result.bytes_total > 0);
+        } else {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let records: Vec<serde_json::Value> = stdout
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("every stream line is a JSON object"))
+                .collect();
+            assert!(
+                records.len() >= 2,
+                "stream must retain live interval records"
+            );
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.get("elapsed_secs").is_some())
+            );
+            assert!(records.last().unwrap()["bytes_total"].as_u64().unwrap() > 0);
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_tcp_single_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;

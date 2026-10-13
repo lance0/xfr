@@ -1471,7 +1471,9 @@ async fn run_client_plain(
     }
 
     let omit_secs = opts.omit_secs;
-    let quiet = opts.quiet;
+    // Summary JSON is one document; interval and feedback rows belong to
+    // the streaming modes and must not contaminate redirected JSON output.
+    let quiet = opts.quiet || opts.json;
     let json_stream = opts.json_stream;
     let csv = opts.csv;
     let interval_secs = opts.interval_secs;
@@ -1755,7 +1757,9 @@ async fn run_client_plain(
     if interrupted {
         eprintln!("Warning: partial results (server did not respond to cancel)");
     }
-    let output_str = if opts.json || opts.json_stream {
+    let output_str = if opts.json_stream {
+        serde_json::to_string(&result)?
+    } else if opts.json {
         output_json(&result)?
     } else if opts.csv {
         output_csv(&result)

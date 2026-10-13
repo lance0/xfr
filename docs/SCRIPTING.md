@@ -101,6 +101,9 @@ Notes:
 
 One JSON object per line, per interval:
 
+The stream ends with a summary object on one line, containing `bytes_total`,
+`duration_ms`, and `streams`.
+
 ```bash
 xfr <host> --json-stream --no-tui
 ```
