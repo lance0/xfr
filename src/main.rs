@@ -1259,7 +1259,13 @@ async fn main() -> Result<()> {
                     .and_then(|s| parse_size(s).ok())
             });
 
-            let json_output = cli.json || file_config.client.json_output.unwrap_or(false);
+            // An explicit --json-stream or --csv overrides a config-file JSON
+            // default; otherwise the summary-JSON mode would suppress the
+            // interval rows the user asked to stream.
+            let json_output = cli.json
+                || (!cli.json_stream
+                    && !cli.csv
+                    && file_config.client.json_output.unwrap_or(false));
             let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
 
             // Determine timestamp format (CLI > config > default)
