@@ -1904,7 +1904,7 @@ fn tui_fallback_result(bytes: u64, elapsed_ms: u64) -> Option<xfr::protocol::Tes
 }
 
 fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
-    let client = Arc::new(Client::new(config.clone()));
+    let client = Arc::new(Client::new(tui_run_config(config)));
     let client_for_task = client.clone();
     let (progress_tx, progress_rx) = mpsc::channel::<TestProgress>(100);
     let handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
@@ -1913,6 +1913,21 @@ fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
         handle,
         progress_rx,
     }
+}
+
+fn tui_run_config(config: &ClientConfig) -> ClientConfig {
+    // Keep the user's transport-specific preferences in the settings
+    // config so switching back restores them. Only the active run drops
+    // options that do not apply to the newly selected protocol.
+    let mut active = config.clone();
+    if active.protocol != Protocol::Udp {
+        active.udp_payload_size = None;
+    }
+    if active.protocol != Protocol::Tcp {
+        active.mptcp = false;
+        active.zerocopy = ZerocopyMode::Off;
+    }
+    active
 }
 
 async fn finish_tui_run(run: TuiRun) -> Result<xfr::protocol::TestResult> {
@@ -2503,6 +2518,57 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tui_protocol_changes_keep_udp_length_as_a_preference() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            udp_payload_size: Some(1368),
+            ..Default::default()
+        };
+        for protocol in [Protocol::Tcp, Protocol::Quic, Protocol::Udp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert!(
+                active.validate().is_ok(),
+                "{protocol}: incompatible UDP payload setting"
+            );
+            assert_eq!(
+                active.udp_payload_size,
+                (protocol == Protocol::Udp).then_some(1368)
+            );
+            assert_eq!(
+                config.udp_payload_size,
+                Some(1368),
+                "keep the choice for switching back"
+            );
+        }
+    }
+
+    #[test]
+    fn tui_protocol_changes_scope_tcp_only_send_options() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Tcp,
+            mptcp: true,
+            zerocopy: ZerocopyMode::Requested,
+            ..Default::default()
+        };
+        for protocol in [Protocol::Udp, Protocol::Quic, Protocol::Tcp] {
+            config.protocol = protocol;
+            let active = tui_run_config(&config);
+            assert_eq!(active.mptcp, protocol == Protocol::Tcp);
+            assert_eq!(
+                active.zerocopy,
+                if protocol == Protocol::Tcp {
+                    ZerocopyMode::Requested
+                } else {
+                    ZerocopyMode::Off
+                }
+            );
+            assert!(config.mptcp);
+            assert_eq!(config.zerocopy, ZerocopyMode::Requested);
+        }
+    }
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
