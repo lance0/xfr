@@ -627,7 +627,12 @@ fn resolve_client_network_options(
 ) -> Result<ResolvedClientNetworkOptions, String> {
     let bitrate = match cli_bitrate {
         Some(bitrate) => Some(bitrate),
-        None => defaults.bitrate.as_deref().map(parse_bitrate).transpose()?,
+        None => defaults
+            .bitrate
+            .as_deref()
+            .map(parse_bitrate)
+            .transpose()
+            .map_err(|e| format!("bitrate: {e}"))?,
     };
 
     Ok(ResolvedClientNetworkOptions {
@@ -636,7 +641,8 @@ fn resolve_client_network_options(
         dscp: cli_dscp.or_else(|| defaults.dscp.clone()),
         interval_secs: validate_report_interval(
             cli_interval.or(defaults.interval_secs).unwrap_or(1.0),
-        )?,
+        )
+        .map_err(|e| format!("interval_secs: {e}"))?,
         bind: cli_bind.or_else(|| defaults.bind.clone()),
         cport: cli_cport.or(defaults.cport),
     })
@@ -1208,7 +1214,7 @@ async fn main() -> Result<()> {
                 cli.cport,
                 &file_config.client,
             )
-            .map_err(|e| anyhow::anyhow!("invalid [client] settings: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
 
             if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
                 eprintln!("Warning: {msg}");
