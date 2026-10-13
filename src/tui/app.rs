@@ -139,6 +139,7 @@ pub struct App {
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
     pub theme_index: usize,
+    theme_touched: bool,
 
     // Settings modal state
     pub settings: SettingsState,
@@ -271,6 +272,7 @@ impl App {
             update_available: None,
             server_version: None,
             pause_started_at: None,
+            theme_touched: false,
         }
     }
 
@@ -311,13 +313,11 @@ impl App {
         timestamp_format: TimestampFormat,
         theme_name: &str,
     ) -> Self {
-        let theme_list = Theme::list();
-        let theme_index = theme_list
-            .iter()
-            .position(|&t| t == theme_name)
-            .unwrap_or(0);
         let theme = Theme::by_name(theme_name);
-
+        let theme_index = Theme::list()
+            .iter()
+            .position(|&name| name == theme.name())
+            .unwrap_or(0);
         let mut app = Self::new(
             host,
             port,
@@ -340,12 +340,14 @@ impl App {
         self.theme_index = (self.theme_index + 1) % theme_list.len();
         self.theme = Theme::by_name(theme_list[self.theme_index]);
         self.settings.theme_index = self.theme_index;
+        self.theme_touched = true;
     }
 
     /// Set theme by index (from settings modal)
     pub fn set_theme_index(&mut self, index: usize) {
         let theme_list = Theme::list();
         if index < theme_list.len() {
+            self.theme_touched |= self.theme_index != index;
             self.theme_index = index;
             self.theme = Theme::by_name(theme_list[index]);
             self.settings.theme_index = index;
@@ -355,6 +357,12 @@ impl App {
     /// Get current theme name
     pub fn theme_name(&self) -> &str {
         self.theme.name()
+    }
+
+    /// A palette explicitly changed in this TUI session, suitable for saving.
+    /// Automatic choices such as NO_COLOR must not become saved preferences.
+    pub fn changed_theme_name(&self) -> Option<&str> {
+        self.theme_touched.then_some(self.theme_name())
     }
 
     /// Called when the run task is spawned, which is *before* any socket is
@@ -1004,6 +1012,7 @@ impl App {
             timestamp_format: _, // log timestamps are formatted when the entry is logged
             theme,
             theme_index,
+            theme_touched: _, // persistence policy; the palette itself is hashed
             settings,
             history,
             average_throughput_mbps,
@@ -1139,6 +1148,32 @@ impl Default for App {
 #[allow(clippy::field_reassign_with_default)] // App has too many fields to spread-construct in tests
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_aliases_keep_the_settings_and_cycle_in_sync() {
+        for (input, canonical, next) in [
+            ("mono", "monochrome", "matrix"),
+            ("DRACULA", "dracula", "monochrome"),
+            ("default", "default", "kawaii"),
+        ] {
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                input,
+            );
+            assert_eq!(app.theme_name(), canonical);
+            assert_eq!(app.settings.theme_name(), canonical);
+            app.cycle_theme();
+            assert_eq!(app.theme_name(), next);
+            assert_eq!(app.settings.theme_name(), next);
+        }
+    }
 
     #[test]
     fn jitter_display_returns_both_instant_and_smoothed_while_running() {

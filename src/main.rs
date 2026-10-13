@@ -243,9 +243,9 @@ struct Cli {
     no_update_check: bool,
 
     /// Color theme (default, kawaii, cyber, dracula, monochrome, matrix, nord, gruvbox, catppuccin, tokyo_night, solarized)
-    #[arg(long, default_value = "default")]
+    #[arg(long, global = true)]
     #[arg(help_heading = "Output Options")]
-    theme: String,
+    theme: Option<String>,
 
     /// Report interval in seconds (default: 1.0)
     #[arg(short = 'i', long)]
@@ -1115,7 +1115,7 @@ async fn main() -> Result<()> {
                 // NO_COLOR-derived default. There is no server section for a
                 // theme in config.toml, so the saved pref carries a user's
                 // choice across from the client.
-                let prefs = xfr::prefs::Prefs::load().with_overrides(Some(&cli.theme), None);
+                let prefs = xfr::prefs::Prefs::load().with_overrides(cli.theme.as_deref(), None);
                 run_server_tui(config, prefs.theme_name()).await?;
             } else {
                 let server = Server::new(config);
@@ -1419,7 +1419,7 @@ async fn main() -> Result<()> {
                 // TUI mode - load prefs with overrides
                 // Priority: CLI flag > config file > saved prefs > default
                 let prefs = xfr::prefs::Prefs::load()
-                    .with_overrides(Some(&cli.theme), file_config.client.theme.as_deref());
+                    .with_overrides(cli.theme.as_deref(), file_config.client.theme.as_deref());
 
                 // Update check runs unless disabled. Precedence (higher wins):
                 // compiled-out > env > CLI flag > config.toml > saved pref.
@@ -1966,6 +1966,12 @@ fn poll_update_check(
     }
 }
 
+fn remember_tui_theme(prefs: &mut xfr::prefs::Prefs, app: &App) {
+    if let Some(theme) = app.changed_theme_name() {
+        prefs.theme = Some(theme.to_string());
+    }
+}
+
 fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> SettingsAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('s') => {
@@ -2170,6 +2176,9 @@ async fn run_tui_loop(
     let mut last_drawn: Option<u64> = None;
 
     loop {
+        // Preserve only explicit palette edits, including on cancel timeout.
+        remember_tui_theme(&mut prefs, &app);
+
         // If we're waiting for cancel result and deadline expired, exit now
         if let Some(deadline) = app.cancel_deadline
             && deadline.elapsed() > Duration::ZERO
@@ -2226,7 +2235,6 @@ async fn run_tui_loop(
             // Settings modal takes priority when visible
             if app.settings.visible {
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
-                    prefs.theme = Some(app.theme_name().to_string());
                     apply_tui_settings(&mut config, &mut app);
                     app.cancel_deadline = None;
                     fallback_bytes = 0;
@@ -2249,18 +2257,15 @@ async fn run_tui_loop(
             ) {
                 TuiQuitAction::Noop => {}
                 TuiQuitAction::ExitError => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
                 }
                 TuiQuitAction::ExitOk => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::ForceExit => {
                     if let Some(current) = run.take() {
                         abort_tui_run(current).await;
                     }
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 TuiQuitAction::Ignore => {
@@ -2334,11 +2339,9 @@ async fn run_tui_loop(
                     app.show_help = false;
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Completed) => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Ok((app.result, prefs, print_json_on_exit, false));
                 }
                 KeyCode::Esc if matches!(app.state, AppState::Error) => {
-                    prefs.theme = Some(app.theme_name().to_string());
                     return Err(anyhow::anyhow!(app.error.clone().unwrap_or_default()));
                 }
                 KeyCode::Char('j') if app.result.is_some() => {
@@ -2380,7 +2383,6 @@ async fn run_tui_loop(
 
                     // If we were waiting for cancel to complete, exit now with result
                     if app.cancel_deadline.is_some() {
-                        prefs.theme = Some(app.theme_name().to_string());
                         return Ok((app.result, prefs, print_json_on_exit, false));
                     }
                     // The next iteration draws the result screen: the
@@ -2392,7 +2394,6 @@ async fn run_tui_loop(
                     // ("Timeout waiting for server response") well before the
                     // cancel deadline, and the stats shouldn't be lost with it.
                     if app.cancel_deadline.is_some() {
-                        prefs.theme = Some(app.theme_name().to_string());
                         let partial = app.result.is_none();
                         if partial {
                             app.result = tui_fallback_result(fallback_bytes, fallback_elapsed_ms);
@@ -2506,6 +2507,98 @@ mod tests {
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn theme_option_is_available_after_the_server_subcommand() {
+        assert!(Cli::try_parse_from(["xfr", "serve", "--tui", "--theme", "default"]).is_ok());
+    }
+
+    #[test]
+    fn theme_parser_distinguishes_an_explicit_default_from_no_choice() {
+        for args in [vec!["xfr", "localhost"], vec!["xfr", "serve", "--tui"]] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            assert!(cli.theme.is_none());
+            let mut explicit = args;
+            explicit.extend(["--theme", "default"]);
+            let cli = Cli::try_parse_from(explicit).unwrap();
+            assert_eq!(cli.theme.as_deref(), Some("default"));
+            let prefs = xfr::prefs::Prefs {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            }
+            .with_overrides(cli.theme.as_deref(), Some("nord"));
+            assert_eq!(prefs.theme.as_deref(), Some("default"));
+        }
+        let cli = Cli::try_parse_from(["xfr", "--theme", "default", "serve", "--tui"]).unwrap();
+        assert_eq!(cli.theme.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn automatic_theme_is_not_saved_without_an_explicit_edit() {
+        for theme in ["default", "monochrome"] {
+            let mut prefs = xfr::prefs::Prefs::default();
+            let mut app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert!(
+                prefs.theme.is_none(),
+                "automatic {theme} must remain transient"
+            );
+
+            // An unrelated display edit must not promote an automatic
+            // palette into an explicit saved preference either.
+            app.settings.visible = true;
+            app.settings.selected_index = 1; // Timestamp
+            handle_tui_settings_key(&mut app, test_key(KeyCode::Right));
+            remember_tui_theme(&mut prefs, &app);
+            assert!(prefs.theme.is_none());
+
+            app.cycle_theme();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(app.theme_name()));
+
+            // Returning to the initial palette is still an explicit choice,
+            // and restarting a test must preserve that intent.
+            for _ in 1..xfr::tui::Theme::list().len() {
+                app.cycle_theme();
+            }
+            app.reset_for_restart();
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
+    }
+
+    #[test]
+    fn untouched_explicit_theme_preferences_are_preserved() {
+        for theme in ["default", "dracula", "mono"] {
+            let mut prefs = xfr::prefs::Prefs {
+                theme: Some(theme.into()),
+                ..Default::default()
+            };
+            let app = App::with_theme_name(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                TimestampFormat::Relative,
+                theme,
+            );
+            remember_tui_theme(&mut prefs, &app);
+            assert_eq!(prefs.theme.as_deref(), Some(theme));
+        }
     }
 
     #[test]

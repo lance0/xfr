@@ -408,9 +408,13 @@ colorblind users. Setting the standard
 automatically unless a theme is chosen explicitly.
 
 Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
-in the same platform configuration directory. The server dashboard
+in the same platform configuration directory when you change it in the TUI.
+Use `--theme default` to override a config or saved theme for a run. Automatic
+choices, including `NO_COLOR`'s monochrome palette, are not saved.
+The server dashboard
 (`xfr serve --tui`) resolves its palette through the same precedence, so
 `--theme`, a saved preference, and `NO_COLOR` all apply to it too.
+For example: `xfr serve --tui --theme default`.
 
 ## Configuration
 
