@@ -238,10 +238,12 @@ async fn run_inner<W: AsyncWrite + Unpin>(
     sending_done_rx: &mut mpsc::Receiver<()>,
     recv_done_rx: &mut mpsc::Receiver<()>,
 ) -> anyhow::Result<Reporting> {
+    // Start the active clock before the timer so a tick never lands just
+    // short of the finite deadline it coincides with.
+    let start = Instant::now();
     let mut timer =
         tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let start = Instant::now();
     let mut paused_total = Duration::ZERO;
     let mut pause_start = None;
     let mut current: Option<Frame> = None;
@@ -304,7 +306,14 @@ async fn run_inner<W: AsyncWrite + Unpin>(
                 }
             }
             _ = timer.tick() => {
-                let elapsed_ms = active_elapsed(start, paused_total, pause_start).as_millis() as u64;
+                let elapsed = active_elapsed(start, paused_total, pause_start);
+                // The final tick coincides with the duration deadline. Whichever
+                // select! picks, end without sampling it, so a timed test
+                // always reports the same rows; Result carries the tail.
+                if !config.duration.is_zero() && elapsed >= config.duration {
+                    break;
+                }
+                let elapsed_ms = elapsed.as_millis() as u64;
                 let sample = Sample::capture(config.stats, elapsed_ms);
                 if let Some(tx) = config.tui_tx {
                     let aggregate = config.stats.to_aggregate_with_direction(
