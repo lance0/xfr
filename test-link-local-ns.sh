@@ -6,7 +6,7 @@ set -euo pipefail
 # mode must carry the scope id through the control connection, the TCP/UDP
 # data sockets and the QUIC endpoint. Run with sudo after
 # `cargo build --release`.
-XFR="$(pwd)/target/release/xfr"
+XFR="${XFR:-$(pwd)/target/release/xfr}"
 [[ -x "$XFR" ]] || { echo "Build target/release/xfr first"; exit 1; }
 CLIENT_NS="xfrll_cli_$$"
 SERVER_NS="xfrll_srv_$$"
@@ -26,15 +26,21 @@ trap cleanup EXIT
 ip netns add "$CLIENT_NS"
 ip netns add "$SERVER_NS"
 ip link add v0 netns "$CLIENT_NS" type veth peer name v1 netns "$SERVER_NS"
-# One link-local address per side: suppress the kernel's EUI-64 address so
-# the fixed fe80::1/fe80::2 pair is the only choice for source selection.
+# Each side keeps its kernel EUI-64 link-local next to the fixed
+# fe80::1/fe80::2, so the server has two candidate source addresses and
+# its UDP replies must come from the fe80::2 the client targeted.
 for spec in "$CLIENT_NS v0 fe80::1" "$SERVER_NS v1 fe80::2"; do
     read -r ns dev addr <<<"$spec"
     ip -n "$ns" link set lo up
-    ip -n "$ns" link set "$dev" addrgenmode none
     ip -n "$ns" -6 addr add "$addr/64" dev "$dev" nodad
     ip -n "$ns" link set "$dev" up
 done
+# Wait out DAD on the EUI-64 addresses so they are real source candidates.
+for _ in $(seq 50); do
+    [[ -z "$(ip -n "$CLIENT_NS" -6 addr show tentative)$(ip -n "$SERVER_NS" -6 addr show tentative)" ]] && break
+    sleep .1
+done
+echo "Server source toward fe80::1: $(ip -n "$SERVER_NS" -6 route get fe80::1 dev v1 | grep -o 'src [^ ]*')"
 IFINDEX=$(ip netns exec "$CLIENT_NS" cat /sys/class/net/v0/ifindex)
 
 ip netns exec "$SERVER_NS" "$XFR" serve -p 5203 >"$TEST_TMP/server.log" 2>&1 &
