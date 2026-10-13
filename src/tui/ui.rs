@@ -833,13 +833,28 @@ fn draw_settings_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     frame.render_widget(block, modal_area);
 
     // Layout: tabs, content, buttons, help
+    // Reserve the controls before giving the remaining rows to the settings.
+    // A fixed minimum for content squeezed the tabs and actions out entirely
+    // in short terminals, leaving an invisible Apply/Close selection.
+    let roomy = inner.height >= 13;
+    let tabs_height = if roomy {
+        2
+    } else {
+        u16::from(inner.height >= 3)
+    };
+    let buttons_height = if roomy {
+        2
+    } else {
+        u16::from(inner.height >= 2)
+    };
+    let help_height = u16::from(inner.height >= 6);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Tabs
-            Constraint::Min(8),    // Content
-            Constraint::Length(2), // Buttons
-            Constraint::Length(1), // Help line
+            Constraint::Length(tabs_height),
+            Constraint::Min(0),
+            Constraint::Length(buttons_height),
+            Constraint::Length(help_height),
         ])
         .split(inner);
 
@@ -996,8 +1011,10 @@ fn draw_setting_items(
             Style::default().fg(theme.text)
         };
 
-        // Add arrows for selected item
-        let value_display = if is_selected {
+        // On a narrow terminal, spend the space on the value before adding
+        // change arrows. The selection prefix still identifies the active row.
+        let value_width = Span::raw(value.as_str()).width();
+        let value_display = if is_selected && 2 + 14 + value_width + 4 <= area.width as usize {
             format!("◀ {} ▶", value)
         } else {
             value.clone()
@@ -1010,7 +1027,12 @@ fn draw_setting_items(
         ]));
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    // Keep the active row in view instead of changing an off-screen setting.
+    let selected_row = selected_index.saturating_add(1); // top padding
+    let scroll = selected_row
+        .saturating_sub(area.height.saturating_sub(1) as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 fn draw_settings_buttons(
@@ -1037,7 +1059,7 @@ fn draw_settings_buttons(
         Style::default().fg(theme.text_dim)
     };
 
-    let mut buttons = vec![Span::raw("          ")]; // Left padding
+    let mut buttons = Vec::new();
 
     if show_apply {
         buttons.push(Span::styled("[Apply & Restart]", apply_style));
@@ -1134,6 +1156,121 @@ mod small_terminal_tests {
         (0..height)
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
+    }
+
+    #[test]
+    fn compact_settings_keeps_selected_values_and_actions_visible() {
+        let categories = [
+            (
+                SettingsCategory::Display,
+                vec![
+                    ("Theme:", "tokyo_night"),
+                    ("Timestamp:", "iso8601"),
+                    ("Units:", "auto"),
+                    ("Update check:", "on"),
+                ],
+            ),
+            (
+                SettingsCategory::Test,
+                vec![
+                    ("Streams:", "2"),
+                    ("Protocol:", "TCP"),
+                    ("Duration:", "10s"),
+                    ("Direction:", "Upload"),
+                    ("Bitrate:", "100 Mbps"),
+                ],
+            ),
+        ];
+        for width in [30, 40, 58] {
+            for height in [5, 6, 8, 10, 12, 14, 19] {
+                for (category, items) in &categories {
+                    for (index, (label, value)) in items.iter().enumerate() {
+                        let mut app = App::default();
+                        app.settings.visible = true;
+                        app.settings.category = *category;
+                        app.settings.selected_index = index;
+                        app.settings.theme_index = 9; // tokyo_night
+                        app.settings.timestamp_format =
+                            super::super::settings::TimestampFormat::Iso8601;
+                        app.settings.streams = 2;
+                        app.settings.bitrate = Some(100_000_000);
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal.draw(|f| draw(f, &app)).unwrap();
+                        let buf = terminal.backend().buffer();
+                        let rows: Vec<String> = (0..height)
+                            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+                            .collect();
+                        let context = format!(
+                            "{width}x{height}, {category:?}, {label}\n{}",
+                            rows.join("\n")
+                        );
+                        let selected = rows
+                            .iter()
+                            .find(|row| row.contains(label) && row.contains('▶'));
+                        assert!(selected.is_some(), "selected setting is hidden: {context}");
+                        assert!(
+                            selected.unwrap().contains(value),
+                            "selected value is clipped: {context}"
+                        );
+                        assert!(
+                            rows.iter().any(|row| row.contains("[Apply & Restart]")),
+                            "apply action is hidden: {context}"
+                        );
+                        assert!(
+                            rows.iter().any(|row| row.contains("[Esc]")),
+                            "close action is hidden: {context}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_settings_shows_the_focused_action() {
+        for height in [5, 8, 12, 19] {
+            for dirty in [false, true] {
+                let mut app = App::default();
+                app.settings.visible = true;
+                app.settings.duration_secs = if dirty { 15 } else { 10 };
+                app.settings.on_enter();
+                let mut terminal = Terminal::new(TestBackend::new(30, height)).unwrap();
+                let actions: &[(&str, Color)] = if dirty {
+                    &[
+                        ("[Apply & Restart]", app.theme.success),
+                        ("[Esc]", app.theme.accent),
+                    ]
+                } else {
+                    &[("[Esc]", app.theme.accent)]
+                };
+                for (label, color) in actions {
+                    terminal.draw(|f| draw(f, &app)).unwrap();
+                    let highlighted: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .filter(|cell| cell.fg == *color && cell.modifier.contains(Modifier::BOLD))
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert!(
+                        highlighted.contains(label),
+                        "height {height}, dirty {dirty}: focused action {label} is hidden"
+                    );
+                    app.settings.value_next();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_degrades_without_panicking_below_the_compact_layout() {
+        let mut app = App::default();
+        app.settings.visible = true;
+        for (width, height) in [(1, 1), (5, 3), (10, 4), (20, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+        }
     }
 
     /// Regression: the throughput sparkline was rendered into a hand-built
