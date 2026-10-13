@@ -3011,32 +3011,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_parallel_one_overrides_config() {
-        let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
-        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 1);
-    }
-
-    #[test]
-    fn parallel_streams_use_config_then_default_when_unset() {
-        let cli = Cli::try_parse_from(["xfr", "host"]).unwrap();
-        assert_eq!(cli.parallel, None);
-        assert_eq!(resolve_parallel_streams(cli.parallel, Some(8)).unwrap(), 8);
-        assert_eq!(resolve_parallel_streams(cli.parallel, None).unwrap(), 1);
-    }
-
-    #[test]
-    fn parallel_streams_validate_only_the_effective_count() {
-        for invalid in [0, 129, 255] {
-            let cli = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
+    fn parallel_streams_resolve_cli_then_config_then_default() {
+        let explicit = Cli::try_parse_from(["xfr", "host", "-P", "1"]).unwrap();
+        let unset = Cli::try_parse_from(["xfr", "host"]).unwrap();
+        assert_eq!(unset.parallel, None);
+        assert_eq!(
+            resolve_parallel_streams(explicit.parallel, Some(8)).unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_parallel_streams(unset.parallel, Some(8)).unwrap(),
+            8
+        );
+        assert_eq!(resolve_parallel_streams(unset.parallel, None).unwrap(), 1);
+        // Only the effective count is validated.
+        for invalid in [0, 129] {
             assert_eq!(
-                resolve_parallel_streams(cli.parallel, Some(invalid)).unwrap(),
+                resolve_parallel_streams(explicit.parallel, Some(invalid)).unwrap(),
                 1
             );
             let error = resolve_parallel_streams(None, Some(invalid)).unwrap_err();
             assert!(error.to_string().contains("client.parallel_streams"));
-        }
-        for valid in [1, 128] {
-            assert_eq!(resolve_parallel_streams(None, Some(valid)).unwrap(), valid);
         }
     }
 

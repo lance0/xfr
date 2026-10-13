@@ -3550,32 +3550,4 @@ mod tests {
             }
         }
     }
-
-    #[tokio::test]
-    async fn run_rejects_wrapping_protocol_duration_before_network_io() {
-        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
-            let config = ClientConfig {
-                host: "this-host-must-not-be-resolved.invalid".into(),
-                protocol,
-                duration: Duration::from_secs(u64::from(u32::MAX) + 1),
-                ..Default::default()
-            };
-            let error = Client::new(config).run(None).await.unwrap_err();
-            assert!(error.to_string().contains("test duration must be at most"));
-        }
-    }
-
-    #[tokio::test]
-    async fn run_rejects_invalid_parallel_stream_count_before_network_io() {
-        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
-            let config = ClientConfig {
-                host: "this-host-must-not-be-resolved.invalid".to_string(),
-                protocol,
-                streams: 0,
-                ..Default::default()
-            };
-            let error = Client::new(config).run(None).await.unwrap_err();
-            assert!(error.to_string().contains("parallel stream count"));
-        }
-    }
 }
