@@ -54,16 +54,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP Bidir Loss Has No Separate Download-Direction Reading
-
-**Issue:** Download-only mode (`-u -R`) builds live throughput, jitter, and cumulative loss from the client's local receive counters on a local interval clock. Bidirectional UDP still exposes one live loss reading from the server's receive side (the upload direction), rather than separate readings for both directions. Its final result also has only one `udp_stats` field.
-
-**Impact:** A bidirectional run does not separately show loss and jitter for the download direction, even though its download byte counts are corrected from the client's receive counters.
-
-**Workaround:** Use a download-only run to measure download loss and jitter. Separate bidirectional direction metrics require protocol additions and remain tracked in ROADMAP.md.
-
----
-
 ### Non-TUI Interval Row Cadence Can Still Bunch Under Extreme Loss
 
 **Issue:** Upload-mode full interval rows still follow TCP control `Interval` arrival, which can bunch under aggressive loss or bufferbloat. UDP feedback updates keep cumulative loss current. When full rows stall for roughly two report periods, plain text emits a `(reports stalled)` loss line and `--json-stream` emits a marked `udp_feedback` event. CSV remains interval-only to preserve its fixed columns. Download-only UDP intervals use local receive counters and a local clock. The source interval clocks sample once per second; `--interval` filters those updates, so values below one second do not create faster sampling.
@@ -131,6 +121,7 @@ The following issues have been fixed and are listed here for reference.
 - **DataHello flood protection** - The server validates that the `test_id` in a DataHello message corresponds to an active test before processing, rejecting unknown test IDs immediately.
 - **cancel.changed() busy-loop** - The stream collection `select!` loop now handles the sender-dropped error from `cancel.changed()` instead of spinning on `Err`, preventing CPU spin when the cancel sender is dropped.
 - **TCP bitrate limiting** - TCP bitrate pacing (`-b` for TCP) was added in v0.6.1 using a byte-budget sleep approach with interruptible sleeps and buffer auto-capping.
+- **UDP bidirectional download loss/jitter** - `-u --bidir` now reports upload and download receiver measurements separately, including locally clocked download updates when TCP control reports stall. Final JSON adds `udp_stats_send` and `udp_stats_recv`; legacy `udp_stats` retains its upload meaning. Per-stream direction splits are available with new servers, and unavailable upload splits remain unknown with older servers.
 - **QUIC bitrate limiting** - QUIC previously accepted `-b/--bitrate` on the CLI and dropped it on the send paths, so a rate-limited QUIC test ran at line rate and only logged a warning. Both directions are now paced with the same cumulative byte-budget approach used for TCP and UDP, split per stream, with the send buffer capped so a rate limit cannot be overshot by the first write.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC control-stream wait** - Accepted QUIC peers now have 30 seconds to open their control stream. Idle peers cannot keep a handler slot indefinitely by maintaining a connection without sending a Hello. The subsequent Hello read retains its own 30-second timeout.

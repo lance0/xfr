@@ -1655,36 +1655,49 @@ async fn run_client_plain(
             // NOT advanced, so the next real interval still reports its
             // full delta window.
             if progress.udp_feedback_only {
-                if !quiet
-                    && !csv
-                    && let Some(cum) = cached_udp_progress
-                {
+                let directional = progress.udp_send.is_some() || progress.udp_recv.is_some();
+                if !quiet && !csv && (directional || cached_udp_progress.is_some()) {
                     let now = std::time::Instant::now();
                     let elapsed_secs = progress.elapsed_ms as f64 / 1000.0;
-                    // Both gates run slightly under their nominal multiple
-                    // (1.9x and 0.9x): feedback updates tick at the same
-                    // nominal rate as rows, so exact >= comparisons skip
-                    // every marginally-early arrival and halve the cadence.
                     let stalled = now.duration_since(last_row_at) >= row_period.mul_f64(1.9)
                         && now.duration_since(last_feedback_row_at) >= row_period.mul_f64(0.9)
                         && elapsed_secs > omit_secs as f64;
                     if stalled {
                         let timestamp = timestamp_format.format(test_start, now, test_start_system);
                         let line = if json_stream {
-                            match xfr::output::json::output_feedback_json(
-                                &timestamp,
-                                elapsed_secs,
-                                cum.packets_received,
-                                cum.packets_lost,
-                                cum.lost_percent(),
-                            ) {
+                            let serialized = if directional {
+                                xfr::output::json::output_directional_feedback_json(
+                                    &timestamp,
+                                    elapsed_secs,
+                                    progress.udp_send.as_ref(),
+                                    progress.udp_recv.as_ref(),
+                                )
+                            } else {
+                                let cum = cached_udp_progress.expect("feedback presence checked");
+                                xfr::output::json::output_feedback_json(
+                                    &timestamp,
+                                    elapsed_secs,
+                                    cum.packets_received,
+                                    cum.packets_lost,
+                                    cum.lost_percent(),
+                                )
+                            };
+                            match serialized {
                                 Ok(line) => format!("{}\n", line),
                                 Err(e) => {
                                     tracing::error!("Failed to serialize feedback to JSON: {}", e);
                                     continue;
                                 }
                             }
+                        } else if directional {
+                            xfr::output::plain::output_directional_feedback_plain(
+                                &timestamp,
+                                elapsed_secs,
+                                progress.udp_send.as_ref(),
+                                progress.udp_recv.as_ref(),
+                            )
                         } else {
+                            let cum = cached_udp_progress.expect("feedback presence checked");
                             xfr::output::plain::output_feedback_plain(
                                 &timestamp,
                                 cum.packets_lost,
@@ -1774,7 +1787,7 @@ async fn run_client_plain(
             let timestamp = timestamp_format.format(test_start, now, test_start_system);
 
             let interval_output = if json_stream {
-                match xfr::output::json::output_interval_json(
+                match xfr::output::json::output_interval_json_with_udp_directions(
                     &timestamp,
                     elapsed_secs,
                     progress.throughput_mbps,
@@ -1784,6 +1797,8 @@ async fn run_client_plain(
                     lost,
                     rtt_us,
                     cwnd,
+                    progress.udp_send.as_ref(),
+                    progress.udp_recv.as_ref(),
                 ) {
                     Ok(line) => format!("{}\n", line),
                     Err(e) => {
@@ -1792,7 +1807,7 @@ async fn run_client_plain(
                     }
                 }
             } else if csv {
-                xfr::output::csv::output_interval_csv(
+                xfr::output::csv::output_interval_csv_with_udp_directions(
                     &timestamp,
                     elapsed_secs,
                     progress.throughput_mbps,
@@ -1806,9 +1821,11 @@ async fn run_client_plain(
                     progress.bytes_received,
                     progress.throughput_send_mbps,
                     progress.throughput_recv_mbps,
+                    progress.udp_send.as_ref(),
+                    progress.udp_recv.as_ref(),
                 )
             } else {
-                xfr::output::plain::output_interval_plain(
+                xfr::output::plain::output_interval_plain_with_udp_directions(
                     &timestamp,
                     elapsed_secs,
                     progress.throughput_mbps,
@@ -1817,6 +1834,8 @@ async fn run_client_plain(
                     jitter_ms,
                     lost,
                     rtt_us,
+                    progress.udp_send.as_ref(),
+                    progress.udp_recv.as_ref(),
                 )
             };
             print!("{}", interval_output);
@@ -1911,6 +1930,8 @@ fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protoco
     };
 
     TestResult {
+        udp_stats_send: None,
+        udp_stats_recv: None,
         id: String::new(),
         bytes_total: cumulative_bytes,
         duration_ms: elapsed_ms,
@@ -4124,6 +4145,10 @@ mod tests {
                     jitter_ms: None,
                     lost: None,
                     error: None,
+                    bytes_sent: None,
+                    bytes_received: None,
+                    throughput_send_mbps: None,
+                    throughput_recv_mbps: None,
                     rtt_us: None,
                     cwnd: None,
                 })
@@ -4137,6 +4162,8 @@ mod tests {
             throughput_recv_mbps: None,
             udp_progress: None,
             udp_feedback_only: false,
+            udp_send: None,
+            udp_recv: None,
         }
     }
 

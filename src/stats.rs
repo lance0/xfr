@@ -297,11 +297,33 @@ impl StreamStats {
     }
 
     pub fn to_interval(&self, interval_stats: &IntervalStats) -> StreamInterval {
+        self.to_interval_with_direction(interval_stats, false)
+    }
+
+    /// Build a server interval with optional client-relative direction splits.
+    /// Server receive bytes are client upload bytes; server send bytes are
+    /// client download bytes, which UDP clients replace with receiver truth.
+    pub fn to_interval_with_direction(
+        &self,
+        interval_stats: &IntervalStats,
+        is_bidir: bool,
+    ) -> StreamInterval {
+        // Use the already-measured interval window, including coalesced spans,
+        // rather than the time at which this snapshot happens to be serialized.
+        let directional_mbps = |bytes: u64| {
+            if interval_stats.bytes > 0 {
+                interval_stats.throughput_mbps * bytes as f64 / interval_stats.bytes as f64
+            } else {
+                0.0
+            }
+        };
         StreamInterval {
             id: self.stream_id,
             bytes: interval_stats.bytes,
             retransmits: Some(interval_stats.retransmits),
-            jitter_ms: if interval_stats.jitter_ms > 0.0 {
+            jitter_ms: if interval_stats.jitter_ms > 0.0
+                || interval_stats.cumulative_packets_received > 0
+            {
                 Some(interval_stats.jitter_ms)
             } else {
                 None
@@ -314,27 +336,44 @@ impl StreamStats {
             error: None,
             rtt_us: interval_stats.rtt_us,
             cwnd: interval_stats.cwnd,
+            bytes_sent: is_bidir.then_some(interval_stats.bytes_received),
+            bytes_received: is_bidir.then_some(interval_stats.bytes_sent),
+            throughput_send_mbps: is_bidir.then(|| directional_mbps(interval_stats.bytes_received)),
+            throughput_recv_mbps: is_bidir.then(|| directional_mbps(interval_stats.bytes_sent)),
         }
     }
 
     pub fn to_result(&self, duration_ms: u64) -> StreamResult {
-        let bytes = self.total_bytes();
-        let throughput_mbps = if duration_ms > 0 {
-            (bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
-        } else {
-            0.0
+        self.to_result_with_direction(duration_ms, false)
+    }
+
+    /// Build a server result with optional client-relative direction splits.
+    pub fn to_result_with_direction(&self, duration_ms: u64, is_bidir: bool) -> StreamResult {
+        let sent = self.bytes_sent.load(Ordering::Relaxed);
+        let received = self.bytes_received.load(Ordering::Relaxed);
+        let bytes = sent + received;
+        let mbps = |bytes: u64| {
+            if duration_ms > 0 {
+                (bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
+            } else {
+                0.0
+            }
         };
 
         StreamResult {
             id: self.stream_id,
             bytes,
-            throughput_mbps,
+            throughput_mbps: mbps(bytes),
             retransmits: Some(
                 self.retransmits()
                     .max(self.interval_retransmits_total.load(Ordering::Relaxed)),
             ),
             jitter_ms: None,
             lost: None,
+            bytes_sent: is_bidir.then_some(received),
+            bytes_received: is_bidir.then_some(sent),
+            throughput_send_mbps: is_bidir.then(|| mbps(received)),
+            throughput_recv_mbps: is_bidir.then(|| mbps(sent)),
         }
     }
 }
@@ -369,8 +408,23 @@ impl TestStats {
 
     /// Aggregate all UDP stats across streams
     pub fn aggregate_udp_stats(&self) -> Option<UdpStats> {
+        self.aggregate_udp_stats_inner(false)
+    }
+
+    /// Aggregate directional receiver measurements without treating an
+    /// unobserved stream as measured zero jitter. Empty counters are unknown.
+    pub fn aggregate_udp_receiver_stats(&self) -> Option<UdpStats> {
+        self.aggregate_udp_stats_inner(true)
+    }
+
+    fn aggregate_udp_stats_inner(&self, receiver_only: bool) -> Option<UdpStats> {
         let stats = self.udp_stats.lock();
-        if stats.is_empty() {
+        if stats.is_empty()
+            || (receiver_only
+                && !stats
+                    .iter()
+                    .any(|stats| stats.packets_received > 0 || stats.lost > 0))
+        {
             return None;
         }
 
@@ -387,21 +441,26 @@ impl TestStats {
 
         let mut jitter_max = 0.0f64;
         let mut any_jitter_max = false;
+        let mut jitter_count = 0;
         for s in stats.iter() {
             total.packets_sent += s.packets_sent;
             total.packets_received += s.packets_received;
             total.lost += s.lost;
             total.out_of_order += s.out_of_order;
-            total.jitter_ms += s.jitter_ms;
-            if let Some(max) = s.jitter_max_ms {
-                jitter_max = jitter_max.max(max);
-                any_jitter_max = true;
+            if !receiver_only || s.packets_received > 0 {
+                total.jitter_ms += s.jitter_ms;
+                jitter_count += 1;
+                if let Some(max) = s.jitter_max_ms {
+                    jitter_max = jitter_max.max(max);
+                    any_jitter_max = true;
+                }
+                total.packet_size = total.packet_size.max(s.packet_size);
             }
-            total.packet_size = total.packet_size.max(s.packet_size);
         }
 
-        // Average jitter across streams
-        total.jitter_ms /= stats.len() as f64;
+        if jitter_count > 0 {
+            total.jitter_ms /= jitter_count as f64;
+        }
         if any_jitter_max {
             total.jitter_max_ms = Some(jitter_max);
         }
@@ -478,10 +537,11 @@ impl TestStats {
             (None, None, None, None)
         };
 
-        // Average jitter across streams that have jitter data
+        // Observed UDP streams can measure zero jitter. Retain positive
+        // readings from older snapshots that lack cumulative UDP counters.
         let jitter_values: Vec<f64> = intervals
             .iter()
-            .filter(|i| i.jitter_ms > 0.0)
+            .filter(|i| i.jitter_ms > 0.0 || i.cumulative_packets_received > 0)
             .map(|i| i.jitter_ms)
             .collect();
         let avg_jitter = if jitter_values.is_empty() {
@@ -692,6 +752,107 @@ mod tests {
         stats.add_bytes_sent(1000);
         stats.add_bytes_received(500);
         assert_eq!(stats.total_bytes(), 1500);
+    }
+
+    #[test]
+    fn directional_stream_interval_uses_snapshot_window_and_client_perspective() {
+        let stats = StreamStats::new(3);
+        // Live totals may have moved past the interval snapshot.
+        stats.add_bytes_sent(9_000_000);
+        stats.add_bytes_received(1_000_000);
+        let interval = IntervalStats {
+            timestamp: Instant::now(),
+            bytes: 4_000_000,
+            throughput_mbps: 16.0, // Four MB over a two-second sample.
+            retransmits: 2,
+            jitter_ms: 0.25,
+            lost: 1,
+            rtt_us: None,
+            cwnd: None,
+            bytes_sent: 1_000_000,
+            bytes_received: 3_000_000,
+            cumulative_packets_received: 99,
+            cumulative_packets_lost: 1,
+        };
+        let result = stats.to_interval_with_direction(&interval, true);
+        assert_eq!(result.id, 3);
+        assert_eq!(result.bytes, 4_000_000);
+        assert_eq!(result.bytes_sent, Some(3_000_000));
+        assert_eq!(result.bytes_received, Some(1_000_000));
+        assert_eq!(result.throughput_send_mbps, Some(12.0));
+        assert_eq!(result.throughput_recv_mbps, Some(4.0));
+        assert_eq!(result.jitter_ms, Some(0.25));
+        assert_eq!(result.lost, Some(1));
+
+        let legacy = serde_json::to_value(stats.to_interval(&interval)).unwrap();
+        for field in [
+            "bytes_sent",
+            "bytes_received",
+            "throughput_send_mbps",
+            "throughput_recv_mbps",
+        ] {
+            assert!(legacy.get(field).is_none());
+        }
+    }
+
+    #[test]
+    fn directional_stream_result_swaps_server_counters_over_result_duration() {
+        let stats = StreamStats::new(3);
+        stats.add_bytes_sent(2_000_000);
+        stats.add_bytes_received(6_000_000);
+        let result = stats.to_result_with_direction(2000, true);
+        assert_eq!(result.bytes, 8_000_000);
+        assert_eq!(result.throughput_mbps, 32.0);
+        assert_eq!(result.bytes_sent, Some(6_000_000));
+        assert_eq!(result.bytes_received, Some(2_000_000));
+        assert_eq!(result.throughput_send_mbps, Some(24.0));
+        assert_eq!(result.throughput_recv_mbps, Some(8.0));
+
+        let legacy = serde_json::to_value(stats.to_result(2000)).unwrap();
+        assert_eq!(
+            legacy,
+            serde_json::json!({"id": 3, "bytes": 8_000_000, "throughput_mbps": 32.0, "retransmits": 0})
+        );
+        let zero_duration = stats.to_result_with_direction(0, true);
+        assert_eq!(zero_duration.throughput_send_mbps, Some(0.0));
+        assert_eq!(zero_duration.throughput_recv_mbps, Some(0.0));
+    }
+
+    #[test]
+    fn directional_empty_interval_has_measured_zero_rates() {
+        let stats = StreamStats::new(0);
+        let interval = stats.record_interval();
+        let result = stats.to_interval_with_direction(&interval, true);
+        assert_eq!(result.bytes_sent, Some(0));
+        assert_eq!(result.bytes_received, Some(0));
+        assert_eq!(result.throughput_send_mbps, Some(0.0));
+        assert_eq!(result.throughput_recv_mbps, Some(0.0));
+    }
+
+    #[test]
+    fn observed_zero_udp_jitter_is_distinct_from_an_unknown_stream() {
+        let stats = TestStats::new("jitter".to_string(), 3);
+        stats.streams[0].add_udp_received(10);
+        stats.streams[1].add_udp_received(10);
+        stats.streams[1].set_udp_jitter_us(2000);
+        let mut intervals = stats.record_intervals();
+
+        assert_eq!(
+            stats.streams[0].to_interval(&intervals[0]).jitter_ms,
+            Some(0.0)
+        );
+        assert_eq!(stats.streams[2].to_interval(&intervals[2]).jitter_ms, None);
+        // Average the two measured streams, including zero, and exclude
+        // the stream without packets instead of inventing its measurement.
+        assert_eq!(stats.to_aggregate(&intervals).jitter_ms, Some(1.0));
+
+        // Positive readings in older snapshots remain valid without counts.
+        intervals[2].jitter_ms = 2.0;
+        assert_eq!(
+            stats.streams[2].to_interval(&intervals[2]).jitter_ms,
+            Some(2.0)
+        );
+        assert_eq!(stats.to_aggregate(&intervals).jitter_ms, Some(4.0 / 3.0));
     }
 
     #[test]
@@ -919,6 +1080,71 @@ mod tests {
         assert_eq!(bytes_to_human(1024), "1.00 KB");
         assert_eq!(bytes_to_human(1024 * 1024), "1.00 MB");
         assert_eq!(bytes_to_human(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn receiver_udp_aggregation_excludes_unobserved_jitter_without_changing_legacy() {
+        let stats = TestStats::new("receiver".to_string(), 2);
+        stats.add_udp_stats(UdpStats {
+            packets_sent: 100,
+            packets_received: 90,
+            lost: 10,
+            lost_percent: 10.0,
+            jitter_ms: 10.0,
+            out_of_order: 3,
+            jitter_max_ms: Some(12.0),
+            packet_size: Some(1400),
+        });
+        stats.add_udp_stats(UdpStats {
+            packets_sent: 0,
+            packets_received: 0,
+            lost: 0,
+            lost_percent: 0.0,
+            jitter_ms: 0.0,
+            out_of_order: 0,
+            jitter_max_ms: Some(0.0),
+            packet_size: None,
+        });
+        assert_eq!(stats.aggregate_udp_stats().unwrap().jitter_ms, 5.0);
+        let receiver = stats.aggregate_udp_receiver_stats().unwrap();
+        assert_eq!(receiver.jitter_ms, 10.0);
+        assert_eq!(receiver.packets_sent, 100);
+        assert_eq!(receiver.packets_received, 90);
+        assert_eq!(receiver.lost, 10);
+        assert_eq!(receiver.lost_percent, 10.0);
+        assert_eq!(receiver.out_of_order, 3);
+        assert_eq!(receiver.jitter_max_ms, Some(12.0));
+        assert_eq!(receiver.packet_size, Some(1400));
+    }
+
+    #[test]
+    fn receiver_udp_aggregation_distinguishes_empty_from_measured_zero_jitter() {
+        let stats = TestStats::new("receiver".to_string(), 2);
+        assert!(stats.aggregate_udp_receiver_stats().is_none());
+        let empty = UdpStats {
+            packets_sent: 0,
+            packets_received: 0,
+            lost: 0,
+            lost_percent: 0.0,
+            jitter_ms: 0.0,
+            out_of_order: 0,
+            jitter_max_ms: Some(0.0),
+            packet_size: None,
+        };
+        stats.add_udp_stats(empty.clone());
+        assert!(stats.aggregate_udp_receiver_stats().is_none());
+        assert!(stats.aggregate_udp_stats().is_some());
+        stats.add_udp_stats(UdpStats {
+            packets_sent: 1,
+            packets_received: 1,
+            packet_size: Some(64),
+            ..empty
+        });
+        let receiver = stats.aggregate_udp_receiver_stats().unwrap();
+        assert_eq!(receiver.packets_received, 1);
+        assert_eq!(receiver.jitter_ms, 0.0);
+        assert_eq!(receiver.jitter_max_ms, Some(0.0));
+        assert_eq!(receiver.packet_size, Some(64));
     }
 
     #[test]

@@ -406,7 +406,14 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     frame.render_widget(Paragraph::new(speed_lines), stats_chunks[0]);
 
     // Right side: Jitter/Loss for UDP, RTT/Retrans for TCP
-    let quality_lines = if app.protocol == crate::protocol::Protocol::Udp {
+    let quality_lines = if app.protocol == crate::protocol::Protocol::Udp
+        && app.direction == crate::protocol::Direction::Bidir
+    {
+        vec![
+            udp_direction_line("Upload", &app.udp_send, theme),
+            udp_direction_line("Download", &app.udp_recv, theme),
+        ]
+    } else if app.protocol == crate::protocol::Protocol::Udp {
         // Jitter line shows both the latest per-interval aggregate (primary,
         // color-coded against the thresholds) and the 10-second rolling mean
         // in parentheses while running. On completion only the authoritative
@@ -460,6 +467,36 @@ fn draw_realtime_stats(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
         ]
     };
     frame.render_widget(Paragraph::new(quality_lines), stats_chunks[1]);
+}
+
+fn udp_direction_line<'a>(
+    label: &str,
+    direction: &super::app::UdpDirectionState,
+    theme: &Theme,
+) -> Line<'a> {
+    let (loss, loss_style) = match direction.lost_percent() {
+        Some(percent) => (
+            format!("{percent:.1}%"),
+            Style::default().fg(loss_color(percent, theme)),
+        ),
+        None => ("--%".to_string(), Style::default().fg(theme.text_dim)),
+    };
+    let (jitter, jitter_style) = match direction.jitter_ms {
+        Some(jitter) => (
+            format!("{jitter:.2}ms"),
+            Style::default().fg(jitter_color(jitter, theme)),
+        ),
+        None => ("--ms".to_string(), Style::default().fg(theme.text_dim)),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{label}: loss "),
+            Style::default().fg(theme.text_dim),
+        ),
+        Span::styled(loss, loss_style),
+        Span::styled(" jitter ", Style::default().fg(theme.text_dim)),
+        Span::styled(jitter, jitter_style),
+    ])
 }
 
 /// Progress-bar geometry as `(bar_width, filled)` cells for the Real-time
@@ -586,6 +623,7 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             stream.retransmits,
         )
         .jitter(stream.jitter_ms)
+        .directions(stream.throughput_send_mbps, stream.throughput_recv_mbps)
         .bar_color(theme.graph_primary)
         .text_color(theme.text);
 
@@ -1195,6 +1233,57 @@ mod small_terminal_tests {
         (0..height)
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
+    }
+
+    #[test]
+    fn bidir_udp_quality_renders_unknown_upload_and_measured_zero_download() {
+        let mut app = App::default();
+        app.protocol = crate::protocol::Protocol::Udp;
+        app.direction = crate::protocol::Direction::Bidir;
+        app.udp_recv.progress = Some(crate::protocol::UdpIntervalProgress {
+            packets_received: 100,
+            packets_lost: 0,
+        });
+        app.udp_recv.jitter_ms = Some(0.0);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_realtime_stats(frame, &app, &app.theme, area)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..10)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Upload: loss --% jitter --ms")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Download: loss 0.0% jitter 0.00ms")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn stream_panel_renders_upload_and_download_rates() {
+        let mut app = App::default();
+        app.streams[0].throughput_mbps = 8.0;
+        app.streams[0].throughput_send_mbps = Some(3.0);
+        app.streams[0].throughput_recv_mbps = Some(5.0);
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_streams(frame, &app, &app.theme, area)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..80).map(|x| buffer[(x, 1)].symbol()).collect();
+        assert!(row.contains("↑ 3.0 Mbps  ↓ 5.0 Mbps"), "{row}");
     }
 
     #[test]

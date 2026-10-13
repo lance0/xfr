@@ -303,6 +303,19 @@ impl UdpIntervalProgress {
     }
 }
 
+/// Receiver measurements for one client-relative UDP direction.
+///
+/// Counts are cumulative across the test. A missing jitter reading means
+/// unknown (for example, receiver feedback carries counts only); a measured
+/// zero jitter remains `Some(0.0)`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct UdpDirectionProgress {
+    #[serde(flatten)]
+    pub progress: UdpIntervalProgress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamInterval {
     pub id: u8,
@@ -320,6 +333,19 @@ pub struct StreamInterval {
     /// Congestion window in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwnd: Option<u32>,
+    /// Bidirectional interval upload bytes, from the client's perspective.
+    /// Absent for unidirectional tests and peers without direction splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_sent: Option<u64>,
+    /// Bidirectional interval download bytes, from the client's perspective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_received: Option<u64>,
+    /// Upload throughput over the same interval window as `bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_send_mbps: Option<f64>,
+    /// Download throughput over the same interval window as `bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_recv_mbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,11 +370,11 @@ pub struct AggregateInterval {
     /// Sum of per-stream congestion windows in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwnd: Option<u32>,
-    /// Bidirectional test: bytes sent by the reporting side during this interval.
+    /// Bidirectional test: upload bytes from the client's perspective during this interval.
     /// Populated only for bidir tests; None for unidirectional (where `bytes` is authoritative).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_sent: Option<u64>,
-    /// Bidirectional test: bytes received by the reporting side during this interval.
+    /// Bidirectional test: download bytes from the client's perspective during this interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_received: Option<u64>,
     /// Bidirectional test: per-direction throughput (upload) in Mbps.
@@ -370,11 +396,21 @@ pub struct TestResult {
     pub tcp_info: Option<TcpInfoSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub udp_stats: Option<UdpStats>,
-    /// Bidirectional test: total bytes sent by the reporting side.
+    /// UDP upload measurements from the server's receiver, from the client's
+    /// perspective. Absent when unavailable, including older peer results.
+    /// Directional aggregates are boxed so every `ControlMessage` does not
+    /// reserve inline space for two receiver snapshots; JSON is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_stats_send: Option<Box<UdpStats>>,
+    /// UDP download measurements from the client's receiver. Filled locally
+    /// after receive tasks finish; the server cannot measure this direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_stats_recv: Option<Box<UdpStats>>,
+    /// Bidirectional test: total upload bytes from the client's perspective.
     /// Populated only for bidir tests; None for unidirectional (where `bytes_total` is authoritative).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_sent: Option<u64>,
-    /// Bidirectional test: total bytes received by the reporting side.
+    /// Bidirectional test: total download bytes from the client's perspective.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_received: Option<u64>,
     /// Bidirectional test: per-direction throughput (upload) in Mbps.
@@ -445,6 +481,19 @@ pub struct StreamResult {
     pub jitter_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<u64>,
+    /// Bidirectional upload bytes, from the client's perspective.
+    /// Absent for unidirectional tests and peers without direction splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_sent: Option<u64>,
+    /// Bidirectional download bytes, from the client's perspective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_received: Option<u64>,
+    /// Upload throughput over the result's test duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_send_mbps: Option<f64>,
+    /// Download throughput over the result's test duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_recv_mbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +509,9 @@ pub struct TcpInfoSnapshot {
     pub bytes_acked: Option<u64>,
 }
 
+/// Receiver-side UDP measurements. `packets_sent` is the expected sequence
+/// count inferred from received packets and gaps, rather than a sender counter;
+/// packets lost entirely beyond the observed sequence range are unknown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UdpStats {
     pub packets_sent: u64,
@@ -787,6 +839,109 @@ impl ControlMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directional_udp_progress_flattens_counts_and_preserves_unknown_jitter() {
+        let counts = serde_json::json!({"packets_received": 9, "packets_lost": 1});
+        let mut progress: UdpDirectionProgress = serde_json::from_value(counts.clone()).unwrap();
+        assert_eq!(progress.progress.lost_percent(), Some(10.0));
+        assert_eq!(progress.jitter_ms, None);
+        assert_eq!(serde_json::to_value(progress).unwrap(), counts);
+
+        // A measured zero is different from a counts-only feedback reading.
+        progress.jitter_ms = Some(0.0);
+        let measured = serde_json::to_value(progress).unwrap();
+        assert_eq!(
+            measured,
+            serde_json::json!({"packets_received": 9, "packets_lost": 1, "jitter_ms": 0.0})
+        );
+        let decoded: UdpDirectionProgress = serde_json::from_value(measured).unwrap();
+        assert_eq!(decoded.jitter_ms, Some(0.0));
+    }
+
+    #[test]
+    fn legacy_stream_reports_omit_direction_splits() {
+        let interval = serde_json::json!({"id": 3, "bytes": 1000});
+        let decoded: StreamInterval = serde_json::from_value(interval.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), interval);
+
+        let result = serde_json::json!({"id": 3, "bytes": 1000, "throughput_mbps": 0.008});
+        let decoded: StreamResult = serde_json::from_value(result.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), result);
+
+        let enriched = serde_json::json!({
+            "id": 3, "bytes": 1000,
+            "bytes_sent": 750, "bytes_received": 250,
+            "throughput_send_mbps": 0.006, "throughput_recv_mbps": 0.002
+        });
+        let decoded: StreamInterval = serde_json::from_value(enriched.clone()).unwrap();
+        assert_eq!(decoded.bytes_sent, Some(750));
+        assert_eq!(decoded.bytes_received, Some(250));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), enriched);
+    }
+
+    #[test]
+    fn directional_results_roundtrip_and_preserve_legacy_payload() {
+        let legacy = serde_json::json!({
+            "id": "bidir", "bytes_total": 1000, "duration_ms": 1000,
+            "throughput_mbps": 0.008,
+            "streams": [{"id": 3, "bytes": 1000, "throughput_mbps": 0.008}],
+            "udp_stats": {
+                "packets_sent": 100, "packets_received": 99,
+                "lost": 1, "lost_percent": 1.0, "jitter_ms": 0.25,
+                "out_of_order": 0
+            }
+        });
+        let mut result: TestResult = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(result.udp_stats_send.is_none());
+        assert!(result.udp_stats_recv.is_none());
+        assert_eq!(serde_json::to_value(&result).unwrap(), legacy);
+
+        result.udp_stats_send = result.udp_stats.clone().map(Box::new);
+        result.udp_stats_recv = Some(Box::new(UdpStats {
+            packets_sent: 100,
+            packets_received: 75,
+            lost: 25,
+            lost_percent: 25.0,
+            jitter_ms: 2.5,
+            out_of_order: 2,
+            jitter_max_ms: Some(5.0),
+            packet_size: Some(1400),
+        }));
+        let stream = &mut result.streams[0];
+        stream.bytes_sent = Some(750);
+        stream.bytes_received = Some(250);
+        stream.throughput_send_mbps = Some(0.006);
+        stream.throughput_recv_mbps = Some(0.002);
+
+        let enriched = ControlMessage::Result(result).serialize().unwrap();
+        let ControlMessage::Result(decoded) = ControlMessage::deserialize(&enriched).unwrap()
+        else {
+            panic!("expected result");
+        };
+        assert_eq!(decoded.udp_stats_send.unwrap().lost, 1);
+        assert_eq!(decoded.udp_stats_recv.unwrap().lost, 25);
+        assert_eq!(decoded.streams[0].bytes_sent, Some(750));
+        assert_eq!(decoded.streams[0].throughput_recv_mbps, Some(0.002));
+
+        // Dropping only the additive fields leaves exactly the older payload.
+        let mut projection: serde_json::Value = serde_json::from_str(&enriched).unwrap();
+        let object = projection.as_object_mut().unwrap();
+        object.remove("type");
+        object.remove("udp_stats_send");
+        object.remove("udp_stats_recv");
+        for stream in projection["streams"].as_array_mut().unwrap() {
+            for field in [
+                "bytes_sent",
+                "bytes_received",
+                "throughput_send_mbps",
+                "throughput_recv_mbps",
+            ] {
+                stream.as_object_mut().unwrap().remove(field);
+            }
+        }
+        assert_eq!(projection, legacy);
+    }
 
     #[test]
     fn test_serialize_hello() {

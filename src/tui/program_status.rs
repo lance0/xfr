@@ -275,6 +275,8 @@ mod tests {
 
         a.toggle_pause();
         a.on_result(TestResult {
+            udp_stats_send: None,
+            udp_stats_recv: None,
             id: String::new(),
             bytes_total: 1,
             duration_ms: 10_000,

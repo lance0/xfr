@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::protocol::TestResult;
+use crate::protocol::{TestResult, UdpDirectionProgress};
 
 fn serialize_pretty<T: Serialize + ?Sized>(value: &T) -> anyhow::Result<String> {
     serde_json::to_string_pretty(value)
@@ -54,6 +54,52 @@ pub fn output_interval_json(
     rtt_us: Option<u32>,
     cwnd: Option<u32>,
 ) -> anyhow::Result<String> {
+    output_interval_json_with_udp_directions(
+        timestamp,
+        elapsed_secs,
+        throughput_mbps,
+        bytes,
+        retransmits,
+        jitter_ms,
+        lost,
+        rtt_us,
+        cwnd,
+        None,
+        None,
+    )
+}
+
+#[derive(Serialize)]
+struct DirectionSnapshot<'a> {
+    #[serde(flatten)]
+    measurement: &'a UdpDirectionProgress,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lost_percent: Option<f64>,
+}
+
+impl<'a> From<&'a UdpDirectionProgress> for DirectionSnapshot<'a> {
+    fn from(measurement: &'a UdpDirectionProgress) -> Self {
+        Self {
+            measurement,
+            lost_percent: measurement.progress.lost_percent(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn output_interval_json_with_udp_directions(
+    timestamp: &str,
+    elapsed_secs: f64,
+    throughput_mbps: f64,
+    bytes: u64,
+    retransmits: Option<u64>,
+    jitter_ms: Option<f64>,
+    lost: Option<u64>,
+    rtt_us: Option<u32>,
+    cwnd: Option<u32>,
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+) -> anyhow::Result<String> {
     let interval = StreamInterval {
         timestamp: timestamp.to_string(),
         elapsed_secs,
@@ -65,8 +111,48 @@ pub fn output_interval_json(
         rtt_us,
         cwnd,
     };
-    serde_json::to_string(&interval)
-        .map_err(|e| anyhow::anyhow!("failed to serialize interval to JSON: {e}"))
+    #[derive(Serialize)]
+    struct DirectionalInterval<'a> {
+        #[serde(flatten)]
+        interval: StreamInterval,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        udp_send: Option<DirectionSnapshot<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        udp_recv: Option<DirectionSnapshot<'a>>,
+    }
+    serde_json::to_string(&DirectionalInterval {
+        interval,
+        udp_send: udp_send.map(Into::into),
+        udp_recv: udp_recv.map(Into::into),
+    })
+    .map_err(|e| anyhow::anyhow!("failed to serialize interval to JSON: {e}"))
+}
+
+/// Receiver updates contain cumulative directional counts, not byte deltas.
+pub fn output_directional_feedback_json(
+    timestamp: &str,
+    elapsed_secs: f64,
+    udp_send: Option<&UdpDirectionProgress>,
+    udp_recv: Option<&UdpDirectionProgress>,
+) -> anyhow::Result<String> {
+    #[derive(Serialize)]
+    struct DirectionalFeedback<'a> {
+        event: &'static str,
+        timestamp: &'a str,
+        elapsed_secs: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        udp_send: Option<DirectionSnapshot<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        udp_recv: Option<DirectionSnapshot<'a>>,
+    }
+    serde_json::to_string(&DirectionalFeedback {
+        event: "udp_feedback",
+        timestamp,
+        elapsed_secs,
+        udp_send: udp_send.map(Into::into),
+        udp_recv: udp_recv.map(Into::into),
+    })
+    .map_err(|e| anyhow::anyhow!("failed to serialize directional feedback to JSON: {e}"))
 }
 
 /// Feedback-only streaming event (issue #70 follow-up, scripted half of
@@ -108,6 +194,7 @@ pub fn output_feedback_json(
 
 #[cfg(test)]
 mod tests {
+    use super::{output_directional_feedback_json, output_interval_json_with_udp_directions};
     use crate::output::json::{
         output_feedback_json, output_interval_json, output_json, save_json, serialize_pretty,
     };
@@ -154,6 +241,10 @@ mod tests {
                 retransmits: None,
                 jitter_ms: None,
                 lost: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
             }],
             tcp_info: Some(TcpInfoSnapshot {
                 retransmits: 0,
@@ -170,7 +261,76 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
         }
+    }
+
+    #[test]
+    fn directional_json_distinguishes_zero_from_absent_upload() {
+        let recv = crate::protocol::UdpDirectionProgress {
+            progress: crate::protocol::UdpIntervalProgress {
+                packets_received: 10,
+                packets_lost: 0,
+            },
+            jitter_ms: Some(0.0),
+        };
+        let feedback: serde_json::Value = serde_json::from_str(
+            &output_directional_feedback_json("2.0", 2.0, None, Some(&recv)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(feedback["event"], "udp_feedback");
+        assert!(feedback.get("udp_send").is_none());
+        assert!(feedback.get("bytes").is_none());
+        assert_eq!(feedback["udp_recv"]["packets_received"], 10);
+        assert_eq!(feedback["udp_recv"]["packets_lost"], 0);
+        assert_eq!(feedback["udp_recv"]["lost_percent"], 0.0);
+        assert_eq!(feedback["udp_recv"]["jitter_ms"], 0.0);
+
+        let interval: serde_json::Value = serde_json::from_str(
+            &output_interval_json_with_udp_directions(
+                "2.0",
+                2.0,
+                8.0,
+                1000,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&recv),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(interval["bytes"], 1000);
+        assert!(interval.get("event").is_none());
+        assert_eq!(interval["udp_recv"], feedback["udp_recv"]);
+    }
+
+    #[test]
+    fn final_json_serializes_directional_stats_and_stream_splits() {
+        let mut result = make_result();
+        result.udp_stats_recv = Some(Box::new(crate::protocol::UdpStats {
+            packets_sent: 100,
+            packets_received: 80,
+            lost: 20,
+            lost_percent: 20.0,
+            jitter_ms: 0.5,
+            out_of_order: 0,
+            jitter_max_ms: None,
+            packet_size: None,
+        }));
+        result.streams[0].bytes_sent = Some(400);
+        result.streams[0].bytes_received = Some(624);
+        result.streams[0].throughput_send_mbps = Some(3.0);
+        result.streams[0].throughput_recv_mbps = Some(5.0);
+        let json: serde_json::Value = serde_json::from_str(&output_json(&result).unwrap()).unwrap();
+        assert!(json.get("udp_stats_send").is_none());
+        assert_eq!(json["udp_stats_recv"]["lost"], 20);
+        assert_eq!(json["streams"][0]["bytes_received"], 624);
+        assert_eq!(json["streams"][0]["throughput_send_mbps"], 3.0);
     }
 
     #[test]

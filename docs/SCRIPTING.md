@@ -147,6 +147,29 @@ xfr <host> --json --no-tui | jq -e '.throughput_mbps > 900' || echo "FAIL"
 xfr <host> --json --no-tui | jq '.tcp_info.retransmits // 0'
 ```
 
+### Bidirectional UDP quality
+
+For `-u --bidir`, final JSON adds `udp_stats_send` (upload receiver) and
+`udp_stats_recv` (download receiver). Their packet counts, loss, jitter,
+maximum jitter, and packet size describe each direction independently.
+Legacy `udp_stats` keeps its upload meaning.
+
+```bash
+xfr <host> -u --bidir --json --no-tui | jq '{upload: .udp_stats_send, download: .udp_stats_recv}'
+```
+
+Full streaming intervals add `udp_send` and `udp_recv`, each containing
+cumulative `packets_received`, `packets_lost`, and an optional `jitter_ms`.
+Download snapshots can also arrive in a marked `event: "udp_feedback"` row
+while full intervals stall. That row has no throughput or byte deltas; a
+missing upload snapshot does not mean zero upload loss. The original
+upload-only UDP feedback event retains its fields.
+
+Per-stream interval/result objects add `bytes_sent`, `bytes_received`,
+`throughput_send_mbps`, and `throughput_recv_mbps`. Directions always use
+the client's perspective. A new client corrects UDP download counts locally;
+missing upload splits from older servers stay absent.
+
 ## CSV Output
 
 ```bash
@@ -155,22 +178,25 @@ xfr <host> --csv --no-tui > results.csv
 
 Interval output format (one line per reporting interval):
 ```
-timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps
-1.000,1.00,118775000,950.20,0,0,0,1200,65535,,,,
-2.000,2.00,122562500,980.50,2,0,0,1150,65535,,,,
+timestamp,elapsed_secs,bytes,throughput_mbps,retransmits,jitter_ms,lost,rtt_us,cwnd,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps,udp_send_packets_received,udp_send_packets_lost,udp_send_lost_percent,udp_send_jitter_ms,udp_recv_packets_received,udp_recv_packets_lost,udp_recv_lost_percent,udp_recv_jitter_ms
+1.000,1.00,118775000,950.20,0,0,0,1200,65535,,,,,,,,,,,,
+2.000,2.00,122562500,980.50,2,0,0,1150,65535,,,,,,,,,,,,
 ```
 
 After intervals, a summary line is printed:
 ```
-test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps
-550e8400-...,10.00,1234567890,987.65,42,0.00,0,0.00,,,,
+test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps,udp_send_packets_received,udp_send_packets_lost,udp_send_lost_percent,udp_send_jitter_ms,udp_recv_packets_received,udp_recv_packets_lost,udp_recv_lost_percent,udp_recv_jitter_ms
+550e8400-...,10.00,1234567890,987.65,42,0.00,0,0.00,,,,,,,,,,,,
 ```
 
 The trailing `bytes_sent` / `bytes_received` / `throughput_send_mbps` /
 `throughput_recv_mbps` columns carry the per-direction split for
 `--bidir` tests; unidirectional tests leave them empty. New columns are
 appended at the end of both row types, so parsers that index columns by
-position keep working across versions.
+position keep working across versions. The final eight columns contain
+per-direction UDP cumulative packet counts, loss percentage, and jitter.
+They remain empty when that direction has no receiver measurement. CSV
+keeps emitting only full interval rows and the final summary.
 
 ## CI/CD Examples
 

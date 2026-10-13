@@ -146,7 +146,9 @@ impl Sample {
             .streams
             .iter()
             .zip(&self.intervals)
-            .map(|(stream, interval)| stream.to_interval(interval))
+            .map(|(stream, interval)| {
+                stream.to_interval_with_direction(interval, config.direction == Direction::Bidir)
+            })
             .collect();
         let aggregate = config
             .stats
