@@ -282,7 +282,9 @@ impl std::fmt::Display for Direction {
 /// Cumulative UDP packet counts, sent on every periodic Interval message so
 /// the client can both derive a live loss percentage and detect that the
 /// server is reporting fresh data (vs. paired with an old server that omits
-/// the field). Counts grow monotonically across the run.
+/// the field). Unique received packets and the expected denominator
+/// (`received + lost`) grow monotonically; lost can fall as late packets
+/// fill previously observed gaps.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct UdpIntervalProgress {
     pub packets_received: u64,
@@ -290,6 +292,17 @@ pub struct UdpIntervalProgress {
 }
 
 impl UdpIntervalProgress {
+    /// Late gap repairs increase received without advancing the expected
+    /// denominator. Compare both monotonic coordinates so an old snapshot
+    /// cannot undo a repair, even when it traveled over a different channel.
+    pub fn is_at_least_as_fresh_as(&self, previous: &Self) -> bool {
+        self.packets_received >= previous.packets_received
+            && self.packets_received.saturating_add(self.packets_lost)
+                >= previous
+                    .packets_received
+                    .saturating_add(previous.packets_lost)
+    }
+
     /// Cumulative loss percent. Returns `None` when no packets have been seen
     /// yet (denominator zero) so callers can distinguish "no traffic" from a
     /// real 0.0% reading.
@@ -514,11 +527,15 @@ pub struct TcpInfoSnapshot {
 /// packets lost entirely beyond the observed sequence range are unknown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UdpStats {
+    /// Receiver-inferred expected count through the highest sequence seen.
+    /// Packets lost after that sequence cannot be inferred by the receiver.
     pub packets_sent: u64,
+    /// Unique packets accepted by the receiver's bounded sequence window.
     pub packets_received: u64,
     pub lost: u64,
     pub lost_percent: f64,
     pub jitter_ms: f64,
+    /// Unique late packets within the sequence window, excluding duplicates.
     pub out_of_order: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter_max_ms: Option<f64>,

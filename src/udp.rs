@@ -1,7 +1,7 @@
 //! UDP data transfer with pacing and receiver-progress feedback
 //!
 //! Implements paced UDP sending to avoid buffer saturation and provides
-//! jitter/loss calculation per RFC 3550.
+//! jitter calculation per RFC 3550 and bounded sequence-based loss tracking.
 //!
 //! Also defines [`UdpFeedbackPacket`], the 36-byte cumulative-counts
 //! receiver-progress packet emitted by the server's [`receive_udp`] task
@@ -16,7 +16,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -459,8 +458,10 @@ impl JitterCalculator {
     /// J(i) = J(i-1) + (|D(i)| - J(i-1)) / 16
     pub fn update(&mut self, send_time_us: u64, recv_time: Instant) -> f64 {
         if let (Some(last_send), Some(last_recv)) = (self.last_send_time, self.last_recv_time) {
-            let recv_diff = recv_time.duration_since(last_recv).as_micros() as i64;
-            let send_diff = (send_time_us as i64) - (last_send as i64);
+            // Wire timestamps are untrusted u64 values. Wide signed deltas
+            // preserve receive-order jitter without overflowing at either end.
+            let recv_diff = recv_time.saturating_duration_since(last_recv).as_micros() as i128;
+            let send_diff = i128::from(send_time_us) - i128::from(last_send);
             let d = (recv_diff - send_diff).abs() as f64;
 
             self.jitter += (d - self.jitter) / 16.0;
@@ -489,47 +490,115 @@ impl Default for JitterCalculator {
     }
 }
 
-/// Receiver-side packet tracker for loss and out-of-order detection
+/// Number of sequence positions retained for duplicate/reordering detection.
+/// One bit per position uses 8 KiB per stream, independent of test duration.
+const PACKET_TRACKER_WINDOW: usize = 65_536;
+const PACKET_TRACKER_WORD_BITS: usize = u64::BITS as usize;
+
+/// Receiver-side packet tracker for loss and out-of-order detection.
+///
+/// Unique late packets repair gaps within the retained sequence window.
+/// Older packets cannot be distinguished from duplicates and are ignored;
+/// gaps outside the window remain counted as lost. Unseen trailing packets
+/// cannot be inferred without an authoritative sender count.
 pub struct PacketTracker {
-    expected_sequence: u64,
     received: u64,
-    lost: AtomicU64,
-    out_of_order: AtomicU64,
-    highest_seen: u64,
+    lost: u64,
+    out_of_order: u64,
+    highest_seen: Option<u64>,
+    seen: Box<[u64]>,
 }
 
 impl PacketTracker {
     pub fn new() -> Self {
         Self {
-            expected_sequence: 0,
             received: 0,
-            lost: AtomicU64::new(0),
-            out_of_order: AtomicU64::new(0),
-            highest_seen: 0,
+            lost: 0,
+            out_of_order: 0,
+            highest_seen: None,
+            seen: vec![0; PACKET_TRACKER_WINDOW / PACKET_TRACKER_WORD_BITS].into_boxed_slice(),
         }
     }
 
     pub fn record(&mut self, sequence: u64) {
-        self.received += 1;
+        self.record_unique(sequence);
+    }
 
-        if sequence < self.expected_sequence {
-            // Out of order packet
-            self.out_of_order.fetch_add(1, Ordering::Relaxed);
-        } else if sequence > self.expected_sequence {
-            // Gap detected - packets lost
-            let gap = sequence - self.expected_sequence;
-            self.lost.fetch_add(gap, Ordering::Relaxed);
-            self.expected_sequence = sequence + 1;
-        } else {
-            self.expected_sequence = sequence + 1;
+    /// Returns true only for a new packet whose sequence can still be tracked.
+    fn record_unique(&mut self, sequence: u64) -> bool {
+        let index = sequence as usize & (PACKET_TRACKER_WINDOW - 1);
+        let word = index / PACKET_TRACKER_WORD_BITS;
+        let bit = 1u64 << (index % PACKET_TRACKER_WORD_BITS);
+
+        match self.highest_seen {
+            None => {
+                // Keep the initial gap: sequence numbering starts at zero.
+                self.lost = sequence;
+                self.highest_seen = Some(sequence);
+            }
+            Some(highest) if sequence > highest => {
+                self.advance_window(highest, sequence);
+                let gap = sequence - highest - 1;
+                self.lost = self.lost.saturating_add(gap);
+                self.highest_seen = Some(sequence);
+            }
+            Some(highest) => {
+                if highest - sequence >= PACKET_TRACKER_WINDOW as u64 || self.seen[word] & bit != 0
+                {
+                    return false;
+                }
+                self.lost = self.lost.saturating_sub(1);
+                self.out_of_order = self.out_of_order.saturating_add(1);
+            }
         }
 
-        self.highest_seen = self.highest_seen.max(sequence);
+        self.seen[word] |= bit;
+        self.received = self.received.saturating_add(1);
+        true
+    }
+
+    fn advance_window(&mut self, previous: u64, next: u64) {
+        let distance = next - previous;
+        if distance >= PACKET_TRACKER_WINDOW as u64 {
+            self.seen.fill(0);
+            return;
+        }
+        // `previous + 1` is safe because a strictly greater `next` exists.
+        let start = (previous + 1) as usize & (PACKET_TRACKER_WINDOW - 1);
+        let end = start + distance as usize;
+        self.clear_range(start, end.min(PACKET_TRACKER_WINDOW));
+        if end > PACKET_TRACKER_WINDOW {
+            self.clear_range(0, end - PACKET_TRACKER_WINDOW);
+        }
+    }
+
+    /// Clear entering positions in bulk while retaining the partial words at
+    /// the oldest window edge. Work is bounded by the bitmap, not the jump.
+    fn clear_range(&mut self, start: usize, end: usize) {
+        if start == end {
+            return;
+        }
+        let first = start / PACKET_TRACKER_WORD_BITS;
+        let last = (end - 1) / PACKET_TRACKER_WORD_BITS;
+        let first_mask = u64::MAX << (start % PACKET_TRACKER_WORD_BITS);
+        let end_bit = end % PACKET_TRACKER_WORD_BITS;
+        let last_mask = if end_bit == 0 {
+            u64::MAX
+        } else {
+            (1u64 << end_bit) - 1
+        };
+        if first == last {
+            self.seen[first] &= !(first_mask & last_mask);
+        } else {
+            self.seen[first] &= !first_mask;
+            self.seen[first + 1..last].fill(0);
+            self.seen[last] &= !last_mask;
+        }
     }
 
     pub fn stats(&self, packets_sent: u64) -> (u64, u64, f64) {
-        let lost = self.lost.load(Ordering::Relaxed);
-        let ooo = self.out_of_order.load(Ordering::Relaxed);
+        let lost = self.lost;
+        let ooo = self.out_of_order;
         let loss_percent = if packets_sent > 0 {
             (lost as f64 / packets_sent as f64) * 100.0
         } else {
@@ -942,7 +1011,6 @@ pub async fn receive_udp(
     let mut buffer = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
     let mut jitter_calc = JitterCalculator::new();
     let mut packet_tracker = PacketTracker::new();
-    let mut packets_received: u64 = 0;
     let mut packet_size = None;
     let mut last_recv = Instant::now();
     // Most-recently-observed client source address. The first successful
@@ -1046,21 +1114,18 @@ pub async fn receive_udp(
                             // toward the loss denominator would understate
                             // the loss percent — the denominator must match
                             // what the sequence tracker actually saw.
-                            packets_received += 1;
-                            stats.add_udp_received(1);
-
-                            let old_lost = packet_tracker.lost.load(Ordering::Relaxed);
-                            packet_tracker.record(header.sequence);
-                            let new_lost = packet_tracker.lost.load(Ordering::Relaxed);
+                            if !packet_tracker.record_unique(header.sequence) {
+                                continue;
+                            }
+                            stats.set_udp_progress(
+                                packet_tracker.received,
+                                packet_tracker.lost,
+                            );
 
                             // Update live stats for interval reporting
                             let jitter_us = jitter_calc.update(header.timestamp_us, recv_time);
                             stats.set_udp_jitter_us(jitter_us as u64);
 
-                            // Add any newly detected lost packets
-                            if new_lost > old_lost {
-                                stats.add_udp_lost(new_lost - old_lost);
-                            }
                         }
                     }
                     Err(e) => {
@@ -1104,7 +1169,7 @@ pub async fn receive_udp(
                 // valid xfr packet (otherwise we're talking to phantom
                 // traffic that doesn't expect feedback).
                 if let Some(addr) = last_client_addr
-                    && packets_received > 0
+                    && packet_tracker.received > 0
                 {
                     let snap = stats.udp_progress_snapshot();
                     let elapsed_ms = stats.start_time.elapsed().as_millis() as u64;
@@ -1139,9 +1204,10 @@ pub async fn receive_udp(
         }
     }
 
+    let packets_received = packet_tracker.received;
     let (lost, out_of_order, _) =
-        packet_tracker.stats(packets_received + packet_tracker.lost.load(Ordering::Relaxed));
-    let packets_sent = packets_received + lost;
+        packet_tracker.stats(packets_received.saturating_add(packet_tracker.lost));
+    let packets_sent = packets_received.saturating_add(lost);
     let loss_percent = if packets_sent > 0 {
         (lost as f64 / packets_sent as f64) * 100.0
     } else {
@@ -1177,10 +1243,8 @@ fn store_udp_feedback(
     let Some(slot) = slots.get_mut(expected_stream_index) else {
         return false;
     };
-    let current_denominator = slot.packets_received.saturating_add(slot.packets_lost);
     let next = packet.to_progress();
-    let next_denominator = next.packets_received.saturating_add(next.packets_lost);
-    if next_denominator < current_denominator {
+    if !next.is_at_least_as_fresh_as(slot) {
         return false;
     }
 
@@ -1418,6 +1482,7 @@ pub async fn wait_for_client(socket: &UdpSocket, timeout: Duration) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn custom_payloads_preserve_datagrams_and_byte_budgets() {
@@ -1717,6 +1782,37 @@ mod tests {
     }
 
     #[test]
+    fn feedback_slot_rejects_replayed_loss_and_backwards_received_counts() {
+        let mut slots = [UdpIntervalProgress {
+            packets_received: 9,
+            packets_lost: 1,
+        }];
+        let corrected = UdpFeedbackPacket {
+            stream_id: 0,
+            elapsed_ms: 2000,
+            packets_received: 10,
+            packets_lost: 0,
+        };
+        assert!(store_udp_feedback(&mut slots, 0, corrected));
+        for stale in [
+            UdpFeedbackPacket {
+                packets_received: 9,
+                packets_lost: 1,
+                ..corrected
+            },
+            UdpFeedbackPacket {
+                packets_received: 9,
+                packets_lost: 10,
+                ..corrected
+            },
+        ] {
+            assert!(!store_udp_feedback(&mut slots, 0, stale));
+            assert_eq!(slots[0].packets_received, 10);
+            assert_eq!(slots[0].packets_lost, 0);
+        }
+    }
+
+    #[test]
     fn data_packet_at_collision_sequence_is_not_feedback() {
         // Length-first demux means a hypothetical data packet whose first
         // four bytes spell "XFRF" is still routed as data. Synthesize the
@@ -1953,15 +2049,141 @@ mod tests {
         tracker.record(0);
         tracker.record(1);
         tracker.record(2);
-        assert_eq!(tracker.lost.load(Ordering::Relaxed), 0);
+        assert_eq!(tracker.lost, 0);
 
         // Gap - packet 3 lost
         tracker.record(4);
-        assert_eq!(tracker.lost.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.lost, 1);
 
         // Out of order
         tracker.record(3);
-        assert_eq!(tracker.out_of_order.load(Ordering::Relaxed), 1);
+        assert_eq!(tracker.out_of_order, 1);
+        assert_eq!(tracker.lost, 0);
+    }
+
+    #[test]
+    fn packet_tracker_repairs_reordering_without_counting_duplicates() {
+        let mut tracker = PacketTracker::new();
+        assert!(tracker.record_unique(0));
+        assert!(tracker.record_unique(2));
+        let (lost, reordered, percent) = tracker.stats(3);
+        assert_eq!((lost, reordered), (1, 0));
+        assert!((percent - 100.0 / 3.0).abs() < 1e-12);
+        for duplicate in [0, 2, 0] {
+            assert!(!tracker.record_unique(duplicate));
+        }
+        assert_eq!(tracker.received, 2);
+        assert_eq!(tracker.lost, 1);
+        assert!(tracker.record_unique(1));
+        assert_eq!(tracker.received, 3);
+        assert_eq!(tracker.stats(3), (0, 1, 0.0));
+        assert!(!tracker.record_unique(1));
+        assert_eq!(tracker.out_of_order, 1);
+    }
+
+    #[test]
+    fn packet_tracker_retains_and_repairs_initial_gaps() {
+        let mut tracker = PacketTracker::new();
+        tracker.record(5);
+        assert_eq!(tracker.lost, 5);
+        for sequence in [3, 0, 1, 2, 4] {
+            assert!(tracker.record_unique(sequence));
+        }
+        assert_eq!(tracker.received, 6);
+        assert_eq!(tracker.stats(6), (0, 5, 0.0));
+    }
+
+    #[test]
+    fn packet_tracker_wrap_keeps_partial_words_and_ignores_expired_packets() {
+        let mut tracker = PacketTracker::new();
+        let window = PACKET_TRACKER_WINDOW as u64;
+        for sequence in 0..=window {
+            if sequence != 62 {
+                tracker.record(sequence);
+            }
+        }
+        // The oldest partial word still contains sequence 1 despite its bit 0
+        // being reused for sequence 65536. Clearing the whole word loses it.
+        assert!(!tracker.record_unique(1));
+        assert!(tracker.record_unique(62));
+        assert_eq!(tracker.lost, 0);
+        tracker.record(window + 63);
+        assert_eq!(tracker.lost, 62);
+        assert!(!tracker.record_unique(63)); // just outside the retained window
+        assert!(!tracker.record_unique(64)); // oldest retained packet is a duplicate
+        assert!(tracker.record_unique(window + 1)); // recycled position is now a real gap
+        assert_eq!(tracker.lost, 61);
+        assert_eq!(tracker.received, window + 3);
+        assert_eq!(tracker.seen.len() * size_of::<u64>(), 8192);
+    }
+
+    #[test]
+    fn packet_tracker_large_jumps_and_maximum_sequence_are_bounded() {
+        let mut tracker = PacketTracker::new();
+        tracker.record(0);
+        tracker.record(1_000_000_000_000);
+        assert_eq!(tracker.lost, 999_999_999_999);
+        assert!(!tracker.record_unique(0));
+        assert!(tracker.record_unique(999_999_999_999));
+        assert_eq!(tracker.lost, 999_999_999_998);
+        tracker.record(u64::MAX);
+        assert!(!tracker.record_unique(u64::MAX));
+        assert!(tracker.record_unique(u64::MAX - 1));
+
+        let mut initial_maximum = PacketTracker::new();
+        initial_maximum.record(u64::MAX);
+        assert_eq!(initial_maximum.lost, u64::MAX);
+        assert_eq!(initial_maximum.received, 1);
+        assert!(initial_maximum.record_unique(u64::MAX - 1));
+        assert_eq!(initial_maximum.lost, u64::MAX - 1);
+    }
+
+    #[test]
+    fn packet_tracker_matches_reference_across_reordering_and_window_wraps() {
+        use std::collections::BTreeSet;
+        let mut tracker = PacketTracker::new();
+        let mut unique = BTreeSet::new();
+        let mut highest: Option<u64> = None;
+        let mut reordered = 0;
+        let mut random = 0x1234_5678u64;
+        // This test-only set has at most 6000 entries; production uses 8 KiB.
+        for step in 0..6000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let previous = highest.unwrap_or(0);
+            let sequence = match step % 6 {
+                0 => previous + 1 + random % 257,
+                1 => previous.saturating_sub(random % PACKET_TRACKER_WINDOW as u64),
+                2 => previous.saturating_sub(random % (2 * PACKET_TRACKER_WINDOW) as u64),
+                3 => previous,
+                4 => previous + 1 + random % 70,
+                _ => previous.saturating_sub(random % 4096),
+            };
+            let expired = highest
+                .is_some_and(|h| sequence <= h && h - sequence >= PACKET_TRACKER_WINDOW as u64);
+            let accepted = !expired && unique.insert(sequence);
+            if accepted {
+                if highest.is_some_and(|h| sequence < h) {
+                    reordered += 1;
+                }
+                highest = Some(highest.map_or(sequence, |h| h.max(sequence)));
+            }
+            assert_eq!(tracker.record_unique(sequence), accepted, "step {step}");
+            assert_eq!(tracker.received, unique.len() as u64, "step {step}");
+            let expected_lost = highest.unwrap() + 1 - unique.len() as u64;
+            assert_eq!(tracker.lost, expected_lost, "step {step}");
+            assert_eq!(tracker.out_of_order, reordered, "step {step}");
+        }
+    }
+
+    #[test]
+    fn jitter_handles_extreme_timestamps_without_signed_overflow() {
+        let mut jitter = JitterCalculator::new();
+        let now = Instant::now();
+        for (index, timestamp) in [u64::MAX, 0, u64::MAX, 1].into_iter().enumerate() {
+            let value = jitter.update(timestamp, now + Duration::from_micros(index as u64));
+            assert!(value.is_finite() && value >= 0.0);
+        }
+        assert!(jitter.jitter_max_ms().is_finite());
     }
 
     /// Verify the pacing ticker doesn't burst after resume from pause.

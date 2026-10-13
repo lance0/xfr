@@ -48,9 +48,9 @@ UDP provides:
 - Configurable bitrate pacing
 - Configurable datagram size (`-l/--length`, 16–65507 bytes including the 16-byte xfr header; default 1400). Pick a size that fits the path MTU — a 1400-byte payload fragments on any path MTU below 1428 bytes (1448 over IPv6), such as WireGuard's 1420 default (issue #213). `--probe-mtu` finds the largest size that survives each direction. Requires a server advertising `udp_payload_size_v1`; older servers are refused rather than silently running at 1400
 - Jitter calculation (RFC 3550)
-- Packet loss detection
-- Out-of-order detection
-- Live receiver-progress feedback at 2 Hz on the data socket (when both peers advertise `udp_feedback_v1`), so the live loss counter stays current under upload-mode saturation even when the TCP control channel back-pressures. Surfaces in the TUI live counter and in `--no-tui --json-stream` / `--csv` / plain interval output via a producer-side cumulative-monotonic filter that admits only the freshest reading from either source
+- Packet loss detection with gap repair for unique late arrivals within the latest 65,536 sequence numbers (8 KiB of tracking memory per receiver); duplicate datagrams cannot dilute loss
+- Out-of-order detection for unique late packets, excluding duplicates. Packets older than the tracking window cannot repair loss; wire byte counts still include all data datagrams
+- Live receiver-progress feedback at 2 Hz on the data socket (when both peers advertise `udp_feedback_v1`), so the live loss counter stays current under upload-mode saturation even when the TCP control channel back-pressures. Surfaces in the TUI live counter and in `--no-tui --json-stream` / `--csv` / plain interval output. Freshness checks compare both unique received packets and the expected packet count, keeping delayed reports from undoing gap repairs
 
 #### Single-Port UDP (Default, v0.9.18+)
 

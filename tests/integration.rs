@@ -433,7 +433,10 @@ async fn test_udp_custom_payload_sizes() {
                 .unwrap();
             assert!(result.bytes_total > 0, "size={size}, direction={direction}");
             let stats = result.udp_stats.expect("receiver UDP stats");
-            assert!(stats.packets_received > 0);
+            assert!(
+                stats.packets_received > 0,
+                "size={size}, direction={direction}"
+            );
             assert_eq!(stats.packet_size, Some(u32::from(size)));
             if direction == Direction::Bidir {
                 assert!(result.bytes_sent.unwrap() > 0);

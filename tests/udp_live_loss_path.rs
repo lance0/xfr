@@ -107,6 +107,32 @@ fn live_loss_path_pre_0_9_11_server_keeps_unknown() {
     );
 }
 
+#[test]
+fn delayed_interval_and_feedback_cannot_restore_a_repaired_gap() {
+    let stats = TestStats::new("live-path".to_string(), 1);
+    stats.streams[0].set_udp_progress(2, 1);
+    let old = stats.to_aggregate(&stats.record_intervals());
+    let mut app = App::default();
+    app.state = AppState::Running;
+    app.on_progress(roundtrip_via_wire(&old));
+    assert!((app.udp_lost_percent.unwrap() - 100.0 / 3.0).abs() < 1e-9);
+
+    stats.streams[0].set_udp_progress(3, 0);
+    let corrected = stats.to_aggregate(&stats.record_intervals());
+    let mut feedback = roundtrip_via_wire(&corrected);
+    feedback.udp_feedback_only = true;
+    app.on_progress(feedback);
+    assert_eq!(app.udp_lost_percent, Some(0.0));
+
+    // A producer can pass its filter then wait for queue capacity while a
+    // second producer enqueues a fresher correction. Recheck on consumption.
+    let mut stale_feedback = roundtrip_via_wire(&old);
+    stale_feedback.udp_feedback_only = true;
+    app.on_progress(stale_feedback);
+    app.on_progress(roundtrip_via_wire(&old));
+    assert_eq!(app.udp_lost_percent, Some(0.0));
+}
+
 /// Serialize an `AggregateInterval` to JSON, deserialize via the actual
 /// `ControlMessage::Interval` path, and reconstruct the `TestProgress` the
 /// client would have built. Catches any field that would silently drop on
