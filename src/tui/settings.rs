@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+pub use crate::protocol::TimestampFormat;
 use crate::protocol::{Direction, Protocol};
 
 use super::theme::Theme;
@@ -19,41 +20,6 @@ impl SettingsCategory {
         match self {
             Self::Display => Self::Test,
             Self::Test => Self::Display,
-        }
-    }
-}
-
-/// Timestamp format for display
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum TimestampFormat {
-    #[default]
-    Relative,
-    Iso8601,
-    Unix,
-}
-
-impl TimestampFormat {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Relative => "relative",
-            Self::Iso8601 => "iso8601",
-            Self::Unix => "unix",
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        match self {
-            Self::Relative => Self::Iso8601,
-            Self::Iso8601 => Self::Unix,
-            Self::Unix => Self::Relative,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            Self::Relative => Self::Unix,
-            Self::Iso8601 => Self::Relative,
-            Self::Unix => Self::Iso8601,
         }
     }
 }

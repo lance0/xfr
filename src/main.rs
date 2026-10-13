@@ -1983,11 +1983,13 @@ fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> Se
         KeyCode::Left | KeyCode::Char('h') => {
             app.settings.value_prev();
             app.set_theme_index(app.settings.theme_index);
+            app.set_timestamp_format(app.settings.timestamp_format);
             SettingsAction::None
         }
         KeyCode::Right | KeyCode::Char('l') => {
             app.settings.value_next();
             app.set_theme_index(app.settings.theme_index);
+            app.set_timestamp_format(app.settings.timestamp_format);
             SettingsAction::None
         }
         KeyCode::Tab => {
@@ -2506,6 +2508,41 @@ mod tests {
 
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn settings_timestamp_keys_update_the_history_format() {
+        let mut app = App::default();
+        app.settings.toggle();
+        app.settings.selected_index = 1; // Timestamp
+        app.log("Before changing the format");
+
+        assert_eq!(
+            handle_tui_settings_key(&mut app, test_key(KeyCode::Right)),
+            SettingsAction::None
+        );
+        assert_eq!(app.timestamp_format, TimestampFormat::Iso8601);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&app.history.front().unwrap().timestamp).is_ok()
+        );
+
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Char('l')));
+        assert_eq!(app.timestamp_format, TimestampFormat::Unix);
+        assert!(
+            app.history
+                .front()
+                .unwrap()
+                .timestamp
+                .parse::<f64>()
+                .is_ok()
+        );
+
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Left));
+        assert_eq!(app.timestamp_format, TimestampFormat::Iso8601);
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Char('h')));
+        assert_eq!(app.timestamp_format, TimestampFormat::Relative);
+        assert_eq!(app.history.front().unwrap().timestamp, "00:00:00");
+        assert!(!app.settings.test_params_dirty());
     }
 
     #[test]

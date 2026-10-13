@@ -433,7 +433,7 @@ pub struct UdpStats {
 }
 
 /// Timestamp format options for interval output
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TimestampFormat {
     /// Seconds since test start (default): [5.2s]
@@ -446,6 +446,30 @@ pub enum TimestampFormat {
 }
 
 impl TimestampFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Relative => "relative",
+            Self::Iso8601 => "iso8601",
+            Self::Unix => "unix",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Relative => Self::Iso8601,
+            Self::Iso8601 => Self::Unix,
+            Self::Unix => Self::Relative,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Relative => Self::Unix,
+            Self::Iso8601 => Self::Relative,
+            Self::Unix => Self::Iso8601,
+        }
+    }
+
     /// Format a timestamp based on the format type
     ///
     /// # Arguments
@@ -505,11 +529,7 @@ impl std::str::FromStr for TimestampFormat {
 
 impl std::fmt::Display for TimestampFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TimestampFormat::Relative => write!(f, "relative"),
-            TimestampFormat::Iso8601 => write!(f, "iso8601"),
-            TimestampFormat::Unix => write!(f, "unix"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
