@@ -1208,7 +1208,7 @@ async fn main() -> Result<()> {
                 cli.cport,
                 &file_config.client,
             )
-            .map_err(|e| anyhow::anyhow!("invalid [client] bitrate: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid [client] settings: {e}"))?;
 
             if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
                 eprintln!("Warning: {msg}");
