@@ -374,6 +374,9 @@ xfr discover --timeout 10s   # Extended search
 | `j` | Print JSON result |
 | `u` | Dismiss update notification |
 
+The Display settings' Timestamp choice reformats history immediately.
+`--timestamp-format` selects its initial format.
+
 ## Keybindings (Server TUI)
 
 | Key | Action |

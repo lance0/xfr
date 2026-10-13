@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::layout::Size;
 
@@ -73,6 +73,23 @@ impl ThroughputSample {
 pub struct LogEntry {
     pub timestamp: String,
     pub message: String,
+    elapsed: Duration,
+    recorded_at: Instant,
+}
+
+impl LogEntry {
+    fn format_timestamp(&self, format: TimestampFormat, clock: (Instant, SystemTime)) -> String {
+        match format {
+            // Keep the compact clock used by the TUI's relative history.
+            TimestampFormat::Relative => format!(
+                "{:02}:{:02}:{:02}",
+                self.elapsed.as_secs() / 3600,
+                (self.elapsed.as_secs() % 3600) / 60,
+                self.elapsed.as_secs() % 60
+            ),
+            _ => format.format(clock.0, self.recorded_at, clock.1),
+        }
+    }
 }
 
 pub struct App {
@@ -145,6 +162,9 @@ pub struct App {
 
     // History log
     pub history: VecDeque<LogEntry>,
+    // A session-wide wall-clock anchor. Unlike start_time, this never shifts
+    // on pause or restart, so absolute log timestamps retain their meaning.
+    history_clock: (Instant, SystemTime),
     pub average_throughput_mbps: f64,
     throughput_count: u64,
 
@@ -203,6 +223,8 @@ impl App {
         timestamp_format: TimestampFormat,
         theme: Theme,
     ) -> Self {
+        let mut settings = SettingsState::new(0, streams, protocol, duration, direction, bitrate);
+        settings.timestamp_format = timestamp_format;
         Self {
             state: AppState::Connecting,
             host,
@@ -255,9 +277,10 @@ impl App {
             theme,
             theme_index: 0,
 
-            settings: SettingsState::new(0, streams, protocol, duration, direction, bitrate),
+            settings,
 
             history: VecDeque::with_capacity(LOG_HISTORY),
+            history_clock: (Instant::now(), SystemTime::now()),
             average_throughput_mbps: 0.0,
             throughput_count: 0,
 
@@ -276,26 +299,33 @@ impl App {
 
     /// Add a log entry with current timestamp
     pub fn log(&mut self, message: impl Into<String>) {
-        let timestamp = if let Some(start) = self.start_time {
-            let elapsed = start.elapsed();
-            format!(
-                "{:02}:{:02}:{:02}",
-                elapsed.as_secs() / 3600,
-                (elapsed.as_secs() % 3600) / 60,
-                elapsed.as_secs() % 60
-            )
-        } else {
-            "00:00:00".to_string()
-        };
-
-        self.history.push_front(LogEntry {
-            timestamp,
+        let recorded_at = Instant::now();
+        let mut entry = LogEntry {
+            timestamp: String::new(),
             message: message.into(),
-        });
+            elapsed: self
+                .start_time
+                .map(|start| recorded_at.saturating_duration_since(start))
+                .unwrap_or_default(),
+            recorded_at,
+        };
+        entry.timestamp = entry.format_timestamp(self.timestamp_format, self.history_clock);
+        self.history.push_front(entry);
 
         if self.history.len() > LOG_HISTORY {
             self.history.pop_back();
         }
+    }
+
+    /// Apply a timestamp display choice to both existing and future history.
+    pub fn set_timestamp_format(&mut self, format: TimestampFormat) {
+        if self.timestamp_format != format {
+            self.timestamp_format = format;
+            for entry in &mut self.history {
+                entry.timestamp = entry.format_timestamp(format, self.history_clock);
+            }
+        }
+        self.settings.timestamp_format = format;
     }
 
     /// Create app with theme by name, setting theme_index appropriately
@@ -1006,6 +1036,7 @@ impl App {
             theme_index,
             settings,
             history,
+            history_clock: _, // formatting anchor; its visible effects are in history
             average_throughput_mbps,
             throughput_count: _,
             peak_throughput_mbps: _, // event-detection baselines; effects land in `history`
@@ -1139,6 +1170,73 @@ impl Default for App {
 #[allow(clippy::field_reassign_with_default)] // App has too many fields to spread-construct in tests
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_honors_the_initial_timestamp_format() {
+        for format in [TimestampFormat::Iso8601, TimestampFormat::Unix] {
+            let mut app = App::new(
+                "localhost".into(),
+                5201,
+                Protocol::Tcp,
+                Direction::Upload,
+                1,
+                Duration::from_secs(10),
+                None,
+                format,
+                Theme::default(),
+            );
+            app.log("Connecting");
+            let timestamp = &app.history.front().unwrap().timestamp;
+            match format {
+                TimestampFormat::Iso8601 => {
+                    assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
+                }
+                TimestampFormat::Unix => assert!(timestamp.parse::<f64>().unwrap() > 1e9),
+                TimestampFormat::Relative => unreachable!(),
+            }
+            assert_eq!(app.settings.timestamp_format.as_str(), format.to_string());
+        }
+    }
+
+    #[test]
+    fn changing_timestamp_format_preserves_the_time_of_existing_events() {
+        let mut app = App::default();
+        let clock_start = Instant::now();
+        app.history_clock = (
+            clock_start,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        app.history.push_front(LogEntry {
+            timestamp: "01:02:03".into(),
+            message: "Captured event".into(),
+            elapsed: Duration::from_secs(3723),
+            recorded_at: clock_start + Duration::from_millis(4500),
+        });
+        let fingerprint = app.render_fingerprint(Size::new(120, 40));
+
+        app.set_timestamp_format(TimestampFormat::Unix);
+        assert_eq!(app.history.front().unwrap().timestamp, "1700000004.500");
+        assert_ne!(fingerprint, app.render_fingerprint(Size::new(120, 40)));
+
+        // Restart preserves history. Its clock reset must not change the
+        // absolute or relative time of a previously captured event.
+        app.reset_for_restart();
+        app.on_connected();
+        app.set_timestamp_format(TimestampFormat::Iso8601);
+        let event = app
+            .history
+            .iter()
+            .find(|entry| entry.message == "Captured event")
+            .unwrap();
+        assert_eq!(event.timestamp, "2023-11-14T22:13:24.500Z");
+        app.set_timestamp_format(TimestampFormat::Relative);
+        let event = app
+            .history
+            .iter()
+            .find(|entry| entry.message == "Captured event")
+            .unwrap();
+        assert_eq!(event.timestamp, "01:02:03");
+    }
 
     #[test]
     fn jitter_display_returns_both_instant_and_smoothed_while_running() {
