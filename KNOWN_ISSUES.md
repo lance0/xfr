@@ -14,16 +14,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP Payload Size Hardcoded to 1400 Bytes
-
-**Issue:** UDP payload size is hardcoded to 1400 bytes, leaving headroom for IP/UDP headers and tunneling overhead.
-
-**Impact:** May not be optimal for jumbo frames or networks with different MTUs.
-
-**Workaround:** Works correctly for the vast majority of networks.
-
----
-
 ### Bitrate Division Truncation
 
 **Issue:** When calculating packets per second from bitrate, integer division may cause minor precision loss.
@@ -172,6 +162,7 @@ The following issues have been fixed and are listed here for reference.
 - **QUIC bitrate limiting** - QUIC previously accepted `-b/--bitrate` on the CLI and dropped it on the send paths, so a rate-limited QUIC test ran at line rate and only logged a warning. Both directions are now paced with the same cumulative byte-budget approach used for TCP and UDP, split per stream, with the send buffer capped so a rate limit cannot be overshot by the first write.
 - **Client capabilities negotiation** - Client and server exchange capabilities in the Hello handshake, allowing the server to adapt behavior (e.g., single-port vs multi-port TCP) based on client support.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
+- **UDP payload size hardcoded to 1400 bytes** - every UDP datagram fragmented on paths with an MTU below 1428 bytes (1448 over IPv6), including WireGuard's 1420 default (issue #213). `-l/--length` now sets the datagram size (16–65507 bytes) for all streams and directions; servers advertise `udp_payload_size_v1`, and the client refuses an explicit size against an older server. The default stays 1400.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 
 ---
