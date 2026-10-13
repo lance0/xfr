@@ -1346,8 +1346,17 @@ async fn handle_quic_client(
             direction,
             byte_budget,
             bitrate,
+            udp_payload_size,
             ..
         } => {
+            if udp_payload_size.is_some() {
+                let error =
+                    ControlMessage::error("UDP payload size requires a UDP throughput test");
+                transport
+                    .write_message(&mut ctrl_send, &error.serialize()?)
+                    .await?;
+                return Err(anyhow::anyhow!("UDP payload size requested for QUIC"));
+            }
             if protocol != Protocol::Quic {
                 let error = ControlMessage::error("Expected QUIC protocol for QUIC connection");
                 transport
@@ -1694,7 +1703,26 @@ async fn handle_test_request(
             mtu_probe,
             tcp_nodelay,
             byte_budget,
+            udp_payload_size,
         } => {
+            if let Some(size) = udp_payload_size {
+                let validation = if protocol != Protocol::Udp || mtu_probe {
+                    Err(anyhow::anyhow!(
+                        "UDP payload size requires a UDP throughput test"
+                    ))
+                } else {
+                    udp::validate_payload_size(usize::from(size))
+                };
+                if let Err(error) = validation {
+                    transport
+                        .write_message(
+                            writer,
+                            &ControlMessage::error(error.to_string()).serialize()?,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            }
             // Validate stream count
             if streams == 0 || streams > MAX_STREAMS {
                 let error = ControlMessage::error(format!(
@@ -1803,6 +1831,7 @@ async fn handle_test_request(
                 mtu_probe,
                 tcp_nodelay,
                 byte_budget,
+                udp_payload_size.map_or(udp::UDP_PAYLOAD_SIZE, usize::from),
                 transport,
             )
             .await;
@@ -2370,6 +2399,7 @@ async fn run_test(
     mtu_probe: bool,
     tcp_nodelay: bool,
     byte_budget: Option<u64>,
+    packet_size: usize,
     mut transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<(u64, u64, f64)> {
     // For TCP: single-port mode (data connections come on control port)
@@ -2632,6 +2662,7 @@ async fn run_test(
                 direction,
                 duration,
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                packet_size,
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
@@ -2678,6 +2709,7 @@ async fn run_test(
                 direction,
                 duration,
                 bitrate.unwrap_or(DEFAULT_BITRATE_BPS),
+                packet_size,
                 cancel_rx.clone(),
                 pause_rx.clone(),
                 dscp,
@@ -3572,6 +3604,7 @@ async fn spawn_udp_handlers(
     direction: Direction,
     duration: Duration,
     bitrate: u64,
+    packet_size: usize,
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
@@ -3637,6 +3670,7 @@ async fn spawn_udp_handlers(
                                 socket,
                                 Some(client_addr),
                                 per_stream_bitrate,
+                                packet_size,
                                 duration,
                                 stream_stats,
                                 cancel,
@@ -3673,6 +3707,7 @@ async fn spawn_udp_handlers(
                                     send_socket,
                                     Some(client_addr),
                                     per_stream_bitrate,
+                                    packet_size,
                                     duration,
                                     send_stats,
                                     send_cancel,
@@ -3736,6 +3771,7 @@ async fn spawn_single_port_udp_handlers(
     direction: Direction,
     duration: Duration,
     bitrate: u64,
+    packet_size: usize,
     cancel: watch::Receiver<bool>,
     pause: watch::Receiver<bool>,
     dscp: Option<u8>,
@@ -3868,6 +3904,7 @@ async fn spawn_single_port_udp_handlers(
                                 socket,
                                 None, // connected socket
                                 per_stream_bitrate,
+                                packet_size,
                                 duration,
                                 stream_stats,
                                 cancel,
@@ -3900,6 +3937,7 @@ async fn spawn_single_port_udp_handlers(
                                     send_socket,
                                     None, // connected socket
                                     per_stream_bitrate,
+                                    packet_size,
                                     duration,
                                     send_stats,
                                     send_cancel,

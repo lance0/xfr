@@ -225,7 +225,7 @@ jobs:
         run: sudo ./test-control-channel-skew.sh
 
   mtu-probe:
-    name: MTU probe (#64 netns)
+    name: UDP MTU regressions (#64, #213 netns)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -236,3 +236,5 @@ jobs:
         run: cargo build --release --locked
       - name: Probe through a constrained middle hop
         run: sudo ./test-mtu-probe-ns.sh --ci
+      - name: Verify configurable UDP payloads on a 1420-byte MTU path
+        run: sudo ./test-udp-payload-ns.sh

@@ -44,6 +44,7 @@ fn test_test_start_roundtrip() {
         mtu_probe: false,
         tcp_nodelay: false,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let json = msg.serialize().unwrap();
@@ -109,12 +110,42 @@ fn test_udp_test_start() {
         mtu_probe: false,
         tcp_nodelay: false,
         byte_budget: None,
+        udp_payload_size: None,
     };
 
     let json = msg.serialize().unwrap();
     assert!(json.contains("\"protocol\":\"udp\""));
     assert!(json.contains("\"bitrate\":1000000000"));
     assert!(json.contains("\"direction\":\"download\""));
+}
+
+#[test]
+fn test_udp_payload_size_wire_compatibility() {
+    let legacy = r#"{"type":"test_start","id":"payload","protocol":"udp","streams":1,"duration_secs":1,"direction":"upload"}"#;
+    let message = ControlMessage::deserialize(legacy).unwrap();
+    assert!(matches!(
+        message,
+        ControlMessage::TestStart {
+            udp_payload_size: None,
+            ..
+        }
+    ));
+    assert!(!message.serialize().unwrap().contains("udp_payload_size"));
+
+    let mut value: serde_json::Value = serde_json::from_str(legacy).unwrap();
+    value["udp_payload_size"] = 1368.into();
+    let message = ControlMessage::deserialize(&value.to_string()).unwrap();
+    assert!(matches!(
+        message,
+        ControlMessage::TestStart {
+            udp_payload_size: Some(1368),
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&message.serialize().unwrap()).unwrap()["udp_payload_size"],
+        1368
+    );
 }
 
 #[test]

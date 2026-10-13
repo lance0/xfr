@@ -41,6 +41,9 @@ Requires a server advertising the byte_budget_v1 capability. Environment: XFR_BY
 .B \-u ", " \-\-udp
 Use UDP instead of TCP
 .TP
+.BI \-l ", " \-\-length " BYTES"
+UDP payload size including the 16-byte xfr header (16\-65507 bytes; default: 1400). Requires \-u and server udp_payload_size_v1 support. Applies to upload, reverse and bidirectional tests and all streams. Cannot be combined with \-\-probe\-mtu. For a 1420-byte tunnel MTU, \-l 1368 fits both IPv4 and IPv6 basic headers. Run \-\-probe\-mtu separately to find a suitable size; throughput tests do not automatically adjust the default.
+.TP
 .B \-Q ", " \-\-quic
 Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
@@ -397,6 +400,9 @@ Server honors a zero-copy request for its own sends in \-R/\-\-bidir TCP tests (
 .TP
 .B mtu_probe_v1
 Server answers path-MTU probe packets (ack + same-size echo) for \-\-probe\-mtu (issue #64). Hard requirement: the client refuses to probe servers without it. Available v0.9.17+.
+.TP
+.B udp_payload_size_v1
+Server honors the requested UDP payload size in TestStart for upload, reverse and bidirectional throughput tests (\-l/\-\-length, issue #213). Explicit sizes require this capability; without a size request both peers retain the 1400-byte default.
 .TP
 .B single_port_udp_v1
 All UDP stream data flows to the server's main port via per-stream connected sockets negotiated with a token-bearing hello, instead of per-stream ephemeral server ports (issue #63). Advertised only when a startup self-test proves the kernel's connected-socket routing; servers fall back to ephemeral ports for older clients or unsupported platforms. Available v0.9.18+.
