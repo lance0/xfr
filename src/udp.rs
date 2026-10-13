@@ -27,6 +27,17 @@ use crate::protocol::{UdpIntervalProgress, UdpStats};
 use crate::stats::StreamStats;
 
 pub const UDP_PAYLOAD_SIZE: usize = 1400; // Leave room for IP + UDP headers
+/// Largest UDP payload that fits in an IPv4 packet without IP options.
+pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
+
+/// Validate the complete UDP payload, including xfr's sequence/timestamp header.
+pub fn validate_payload_size(size: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (UDP_HEADER_SIZE..=MAX_UDP_PAYLOAD_SIZE).contains(&size),
+        "UDP payload size must be between {UDP_HEADER_SIZE} and {MAX_UDP_PAYLOAD_SIZE} bytes"
+    );
+    Ok(())
+}
 pub const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
 const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
 
@@ -305,7 +316,7 @@ pub async fn single_port_udp_handshake(
     // Full-size buffer: Windows fails peek/recv with WSAEMSGSIZE when the
     // buffer is smaller than the datagram, and download-mode data packets
     // can arrive here.
-    let mut buf = [0u8; UDP_PAYLOAD_SIZE + 100];
+    let mut buf = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
 
     for _ in 0..UDP_HELLO_MAX_ATTEMPTS {
         socket.send(&hello).await?;
@@ -609,6 +620,7 @@ pub async fn send_udp_paced(
     socket: Arc<UdpSocket>,
     target: Option<SocketAddr>,
     target_bitrate: u64,
+    packet_size: usize,
     duration: Duration,
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
@@ -616,13 +628,14 @@ pub async fn send_udp_paced(
     random_payload: bool,
     budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<UdpSendStats> {
-    let packet_size = UDP_PAYLOAD_SIZE;
+    validate_payload_size(packet_size)?;
 
     // Unlimited mode: no pacing, send as fast as possible
     if target_bitrate == 0 {
         return send_udp_unlimited(
             socket,
             target,
+            packet_size,
             duration,
             stats,
             cancel,
@@ -784,6 +797,7 @@ fn claim_datagram(
 async fn send_udp_unlimited(
     socket: Arc<UdpSocket>,
     target: Option<SocketAddr>,
+    packet_size: usize,
     duration: Duration,
     stats: Arc<StreamStats>,
     mut cancel: watch::Receiver<bool>,
@@ -791,7 +805,6 @@ async fn send_udp_unlimited(
     random_payload: bool,
     budget: Option<Arc<crate::budget::ByteBudget>>,
 ) -> anyhow::Result<UdpSendStats> {
-    let packet_size = UDP_PAYLOAD_SIZE;
     let mut sequence: u64 = 0;
     let mut bytes_sent: u64 = 0;
     let mut budget_spent = false;
@@ -907,10 +920,13 @@ pub async fn receive_udp(
     feedback_enabled: bool,
     single_port_ack: Option<[u8; UDP_HELLO_SIZE]>,
 ) -> anyhow::Result<(UdpStats, u64)> {
-    let mut buffer = vec![0u8; UDP_PAYLOAD_SIZE + 100];
+    // Accept every supported payload without truncation, including jumbo
+    // datagrams and short final datagrams from byte-budget tests.
+    let mut buffer = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
     let mut jitter_calc = JitterCalculator::new();
     let mut packet_tracker = PacketTracker::new();
     let mut packets_received: u64 = 0;
+    let mut packet_size = None;
     let mut last_recv = Instant::now();
     // Most-recently-observed client source address. The first successful
     // recv populates it; later recvs refresh it (handles NAT rebinding
@@ -1005,6 +1021,7 @@ pub async fn receive_udp(
                         stats.add_bytes_received(n as u64);
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
+                            packet_size = Some(packet_size.unwrap_or(0).max(n as u32));
                             // Only count valid xfr packets toward UDP loss
                             // accounting (both live and final). A short or
                             // foreign datagram still adds to `bytes_received`
@@ -1123,7 +1140,7 @@ pub async fn receive_udp(
             jitter_ms: jitter_calc.jitter_ms(),
             out_of_order,
             jitter_max_ms: Some(jitter_calc.jitter_max_ms()),
-            packet_size: Some(UDP_PAYLOAD_SIZE as u32),
+            packet_size,
         },
         packets_sent,
     ))
@@ -1361,7 +1378,9 @@ pub async fn respond_mtu_probes(
 /// Wait for the first packet from a client and return their address.
 /// Used in server reverse mode to learn where to send data.
 pub async fn wait_for_client(socket: &UdpSocket, timeout: Duration) -> anyhow::Result<SocketAddr> {
-    let mut buffer = [0u8; 64];
+    // Bidir discovers the peer from its first bulk datagram. Windows
+    // rejects oversized receives rather than truncating them.
+    let mut buffer = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
 
     tokio::select! {
         result = socket.recv_from(&mut buffer) => {
@@ -1382,6 +1401,67 @@ pub async fn wait_for_client(socket: &UdpSocket, timeout: Duration) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn custom_payloads_preserve_datagrams_and_byte_budgets() {
+        for size in [UDP_HEADER_SIZE, 1368, 8192] {
+            for bitrate in [0, 1_000_000] {
+                let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let addr = receiver.local_addr().unwrap();
+                // Exercise connected and legacy send_to sockets.
+                let target = if bitrate == 0 {
+                    sender.connect(addr).await.unwrap();
+                    None
+                } else {
+                    Some(addr)
+                };
+                let recv_stats = Arc::new(StreamStats::new(0));
+                let observed = recv_stats.clone();
+                let (cancel_tx, cancel) = watch::channel(false);
+                let (_pause_tx, pause) = watch::channel(false);
+                let recv_cancel = cancel.clone();
+                let recv_pause = pause.clone();
+                let recv = tokio::spawn(receive_udp(
+                    receiver,
+                    recv_stats,
+                    recv_cancel,
+                    recv_pause,
+                    false,
+                    None,
+                ));
+                let bytes = (size * 3 + UDP_HEADER_SIZE) as u64;
+                let sent = send_udp_paced(
+                    sender,
+                    target,
+                    bitrate,
+                    size,
+                    Duration::ZERO,
+                    Arc::new(StreamStats::new(0)),
+                    cancel,
+                    pause,
+                    true,
+                    Some(crate::budget::ByteBudget::new(bytes)),
+                )
+                .await
+                .unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while observed.bytes_received.load(Ordering::Relaxed) < bytes {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("all datagrams arrive intact");
+                cancel_tx.send(true).unwrap();
+                let (received, _) = recv.await.unwrap().unwrap();
+                assert_eq!(sent.bytes_sent, bytes);
+                assert_eq!(sent.packets_sent, 4);
+                assert_eq!(received.packets_received, 4);
+                assert_eq!(received.packet_size, Some(size as u32));
+                assert_eq!(received.lost, 0);
+            }
+        }
+    }
 
     #[test]
     fn test_packet_header_roundtrip() {
@@ -1861,6 +1941,7 @@ mod tests {
                     send_socket,
                     None,
                     bitrate,
+                    UDP_PAYLOAD_SIZE,
                     Duration::ZERO, // infinite — cancel ends it
                     send_stats,
                     cancel_rx,

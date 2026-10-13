@@ -252,6 +252,9 @@ pub struct ClientConfig {
     pub duration: Duration,
     pub direction: Direction,
     pub bitrate: Option<u64>,
+    /// Complete UDP payload size (`-l`), including the xfr header.
+    /// None preserves the 1400-byte default and compatibility with older servers.
+    pub udp_payload_size: Option<u16>,
     pub tcp_nodelay: bool,
     pub tcp_congestion: Option<String>,
     pub window_size: Option<usize>,
@@ -302,6 +305,7 @@ impl Default for ClientConfig {
             duration: Duration::from_secs(10),
             direction: Direction::Upload,
             bitrate: None,
+            udp_payload_size: None,
             tcp_nodelay: false,
             tcp_congestion: None,
             window_size: None,
@@ -323,6 +327,13 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// Validate settings before DNS resolution or socket creation.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(size) = self.udp_payload_size {
+            anyhow::ensure!(
+                !self.mtu_probe,
+                "--length cannot be combined with --probe-mtu"
+            );
+            udp::validate_payload_size(usize::from(size))?;
+        }
         if let Some(psk) = self.psk.as_deref() {
             auth::validate_psk(psk)?;
         }
@@ -400,6 +411,8 @@ impl UdpProgressFilter {
         let denom = progress
             .packets_received
             .saturating_add(progress.packets_lost);
+        // Keep the Rust 1.88 MSRV; the replacement try_update needs 1.95.
+        #[allow(deprecated)]
         let result = self.max_denominator.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
@@ -568,6 +581,14 @@ impl Client {
         if self.config.protocol != Protocol::Tcp && self.config.tcp_congestion.is_some() {
             warn!(
                 "--congestion is only supported for TCP; ignoring for {}",
+                self.config.protocol
+            );
+        }
+        // The TUI settings modal can switch a `-u -l` run to TCP or QUIC;
+        // keep the size for a later switch back instead of failing the run.
+        if self.config.protocol != Protocol::Udp && self.config.udp_payload_size.is_some() {
+            warn!(
+                "--length is only supported for UDP; ignoring for {}",
                 self.config.protocol
             );
         }
@@ -786,6 +807,22 @@ impl Client {
         let server_supports_udp_feedback =
             crate::protocol::capability_advertised(&server_capabilities, "udp_feedback_v1");
 
+        let udp_payload_size = self
+            .config
+            .udp_payload_size
+            .filter(|_| self.config.protocol == Protocol::Udp);
+        if udp_payload_size.is_some()
+            && !crate::protocol::capability_advertised(
+                &server_capabilities,
+                crate::protocol::UDP_PAYLOAD_SIZE_CAPABILITY,
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Server does not support UDP payload sizes (udp_payload_size_v1 capability missing); \
+                 upgrade the server to use -l/--length"
+            ));
+        }
+
         // Zero-copy on the server's sends (download/bidir) rides on the
         // TestStart.zerocopy field; servers predating zerocopy_v1 silently
         // ignore it. Only an explicit -Z warns about that — with the
@@ -854,6 +891,7 @@ impl Client {
             mtu_probe: self.config.mtu_probe,
             tcp_nodelay: self.config.protocol == Protocol::Tcp && self.config.tcp_nodelay,
             byte_budget: self.config.byte_budget,
+            udp_payload_size,
         };
         transport
             .write_message(&mut writer, &test_start.serialize()?)
@@ -1810,6 +1848,10 @@ impl Client {
         )?;
 
         let bitrate = self.config.bitrate.unwrap_or(1_000_000_000); // 1 Gbps default
+        let packet_size = self
+            .config
+            .udp_payload_size
+            .map_or(udp::UDP_PAYLOAD_SIZE, usize::from);
 
         // Calculate per-stream bitrate, clamping to at least 1 bps to prevent
         // integer division underflow (e.g., 100 bps / 8 streams = 12 bps, not 0)
@@ -1869,6 +1911,7 @@ impl Client {
                         direction,
                         duration,
                         stream_bitrate,
+                        packet_size,
                         random_payload,
                         stream_stats,
                         test_stats,
@@ -1958,6 +2001,7 @@ impl Client {
                     direction,
                     duration,
                     stream_bitrate,
+                    packet_size,
                     random_payload,
                     stream_stats,
                     test_stats,
@@ -2249,6 +2293,7 @@ impl Client {
             mtu_probe: false,   // probe mode is UDP-only
             tcp_nodelay: false, // QUIC manages its own transport; Nagle is a TCP concept
             byte_budget: self.config.byte_budget,
+            udp_payload_size: None,
         };
         transport
             .write_message(&mut ctrl_send, &test_start.serialize()?)
@@ -2666,6 +2711,7 @@ async fn run_udp_stream_io(
     direction: Direction,
     duration: Duration,
     stream_bitrate: u64,
+    packet_size: usize,
     random_payload: bool,
     stream_stats: Arc<crate::stats::StreamStats>,
     test_stats: Arc<TestStats>,
@@ -2699,6 +2745,7 @@ async fn run_udp_stream_io(
                         send_socket,
                         None,
                         stream_bitrate,
+                        packet_size,
                         duration,
                         stream_stats,
                         send_cancel,
@@ -2728,6 +2775,7 @@ async fn run_udp_stream_io(
                 socket,
                 None, // Connected socket, no target needed
                 stream_bitrate,
+                packet_size,
                 duration,
                 stream_stats,
                 cancel,
@@ -2789,6 +2837,7 @@ async fn run_udp_stream_io(
                     send_socket,
                     None, // Connected socket, no target needed
                     stream_bitrate,
+                    packet_size,
                     duration,
                     send_stats,
                     send_cancel,

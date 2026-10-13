@@ -176,6 +176,12 @@ struct Cli {
     #[arg(help_heading = "Test Options")]
     udp: bool,
 
+    /// UDP payload size in bytes, including the 16-byte xfr header (default: 1400).
+    /// Use a smaller size on VPN/tunnel paths; requires server udp_payload_size_v1 support.
+    #[arg(short = 'l', long = "length", value_name = "BYTES", requires = "udp", conflicts_with_all = ["probe_mtu", "quic", "mptcp", "zerocopy"], value_parser = clap::value_parser!(u16).range(16..=65507))]
+    #[arg(help_heading = "Test Options")]
+    udp_payload_size: Option<u16>,
+
     /// QUIC mode (encrypted, multiplexed streams)
     #[arg(short = 'Q', long, conflicts_with = "udp")]
     #[arg(help_heading = "Test Options")]
@@ -1373,6 +1379,7 @@ async fn main() -> Result<()> {
                 tcp_congestion: network_options.congestion,
                 window_size,
                 byte_budget: cli.bytes,
+                udp_payload_size: cli.udp_payload_size,
                 psk: client_psk,
                 address_family: client_address_family,
                 bind_addr,
@@ -3050,6 +3057,29 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-b", "1G"]).is_err());
         assert!(Cli::try_parse_from(["xfr", "host", "--probe-mtu", "-P", "4"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_udp_payload_size() {
+        assert!(
+            Cli::try_parse_from(["xfr", "host", "-u"])
+                .unwrap()
+                .udp_payload_size
+                .is_none()
+        );
+        for flag in ["-l", "--length"] {
+            for size in ["16", "1368", "65507"] {
+                let cli = Cli::try_parse_from(["xfr", "host", "-u", flag, size]).unwrap();
+                assert_eq!(cli.udp_payload_size, Some(size.parse().unwrap()));
+            }
+            for size in ["0", "15", "65508", "65536"] {
+                assert!(Cli::try_parse_from(["xfr", "host", "-u", flag, size]).is_err());
+            }
+        }
+        assert!(Cli::try_parse_from(["xfr", "host", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "-Q", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "--mptcp", "-l", "1368"]).is_err());
+        assert!(Cli::try_parse_from(["xfr", "host", "-u", "--probe-mtu", "-l", "1368"]).is_err());
     }
 
     #[test]

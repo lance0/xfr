@@ -282,7 +282,22 @@ xfr ::1 -6                   # IPv6 localhost
 xfr 192.168.1.1 -u           # UDP mode
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 xfr 192.168.1.1 -u -b 100M   # UDP at 100 Mbps
+xfr 192.168.1.1 -u -b 60M -l 1368  # Smaller datagrams for a 1420-MTU tunnel
 ```
+
+`-l/--length` sets the complete UDP payload size, including xfr's 16-byte
+sequence/timestamp header (16–65507 bytes; default 1400). It applies in both
+directions and across all streams. Both peers must support `udp_payload_size_v1`;
+an explicit size fails with an upgrade message against an older server.
+
+Choose a size that fits the path: allow 28 bytes for IPv4 + UDP headers or
+48 bytes for IPv6 + UDP headers, plus any IP options or extension headers.
+For example, 1368 fits a 1420-byte MTU with either address family's basic headers.
+Use `--probe-mtu` separately to find the largest payload that survives each
+direction, then pass the smaller result to `-l`. The default remains 1400;
+throughput tests do not automatically probe or adjust the size. JSON
+`udp_stats.packet_size` reports the largest valid datagram received, or is absent
+when no data arrived.
 
 ### QUIC Mode
 
@@ -491,6 +506,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
+| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and server `udp_payload_size_v1` support |
 | `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
 | `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
 | `--parallel` | `-P` | 1 | Parallel streams |
