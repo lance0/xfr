@@ -919,7 +919,9 @@ impl App {
                 stream.throughput_send_mbps = reported.throughput_send_mbps;
                 stream.throughput_recv_mbps = reported.throughput_recv_mbps;
                 stream.retransmits = reported.retransmits.unwrap_or(0);
-                stream.jitter_ms = reported.jitter_ms;
+                // Servers never put jitter in per-stream results; keep the
+                // last interval's reading instead of blanking it on completion.
+                stream.jitter_ms = reported.jitter_ms.or(stream.jitter_ms);
             }
         }
         self.udp_send = UdpDirectionState::from_result(result.udp_stats_send.as_deref());
@@ -1834,7 +1836,7 @@ mod tests {
             id: 0,
             bytes: 4_000_000,
             retransmits: None,
-            jitter_ms: None,
+            jitter_ms: Some(0.42),
             lost: None,
             error: None,
             rtt_us: None,
@@ -1892,6 +1894,8 @@ mod tests {
         });
         assert_eq!(app.streams[0].throughput_send_mbps, Some(4.0));
         assert_eq!(app.streams[0].throughput_recv_mbps, Some(4.0));
+        // Per-stream results carry no jitter; the last measured value stays.
+        assert_eq!(app.streams[0].jitter_ms, Some(0.42));
         assert_eq!(app.udp_send.lost_percent(), None);
         assert_eq!(app.udp_recv.lost_percent(), Some(20.0));
         assert_eq!(app.udp_recv.jitter_ms, Some(0.25));
