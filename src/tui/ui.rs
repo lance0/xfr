@@ -1056,6 +1056,44 @@ fn draw_settings_buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{buffer::Buffer, widgets::Widget};
+
+    #[test]
+    fn loss_marker_survives_zero_and_sub_resolution_throughput() {
+        // With the graph's 100 Mbps floor and three rows, a rate below
+        // ~4.2 Mbps has no eighth-block to draw. Loss must remain visible
+        // at the baseline even when the throughput bar disappears.
+        let area = Rect::new(0, 0, 1, 3);
+        for name in Theme::list() {
+            let theme = Theme::by_name(name);
+            for mbps in [0.0, 1.0, 50.0] {
+                for rate in [None, Some(0.0), Some(0.5), Some(5.0)] {
+                    let mut buf = Buffer::empty(area);
+                    Sparkline::new(&[mbps])
+                        .max(100.0)
+                        .styles(&[loss_severity_style(rate, &theme)])
+                        .render(area, &mut buf);
+
+                    assert_eq!(
+                        buf[(0, 2)].modifier.contains(Modifier::UNDERLINED),
+                        rate.is_some_and(|rate| rate > 0.0),
+                        "theme {name}, {mbps} Mbps, loss {rate:?}: the baseline must carry loss"
+                    );
+                    // A loss marker must not invent throughput at zero or
+                    // below the graph's resolution. Monochrome's existing
+                    // heavy-loss stipple marks empty cells explicitly.
+                    if mbps < 4.0 {
+                        let expected = if theme.hue_free() && rate == Some(5.0) {
+                            "░"
+                        } else {
+                            " "
+                        };
+                        assert_eq!(buf[(0, 2)].symbol(), expected);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn loss_severity_survives_without_hue() {

@@ -399,7 +399,8 @@ The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
 the terminal's own default colors at maximum contrast, so it works on both
 dark and light terminal backgrounds — pair it with a light background at full
 brightness when working in direct sunlight. Loss severity in the throughput
-graph is always also encoded without color — light loss underlines the bar,
+graph is always also encoded without color — light loss underlines the bar
+(or the baseline when throughput is zero or too small to draw),
 and in a theme with no hue to spend heavy loss additionally stipples the empty
 cells above it, marking the whole column while the bar keeps its true height —
 so lossy intervals stay visible through glare, in monochrome, and for
