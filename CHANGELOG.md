@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Maintenance
 - **CI action pin** — `taiki-e/install-action` 2.87.4 → 2.87.10.
 - **Network-namespace regression for #213** — the MTU-probe CI job, renamed *UDP MTU regressions*, now also runs `test-udp-payload-ns.sh`: on a 1420-byte-MTU veth pair shaped to 50 Mbit/s, the 1400-byte default must produce IP fragments and `-l 1368` must produce none while delivering traffic, over IPv4 and IPv6 in all three directions.
+- **Removed the unused `xfr::tui::widgets::ProgressBar`** — a public library item, but nothing in xfr drew with it: the TUI's transfer bar is rendered by `tui::ui` with eighth-block glyphs, and this widget's `━`/`─` line had drifted from it. Library users who imported it should copy the ~40 lines from 0.10.1 or use ratatui's `Gauge`/`LineGauge`.
 - **Rust 1.99 lint** — `AtomicU64::fetch_update` is deprecated in favour of `try_update`, which needs Rust 1.95. The two call sites allow the lint to keep the 1.88 MSRV.
 
 ### Fixed

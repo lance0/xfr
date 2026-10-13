@@ -46,7 +46,7 @@ src/
     ├── ui.rs        # Layout and rendering
     ├── server.rs    # Server dashboard
     ├── settings.rs  # Settings modal
-    ├── widgets.rs   # Sparkline, progress bar
+    ├── widgets.rs   # Sparkline, per-stream bars
     └── theme.rs     # Color themes
 ```
 
