@@ -555,7 +555,7 @@ Compare test results to detect regressions:
 
 ```bash
 xfr diff baseline.json current.json
-xfr diff baseline.json current.json --threshold 5%
+xfr diff baseline.json current.json --threshold 5   # percent; 0 flags any regression
 ```
 
 Exit code:
