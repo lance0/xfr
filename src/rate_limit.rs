@@ -84,7 +84,9 @@ impl RateLimiter {
     /// Start a background cleanup task
     pub fn start_cleanup_task(self: Arc<Self>) {
         let limiter = self.clone();
-        let interval = self.window / 2;
+        // tokio::time::interval panics on a zero period; a zero window (valid
+        // for RateLimiter::new) still needs a non-zero cleanup cadence.
+        let interval = (self.window / 2).max(Duration::from_millis(500));
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {

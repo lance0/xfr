@@ -452,10 +452,10 @@ enum Commands {
         #[arg(help_heading = "Access Control")]
         rate_limit: Option<u32>,
 
-        /// Rate limit time window. Bare integers are seconds (`60`); must be greater than 0.
-        #[arg(long, default_value = "60s", value_parser = parse_nonzero_duration)]
+        /// Rate limit time window in whole seconds (default: 60s). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`). Must be at least 1 second.
+        #[arg(long, value_parser = parse_rate_limit_window)]
         #[arg(help_heading = "Access Control")]
-        rate_limit_window: Duration,
+        rate_limit_window: Option<u64>,
 
         /// Allow IP/subnet (can be repeated)
         #[arg(long = "allow", action = clap::ArgAction::Append)]
@@ -527,15 +527,38 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
-/// Duration parser that rejects zero. For flags where zero is not a valid
-/// sentinel (e.g. `--rate-limit-window`, which would divide-by-zero the
-/// cleanup-task interval in `tokio::time::interval`).
+/// Duration parser for flags where zero is not a valid sentinel.
 fn parse_nonzero_duration(s: &str) -> Result<Duration, String> {
     let d = parse_duration(s)?;
     if d.is_zero() {
         return Err("Duration must be greater than 0".to_string());
     }
     Ok(d)
+}
+
+fn parse_rate_limit_window(s: &str) -> Result<u64, String> {
+    let duration = parse_nonzero_duration(s)?;
+    if duration.subsec_nanos() != 0 {
+        return Err(
+            "Rate limit window must be a whole number of seconds (at least 1 second)".into(),
+        );
+    }
+    Ok(duration.as_secs())
+}
+
+/// Resolve the rate limit window without confusing an explicit CLI value
+/// with a default. The config and public rate limiter API use whole seconds.
+fn resolve_rate_limit_window(
+    cli_window_secs: Option<u64>,
+    config_window_secs: Option<u64>,
+) -> anyhow::Result<u64> {
+    let window_secs = cli_window_secs
+        .or(config_window_secs)
+        .unwrap_or_else(|| xfr::rate_limit::RateLimitConfig::default().window_secs);
+    if window_secs == 0 {
+        anyhow::bail!("server.rate_limit_window must be at least 1 second");
+    }
+    Ok(window_secs)
 }
 
 fn parse_test_duration(s: &str) -> Result<Duration, String> {
@@ -1086,7 +1109,10 @@ async fn main() -> Result<()> {
 
             let rate_limit_config = xfr::rate_limit::RateLimitConfig {
                 max_per_ip: rate_limit.or(file_config.server.rate_limit),
-                window_secs: rate_limit_window.as_secs(),
+                window_secs: resolve_rate_limit_window(
+                    rate_limit_window,
+                    file_config.server.rate_limit_window,
+                )?,
             };
 
             // Determine address family
@@ -3029,10 +3055,56 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_window_cli_rejects_zero_and_fractional_seconds() {
+        for value in ["0", "0s", "0ms", "1ns", "500ms", "1500ms", "1.5s"] {
+            let error = Cli::try_parse_from(["xfr", "serve", "--rate-limit-window", value])
+                .err()
+                .unwrap_or_else(|| panic!("rate limit window {value} should be rejected"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn rate_limit_window_cli_accepts_whole_seconds_and_preserves_unset() {
+        for (value, expected) in [("1", 1), ("60s", 60), ("5min", 300), ("1000ms", 1)] {
+            let cli = Cli::try_parse_from(["xfr", "serve", "--rate-limit-window", value]).unwrap();
+            let Some(Commands::Serve {
+                rate_limit_window, ..
+            }) = cli.command
+            else {
+                panic!("expected serve command");
+            };
+            assert_eq!(rate_limit_window, Some(expected));
+        }
+
+        let cli = Cli::try_parse_from(["xfr", "serve"]).unwrap();
+        let Some(Commands::Serve {
+            rate_limit_window, ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert_eq!(rate_limit_window, None);
+    }
+
+    #[test]
+    fn rate_limit_window_uses_cli_then_config_then_default() {
+        assert_eq!(resolve_rate_limit_window(None, None).unwrap(), 60);
+        assert_eq!(resolve_rate_limit_window(None, Some(30)).unwrap(), 30);
+        // Even an explicit CLI value equal to the default wins over config.
+        assert_eq!(resolve_rate_limit_window(Some(60), Some(30)).unwrap(), 60);
+        assert_eq!(resolve_rate_limit_window(Some(1), Some(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn rate_limit_window_rejects_zero_config() {
+        let error = resolve_rate_limit_window(None, Some(0)).unwrap_err();
+        assert!(error.to_string().contains("server.rate_limit_window"));
+    }
+
+    #[test]
     fn test_parse_nonzero_duration_rejects_zero_variants() {
-        // Bare-integer 0 and any unit-suffixed zero must fail — the rate-limit
-        // cleanup task uses `window / 2` as a tokio::time::interval which
-        // panics on Duration::ZERO.
+        // Bare-integer 0 and any unit-suffixed zero must fail.
         assert!(parse_nonzero_duration("0").is_err());
         assert!(parse_nonzero_duration("0s").is_err());
         assert!(parse_nonzero_duration("0ms").is_err());

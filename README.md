@@ -449,7 +449,7 @@ no_mdns = false
 address_family = "dual"      # "ipv4", "ipv6", or "dual"
 psk = "my-secret-key"
 rate_limit = 5
-rate_limit_window = 60
+rate_limit_window = 60       # whole seconds; must be at least 1
 allow = ["192.168.0.0/16", "10.0.0.0/8"]
 deny = []
 acl_file = "/path/to/acl.txt"
@@ -546,7 +546,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--psk` | | none | Pre-shared key for authentication |
 | `--psk-file` | | none | Read PSK from file |
 | `--rate-limit` | | none | Max concurrent tests per IP (server) |
-| `--rate-limit-window` | | 60s | Rate limit time window (server) |
+| `--rate-limit-window` | | config or 60s | Rate limit time window in whole seconds, at least 1s (server) |
 | `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `--allow` | | none | Allow IP/subnet, repeatable (server) |
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |

@@ -115,7 +115,7 @@ pub struct ServerDefaults {
     /// Max concurrent tests per IP
     pub rate_limit: Option<u32>,
 
-    /// Rate limit window in seconds
+    /// Rate limit window in whole seconds (must be at least 1)
     pub rate_limit_window: Option<u64>,
 
     /// IP allow list (CIDR notation)

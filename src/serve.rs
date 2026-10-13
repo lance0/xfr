@@ -120,7 +120,12 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Validate settings before binding listeners or allocating server tasks.
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.auth.validate()
+        self.auth.validate()?;
+        anyhow::ensure!(
+            self.rate_limit.max_per_ip.is_none() || self.rate_limit.window_secs > 0,
+            "rate limit window must be at least 1 second when rate limiting is enabled"
+        );
+        Ok(())
     }
 }
 
@@ -4171,6 +4176,61 @@ mod tests {
             control_peer_ip: ip,
             expected_streams: streams,
         }
+    }
+
+    #[test]
+    fn rate_limit_active_zero_window_is_rejected() {
+        for max_per_ip in [0, 1] {
+            let config = ServerConfig {
+                rate_limit: RateLimitConfig {
+                    max_per_ip: Some(max_per_ip),
+                    window_secs: 0,
+                },
+                ..Default::default()
+            };
+            let error = config.validate().unwrap_err();
+            assert!(error.to_string().contains("rate limit window"));
+        }
+    }
+
+    #[test]
+    fn rate_limit_inactive_zero_window_is_allowed() {
+        let config = ServerConfig {
+            rate_limit: RateLimitConfig {
+                max_per_ip: None,
+                window_secs: 0,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rate_limit_positive_window_is_allowed() {
+        for max_per_ip in [None, Some(0), Some(1)] {
+            let config = ServerConfig {
+                rate_limit: RateLimitConfig {
+                    max_per_ip,
+                    window_secs: 1,
+                },
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_zero_window_is_rejected_before_binding() {
+        let config = ServerConfig {
+            bind_addr: Some("203.0.113.1".parse().unwrap()),
+            rate_limit: RateLimitConfig {
+                max_per_ip: Some(1),
+                window_secs: 0,
+            },
+            ..Default::default()
+        };
+        let error = Server::new(config).run().await.unwrap_err();
+        assert!(error.to_string().contains("rate limit window"));
     }
 
     #[test]
