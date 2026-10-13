@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
 - **`--json` output could not be piped to a JSON parser** — `xfr <host> --json --no-tui | jq` failed because plain-text interval rows were printed ahead of the summary, and `--json-stream` ended with a multi-line summary. `--json` now prints only the summary document, and the `--json-stream` summary is a single line. An explicit `--json-stream` or `--csv` now also takes precedence over `json_output = true` in the config file.
+- **`--interval inf` panicked the client** — non-finite, zero, negative or enormous report intervals were accepted and then crashed the interval printer or silently stopped reporting. `--interval` and `[client] interval_secs` must now be a positive, finite number of seconds and are rejected with a clear error before the test starts; a valid `--interval` still overrides a bad config value.
 
 ## [0.10.1] - 2026-09-04
 

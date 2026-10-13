@@ -93,7 +93,7 @@ its true height). The server dashboard resolves its palette the same way, so
 \fB\-\-theme\fR, a saved preference and \fBNO_COLOR\fR apply to it too.
 .TP
 .BI \-i ", " \-\-interval " SECS"
-Report interval in seconds (default: 1.0)
+Report interval in positive, finite seconds (default: 1.0). CLI and config-file values that cannot be represented by the reporting timers are rejected.
 .TP
 .BI \-\-omit " N"
 Omit first N seconds from interval output (TCP ramp-up)
