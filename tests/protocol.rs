@@ -393,10 +393,12 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
     // - new guard (65536) should still provide DoS protection
     let streams: Vec<StreamResult> = (0u8..128u8)
         .map(|i| StreamResult {
-            bytes_sent: None,
-            bytes_received: None,
-            throughput_send_mbps: None,
-            throughput_recv_mbps: None,
+            // Worst-case bidir rows: every direction split populated with
+            // maximal integers and full-precision floats.
+            bytes_sent: Some(u64::MAX),
+            bytes_received: Some(u64::MAX),
+            throughput_send_mbps: Some(1e8 / 3.0),
+            throughput_recv_mbps: Some(1e8 / 3.0),
             id: i,
             bytes: u64::MAX,
             throughput_mbps: 99_999_999.9,
