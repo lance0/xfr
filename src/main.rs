@@ -2510,71 +2510,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_server_port_equal_to_default_overrides_config() {
-        let cli = Cli::try_parse_from(["xfr", "serve", "--port", "5201"]).unwrap();
-        let Some(Commands::Serve { port, .. }) = cli.command else {
-            panic!("expected serve command");
-        };
-        assert_eq!(resolve_server_port(port, Some(9000)), DEFAULT_PORT);
-    }
-
-    #[test]
-    fn server_port_uses_config_then_default_when_unset() {
-        use clap::{CommandFactory, FromArgMatches};
-
-        // Isolate the fallback case from an XFR_PORT set by the test runner.
-        let matches = Cli::command()
-            .mut_subcommand("serve", |command| {
-                command.mut_arg("port", |arg| arg.env(None::<&str>))
-            })
-            .try_get_matches_from(["xfr", "serve"])
-            .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
-        let Some(Commands::Serve { port, .. }) = cli.command else {
-            panic!("expected serve command");
-        };
-        assert_eq!(port, None);
-        assert_eq!(resolve_server_port(port, Some(9000)), 9000);
-        assert_eq!(resolve_server_port(port, None), DEFAULT_PORT);
-    }
-
-    #[test]
-    fn server_port_environment_and_cli_override_config() {
-        const CHILD_FLAG: &str = "XFR_SERVER_PORT_TEST_CHILD";
-        if std::env::var_os(CHILD_FLAG).is_none() {
-            // A child process avoids mutating the environment while other
-            // parser tests are running in parallel.
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::server_port_environment_and_cli_override_config",
-                ])
-                .env(CHILD_FLAG, "1")
-                .env("XFR_PORT", DEFAULT_PORT.to_string())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "environment precedence check failed: {}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            return;
-        }
-
-        for (args, expected) in [
-            (vec!["xfr", "serve"], DEFAULT_PORT),
-            (vec!["xfr", "serve", "--port", "8000"], 8000),
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            let Some(Commands::Serve { port, .. }) = cli.command else {
-                panic!("expected serve command");
-            };
-            assert_eq!(resolve_server_port(port, Some(9000)), expected);
-        }
-    }
-
-    #[test]
     fn resolve_server_max_duration_cli_overrides_preset() {
         let preset = xfr::config::ServerPreset {
             name: "limited".into(),
@@ -3241,6 +3176,71 @@ mod tests {
         // QUIC + explicit port + single stream should work
         let result = validate_bind_address(addr, Protocol::Quic, 1, false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn explicit_server_port_equal_to_default_overrides_config() {
+        let cli = Cli::try_parse_from(["xfr", "serve", "--port", "5201"]).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(resolve_server_port(port, Some(9000)), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_uses_config_then_default_when_unset() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        // Isolate the fallback case from an XFR_PORT set by the test runner.
+        let matches = Cli::command()
+            .mut_subcommand("serve", |command| {
+                command.mut_arg("port", |arg| arg.env(None::<&str>))
+            })
+            .try_get_matches_from(["xfr", "serve"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let Some(Commands::Serve { port, .. }) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(port, None);
+        assert_eq!(resolve_server_port(port, Some(9000)), 9000);
+        assert_eq!(resolve_server_port(port, None), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn server_port_environment_and_cli_override_config() {
+        const CHILD_FLAG: &str = "XFR_SERVER_PORT_TEST_CHILD";
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            // A child process avoids mutating the environment while other
+            // parser tests are running in parallel.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::server_port_environment_and_cli_override_config",
+                ])
+                .env(CHILD_FLAG, "1")
+                .env("XFR_PORT", DEFAULT_PORT.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "environment precedence check failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        for (args, expected) in [
+            (vec!["xfr", "serve"], DEFAULT_PORT),
+            (vec!["xfr", "serve", "--port", "8000"], 8000),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Commands::Serve { port, .. }) = cli.command else {
+                panic!("expected serve command");
+            };
+            assert_eq!(resolve_server_port(port, Some(9000)), expected);
+        }
     }
 
     #[test]
