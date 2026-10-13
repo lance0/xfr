@@ -168,6 +168,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         }
     }
 

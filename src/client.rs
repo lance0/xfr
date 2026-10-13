@@ -1544,6 +1544,14 @@ impl Client {
         if udp_bidir && let Ok(ref mut result) = test_result {
             overlay_udp_bidir_result(result, &stats);
         }
+        if let Ok(ref mut result) = test_result {
+            // The server's message is untrusted text bound for the terminal.
+            if let Some(errors) = result.server_udp_send_errors.as_mut() {
+                errors.last_error =
+                    crate::protocol::UdpSendErrors::sanitize_message(&errors.last_error);
+            }
+            result.client_udp_send_errors = stats.udp_send_errors();
+        }
 
         test_result
     }
@@ -3286,6 +3294,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_download_result(&mut result, &stats);
@@ -3316,6 +3326,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
         overlay_udp_download_result(&mut result, &stats);
         assert_eq!(result.bytes_total, 1_000);
@@ -3345,6 +3357,8 @@ mod tests {
             throughput_send_mbps: Some(160.0),
             throughput_recv_mbps: Some(2_400.0),
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -3381,6 +3395,8 @@ mod tests {
             throughput_send_mbps: None,
             throughput_recv_mbps: None,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);

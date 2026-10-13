@@ -44,16 +44,6 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
-### UDP Reverse Mode Error Handling
-
-**Issue:** In UDP reverse (download) mode, send errors on the server side are logged but not reported back to the client.
-
-**Impact:** Client may see lower throughput without explicit error indication.
-
-**Workaround:** Check server logs if UDP reverse shows unexpected results.
-
----
-
 ### UDP `Connection refused` Storms at >=50% Loss with Short Tests
 
 **Issue:** Under tc netem `loss 50%` (or higher) on lo with short test durations (`-t 10sec`), the client's connected UDP socket can get stuck returning `ECONNREFUSED` on every send. The mechanism: TCP control handshake under heavy loss takes several seconds (retransmits), eating into test duration; if the server's test-end fires before the client's first UDP packet reaches the server's data port, the kernel returns ICMP port-unreachable, which sticks on the connected socket and rejects all subsequent sends.
@@ -155,6 +145,7 @@ The following issues have been fixed and are listed here for reference.
 - **QUIC client DualStack binding** - The default local endpoint now matches the resolved remote address family, so IPv6 targets work without forcing `-6`. Explicit local binds are matched to the remote family as well. IPv6 and dual-stack client-port regressions cover this behavior.
 - **QUIC one-off mode** - QUIC accept loop now responds to the shutdown signal for proper `--one-off` exit after a single test completes.
 - **UDP payload size hardcoded to 1400 bytes** - every UDP datagram fragmented on paths with an MTU below 1428 bytes (1448 over IPv6), including WireGuard's 1420 default (issue #213). `-l/--length` now sets the datagram size (16–65507 bytes) for all streams and directions; servers advertise `udp_payload_size_v1`, and the client refuses an explicit size against an older server. The default stays 1400.
+- **UDP reverse mode send errors hidden from the client** - in `-u -R` and the server half of `--bidir`, the server only logged failed sends, so the client saw lower throughput with no explanation. The final result now carries `server_udp_send_errors` (count plus the last error message; teardown-window errors excluded), and plain output, `--json` and the TUI history report it. The client's own failed sends in upload/bidir are reported the same way as `client_udp_send_errors`. Older peers ignore or omit the field.
 - **TUI settings modal restart path** - Settings → Apply & Restart now cancels the current run, applies test settings, and starts a fresh run in place. QUIC-ignored options are logged in TUI history when applicable.
 
 ---

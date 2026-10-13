@@ -2,7 +2,7 @@
 
 use xfr::protocol::{
     AggregateInterval, ControlMessage, Direction, Protocol, StreamInterval, StreamResult,
-    TcpInfoSnapshot, TestResult, UdpIntervalProgress,
+    TcpInfoSnapshot, TestResult, UdpIntervalProgress, UdpSendErrors,
 };
 
 #[test]
@@ -331,6 +331,8 @@ fn test_result_message() {
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
         mtu_probe: None,
+        server_udp_send_errors: None,
+        client_udp_send_errors: None,
     };
 
     let msg = ControlMessage::Result(result);
@@ -339,6 +341,35 @@ fn test_result_message() {
     assert!(json.contains("\"bytes_total\":1250000000"));
     assert!(json.contains("\"throughput_mbps\":1000.0"));
     assert!(json.contains("\"rtt_us\":1234"));
+    // None must stay off the wire so older clients see an unchanged Result.
+    assert!(!json.contains("udp_send_errors"), "got: {json}");
+}
+
+#[test]
+fn test_result_udp_send_errors_round_trip_and_legacy_absence() {
+    // An older server's Result has neither field: both decode to None.
+    let legacy = r#"{"type":"result","id":"t","bytes_total":0,"duration_ms":1000,"throughput_mbps":0.0,"streams":[]}"#;
+    let ControlMessage::Result(decoded) = ControlMessage::deserialize(legacy).unwrap() else {
+        panic!("wrong message type");
+    };
+    assert_eq!(decoded.server_udp_send_errors, None);
+    assert_eq!(decoded.client_udp_send_errors, None);
+
+    let errors = UdpSendErrors {
+        count: 7,
+        last_error: "Connection refused (os error 111)".to_string(),
+    };
+    let mut result = decoded;
+    result.server_udp_send_errors = Some(errors.clone());
+    let json = ControlMessage::Result(result).serialize().unwrap();
+    assert!(json.contains(
+        r#""server_udp_send_errors":{"count":7,"last_error":"Connection refused (os error 111)"}"#
+    ));
+    assert!(!json.contains("client_udp_send_errors"));
+    let ControlMessage::Result(decoded) = ControlMessage::deserialize(&json).unwrap() else {
+        panic!("wrong message type");
+    };
+    assert_eq!(decoded.server_udp_send_errors, Some(errors));
 }
 
 #[test]
@@ -376,6 +407,8 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
         throughput_send_mbps: None,
         throughput_recv_mbps: None,
         mtu_probe: None,
+        server_udp_send_errors: None,
+        client_udp_send_errors: None,
     };
 
     let msg = ControlMessage::Result(result);

@@ -2339,6 +2339,8 @@ async fn run_quic_test(
             throughput_send_mbps,
             throughput_recv_mbps,
             mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
         });
 
         writer_half
@@ -3011,6 +3013,8 @@ async fn run_test(
         throughput_send_mbps,
         throughput_recv_mbps,
         mtu_probe: None,
+        server_udp_send_errors: stats.udp_send_errors(),
+        client_udp_send_errors: None,
     });
 
     // Send result FIRST so the client isn't blocked by slow post-processing
