@@ -99,10 +99,9 @@ Notes:
 
 ### Streaming JSON (`--json-stream`)
 
-One JSON object per line, per interval:
-
-The stream ends with a summary object on one line, containing `bytes_total`,
-`duration_ms`, and `streams`.
+One JSON object per line, per interval. The stream ends with the final
+summary on a single line, with the same fields as `--json` (`bytes_total`,
+`duration_ms`, `streams`, ...), so every line parses on its own:
 
 ```bash
 xfr <host> --json-stream --no-tui
