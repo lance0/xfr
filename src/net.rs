@@ -4,7 +4,7 @@
 //! compatibility, MPTCP auto-negotiation (Linux 5.6+), and IPv6 flow label support.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -619,28 +619,80 @@ async fn check_connected_precedence(
     }
 }
 
+/// Resolve an IPv6 zone (the `eth0` or `2` in `fe80::1%eth0`) to the
+/// numeric scope id the kernel needs to route a link-local address.
+pub fn zone_to_scope_id(zone: &str) -> io::Result<u32> {
+    if let Ok(index) = zone.parse::<u32>() {
+        return Ok(index);
+    }
+    #[cfg(unix)]
+    let index = std::ffi::CString::new(zone)
+        // SAFETY: `name` is a valid NUL-terminated string for the call's duration.
+        .map(|name| unsafe { libc::if_nametoindex(name.as_ptr()) })
+        .unwrap_or(0);
+    // Name lookup off Unix would need a new dependency; numeric zones work.
+    #[cfg(not(unix))]
+    let index = 0;
+    if index != 0 {
+        return Ok(index);
+    }
+    let reason = if cfg!(unix) {
+        "no such interface"
+    } else {
+        "interface names are not supported on this platform; use the numeric index (e.g. %12)"
+    };
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("IPv6 zone '%{}': {}", zone, reason),
+    ))
+}
+
+/// Parse an IP literal, optionally bracketed and optionally carrying an IPv6
+/// zone (`fe80::1%eth0`, `[fe80::1%2]`), into a socket address. The zone
+/// becomes the address's `scope_id`. Returns `Ok(None)` when `host` is not
+/// an IP literal (i.e. a hostname to look up).
+pub fn parse_ip_literal(host: &str, port: u16) -> io::Result<Option<SocketAddr>> {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let (ip, zone) = match host.split_once('%') {
+        Some((ip, zone)) => (ip, Some(zone)),
+        None => (host, None),
+    };
+    match (ip.parse::<IpAddr>(), zone) {
+        (Ok(ip), None) => Ok(Some(SocketAddr::new(ip, port))),
+        (Ok(IpAddr::V6(ip)), Some(zone)) => Ok(Some(SocketAddr::V6(SocketAddrV6::new(
+            ip,
+            port,
+            0,
+            zone_to_scope_id(zone)?,
+        )))),
+        (Err(_), None) => Ok(None),
+        (_, Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{}: a %zone is only valid on an IPv6 address (e.g. fe80::1%eth0)",
+                host
+            ),
+        )),
+    }
+}
+
+/// `addr` with a different port. Unlike `SocketAddr::new(addr.ip(), port)`,
+/// this keeps an IPv6 `scope_id` (and flow info), without which a
+/// link-local destination cannot be routed.
+pub fn with_port(mut addr: SocketAddr, port: u16) -> SocketAddr {
+    addr.set_port(port);
+    addr
+}
+
 /// Resolve a hostname to addresses, filtered by address family preference
 pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<Vec<SocketAddr>> {
-    // Handle zone IDs for link-local IPv6 (e.g., fe80::1%eth0)
-    let host_for_lookup = if host.contains('%') {
-        // Strip zone ID for lookup, we'll add it back
-        host.split('%').next().unwrap_or(host)
-    } else {
-        host
+    let addrs: Vec<SocketAddr> = match parse_ip_literal(host, port)? {
+        Some(addr) => vec![addr],
+        None => (host, port).to_socket_addrs()?.collect(),
     };
-
-    // Wrap literal IPv6 addresses in brackets so `to_socket_addrs` parses
-    // "[::1]:5201" correctly instead of treating the colons as port separators.
-    let is_ipv6_literal = host_for_lookup
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_ipv6())
-        .unwrap_or(false);
-    let addr_str = if is_ipv6_literal {
-        format!("[{}]:{}", host_for_lookup, port)
-    } else {
-        format!("{}:{}", host_for_lookup, port)
-    };
-    let addrs: Vec<SocketAddr> = addr_str.to_socket_addrs()?.collect();
 
     if addrs.is_empty() {
         return Err(io::Error::new(
@@ -661,16 +713,6 @@ pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<
             io::ErrorKind::AddrNotAvailable,
             format!("No {} addresses found for host: {}", family, host),
         ));
-    }
-
-    // Re-add zone ID for link-local addresses if present
-    if host.contains('%') {
-        let zone_id = host.split('%').nth(1);
-        if let Some(_zone) = zone_id {
-            // Note: Rust's SocketAddr doesn't support zone IDs directly
-            // This would need platform-specific handling for link-local
-            debug!("Zone ID specified but not directly supported in SocketAddr");
-        }
     }
 
     Ok(filtered)
@@ -1306,6 +1348,77 @@ mod tests {
         assert!(
             addrs.iter().all(|a| a.is_ipv4() && a.port() == 5201),
             "literal IPv4 address must be parsed as addr:port"
+        );
+    }
+
+    fn scope_of(addr: SocketAddr) -> u32 {
+        match addr {
+            SocketAddr::V6(v6) => v6.scope_id(),
+            SocketAddr::V4(_) => panic!("expected IPv6, got {addr}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_numeric_zone_sets_scope_id() {
+        for host in ["fe80::1%7", "[fe80::1%7]"] {
+            for family in [AddressFamily::V6Only, AddressFamily::DualStack] {
+                let addrs = resolve_host(host, 5201, family).unwrap();
+                assert_eq!(addrs.len(), 1, "{host}");
+                assert_eq!(addrs[0].ip(), "fe80::1".parse::<IpAddr>().unwrap());
+                assert_eq!(addrs[0].port(), 5201);
+                assert_eq!(scope_of(addrs[0]), 7, "{host} must keep its zone");
+            }
+        }
+        assert!(resolve_host("fe80::1%7", 5201, AddressFamily::V4Only).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_resolve_interface_name_zone_sets_scope_id() {
+        let addrs = resolve_host("fe80::1%lo", 5201, AddressFamily::V6Only).unwrap();
+        let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+        assert_ne!(lo, 0);
+        assert_eq!(scope_of(addrs[0]), lo);
+    }
+
+    #[test]
+    fn test_resolve_unknown_zone_names_it() {
+        let err = resolve_host("fe80::1%xfr-no-such-if0", 5201, AddressFamily::V6Only).unwrap_err();
+        assert!(
+            err.to_string().contains("xfr-no-such-if0"),
+            "error should name the zone: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_rejects_zone_off_ipv6_literals() {
+        for host in ["127.0.0.1%1", "localhost%1", "fe80::1%"] {
+            assert!(
+                resolve_host(host, 5201, AddressFamily::DualStack).is_err(),
+                "{host} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_without_zone_has_no_scope() {
+        let addrs = resolve_host("[::1]", 5201, AddressFamily::V6Only).unwrap();
+        assert_eq!(scope_of(addrs[0]), 0);
+        assert_eq!(addrs[0].port(), 5201);
+    }
+
+    #[test]
+    fn test_with_port_preserves_scope_id() {
+        let addr = SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 5201, 9, 4));
+        let SocketAddr::V6(moved) = with_port(addr, 6000) else {
+            unreachable!()
+        };
+        assert_eq!(moved.port(), 6000);
+        assert_eq!(moved.scope_id(), 4, "rebuilding from ip() drops the zone");
+        assert_eq!(moved.flowinfo(), 9);
+        assert_eq!(
+            with_port("10.0.0.1:1".parse().unwrap(), 2),
+            "10.0.0.1:2".parse::<SocketAddr>().unwrap()
         );
     }
 

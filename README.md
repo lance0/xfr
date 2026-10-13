@@ -275,6 +275,7 @@ xfr 192.168.1.1 -R           # Reverse (download test)
 xfr 192.168.1.1 --bidir      # Bidirectional
 xfr 192.168.1.1 -6           # Force IPv6 only
 xfr ::1 -6                   # IPv6 localhost
+xfr fe80::2%eth0             # IPv6 link-local: zone = interface name or index
 ```
 
 ### UDP Mode

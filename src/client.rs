@@ -1679,7 +1679,7 @@ impl Client {
             } else {
                 data_ports[i]
             };
-            let addr = SocketAddr::new(server_addr.ip(), port);
+            let addr = net::with_port(server_addr, port);
             let stream_stats = stats.streams[i].clone();
             let cancel = cancel.clone();
             let pause = pause.clone();
@@ -1907,7 +1907,7 @@ impl Client {
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("Server allocated no UDP port for the MTU probe"))?,
         };
-        let server_addr = SocketAddr::new(server_ip.ip(), port);
+        let server_addr = net::with_port(server_ip, port);
 
         let socket = net::create_udp_socket_for_remote(server_addr).await?;
         socket.connect(server_addr).await?;
@@ -2019,7 +2019,7 @@ impl Client {
         // what keeps line-rate data off the shared QUIC socket; a missing
         // ack fails the whole test loudly instead of degrading quietly.
         if let Some(token) = single_port_token {
-            let server_port = SocketAddr::new(server_addr.ip(), self.config.port);
+            let server_port = net::with_port(server_addr, self.config.port);
             let mut sockets = Vec::with_capacity(stream_count);
             for i in 0..stream_count {
                 let bind_addr = stream_bind_addr(base_bind_addr, self.config.sequential_ports, i);
@@ -2075,7 +2075,7 @@ impl Client {
         let mut handles = Vec::new();
 
         for (i, &port) in data_ports.iter().enumerate() {
-            let server_port = SocketAddr::new(server_addr.ip(), port);
+            let server_port = net::with_port(server_addr, port);
             let stream_stats = stats.streams[i].clone();
             let test_stats = stats.clone();
             let cancel = cancel.clone();
