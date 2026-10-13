@@ -730,7 +730,7 @@ mod tests {
             } else {
                 (ControlWriter::Plaintext, ControlReader::Plaintext)
             };
-            let messages = ["{\"type\":\"ping\"}", "{\"message\":\"caf\u{e9}\"}"];
+            let messages = ["{\"type\":\"ping\"}", "{\"message\":\"hello 🌍\"}"];
             let mut wire = Vec::new();
             for message in messages {
                 wire.extend_from_slice(&writer.encode_message(message).unwrap());
