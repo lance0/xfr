@@ -136,48 +136,6 @@ impl Widget for Sparkline<'_> {
     }
 }
 
-/// A simple progress bar using block characters
-pub struct ProgressBar {
-    pub progress: f64, // 0.0 to 1.0
-    pub style: Style,
-    pub filled_style: Style,
-}
-
-impl ProgressBar {
-    pub fn new(progress: f64) -> Self {
-        Self {
-            progress: progress.clamp(0.0, 1.0),
-            style: Style::default().fg(Color::DarkGray),
-            filled_style: Style::default().fg(Color::Green),
-        }
-    }
-
-    pub fn filled_style(mut self, style: Style) -> Self {
-        self.filled_style = style;
-        self
-    }
-}
-
-impl Widget for ProgressBar {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-
-        let filled_width = (self.progress * area.width as f64) as u16;
-
-        for x in 0..area.width {
-            let ch = if x < filled_width { '━' } else { '─' };
-            let style = if x < filled_width {
-                self.filled_style
-            } else {
-                self.style
-            };
-            buf[(area.x + x, area.y)].set_char(ch).set_style(style);
-        }
-    }
-}
-
 /// A bar showing per-stream throughput with retransmit count or jitter
 pub struct StreamBar {
     pub stream_id: u8,
@@ -354,15 +312,6 @@ mod tests {
             bar_cells(0),
             bar_cells(1)
         );
-    }
-
-    #[test]
-    fn test_progress_bar_clamp() {
-        let bar = ProgressBar::new(1.5);
-        assert_eq!(bar.progress, 1.0);
-
-        let bar = ProgressBar::new(-0.5);
-        assert_eq!(bar.progress, 0.0);
     }
 
     #[test]
