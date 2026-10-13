@@ -2014,23 +2014,38 @@ async fn run_quic_test(
                     // Server sends - open uni stream to client. The guard
                     // drops when the send ends: the `-n` delivered signal.
                     let _sending_done = sending_done;
-                    match conn.open_uni().await {
-                        Ok(send) => {
-                            if let Err(e) = quic::send_quic_data(
-                                send,
-                                stream_stats,
-                                duration,
-                                per_stream_bitrate,
-                                cancel,
-                                pause,
-                                budget,
-                            )
-                            .await
-                            {
-                                debug!("QUIC send ended: {}", e);
+                    let mut cancel_rx = cancel.clone();
+                    let send = tokio::select! {
+                        biased;
+                        _ = cancel_rx.changed() => {
+                            debug!("Cancelled while waiting to open uni stream");
+                            None
+                        }
+                        _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => {
+                            debug!("Timeout waiting for client to allow uni stream");
+                            None
+                        }
+                        result = conn.open_uni() => match result {
+                            Ok(send) => Some(send),
+                            Err(e) => {
+                                debug!("Failed to open uni stream: {}", e);
+                                None
                             }
                         }
-                        Err(e) => debug!("Failed to open uni stream: {}", e),
+                    };
+                    if let Some(send) = send
+                        && let Err(e) = quic::send_quic_data(
+                            send,
+                            stream_stats,
+                            duration,
+                            per_stream_bitrate,
+                            cancel,
+                            pause,
+                            budget,
+                        )
+                        .await
+                    {
+                        debug!("QUIC send ended: {}", e);
                     }
                 }
                 Direction::Bidir => {
@@ -4065,6 +4080,99 @@ mod tests {
         assert!(FINISH_DRAIN_GRACE_UDP < FINISH_DRAIN_GRACE);
     }
     use super::*;
+
+    #[tokio::test]
+    async fn quic_download_cancel_without_stream_credit_returns_result_and_cleans_up() {
+        use quinn::crypto::rustls::QuicClientConfig;
+        use tokio::io::AsyncBufReadExt;
+
+        // A peer can keep the control stream healthy while withholding all
+        // download stream credit. Cancellation must stop that pending open
+        // so teardown can return a Result and release the active-test entry.
+        let (cert, key) = quic::generate_self_signed_cert().unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert[0].clone()).unwrap();
+        let mut crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        crypto.alpn_protocols = vec![b"xfr".to_vec()];
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
+        let mut config =
+            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+        config.transport_config(Arc::new(transport));
+
+        let server = quic::create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )
+        .unwrap();
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client.set_default_client_config(config);
+        let (client_conn, server_conn) = tokio::join!(
+            async {
+                client
+                    .connect(server.local_addr().unwrap(), "xfr")
+                    .unwrap()
+                    .await
+                    .unwrap()
+            },
+            async { server.accept().await.unwrap().await.unwrap() },
+        );
+
+        let id = "blocked-quic-download";
+        let (mut send, recv) = client_conn.open_bi().await.unwrap();
+        let cancel = ControlMessage::Cancel {
+            id: id.to_string(),
+            reason: "test cancellation".to_string(),
+        };
+        send.write_all(format!("{}\n", cancel.serialize().unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let (server_send, server_recv) = server_conn.accept_bi().await.unwrap();
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let tests_for_task = active_tests.clone();
+        let task = tokio::spawn(async move {
+            run_quic_test(
+                &server_conn,
+                BufReader::new(server_recv),
+                server_send,
+                id,
+                1,
+                Duration::ZERO,
+                Direction::Download,
+                None,
+                None,
+                tests_for_task,
+                server_conn.remote_address(),
+                None,
+                &None,
+                crate::control_crypto::ProtectedControl::plaintext(),
+            )
+            .await
+        });
+
+        let mut reader = BufReader::new(recv);
+        let mut line = String::new();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                ControlMessage::deserialize(line.trim()).unwrap(),
+                ControlMessage::Cancelled { .. }
+            ));
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            ControlMessage::deserialize(line.trim()).unwrap()
+        })
+        .await
+        .expect("cancelling a blocked stream open should return a final result");
+        assert!(matches!(result, ControlMessage::Result(_)));
+        task.await.unwrap().unwrap();
+        assert!(active_tests.lock().await.is_empty());
+    }
 
     #[tokio::test]
     async fn test_remove_active_test_cleans_entry_and_sends_cancel() {
