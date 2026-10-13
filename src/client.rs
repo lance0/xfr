@@ -3390,18 +3390,8 @@ mod tests {
     #[test]
     fn udp_local_progress_sums_across_streams() {
         let stats = test_stats_with_recv_bytes(&[0, 0]);
-        stats.streams[0]
-            .udp_packets_received
-            .store(100, std::sync::atomic::Ordering::Relaxed);
-        stats.streams[0]
-            .udp_lost
-            .store(7, std::sync::atomic::Ordering::Relaxed);
-        stats.streams[1]
-            .udp_packets_received
-            .store(50, std::sync::atomic::Ordering::Relaxed);
-        stats.streams[1]
-            .udp_lost
-            .store(3, std::sync::atomic::Ordering::Relaxed);
+        stats.streams[0].set_udp_progress(100, 7);
+        stats.streams[1].set_udp_progress(50, 3);
 
         let p = udp_local_progress(&stats);
         assert_eq!(p.packets_received, 150);
@@ -3561,13 +3551,12 @@ mod tests {
     fn directional_local_progress_distinguishes_no_packets_from_zero_jitter() {
         let stats = TestStats::new("directions".into(), 2);
         assert!(udp_local_direction_progress(&stats).is_none());
-        stats.streams[0].add_udp_received(8);
+        stats.streams[0].set_udp_progress(8, 0);
         let progress = udp_local_direction_progress(&stats).unwrap();
         assert_eq!(progress.progress.packets_received, 8);
         assert_eq!(progress.progress.lost_percent(), Some(0.0));
         assert_eq!(progress.jitter_ms, Some(0.0));
-        stats.streams[1].add_udp_received(2);
-        stats.streams[1].add_udp_lost(5);
+        stats.streams[1].set_udp_progress(2, 5);
         stats.streams[1].set_udp_jitter_us(6000);
         let progress = udp_local_direction_progress(&stats).unwrap();
         assert_eq!(progress.progress.packets_received, 10);
