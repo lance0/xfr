@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A single malformed mDNS packet could silently disable discovery** — mdns-sd 0.21.1 indexed past the end of a packet when parsing an HINFO record whose character-string length byte was missing. Any host on the local network could send one 23-byte multicast packet and panic the mDNS daemon thread inside `xfr serve`: the server kept running and tests kept working, but it stopped answering mDNS queries until restarted, so `xfr discover` found nothing, and nothing after the one-time panic message indicated why. Updated to mdns-sd 0.21.3, which skips the truncated record instead. The same packet now leaves discovery intact.
+- **Changing protocol or streams in the TUI settings carried stale transport options into the next run** — `--mptcp` and zero-copy stayed on for UDP and QUIC, `-l` made a TCP or QUIC run fail validation, and `--cport` kept its old single-port or sequential assignment. Each run now applies only the options its protocol supports and recomputes port assignment; switching back restores them.
 
 ## [0.10.1] - 2026-09-04
 
