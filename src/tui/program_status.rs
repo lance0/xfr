@@ -115,7 +115,7 @@ impl StatusReporter {
     }
 
     /// State changes go out immediately; same-state changes at most once per
-    /// [`MIN_UPDATE_INTERVAL`]. Call after `terminal.draw` returns, never
+    /// `MIN_UPDATE_INTERVAL`. Call after `terminal.draw` returns, never
     /// mid-frame. Write errors are ignored: the next draw surfaces them.
     pub fn update(
         &mut self,
