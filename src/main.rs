@@ -2261,13 +2261,18 @@ enum TuiQuitAction {
     Ignore,
 }
 
+fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
+    (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        || key.code == KeyCode::Char('\x03')
+}
+
 fn tui_quit_action(
     key: &crossterm::event::KeyEvent,
     state: AppState,
     cancel_pending: bool,
     run_active: bool,
 ) -> TuiQuitAction {
-    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+    let is_ctrl_c = is_ctrl_c(key);
     let is_quit = key.code == KeyCode::Char('q') || is_ctrl_c;
 
     if !is_quit {
@@ -2436,8 +2441,8 @@ async fn run_tui_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            // Settings modal takes priority when visible
-            if app.settings.visible {
+            // Interrupts use the normal cancel path even while Settings is open.
+            if app.settings.visible && !is_ctrl_c(&key) {
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
                     apply_tui_settings(config, &mut app);
                     app.cancel_deadline = None;
@@ -2662,6 +2667,9 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if is_ctrl_c(&key) {
+                break;
+            }
             match key.code {
                 KeyCode::Char('q') => {
                     break;
@@ -3071,6 +3079,26 @@ mod tests {
 
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn tui_interrupts_preserve_cancel_and_exit_actions() {
+        for key in [ctrl_c_key(), test_key(KeyCode::Char('\x03'))] {
+            assert!(is_ctrl_c(&key));
+            for (state, pending, active, expected) in [
+                (AppState::Running, false, true, TuiQuitAction::StartCancel),
+                (AppState::Paused, false, true, TuiQuitAction::StartCancel),
+                (AppState::Running, true, true, TuiQuitAction::ForceExit),
+                (AppState::Completed, false, true, TuiQuitAction::ExitOk),
+                (AppState::Error, false, true, TuiQuitAction::ExitError),
+                (AppState::Running, false, false, TuiQuitAction::ExitOk),
+            ] {
+                assert_eq!(tui_quit_action(&key, state, pending, active), expected);
+            }
+        }
+        for code in [KeyCode::Char('c'), KeyCode::Char('q'), KeyCode::Esc] {
+            assert!(!is_ctrl_c(&test_key(code)));
+        }
     }
 
     #[test]
