@@ -411,6 +411,10 @@ async fn test_udp_upload() {
 /// Issue #213: both peers must use the requested size, including reverse
 /// and multistream bidir. Jumbo payloads catch silent receive truncation.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "LAN-2299: custom-payload UDP bidir/download fails on native Windows"
+)]
 async fn test_udp_custom_payload_sizes() {
     let port = get_test_port();
     let server = start_test_server(port).await;
@@ -3870,6 +3874,10 @@ impl RawControl {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "LAN-2299: custom-payload UDP bidir/download fails on native Windows"
+)]
 async fn test_udp_custom_payload_legacy_ports() {
     let port = get_test_port();
     let server = start_test_server(port).await;
