@@ -21,7 +21,7 @@ pub(crate) fn atomic_write(
                 .write(true)
                 .truncate(true)
                 .open(path)
-                .with_context(|| format!("Failed to open {}", path.display()))?;
+                .with_context(|| format!("Failed to open {} for writing", path.display()))?;
             let mut buffered = BufWriter::new(file);
             write(&mut buffered)?;
             buffered.flush()?;
@@ -35,7 +35,12 @@ pub(crate) fn atomic_write(
                 path.display()
             );
             // Preserve fs::write's access check without creating or truncating the file.
-            drop(fs::OpenOptions::new().write(true).open(path)?);
+            drop(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .with_context(|| format!("Failed to open {} for writing", path.display()))?,
+            );
             Some(metadata.permissions())
         }
         Err(error) if error.kind() == ErrorKind::NotFound => None,
