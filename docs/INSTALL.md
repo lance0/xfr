@@ -154,7 +154,7 @@ xfr --completions elvish > ~/.elvish/lib/xfr.elv
 | macOS Intel | Build with `cargo install xfr`; no release binary |
 | Android (Termux) | ARM64 release binary; cross-built, not runtime-tested in CI |
 | NetBSD | Community pkgsrc package; not runtime-tested in CI |
-| Windows | Experimental; CI checks compilation, not runtime behavior. WSL2 recommended; native builds lack TCP_INFO metrics |
+| Windows | Experimental; WSL2 recommended; native builds lack TCP_INFO metrics. See [contributor checks](../CONTRIBUTING.md#testing) for validation scope |
 
 CI and release builds do not qualify every protocol, terminal, or network setup.
 MPTCP and TCP zero-copy sends require Linux; see [transport details](FEATURES.md#transport-modes).

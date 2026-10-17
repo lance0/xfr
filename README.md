@@ -79,8 +79,8 @@ Release binaries cover Linux x86_64/ARM64, macOS Apple Silicon, and Android
 ARM64. macOS Intel can build from crates.io; NetBSD has a community pkgsrc
 package. Native Windows remains experimental; WSL2 is recommended.
 
-CI runs tests on Ubuntu and macOS and checks Windows compilation. Packaging
-and CI coverage do not establish runtime qualification for every platform or
+CI covers Ubuntu, macOS, and Windows. Packaging and CI coverage do not
+establish runtime qualification for every platform or
 transport. See [platform details and limitations](docs/INSTALL.md#platform-support).
 
 ## Real-World Use Cases
