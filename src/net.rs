@@ -4,7 +4,7 @@
 //! compatibility, MPTCP auto-negotiation (Linux 5.6+), and IPv6 flow label support.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -687,11 +687,19 @@ pub fn with_port(mut addr: SocketAddr, port: u16) -> SocketAddr {
     addr
 }
 
-/// Resolve a hostname to addresses, filtered by address family preference
-pub fn resolve_host(host: &str, port: u16, family: AddressFamily) -> io::Result<Vec<SocketAddr>> {
+/// Resolve a hostname to addresses, filtered by address family preference.
+///
+/// Name lookups run on tokio's blocking pool, so a stuck system resolver
+/// does not stall the runtime and a surrounding `tokio::time::timeout`
+/// (`--connect-timeout`) can abandon the lookup.
+pub async fn resolve_host(
+    host: &str,
+    port: u16,
+    family: AddressFamily,
+) -> io::Result<Vec<SocketAddr>> {
     let addrs: Vec<SocketAddr> = match parse_ip_literal(host, port)? {
         Some(addr) => vec![addr],
-        None => (host, port).to_socket_addrs()?.collect(),
+        None => tokio::net::lookup_host((host, port)).await?.collect(),
     };
 
     if addrs.is_empty() {
@@ -726,7 +734,7 @@ pub async fn connect_tcp(
     bind_addr: Option<SocketAddr>,
     mptcp: bool,
 ) -> io::Result<(TcpStream, SocketAddr)> {
-    let addrs = resolve_host(host, port, family)?;
+    let addrs = resolve_host(host, port, family).await?;
 
     let mut last_err = None;
 
@@ -1331,9 +1339,11 @@ mod tests {
         assert_eq!(match_bind_family(bind, remote), bind);
     }
 
-    #[test]
-    fn test_resolve_ipv6_literal_uses_brackets() {
-        let addrs = resolve_host("::1", 5201, AddressFamily::V6Only).unwrap();
+    #[tokio::test]
+    async fn test_resolve_ipv6_literal_uses_brackets() {
+        let addrs = resolve_host("::1", 5201, AddressFamily::V6Only)
+            .await
+            .unwrap();
         assert!(!addrs.is_empty(), "::1 should resolve");
         assert!(
             addrs.iter().all(|a| a.is_ipv6() && a.port() == 5201),
@@ -1341,9 +1351,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_ipv4_literal_keeps_standard_formatting() {
-        let addrs = resolve_host("127.0.0.1", 5201, AddressFamily::V4Only).unwrap();
+    #[tokio::test]
+    async fn test_resolve_ipv4_literal_keeps_standard_formatting() {
+        let addrs = resolve_host("127.0.0.1", 5201, AddressFamily::V4Only)
+            .await
+            .unwrap();
         assert!(!addrs.is_empty(), "127.0.0.1 should resolve");
         assert!(
             addrs.iter().all(|a| a.is_ipv4() && a.port() == 5201),
@@ -1358,51 +1370,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_resolve_numeric_zone_sets_scope_id() {
+    #[tokio::test]
+    async fn test_resolve_numeric_zone_sets_scope_id() {
         for host in ["fe80::1%7", "[fe80::1%7]"] {
             for family in [AddressFamily::V6Only, AddressFamily::DualStack] {
-                let addrs = resolve_host(host, 5201, family).unwrap();
+                let addrs = resolve_host(host, 5201, family).await.unwrap();
                 assert_eq!(addrs.len(), 1, "{host}");
                 assert_eq!(addrs[0].ip(), "fe80::1".parse::<IpAddr>().unwrap());
                 assert_eq!(addrs[0].port(), 5201);
                 assert_eq!(scope_of(addrs[0]), 7, "{host} must keep its zone");
             }
         }
-        assert!(resolve_host("fe80::1%7", 5201, AddressFamily::V4Only).is_err());
+        assert!(
+            resolve_host("fe80::1%7", 5201, AddressFamily::V4Only)
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn test_resolve_interface_name_zone_sets_scope_id() {
-        let addrs = resolve_host("fe80::1%lo", 5201, AddressFamily::V6Only).unwrap();
+    #[tokio::test]
+    async fn test_resolve_interface_name_zone_sets_scope_id() {
+        let addrs = resolve_host("fe80::1%lo", 5201, AddressFamily::V6Only)
+            .await
+            .unwrap();
         let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
         assert_ne!(lo, 0);
         assert_eq!(scope_of(addrs[0]), lo);
     }
 
-    #[test]
-    fn test_resolve_unknown_zone_names_it() {
-        let err = resolve_host("fe80::1%xfr-no-such-if0", 5201, AddressFamily::V6Only).unwrap_err();
+    #[tokio::test]
+    async fn test_resolve_unknown_zone_names_it() {
+        let err = resolve_host("fe80::1%xfr-no-such-if0", 5201, AddressFamily::V6Only)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("xfr-no-such-if0"),
             "error should name the zone: {err}"
         );
     }
 
-    #[test]
-    fn test_resolve_rejects_zone_off_ipv6_literals() {
+    #[tokio::test]
+    async fn test_resolve_rejects_zone_off_ipv6_literals() {
         for host in ["127.0.0.1%1", "localhost%1", "fe80::1%"] {
             assert!(
-                resolve_host(host, 5201, AddressFamily::DualStack).is_err(),
+                resolve_host(host, 5201, AddressFamily::DualStack)
+                    .await
+                    .is_err(),
                 "{host} should be rejected"
             );
         }
     }
 
-    #[test]
-    fn test_resolve_without_zone_has_no_scope() {
-        let addrs = resolve_host("[::1]", 5201, AddressFamily::V6Only).unwrap();
+    #[tokio::test]
+    async fn test_resolve_without_zone_has_no_scope() {
+        let addrs = resolve_host("[::1]", 5201, AddressFamily::V6Only)
+            .await
+            .unwrap();
         assert_eq!(scope_of(addrs[0]), 0);
         assert_eq!(addrs[0].port(), 5201);
     }
@@ -1424,7 +1448,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_localhost_v4() {
-        let addrs = resolve_host("localhost", 5201, AddressFamily::V4Only).unwrap();
+        let addrs = resolve_host("localhost", 5201, AddressFamily::V4Only)
+            .await
+            .unwrap();
         assert!(!addrs.is_empty());
         assert!(addrs.iter().all(|a| a.is_ipv4()));
     }
@@ -1432,9 +1458,43 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_localhost_v6() {
         // May fail if IPv6 is not configured
-        if let Ok(addrs) = resolve_host("localhost", 5201, AddressFamily::V6Only) {
+        if let Ok(addrs) = resolve_host("localhost", 5201, AddressFamily::V6Only).await {
             assert!(addrs.iter().all(|a| a.is_ipv6()));
         }
+    }
+
+    /// A stuck system resolver must not stop `--connect-timeout` from firing
+    /// (LAN-2295). The only blocking-pool thread is held busy, so the
+    /// lookup can never finish: the deadline fires only if `resolve_host`
+    /// yields instead of calling the resolver inside `poll`. A blocking
+    /// lookup would resolve `localhost` before the timer is ever checked.
+    #[test]
+    fn test_connect_timeout_bounds_stuck_resolver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        rt.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().unwrap();
+
+        let outcome = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                resolve_host("localhost", 5201, AddressFamily::DualStack),
+            )
+            .await
+        });
+        release_tx.send(()).unwrap();
+        assert!(
+            outcome.is_err(),
+            "resolution must yield to the connect deadline, got {outcome:?}"
+        );
     }
 
     #[tokio::test]

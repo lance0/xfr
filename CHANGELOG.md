@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
 
+### Fixed
+- **`--connect-timeout` now bounds hostname resolution** — the client resolved the target with the blocking system resolver on a runtime thread, so a stuck DNS lookup hung the connect and the timeout could never fire; QUIC also resolved outside its connect deadline entirely. Lookups now run on tokio's blocking pool inside the deadline for TCP, UDP and QUIC. Library: `xfr::net::resolve_host` is now `async`.
+
 ## [0.11.0] - 2026-10-13
 
 ### Security

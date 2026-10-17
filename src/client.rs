@@ -2315,31 +2315,36 @@ impl Client {
         // prior peer's string forward into the TUI display.
         *self.server_version.lock() = None;
 
-        // Resolve target address first, then create endpoint with matching address family
-        let addr = net::resolve_host(
-            &self.config.host,
-            self.config.port,
-            self.config.address_family,
-        )?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No address found for {}", self.config.host))?;
+        // Resolve inside the connect deadline so --connect-timeout bounds DNS too.
+        let connect = async {
+            // Resolve target address first, then create endpoint with matching address family
+            let addr = net::resolve_host(
+                &self.config.host,
+                self.config.port,
+                self.config.address_family,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No address found for {}", self.config.host))?;
 
-        // Create QUIC endpoint with address family matching the target
-        let endpoint = quic::create_client_endpoint(addr, self.config.bind_addr)?;
+            // Create QUIC endpoint with address family matching the target
+            let endpoint = quic::create_client_endpoint(addr, self.config.bind_addr)?;
 
-        info!("Connecting via QUIC to {}...", addr);
-        let connection = match self.config.connect_timeout {
-            Some(limit) => tokio::time::timeout(limit, quic::connect(&endpoint, addr))
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Timed out connecting to {} after {:?} (--connect-timeout)",
-                        addr,
-                        limit
-                    )
-                })??,
-            None => quic::connect(&endpoint, addr).await?,
+            info!("Connecting via QUIC to {}...", addr);
+            let connection = quic::connect(&endpoint, addr).await?;
+            anyhow::Ok((endpoint, connection))
+        };
+        let (endpoint, connection) = match self.config.connect_timeout {
+            Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
+                anyhow::anyhow!(
+                    "Timed out connecting to {}:{} after {:?} (--connect-timeout)",
+                    self.config.host,
+                    self.config.port,
+                    limit
+                )
+            })??,
+            None => connect.await?,
         };
 
         // Open control stream (bidirectional)
