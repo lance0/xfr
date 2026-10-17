@@ -1,6 +1,6 @@
 //! Publish complete saves without truncating the previous file.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::fs;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
@@ -10,16 +10,24 @@ pub(crate) fn atomic_write(
     path: &Path,
     write: impl FnOnce(&mut dyn Write) -> Result<()>,
 ) -> Result<()> {
-    let resolved = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Some(fs::canonicalize(path)?),
-        Ok(_) => None,
-        Err(error) if error.kind() == ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    let path = resolved.as_deref().unwrap_or(path);
     let permissions = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            bail!("Save destination is a directory: {}", path.display())
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            // Devices, FIFOs, and pipes (/dev/null, /dev/stdout) cannot be replaced; write
+            // through them as fs::write did. O_TRUNC is ignored for FIFOs and terminals.
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .with_context(|| format!("Failed to open {}", path.display()))?;
+            let mut buffered = BufWriter::new(file);
+            write(&mut buffered)?;
+            buffered.flush()?;
+            return Ok(());
+        }
         Ok(metadata) => {
-            ensure!(metadata.is_file(), "Not a regular file: {}", path.display());
             // Read-only temporary files cannot be cleaned up on Windows after an error.
             ensure!(
                 !metadata.permissions().readonly(),
@@ -33,6 +41,13 @@ pub(crate) fn atomic_write(
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let resolved = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Some(fs::canonicalize(path)?),
+        Ok(_) => None,
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let path = resolved.as_deref().unwrap_or(path);
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -191,6 +206,41 @@ mod tests {
             ErrorKind::PermissionDenied
         );
         assert_eq!(fs::read(&path).unwrap(), b"previous");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_through_character_devices() {
+        atomic_write(Path::new("/dev/null"), |writer| {
+            Ok(writer.write_all(b"discarded")?)
+        })
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_through_fifos() {
+        use std::io::Read;
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{FileTypeExt, OpenOptionsExt},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        // A non-blocking reader lets the writer open without a second thread.
+        let mut reader = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
+        atomic_write(&fifo, |writer| Ok(writer.write_all(b"result")?)).unwrap();
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).unwrap();
+        assert_eq!(received, b"result");
+        assert!(fifo.symlink_metadata().unwrap().file_type().is_fifo());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
