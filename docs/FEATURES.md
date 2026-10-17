@@ -52,6 +52,27 @@ UDP provides:
 - Out-of-order detection for unique late packets, excluding duplicates. Packets older than the tracking window cannot repair loss; wire byte counts still include all data datagrams
 - Live receiver-progress feedback at 2 Hz on the data socket (when both peers advertise `udp_feedback_v1`), so the live loss counter stays current under upload-mode saturation even when the TCP control channel back-pressures. Surfaces in the TUI live counter and in `--no-tui --json-stream` / `--csv` / plain interval output. Freshness checks compare both unique received packets and the expected packet count, keeping delayed reports from undoing gap repairs
 
+`-l/--length` sets the complete UDP payload size, including xfr's 16-byte
+sequence/timestamp header (16–65507 bytes; default 1400). It applies in both
+directions and across all streams. Both peers must support `udp_payload_size_v1`;
+an explicit size fails with an upgrade message against an older server.
+
+Choose a size that fits the path: allow 28 bytes for IPv4 + UDP headers or
+48 bytes for IPv6 + UDP headers, plus any IP options or extension headers.
+For example, 1368 fits a 1420-byte MTU with either address family's basic headers.
+Use `--probe-mtu` separately to find the largest payload that survives each
+direction, then pass the smaller result to `-l`. The default remains 1400;
+throughput tests do not automatically probe or adjust the size. JSON
+`udp_stats.packet_size` reports the largest valid datagram received, or is absent
+when no data arrived.
+
+`--probe-mtu` sets the don't-fragment flag so middleboxes can't hide the limit
+by fragmenting, which makes it useful for NFS-over-UDP and VPN/tunnel tuning:
+
+```bash
+xfr <host> --probe-mtu
+```
+
 #### Single-Port UDP (Default, v0.9.18+)
 
 When both peers advertise `single_port_udp_v1`, all per-stream UDP data flows to the server's main port (5201/UDP by default) instead of per-stream ephemeral server ports — the UDP firewall story matches single-port TCP. Per stream, the client sends a token-bearing hello datagram to the main port; the server creates a connected same-port socket (`SO_REUSEPORT`) for that stream and acks from it, after which the kernel routes the stream's traffic to its dedicated socket. The server advertises the capability only after a startup self-test proves the running kernel's connected-socket routing; on unsupported platforms (e.g. Windows) or against older peers, it falls back to ephemeral per-stream ports automatically.
@@ -82,6 +103,7 @@ Encrypted transport over UDP using TLS 1.3:
 ```bash
 xfr <host> --quic              # QUIC transport (short: -Q)
 xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
+xfr <host> --quic -R           # QUIC download test
 xfr <host> --quic --psk secret # PSK-authenticated QUIC
 ```
 
@@ -295,6 +317,7 @@ xfr serve -4                   # IPv4 only
 xfr serve -6                   # IPv6 only
 xfr <host> -4                  # Client: force IPv4
 xfr <host> -6                  # Client: force IPv6
+xfr ::1 -6                     # IPv6 localhost
 ```
 
 IPv6 link-local addresses need a zone naming the interface, as in `xfr fe80::2%eth0` or `xfr [fe80::2%eth0]`; a numeric interface index (`%3`) also works, and is the only form accepted on non-Unix platforms. The zone is carried through to every control, data and QUIC socket, which makes a direct cable between two machines testable with no IP configuration at all. `xfr discover` prints link-local answers with their zone. `xfr serve --bind` takes a plain IP, so serve link-local clients from the default wildcard listener.
@@ -314,6 +337,9 @@ xfr <host> -q                  # Quiet mode (summary only)
 ```
 
 The client TUI and `xfr serve --tui` report test status to the terminal through OSC 7501 ([Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)): working with a progress percentage and the current rate, paused, done with the summary, or the error. Terminals that do not implement it ignore the sequence. Plain, JSON and CSV output never emit it.
+
+Log messages go to stderr, so JSON and CSV output pipe cleanly:
+`xfr <host> --json 2>/dev/null`.
 
 ### JSON
 
@@ -344,6 +370,14 @@ xfr <host> --timestamp-format iso8601    # "2024-01-15T10:30:00Z"
 xfr <host> --timestamp-format unix       # "1705316400"
 ```
 
+### Interval Control
+
+```bash
+xfr <host> -i 2                # Report every 2 seconds
+xfr <host> --omit 3            # Skip first 3s of intervals (TCP ramp-up)
+```
+
+
 ## Configuration
 
 ### Config File
@@ -356,21 +390,21 @@ xfr reads defaults from:
 ```toml
 [client]
 duration_secs = 10
-parallel_streams = 1
+parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
 tcp_nodelay = false
-window_size = "1M"
-# bitrate = "100M"             # same units as --bitrate
-# congestion = "bbr"           # TCP congestion-control algorithm
-# dscp = "EF"                  # DSCP name or raw TOS byte (0-255)
-interval_secs = 1.0            # report interval in seconds
+window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
+# bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
+# congestion = "bbr"          # TCP congestion-control algorithm
+# dscp = "EF"                 # DSCP name or raw TOS byte (0-255)
+interval_secs = 1.0           # report interval; default is 1.0 seconds
 json_output = false
 no_tui = false
-theme = "default"
-timestamp_format = "relative"  # relative, iso8601, unix
-address_family = "dual"        # ipv4, ipv6, dual
-omit_secs = 0                  # omit first N seconds (TCP ramp-up)
-# bind = "192.168.1.100"       # local address, optionally with :port
-# cport = 5202                  # client source port for firewall traversal
+theme = "default"            # or dracula, catppuccin, nord, matrix, etc.
+timestamp_format = "relative" # or "iso8601", "unix"
+address_family = "dual"      # "ipv4", "ipv6", or "dual"
+omit_secs = 0                # omit first N seconds (TCP ramp-up)
+# bind = "192.168.1.100"      # local address, optionally with :port
+# cport = 5202                # client source port for firewall traversal
 psk = "my-secret-key"
 log_file = "~/.config/xfr/xfr.log"
 log_level = "info"
@@ -379,7 +413,7 @@ log_level = "info"
 port = 5201
 one_off = false
 no_mdns = false
-address_family = "dual"
+address_family = "dual"      # "ipv4", "ipv6", or "dual"
 psk = "my-secret-key"
 rate_limit = 5
 rate_limit_window = 60       # whole seconds; must be at least 1
@@ -389,7 +423,18 @@ acl_file = "/path/to/acl.txt"
 push_gateway = "http://pushgateway:9091"
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
+
+[[presets]]                  # selected with `xfr serve --preset internal`
+name = "internal"
+allowed_clients = ["192.168.1.0/24"]  # extra allowlist on top of allow/deny
+max_duration_secs = 60       # applies when --max-duration is not given
 ```
+
+```bash
+xfr serve --preset internal  # Apply the [[presets]] entry named "internal"
+```
+
+Unknown preset names are rejected.
 
 On Unix, a config containing either `psk` must grant no access to group or
 other users, so the shared key is not exposed to another local account:
@@ -402,7 +447,24 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
 chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
 
-The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value overrides them. This includes `omit_secs` and `interval_secs`, so `--omit 0` and `--interval 1.0` take precedence over the config file. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
+The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
+
+The `address_family` setting accepts `ipv4`, `ipv6`, or `dual`, including existing
+aliases such as `4`, `6`, and `both`. Unknown effective values are rejected.
+`-4`/`--ipv4` and `-6`/`--ipv6` override config defaults and cannot be used together.
+A specific server `--bind` address also selects its address family; any `-4`/`-6`
+flag must agree with that address.
+
+Environment variables override config file:
+
+```bash
+export XFR_PORT=9000
+export XFR_DURATION=30s
+```
+
+For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes precedence over
+`server.port` in the config file. If none is set, the server uses port 5201. An explicit
+port of 5201 also overrides the config file.
 
 ### Environment Variables
 
@@ -526,7 +588,8 @@ xfr serve --max-duration 60s   # Cap tests at 60 seconds
 
 ## Prometheus Metrics
 
-Build with `--features prometheus` for metrics support.
+Build with `--features prometheus` for the metrics HTTP endpoint. Push Gateway
+support is available without this optional feature.
 
 ### Metrics Endpoint
 
@@ -624,58 +687,167 @@ Precedence, highest first: compiled-out > env > `--no-update-check` > `config.to
 
 The check uses a 1-hour cache to avoid GitHub API rate limits.
 
-## CLI Reference
+<a id="server-specific-flags"></a>
 
-See `xfr --help` for complete CLI documentation.
+## CLI Reference
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--port` | `-p` | 5201 | Server/client port |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
+| `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
-| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and a server with `udp_payload_size_v1` |
-| `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams (unlike iperf3 per-stream) |
+| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and server `udp_payload_size_v1` support |
+| `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
+| `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
 | `--parallel` | `-P` | 1 | Parallel streams |
 | `--reverse` | `-R` | false | Reverse direction (download) |
 | `--bidir` | | false | Bidirectional test |
+| `--ipv4` | `-4` | false | Force IPv4 only |
+| `--ipv6` | `-6` | false | Force IPv6 only |
+| `--bind` | `-B` (server) | none | Local address to bind: IP or IP:port on the client (e.g., 192.168.1.100), plain IP on the server |
+| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
+| `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
+| `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
+| `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
+| `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
+| `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
+| `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
+| `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; requires server `mtu_probe_v1` support) |
+| `--connect-timeout` | | none | Fail if the control connection takes longer than this (e.g. `5s`); without it, dead servers are bounded only by OS defaults |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval |
 | `--csv` | | false | CSV output |
 | `--quiet` | `-q` | false | Summary only |
-| `--interval` | `-i` | 1.0 | Report interval (seconds) |
+| `--interval` | `-i` | 1.0 | Report interval in seconds (must be > 0) |
 | `--omit` | | 0 | Omit first N seconds |
 | `--output` | `-o` | | Also save the final result to a file (CSV with `--csv`, otherwise JSON) |
 | `--no-tui` | | false | Disable TUI |
-| `--theme` | | default | Color theme |
+| `--no-update-check` | | false | Disable the background update check (also honors `DO_NOT_TRACK` / `XFR_NO_UPDATE_CHECK`) |
+| `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |
-| `--window` | `-w` | OS default | TCP window size; when unset, kernel autotunes |
+| `--window` | `-w` | OS default | Socket buffer size for TCP and UDP (SO_SNDBUF/SO_RCVBUF on both ends); when unset, TCP autotunes and UDP uses the kernel default |
 | `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
-| `--quic` | `-Q` | false | Use QUIC transport |
-| `--psk` | | none | Pre-shared key |
-| `--timestamp-format` | | relative | Timestamp format |
-| `--log-file` | | none | Log file path |
-| `--log-level` | | info | Log level |
-| `--ipv4` | `-4` | false | Force IPv4 only |
-| `--ipv6` | `-6` | false | Force IPv6 only |
-| `--bind` | | none | Local address to bind (IP or IP:port) |
-| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
-| `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
-| `--mptcp` | | false | MPTCP mode (Multi-Path TCP, Linux 5.6+) |
-| `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
-| `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
-| `--zerocopy` | `-Z` | false | Zero-copy TCP sends via sendfile(2) (Linux; lowers sender CPU overhead) |
+| `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
+| `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
+| `--log-level` | | info | Log level (error, warn, info, debug, trace) |
+| `--push-gateway` | | none | Prometheus Push Gateway URL (server) |
+| `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
+| `--psk` | | none | Pre-shared key for authentication |
+| `--psk-file` | | none | Read PSK from file |
+| `--rate-limit` | | none | Max concurrent tests per IP (server) |
+| `--rate-limit-window` | | config or 60s | Rate limit time window in whole seconds, at least 1s (server) |
+| `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell, elvish) |
+| `--allow` | | none | Allow IP/subnet, repeatable (server) |
+| `--deny` | | none | Deny IP/subnet, repeatable (server) |
+| `--acl-file` | | none | ACL rules file (server) |
+| `--max-duration` | | none | Maximum test duration, server-side limit (server) |
+| `--preset` | | none | Apply a named `[[presets]]` entry from the config file (server) |
+| `--tui` | | false | Enable live dashboard (server) |
+| `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
+| `--no-mdns` | | false | Disable mDNS service registration (server) |
 
-### Server-Specific Flags
+TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tui` | false | Enable server dashboard |
-| `--one-off` | false | Exit after one test (TCP or QUIC) |
-| `--max-duration` | none | Maximum test duration |
-| `--rate-limit` | none | Max concurrent tests per IP |
-| `--allow` | none | Allow IP/subnet (repeatable) |
-| `--deny` | none | Deny IP/subnet (repeatable) |
-| `--acl-file` | none | Load ACL from file |
-| `--psk-file` | none | Read PSK from file |
-| `--push-gateway` | none | Prometheus Push Gateway URL |
-| `--prometheus` | none | Metrics endpoint port |
+`--dscp` applies to TCP and UDP sockets on both ends when relevant, including server-sent download and bidirectional traffic. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
+
+## Keybindings (Client TUI)
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit (cancels test) |
+| `p` | Pause/Resume test traffic |
+| `s` | Settings modal |
+| `t` | Cycle color theme |
+| `d` | Toggle per-stream view |
+| `?` / `F1` | Help |
+| `j` | Print JSON result |
+| `u` | Dismiss update notification |
+
+The Display settings' Timestamp choice reformats history immediately.
+`--timestamp-format` selects its initial format.
+
+## Keybindings (Server TUI)
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit server |
+| `?` / `F1` | Help |
+| `Esc` | Close help |
+
+## Themes
+
+xfr includes 11 built-in color themes. Select with `--theme` or press `t` during a test:
+
+```bash
+xfr <host> --theme dracula     # Dark purple theme
+xfr <host> --theme matrix      # Green on black hacker style
+xfr <host> --theme catppuccin  # Soothing pastels
+xfr <host> --theme nord        # Arctic blue tones
+```
+
+Available themes: `default`, `kawaii`, `cyber`, `dracula`, `monochrome`, `matrix`, `nord`, `gruvbox`, `catppuccin`, `tokyo_night`, `solarized`
+
+The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
+the terminal's own default colors at maximum contrast, so it works on both
+dark and light terminal backgrounds — pair it with a light background at full
+brightness when working in direct sunlight. Loss severity in the throughput
+graph is always also encoded without color — light loss underlines the bar
+(or the baseline when throughput is zero or too small to draw),
+and in a theme with no hue to spend heavy loss additionally stipples the empty
+cells above it, marking the whole column while the bar keeps its true height —
+so lossy intervals stay visible through glare, in monochrome, and for
+colorblind users. Setting the standard
+[`NO_COLOR`](https://no-color.org) environment variable selects `monochrome`
+automatically unless a theme is chosen explicitly.
+
+Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
+in the same platform configuration directory when you change it in the TUI.
+Use `--theme default` to override a config or saved theme for a run. Automatic
+choices, including `NO_COLOR`'s monochrome palette, are not saved.
+The server dashboard
+(`xfr serve --tui`) resolves its palette through the same precedence, so
+`--theme`, a saved preference, and `NO_COLOR` all apply to it too.
+For example: `xfr serve --tui --theme default`.
+
+## Security Considerations
+
+### Transport Encryption
+
+| Mode | Bulk test data | Control channel |
+|------|----------------|-----------------|
+| TCP | Plaintext | Plaintext without PSK; ChaCha20-Poly1305 after PSK authentication |
+| UDP | Plaintext | Uses the same TCP control channel behavior |
+| QUIC | TLS 1.3; identity unverified without PSK | TLS 1.3; exporter-bound PSK protection when enabled |
+
+**QUIC mode** (`-Q/--quic`) uses a self-signed server certificate without PKI
+verification. Without a PSK, an active relay can terminate and forward the QUIC
+connection. With a PSK, xfr mixes the RFC 9266 TLS exporter into the
+authentication proof and protected-control keys, binding them to the exact QUIC
+connection that carries the bulk streams. A relay cannot splice authentication
+across two QUIC connections without the PSK. This requires both peers to
+advertise `quic_channel_binding_v1`; the session fails closed otherwise.
+
+### Network Considerations
+
+- **Single-port TCP**: TCP uses single-port mode by default -- control and data connections share port 5201. Data connections are validated against the control connection's IP address, preventing unauthorized access.
+- **UDP on untrusted networks**: UDP mode may be susceptible to reflection attacks from spoofed source addresses. Use TCP or QUIC on public networks.
+- **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
+- **ACLs**: Use `--allow`/`--deny` to restrict client access.
+
+### Server Resource Usage
+
+Each TCP stream allocates a 128 KB application read/write buffer. Kernel socket buffers are managed by TCP autotuning unless the client passes `-w`/`--window`, in which case the requested size is applied via `SO_SNDBUF`/`SO_RCVBUF` on both ends. Memory usage scales with concurrent clients:
+
+| Streams per client | App buffer per client | 10 clients (app buffers) |
+|-------------------|-----------------------|--------------------------|
+| 1 (`-P 1`) | 128 KB | 1.3 MB |
+| 8 (`-P 8`) | 1 MB | 10 MB |
+| 128 (`-P 128`) | 16 MB | 160 MB |
+
+On top of that, the kernel holds autotuned socket buffers (typically a few hundred KB per stream, capped by `net.ipv4.tcp_rmem[2]`/`tcp_wmem[2]`). When a client passes `-w N`, add roughly `N` bytes per stream on each side. The server limits concurrent handlers (default 100) to prevent resource exhaustion. Use `--rate-limit` to restrict tests per IP.
+
+For authentication details and handshake limits, see [PSK authentication](#psk-authentication)
+and [connection security](#connection-security). Use an authenticated VPN when
+you need centrally managed endpoint identities or isolation between different
+holders of a shared PSK.
