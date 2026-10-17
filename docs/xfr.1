@@ -62,13 +62,13 @@ becomes an upper bound. Cannot be combined with
 .BR \-\-probe\-mtu .
 Requires a server advertising the byte_budget_v1 capability. Environment: XFR_BYTES
 .TP
-.B \-u ", " \-\-udp
+.BR \-u ", " \-\-udp
 Use UDP instead of TCP
 .TP
 .BI \-l ", " \-\-length " BYTES"
 UDP payload size including the 16-byte xfr header (16\-65507 bytes; default: 1400). Requires \-u and server udp_payload_size_v1 support. Applies to upload, reverse and bidirectional tests and all streams. Cannot be combined with \-\-probe\-mtu. For a 1420-byte tunnel MTU, \-l 1368 fits both IPv4 and IPv6 basic headers. Run \-\-probe\-mtu separately to find a suitable size; throughput tests do not automatically adjust the default.
 .TP
-.B \-Q ", " \-\-quic
+.BR \-Q ", " \-\-quic
 Use QUIC transport (encrypted, multiplexed streams over UDP)
 .TP
 .BI \-b ", " \-\-bitrate " RATE"
@@ -77,7 +77,7 @@ Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M, 10K). Global across all st
 .BI \-P ", " \-\-parallel " N"
 Number of parallel streams, 1\-128 (default: \fBparallel_streams\fR from the config file, else 1)
 .TP
-.B \-R ", " \-\-reverse
+.BR \-R ", " \-\-reverse
 Reverse direction (server sends to client, i.e., download test)
 .TP
 .B \-\-bidir
@@ -94,7 +94,7 @@ combined with \fB\-q\fR, which would suppress the intervals; use
 .B \-\-csv
 CSV output format
 .TP
-.B \-q ", " \-\-quiet
+.BR \-q ", " \-\-quiet
 Quiet mode \- suppress interval output, show only summary
 .TP
 .BI \-o ", " \-\-output " FILE"
@@ -153,10 +153,10 @@ Pre-shared key for mutual peer authentication and protected post-auth control me
 .BI \-\-psk\-file " FILE"
 Read PSK from file
 .TP
-.B \-4 ", " \-\-ipv4
+.BR \-4 ", " \-\-ipv4
 Force IPv4 only
 .TP
-.B \-6 ", " \-\-ipv6
+.BR \-6 ", " \-\-ipv6
 Force IPv6 only
 .TP
 .BI \-\-bind " ADDR"
@@ -177,7 +177,7 @@ Use random payload data (default for TCP/UDP client\-sent traffic)
 .B \-\-zeros
 Use zero\-filled payload data instead of random bytes
 .TP
-.B \-Z ", " \-\-zerocopy
+.BR \-Z ", " \-\-zerocopy
 Zero\-copy TCP sends via sendfile(2), like iperf3 \-Z (Linux only; lowers sender CPU overhead). On by default for TCP since v0.9.17; passing \-Z explicitly warns when zero\-copy cannot take effect instead of falling back silently. Forwarded to servers that support it for \-R/\-\-bidir
 .TP
 .B \-\-no\-zerocopy
@@ -256,10 +256,10 @@ Bind to specific address (e.g., 192.168.1.1, ::1). Rejects unspecified addresses
 .B \-\-no\-mdns
 Disable mDNS service registration. By default the server registers itself via mDNS for automatic discovery by \fBxfr discover\fR. Use this flag when another service already uses mDNS or when running in environments where multicast is unwanted.
 .TP
-.B \-4 ", " \-\-ipv4
+.BR \-4 ", " \-\-ipv4
 Force IPv4 only
 .TP
-.B \-6 ", " \-\-ipv6
+.BR \-6 ", " \-\-ipv6
 Force IPv6 only
 .SH DIFF OPTIONS
 .TP

@@ -253,7 +253,7 @@ The TUI shows elapsed time as `Xs/∞`. Press `q` to stop.
 
 ### Early Exit Summary
 
-Ctrl+C during any test (infinite or finite) triggers a graceful cancel and displays the full test summary with whatever stats have accumulated — rather than silently killing the process. Works in both plain text and TUI modes. A second Ctrl+C force-exits immediately (exit code 130). If the server is unreachable, a partial summary is printed from the client's cumulative counters instead of saving a synthetic result to `--output`.
+Ctrl+C during any test (infinite or finite) triggers a graceful cancel and displays the full test summary with whatever stats have accumulated — rather than silently killing the process. Works in both plain text and TUI modes. A second Ctrl+C force-exits immediately: without the TUI it exits with code 130; in the TUI it stops the test without waiting for the summary, prints `Test cancelled.` (or the result, if one had already arrived) and exits with code 0. If the server is unreachable, a partial summary is printed from the client's cumulative counters instead of saving a synthetic result to `--output`.
 
 Servers can cap infinite requests with `--max-duration`:
 
