@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────
+  xfr Path MTU Probe
+────────────────────────────────────────────────────────────
+
+  Address family: IPv4 (28 bytes IP+UDP overhead)
+
+  Payload      client → server    server → client
+     1472      pass (2/3)         BLOCKED (0/3)
+     8972      local MTU limit    untested
+
+  Largest payload client → server: 1472 bytes  (path MTU ≈ 1500)
+  Largest payload server → client: none observed
+  (server → client is a lower bound, capped by the client → server path)
+────────────────────────────────────────────────────────────

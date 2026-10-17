@@ -1,5 +1,7 @@
 //! CSV output format
 
+use std::fmt::Write;
+
 use crate::protocol::{TestResult, TimestampFormat, UdpDirectionProgress, UdpStats};
 
 const UDP_DIRECTION_COLUMNS: &str = "udp_send_packets_received,udp_send_packets_lost,udp_send_lost_percent,udp_send_jitter_ms,udp_recv_packets_received,udp_recv_packets_lost,udp_recv_lost_percent,udp_recv_jitter_ms";
@@ -41,14 +43,15 @@ pub fn output_csv(result: &TestResult) -> String {
     // Header. bytes_sent / bytes_received / throughput_send_mbps /
     // throughput_recv_mbps are populated only for bidirectional tests;
     // unidirectional tests leave those columns empty.
-    output.push_str(&format!("test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps,{UDP_DIRECTION_COLUMNS}\n"));
+    writeln!(output, "test_id,duration_secs,transfer_bytes,throughput_mbps,retransmits,jitter_ms,lost,lost_percent,bytes_sent,bytes_received,throughput_send_mbps,throughput_recv_mbps,{UDP_DIRECTION_COLUMNS}").expect("writing to String cannot fail");
 
     let fmt_u64 = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
     let fmt_f64 = |v: Option<f64>| v.map(|n| format!("{:.2}", n)).unwrap_or_default();
 
     // Summary row
-    output.push_str(&format!(
-        "{},{:.2},{},{:.2},{},{:.2},{},{:.2},{},{},{},{},{},{}\n",
+    writeln!(
+        output,
+        "{},{:.2},{},{:.2},{},{:.2},{},{:.2},{},{},{},{},{},{}",
         result.id,
         result.duration_ms as f64 / 1000.0,
         result.bytes_total,
@@ -71,7 +74,8 @@ pub fn output_csv(result: &TestResult) -> String {
         fmt_f64(result.throughput_recv_mbps),
         final_direction_columns(result.udp_stats_send.as_deref()),
         final_direction_columns(result.udp_stats_recv.as_deref()),
-    ));
+    )
+    .expect("writing to String cannot fail");
 
     output
 }
