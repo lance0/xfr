@@ -683,6 +683,80 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 }
 
+/// Hints every client footer shows; Streams and Dismiss are conditional.
+const BASE_KEYS: [(&str, &str); 6] = [
+    ("?", "Help"),
+    ("q", "Quit"),
+    ("p", "Pause"),
+    ("r", "Restart"),
+    ("s", "Settings"),
+    ("t", "Theme"),
+];
+
+/// Width of the roomy "[q] Quit | ..." form: len(key) + len(label) + 3 per
+/// hint plus 3-column separators. The compact "q:Quit ..." form drops to
+/// len + 1 and single spaces, which fits the default hint set beside Status
+/// on 80 columns.
+fn full_hints_width(keys: &[(&str, &str)]) -> usize {
+    keys.iter()
+        .map(|(k, l)| k.len() + l.len() + 3)
+        .sum::<usize>()
+        + 3 * keys.len().saturating_sub(1)
+}
+
+/// Whether the client footer uses the roomy hint form at `width` with its
+/// base hints beside "Status: Running...". The server footer follows this,
+/// so both TUIs show the same hint style at the same width.
+pub(super) fn roomy_hints_fit(width: u16) -> bool {
+    full_hints_width(&BASE_KEYS) + " Status: Running...".len() <= usize::from(width)
+}
+
+/// Footer key hints, in order, as compact `q:Quit` or roomy `[q] Quit`.
+/// Whole hints that don't fit are dropped rather than letting ratatui clip
+/// the last one part-way through its label. A shorter list reads as a
+/// shorter list; half a label reads as a rendering bug.
+pub(super) fn key_hints(
+    keys: &[(&'static str, &'static str)],
+    width: u16,
+    compact: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let sep_width = if compact { 1 } else { 3 };
+    let hint_pad = if compact { 1 } else { 3 };
+    let available = usize::from(width);
+    let mut used = 0usize;
+
+    let mut spans = Vec::with_capacity(keys.len() * 3);
+    for (i, &(key, label)) in keys.iter().enumerate() {
+        let sep_cost = if i > 0 { sep_width } else { 0 };
+        let cost = sep_cost + key.len() + label.len() + hint_pad;
+        if used + cost > available {
+            break;
+        }
+        used += cost;
+
+        if i > 0 {
+            let sep = if compact { " " } else { " | " };
+            spans.push(Span::styled(sep, Style::default().fg(theme.text_dim)));
+        }
+        if compact {
+            spans.push(Span::styled(key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!(":{}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        } else {
+            spans.push(Span::styled("[", Style::default().fg(theme.text_dim)));
+            spans.push(Span::styled(key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!("] {}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // A pending quit overrides the state label: show a live countdown so a
     // cancel on a dead link reads as a bounded wait, not a hang (issue #159).
@@ -707,14 +781,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     // Help leads: hints are dropped from the right as the width shrinks, and
     // help lists every other key.
-    let mut keys = vec![
-        ("?", "Help"),
-        ("q", "Quit"),
-        ("p", "Pause"),
-        ("r", "Restart"),
-        ("s", "Settings"),
-        ("t", "Theme"),
-    ];
+    let mut keys = BASE_KEYS.to_vec();
     if app.streams_count > 1 {
         keys.push(("d", "Streams"));
     }
@@ -740,54 +807,11 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(status_width)])
         .split(area);
 
-    // "[q] Quit | ..." costs len(key) + len(label) + 3 per hint plus 3-column
-    // separators; the compact "q:Quit ..." form drops to len+1 and single
-    // spaces, which fits the default hint set beside Status on 80 columns.
-    let full_width: usize = keys
-        .iter()
-        .map(|(k, l)| k.len() + l.len() + 3)
-        .sum::<usize>()
-        + 3 * keys.len().saturating_sub(1);
-    let compact = full_width > chunks[0].width as usize;
-
-    // Drop whole hints that don't fit rather than letting ratatui clip the
-    // last one part-way through its label. A shorter list reads as a shorter
-    // list; half a label reads as a rendering bug.
-    let sep_width = if compact { 1 } else { 3 };
-    let hint_pad = if compact { 1 } else { 3 };
-    let available = chunks[0].width as usize;
-    let mut used = 0usize;
-
-    let mut spans = Vec::with_capacity(keys.len() * 3);
-    for (i, (key, label)) in keys.iter().enumerate() {
-        let sep_cost = if i > 0 { sep_width } else { 0 };
-        let cost = sep_cost + key.len() + label.len() + hint_pad;
-        if used + cost > available {
-            break;
-        }
-        used += cost;
-
-        if i > 0 {
-            let sep = if compact { " " } else { " | " };
-            spans.push(Span::styled(sep, Style::default().fg(theme.text_dim)));
-        }
-        if compact {
-            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
-            spans.push(Span::styled(
-                format!(":{}", label),
-                Style::default().fg(theme.text_dim),
-            ));
-        } else {
-            spans.push(Span::styled("[", Style::default().fg(theme.text_dim)));
-            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
-            spans.push(Span::styled(
-                format!("] {}", label),
-                Style::default().fg(theme.text_dim),
-            ));
-        }
-    }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+    let compact = full_hints_width(&keys) > usize::from(chunks[0].width);
+    frame.render_widget(
+        Paragraph::new(key_hints(&keys, chunks[0].width, compact, theme)),
+        chunks[0],
+    );
 
     if let Some(label) = status_label {
         let status = Line::from(vec![

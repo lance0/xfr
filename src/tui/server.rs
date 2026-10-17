@@ -223,7 +223,17 @@ pub fn draw(frame: &mut Frame, app: &ServerApp, theme: &Theme) {
 
     draw_header(frame, app, theme, chunks[0]);
     draw_tests_table(frame, app, theme, chunks[1]);
-    draw_footer(frame, theme, chunks[2]);
+    // Same hints, order and style as the client footer at this width.
+    let compact = !super::ui::roomy_hints_fit(chunks[2].width);
+    frame.render_widget(
+        Paragraph::new(super::ui::key_hints(
+            &[("?", "Help"), ("q", "Quit")],
+            chunks[2].width,
+            compact,
+            theme,
+        )),
+        chunks[2],
+    );
 
     if app.show_help {
         super::ui::draw_help_overlay(frame, theme, size, app.help_scroll, true);
@@ -252,101 +262,99 @@ fn draw_header(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Stats layout
-    let stats_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(inner);
-
-    // Active tests
-    let active = Paragraph::new(vec![
-        Line::from(Span::styled(
+    let quiet_or =
+        |alert: bool, color| Style::default().fg(if alert { color } else { theme.text_dim });
+    let stats = [
+        (
             "Active Tests",
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!("{}", app.active_tests.len()),
+            app.active_tests.len().to_string(),
             Style::default()
                 .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
-        )),
-    ]);
-    frame.render_widget(active, stats_chunks[0]);
-
-    let bw_str = mbps_to_human(app.current_bandwidth());
-    let bw_widget = Paragraph::new(vec![
-        Line::from(Span::styled(
+        ),
+        (
             "Bandwidth",
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            bw_str,
+            mbps_to_human(app.current_bandwidth()),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-        )),
-    ]);
-    frame.render_widget(bw_widget, stats_chunks[1]);
-
-    // Total / failed tests
-    let total = Paragraph::new(vec![
-        Line::from(Span::styled(
+        ),
+        (
             "Tests / Failed",
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
             format!("{} / {}", app.total_tests, app.failed_tests),
-            Style::default().fg(if app.failed_tests > 0 {
-                theme.error
-            } else {
-                theme.text_dim
-            }),
-        )),
-    ]);
-    frame.render_widget(total, stats_chunks[2]);
-
-    // Blocked / Auth failures
-    let security = Paragraph::new(vec![
-        Line::from(Span::styled(
+            quiet_or(app.failed_tests > 0, theme.error),
+        ),
+        (
             "Blocked / Auth Fail",
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
             format!("{} / {}", app.connections_blocked, app.auth_failures),
-            Style::default().fg(if app.connections_blocked > 0 || app.auth_failures > 0 {
-                theme.warning
-            } else {
-                theme.text_dim
-            }),
-        )),
-    ]);
-    frame.render_widget(security, stats_chunks[3]);
+            quiet_or(
+                app.connections_blocked > 0 || app.auth_failures > 0,
+                theme.warning,
+            ),
+        ),
+    ];
+
+    // Equal columns that each hold their label and value plus a 1-column gap
+    // (the border serves as the last one's). When they don't fit, the
+    // lower-value columns go first; Bandwidth stays to the end.
+    let fits = |columns: &[usize]| {
+        let width = usize::from(inner.width) / columns.len();
+        columns.iter().enumerate().all(|(n, &i)| {
+            let (label, value, _) = &stats[i];
+            let gap = usize::from(n + 1 < columns.len());
+            label.len().max(value.len()) + gap <= width
+        })
+    };
+    let columns: &[usize] = [&[0, 1, 2, 3][..], &[0, 1, 2], &[0, 1]]
+        .into_iter()
+        .find(|columns| fits(columns))
+        .unwrap_or(&[1]);
+    let stats_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Ratio(1, columns.len() as u32);
+            columns.len()
+        ])
+        .split(inner);
+
+    for (&i, &chunk) in columns.iter().zip(stats_chunks.iter()) {
+        let (label, value, value_style) = &stats[i];
+        let column = Paragraph::new(vec![
+            Line::from(Span::styled(
+                *label,
+                Style::default()
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(value.as_str(), *value_style)),
+        ]);
+        frame.render_widget(column, chunk);
+    }
 }
 
 fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rect) {
     let block = Block::default()
-        .title(Span::styled(
-            " Active Tests ",
-            Style::default()
-                .fg(theme.header)
-                .add_modifier(Modifier::BOLD),
-        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
+    // The column header takes a row, plus a spacer row when there is room.
+    let header_rows = 1 + u16::from(inner.height >= 4);
+    let visible = usize::from(inner.height.saturating_sub(header_rows));
+    let hidden = app.active_tests.len().saturating_sub(visible);
+    let title = if hidden > 0 {
+        format!(
+            " Active Tests ({}, {hidden} hidden) ",
+            app.active_tests.len()
+        )
+    } else {
+        " Active Tests ".to_string()
+    };
+    let block = block.title(Span::styled(
+        title,
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD),
+    ));
     frame.render_widget(block, area);
 
     if app.active_tests.is_empty() {
@@ -376,7 +384,7 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
                 .fg(theme.header)
                 .add_modifier(Modifier::BOLD),
         )
-        .bottom_margin(u16::from(inner.height >= 4));
+        .bottom_margin(header_rows - 1);
 
     let rows = app.active_tests.iter().map(|test| {
         Row::new(columns.iter().map(|&i| match i {
@@ -410,17 +418,6 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
     .style(Style::default().fg(theme.text));
 
     frame.render_widget(table, inner);
-}
-
-fn draw_footer(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let footer = Line::from(vec![
-        Span::styled("[", Style::default().fg(theme.text_dim)),
-        Span::styled("q", Style::default().fg(theme.accent)),
-        Span::styled("] Quit   [", Style::default().fg(theme.text_dim)),
-        Span::styled("?", Style::default().fg(theme.accent)),
-        Span::styled("] Help", Style::default().fg(theme.text_dim)),
-    ]);
-    frame.render_widget(Paragraph::new(footer), area);
 }
 
 #[cfg(test)]
@@ -468,7 +465,7 @@ mod tests {
                 .collect();
             // The header and the footer's help hint must never be squeezed out.
             assert!(text.contains("uptime"), "{width}x{height}\n{text}");
-            assert!(text.contains("[?] Help"), "{width}x{height}\n{text}");
+            assert!(text.contains("?:Help q:Quit"), "{width}x{height}\n{text}");
             assert_eq!(text.contains("Bandwidth"), height >= 10, "{text}");
             if height >= 8 {
                 assert!(text.contains("192.0.2.1"), "{text}");
@@ -499,6 +496,96 @@ mod tests {
         terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
         app.show_help = true;
         terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+    }
+
+    fn screen(app: &ServerApp, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, app, &Theme::default())).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn busy_server() -> ServerApp {
+        let mut app = ServerApp::new();
+        for (id, mbps) in [("a", 60_960.0), ("b", 299.9), ("c", 1990.0)] {
+            app.add_test(active_test(id));
+            app.update_test(id, 0, mbps);
+        }
+        app
+    }
+
+    /// At 40 columns the four equal header columns ran together:
+    /// "Active TesBandwidthTests / FaBlocked /" over "3  61.93 Gbp3 / 0".
+    #[test]
+    fn narrow_header_drops_columns_instead_of_overlapping() {
+        let app = busy_server();
+        for width in [30, 40, 50, 60, 79, 80, 120] {
+            let rows = screen(&app, width, 10);
+            let (labels, values) = (&rows[1], &rows[2]);
+            assert!(values.contains("63.25 Gbps"), "{width}: {values:?}");
+            for label in ["Active Tests", "Bandwidth"] {
+                assert!(labels.contains(label), "{width}: {labels:?}");
+            }
+            // Every label shown is whole and set off by a space or border.
+            let chars: Vec<char> = labels.chars().collect();
+            for label in [
+                "Active Tests",
+                "Bandwidth",
+                "Tests / Failed",
+                "Blocked / Auth Fail",
+            ] {
+                let Some(at) = labels.find(&label[..7]) else {
+                    continue;
+                };
+                let at = labels[..at].chars().count();
+                let end = at + label.len();
+                let whole: String = chars[at..end].iter().collect();
+                assert_eq!(whole, label, "{width}: {labels:?}");
+                for edge in [chars[at - 1], chars[end]] {
+                    assert!(edge == ' ' || edge == '│', "{width}: {labels:?}");
+                }
+            }
+            for joined in ["TesBandwidth", "BandwidthTests", "Gbp3", "Gbps3"] {
+                assert!(!labels.contains(joined) && !values.contains(joined));
+            }
+            assert_eq!(
+                values.contains("3 / 0"),
+                labels.contains("Tests / Failed"),
+                "{width}: {rows:?}"
+            );
+        }
+        let rows = screen(&app, 40, 10);
+        assert!(!rows[1].contains("Tests /"), "{:?}", rows[1]);
+        let rows = screen(&app, 80, 10);
+        assert!(rows[1].contains("Blocked / Auth Fail"), "{:?}", rows[1]);
+    }
+
+    /// Help leads, as in the client, in the client's style for that width.
+    #[test]
+    fn footer_matches_the_client_hint_order_and_style() {
+        let app = ServerApp::new();
+        for (width, footer) in [
+            (40, "?:Help q:Quit"),
+            (80, "?:Help q:Quit"),
+            (120, "[?] Help | [q] Quit"),
+        ] {
+            let rows = screen(&app, width, 12);
+            assert!(rows[11].starts_with(footer), "{width}: {:?}", rows[11]);
+        }
+    }
+
+    /// A short terminal showed one of three active tests with no sign of
+    /// the other two.
+    #[test]
+    fn table_title_counts_hidden_tests() {
+        let app = busy_server();
+        let rows = screen(&app, 80, 10);
+        assert!(rows[5].contains(" Active Tests (3, 2 hidden) "), "{rows:?}");
+        let rows = screen(&app, 80, 24);
+        assert!(rows[5].contains(" Active Tests "), "{rows:?}");
+        assert!(!rows.concat().contains("hidden"), "{rows:?}");
     }
 
     /// Every foreground colour the dashboard actually paints.
