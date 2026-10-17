@@ -129,7 +129,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     if app.show_help {
-        draw_help_overlay(frame, theme, size);
+        draw_help_overlay(frame, theme, size, app.help_scroll, false);
     }
 
     if app.settings.visible {
@@ -175,6 +175,39 @@ fn draw_update_banner(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    if area.height < 20 {
+        if area.height >= 10 {
+            draw_realtime_stats(frame, app, theme, area);
+        } else {
+            let elapsed = app.elapsed.as_secs();
+            let transferred = bytes_to_human(app.total_bytes);
+            let progress = if let Some(budget) = app.byte_budget.filter(|b| *b > 0) {
+                format!("{} / {}  {}s", transferred, bytes_to_human(budget), elapsed)
+            } else if app.is_infinite() {
+                format!("{}s / ∞  {}", elapsed, transferred)
+            } else {
+                format!(
+                    "{}s / {}s  {}",
+                    elapsed,
+                    app.duration.as_secs(),
+                    transferred
+                )
+            };
+            let lines = vec![
+                Line::from(format!(
+                    "{:?}  {}",
+                    app.state,
+                    mbps_to_human(app.current_throughput_mbps)
+                )),
+                Line::from(progress),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines).style(Style::default().fg(theme.text)),
+                area,
+            );
+        }
+        return;
+    }
     // Layout: Configuration + Real-time Stats + History/Streams
     // Configuration is 6 lines tall: 2 border rows + 4 content rows
     // (Role, Target, Protocol, Version).
@@ -743,65 +776,53 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(status), chunks[1]);
 }
 
-fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let help_width = 40;
-    let help_height = 16;
-    let help_area = Rect {
-        x: (area.width.saturating_sub(help_width)) / 2,
-        y: (area.height.saturating_sub(help_height)) / 2,
-        width: help_width.min(area.width),
-        height: help_height.min(area.height),
-    };
+const CLIENT_HELP: &str = "q  quit
+r  restart
+p  pause/resume
+s  settings
+t  cycle theme
+j  print JSON
+d  toggle streams
+?  toggle help
+PgUp/PgDn  page help
+Home/End  first/last page
+Esc  close";
+const SERVER_HELP: &str = "q  quit server
+?  toggle help
+PgUp/PgDn  page help
+Home/End  first/last page
+Esc  close";
 
-    let help_text = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  q", Style::default().fg(theme.accent)),
-            Span::styled("  quit", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  r", Style::default().fg(theme.accent)),
-            Span::styled("  restart", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  p", Style::default().fg(theme.accent)),
-            Span::styled("  pause/resume", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  s", Style::default().fg(theme.accent)),
-            Span::styled("  settings", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  t", Style::default().fg(theme.accent)),
-            Span::styled("  cycle theme", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  j", Style::default().fg(theme.accent)),
-            Span::styled("  print JSON", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  d", Style::default().fg(theme.accent)),
-            Span::styled("  toggle streams", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("  ?", Style::default().fg(theme.accent)),
-            Span::styled("  toggle help", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Press ", Style::default().fg(theme.text_dim)),
-            Span::styled("Esc", Style::default().fg(theme.accent)),
-            Span::styled(" to close", Style::default().fg(theme.text_dim)),
-        ]),
-    ];
+fn help_lines(width: u16, server: bool) -> Vec<Line<'static>> {
+    let text = if server { SERVER_HELP } else { CLIENT_HELP };
+    text.lines()
+        .flat_map(|line| {
+            // Help text is ASCII; hard wrapping keeps paging exact even at one column.
+            line.as_bytes()
+                .chunks(usize::from(width.max(1)))
+                .map(|chunk| Line::from(String::from_utf8(chunk.to_vec()).expect("ASCII help")))
+        })
+        .collect()
+}
 
-    let help = Paragraph::new(help_text).block(
-        Block::default()
-            .title(" Keybindings ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border)),
+pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u16, server: bool) {
+    let width = area.width.min(40);
+    let height = area.height.min(if server { 8 } else { 16 });
+    let help_area = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     );
-
+    let help = Paragraph::new(help_lines(width.saturating_sub(2), server))
+        .style(Style::default().fg(theme.text))
+        .scroll((scroll, 0))
+        .block(
+            Block::default()
+                .title(" Help ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border)),
+        );
     frame.render_widget(Clear, help_area);
     frame.render_widget(help, help_area);
 }
@@ -1236,6 +1257,86 @@ mod small_terminal_tests {
     }
 
     #[test]
+    fn compact_client_keeps_rate_and_progress() {
+        let mut app = running_app_with_history();
+        app.current_throughput_mbps = 42.0;
+        for (width, height) in [(40, 8), (40, 16)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("42.0 Mbps"), "{text}");
+            assert!(
+                text.contains(if height < 12 { "0s / 10s" } else { "0s/10s" }),
+                "{text}"
+            );
+            assert!(!text.contains("Configuration"));
+        }
+    }
+
+    #[test]
+    fn compact_client_preserves_byte_budget_and_infinite_targets() {
+        let mut app = App::default();
+        app.byte_budget = Some(1_000_000);
+        app.duration = std::time::Duration::ZERO;
+        for (budget, expected) in [(Some(1_000_000), "0 B / 976.56 KB"), (None, "0s / ∞")] {
+            app.byte_budget = budget;
+            let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn help_pages_wrap_and_clamp_after_resize() {
+        use crossterm::event::KeyCode;
+        use ratatui::layout::Size;
+        for server in [false, true] {
+            let size = Size::new(18, 5);
+            let first = help_scroll(0, size, server, Some(KeyCode::PageDown));
+            assert_eq!(first, 3);
+            assert_eq!(help_scroll(first, size, server, Some(KeyCode::PageUp)), 0);
+            let end = help_scroll(0, size, server, Some(KeyCode::End));
+            assert!(end > first);
+            let mut terminal = Terminal::new(TestBackend::new(size.width, size.height)).unwrap();
+            terminal
+                .draw(|f| draw_help_overlay(f, &Theme::default(), f.area(), end, server))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Esc  close"), "{text}");
+            assert_eq!(help_scroll(end, Size::new(80, 30), server, None), 0);
+            assert_eq!(help_scroll(end, size, server, Some(KeyCode::Home)), 0);
+        }
+    }
+
+    #[test]
+    fn ultra_small_client_and_help_do_not_panic() {
+        let mut app = App::default();
+        let mut terminal = Terminal::new(TestBackend::new(1, 1)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        app.show_help = true;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+    }
+
+    #[test]
     fn bidir_udp_quality_renders_unknown_upload_and_measured_zero_download() {
         let mut app = App::default();
         app.protocol = crate::protocol::Protocol::Udp;
@@ -1451,5 +1552,29 @@ mod small_terminal_tests {
         for (w, h) in [(1, 1), (5, 3), (10, 5), (20, 8), (40, 12), (80, 24)] {
             let _ = rows(w, h);
         }
+    }
+}
+
+/// Keep help paging aligned with the overlay's actual inner height.
+pub fn help_scroll(
+    scroll: u16,
+    size: ratatui::layout::Size,
+    server: bool,
+    key: Option<crossterm::event::KeyCode>,
+) -> u16 {
+    use crossterm::event::KeyCode;
+    let visible = size
+        .height
+        .min(if server { 8 } else { 16 })
+        .saturating_sub(2);
+    let max = (help_lines(size.width.min(40).saturating_sub(2), server).len() as u16)
+        .saturating_sub(visible);
+    let scroll = scroll.min(max);
+    match key {
+        Some(KeyCode::PageDown) => scroll.saturating_add(visible.max(1)).min(max),
+        Some(KeyCode::PageUp) => scroll.saturating_sub(visible.max(1)),
+        Some(KeyCode::Home) => 0,
+        Some(KeyCode::End) => max,
+        _ => scroll,
     }
 }

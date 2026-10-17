@@ -439,6 +439,8 @@ xfr serve --one-off          # Exit after one test (TCP or QUIC)
 
 The `--one-off` flag causes the server to shut down after a single test completes. This works for both TCP and QUIC connections. When one-off mode is active, the shutdown signal is shared between the TCP accept loop and the QUIC acceptor task, so whichever protocol completes a test first triggers the server exit.
 
+The client prioritizes live throughput, status, and progress on short terminals. The server dashboard drops optional columns on narrow terminals while retaining client and throughput. In either help overlay (`?` or F1), use PgUp/PgDn to page and Home/End to jump; paging adjusts when the terminal resizes.
+
 ### Server TUI Dashboard
 
 Monitor active tests in real-time:
