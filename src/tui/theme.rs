@@ -7,6 +7,9 @@
 use ratatui::style::Color;
 use std::borrow::Cow;
 
+/// Palette-independent mid grey (xterm 244, #808080) for secondary text.
+const DIM_GREY: Color = Color::Indexed(244);
+
 /// All themeable colors in the application
 #[derive(Clone, Debug, Hash)]
 pub struct Theme {
@@ -49,7 +52,11 @@ impl Theme {
             border_focused: Color::Cyan,
             // Follow the terminal foreground on both light and dark backgrounds.
             text: Color::Reset,
-            text_dim: Color::DarkGray,
+            // No named ANSI grey is safe for secondary text: Solarized Dark
+            // maps ANSI 8 (DarkGray) to its background and light palettes put
+            // ANSI 7 (Gray) next to theirs. A fixed mid grey from the 256-colour
+            // ramp (#808080) stays legible on dark and light backgrounds alike.
+            text_dim: DIM_GREY,
             highlight_bg: Color::DarkGray,
 
             success: Color::Green,
@@ -142,18 +149,20 @@ impl Theme {
     /// invisible on a light terminal — and a light background is exactly
     /// what wins in direct sun, where dark screens act as mirrors.)
     /// Deliberately few levels: glare washes out mid-tone grays first, so
-    /// everything collapses to Reset / Gray / DarkGray, with maximum
-    /// contrast (the terminal's default foreground) on anything that
-    /// matters. Loss severity stays legible without hue via the modifier
-    /// encoding in the sparkline renderer.
+    /// everything collapses to Reset / Gray / one fixed mid grey, with
+    /// maximum contrast (the terminal's default foreground) on anything that
+    /// matters. Borders and secondary text use the fixed grey rather than
+    /// DarkGray because Solarized Dark draws ANSI 8 in its background colour,
+    /// which erased every border and label. Loss severity stays legible
+    /// without hue via the modifier encoding in the sparkline renderer.
     pub fn monochrome() -> Self {
         Self {
             name: Cow::Borrowed("monochrome"),
 
-            border: Color::DarkGray,
+            border: DIM_GREY,
             border_focused: Color::Gray,
             text: Color::Reset,
-            text_dim: Color::DarkGray,
+            text_dim: DIM_GREY,
             highlight_bg: Color::DarkGray,
 
             success: Color::Reset,
@@ -363,19 +372,23 @@ mod tests {
     fn default_theme_follows_terminal_foreground() {
         let theme = Theme::default();
         assert_eq!(theme.text, Color::Reset);
-        assert_eq!(theme.text_dim, Color::DarkGray);
+        assert_eq!(theme.text_dim, Color::Indexed(244));
     }
 
     #[test]
     fn default_theme_uses_only_terminal_palette_colors() {
         // Named ANSI colors are remapped by the terminal for its own
         // background; fixed RGB (e.g. bright green) washes out on white.
+        // `text_dim` is the one exception: no named grey survives every
+        // palette (Solarized Dark draws ANSI 8 in its background colour, and
+        // light palettes put ANSI 7 next to theirs), so it is a fixed mid
+        // grey that keeps enough contrast against both dark and light.
         let t = Theme::default();
+        assert_eq!(t.text_dim, Color::Indexed(244));
         for (role, color) in [
             ("border", t.border),
             ("border_focused", t.border_focused),
             ("text", t.text),
-            ("text_dim", t.text_dim),
             ("highlight_bg", t.highlight_bg),
             ("success", t.success),
             ("warning", t.warning),
@@ -389,6 +402,17 @@ mod tests {
                 !matches!(color, Color::Rgb(..) | Color::Indexed(_)),
                 "default {role} is fixed: {color:?}"
             );
+        }
+    }
+
+    #[test]
+    fn palette_themes_keep_text_and_borders_off_ansi_dark_gray() {
+        // Solarized Dark draws ANSI 8 in its background colour, which erased
+        // every label and border of the palette-following themes.
+        for t in [Theme::default(), Theme::monochrome()] {
+            for color in [t.text, t.text_dim, t.border, t.border_focused] {
+                assert_ne!(color, Color::DarkGray, "{}", t.name());
+            }
         }
     }
 
