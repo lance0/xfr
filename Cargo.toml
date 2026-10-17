@@ -51,6 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 parking_lot = "0.12"
 humantime = "2"
+tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 once_cell = "1"
@@ -97,7 +98,6 @@ update-check = ["dep:update-informer"]
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
-tempfile = "3"
 
 [[bench]]
 name = "throughput"

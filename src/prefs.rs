@@ -54,7 +54,10 @@ impl Prefs {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(path, toml::to_string_pretty(self)?)?;
+            let contents = toml::to_string_pretty(self)?;
+            crate::persistence::atomic_write(&path, |writer| {
+                Ok(writer.write_all(contents.as_bytes())?)
+            })?;
         }
         Ok(())
     }

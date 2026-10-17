@@ -1,6 +1,5 @@
 //! JSON output
 
-use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
@@ -18,8 +17,7 @@ pub fn output_json(result: &TestResult) -> anyhow::Result<String> {
 
 pub fn save_json(result: &TestResult, path: &Path) -> anyhow::Result<()> {
     let json = output_json(result)?;
-    fs::write(path, json)?;
-    Ok(())
+    crate::persistence::atomic_write(path, |writer| Ok(writer.write_all(json.as_bytes())?))
 }
 
 /// JSON streaming interval output (one JSON object per line)
@@ -372,6 +370,11 @@ mod tests {
     fn test_save_json_writes_valid_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("result.json");
+        std::fs::write(
+            &path,
+            "previous save with stale trailing contents".repeat(100),
+        )
+        .unwrap();
         save_json(&make_result(), &path).expect("save_json should succeed");
 
         let contents = std::fs::read_to_string(&path).expect("read file");
