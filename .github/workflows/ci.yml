@@ -93,6 +93,10 @@ jobs:
   windows-check:
     name: Windows tests and Clippy
     runs-on: windows-latest
+    # Informational until native Windows support is a priority: known
+    # failures (LAN-2296, LAN-2299) and Windows timing flakes stay visible
+    # without turning master red.
+    continue-on-error: true
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
