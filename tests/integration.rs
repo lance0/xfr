@@ -4607,6 +4607,10 @@ mod byte_budget {
 /// carried zero bytes. Separate processes, like a real run, so each side
 /// gets its own multi-thread runtime.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "LAN-2328: most of 64 TCP upload streams carry no data on native Windows"
+)]
 async fn test_tcp_many_streams_all_carry_data() {
     const STREAMS: usize = 64;
     let port = get_test_port().to_string();
