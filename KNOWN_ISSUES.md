@@ -94,13 +94,23 @@ This document tracks known limitations and edge cases that are documented but no
 
 ---
 
+### Saving Results Needs a Writable Directory
+
+**Issue:** `-o` and preference saves replace a regular file atomically by writing a temporary file beside it and renaming it over the destination. A writable file inside a read-only directory therefore cannot be saved, and the save fails with an error naming the directory. Before atomic saves, such a file was overwritten in place. Separately, `-o /dev/stdout` with standard output redirected to a regular file (`xfr <host> -o /dev/stdout > out.json`) resolves to `out.json` and replaces it, so the file ends up holding only the saved result, not the output printed before it.
+
+**Impact:** Saves into directories you cannot write fail instead of overwriting the file. Redirecting `-o /dev/stdout` to a file keeps only the saved result.
+
+**Workaround:** Save to a writable directory and copy the file afterwards. To capture the result through standard output, use `--json` or `--csv` with a shell redirect instead of `-o /dev/stdout`.
+
+---
+
 ### Windows Support is Experimental
 
-**Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently.
+**Issue:** Windows is not a first-class platform. TCP_INFO statistics are not available (returns zeros), and some socket options may behave differently. QUIC with `-b` delivers far below the target on native Windows: over loopback, a `-Q -b 20M` upload measured about 2 Mbps, while the same test delivers 20 Mbps on Linux. The cause is not yet known, and paced QUIC downloads may be affected too.
 
-**Impact:** Basic TCP/UDP/QUIC testing works, but advanced metrics are missing.
+**Impact:** Basic TCP/UDP/QUIC testing works, but advanced metrics are missing and rate-limited QUIC results understate the requested rate.
 
-**Workaround:** Use WSL2 for full functionality on Windows. Native Windows binaries are not provided.
+**Workaround:** Use WSL2 for full functionality on Windows, and TCP or UDP for rate-limited tests on native Windows. Native Windows binaries are not provided.
 
 ---
 
