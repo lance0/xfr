@@ -17,7 +17,7 @@ pub fn output_json(result: &TestResult) -> anyhow::Result<String> {
 
 pub fn save_json(result: &TestResult, path: &Path) -> anyhow::Result<()> {
     let json = output_json(result)?;
-    crate::persistence::atomic_write(path, |writer| Ok(writer.write_all(json.as_bytes())?))
+    crate::persistence::atomic_write(path, json.as_bytes())
 }
 
 /// JSON streaming interval output (one JSON object per line)

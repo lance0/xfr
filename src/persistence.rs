@@ -5,11 +5,16 @@ use std::fs;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
 
-/// Follow existing symlinks and preserve Unix permission bits when replacing a file.
-pub(crate) fn atomic_write(
-    path: &Path,
-    write: impl FnOnce(&mut dyn Write) -> Result<()>,
-) -> Result<()> {
+/// Save `contents` to `path` so a failed save never truncates an existing regular file.
+///
+/// Regular files are replaced by renaming a synced temporary file over them, following
+/// existing symlinks and preserving Unix permission bits. Devices, FIFOs, and pipes such as
+/// `/dev/null` or `/dev/stdout` are written in place. Directories are rejected.
+pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    write_with(path, |writer| Ok(writer.write_all(contents)?))
+}
+
+fn write_with(path: &Path, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
     let permissions = match fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => {
             bail!("Save destination is a directory: {}", path.display())
@@ -101,7 +106,7 @@ mod tests {
         let path = dir.path().join("saved");
         fs::write(&path, b"previous").unwrap();
         assert!(
-            atomic_write(&path, |writer| {
+            write_with(&path, |writer| {
                 writer.write_all(b"partial")?;
                 anyhow::bail!("simulated write failure");
             })
@@ -116,7 +121,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("saved");
         fs::write(&path, b"a longer previous save").unwrap();
-        atomic_write(&path, |writer| Ok(writer.write_all(b"new")?)).unwrap();
+        write_with(&path, |writer| Ok(writer.write_all(b"new")?)).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -127,7 +132,7 @@ mod tests {
         let path = dir.path().join("saved");
         fs::create_dir(&path).unwrap();
         fs::write(path.join("keep"), b"previous").unwrap();
-        assert!(atomic_write(&path, |_| panic!("must reject before writing")).is_err());
+        assert!(write_with(&path, |_| panic!("must reject before writing")).is_err());
         assert_eq!(fs::read(path.join("keep")).unwrap(), b"previous");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -141,7 +146,7 @@ mod tests {
         let mut readonly = original.clone();
         readonly.set_readonly(true);
         fs::set_permissions(&path, readonly).unwrap();
-        let result = atomic_write(&path, |_| panic!("must reject before writing"));
+        let result = write_with(&path, |_| panic!("must reject before writing"));
         fs::set_permissions(&path, original).unwrap();
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), b"previous");
@@ -158,7 +163,7 @@ mod tests {
         fs::write(&path, b"previous").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
         symlink("saved", &link).unwrap();
-        atomic_write(&link, |writer| {
+        write_with(&link, |writer| {
             let temporary = fs::read_dir(dir.path())
                 .unwrap()
                 .map(|entry| entry.unwrap())
@@ -181,7 +186,7 @@ mod tests {
         let plain = dir.path().join("plain");
         let new = dir.path().join("new");
         fs::File::create(&plain).unwrap();
-        atomic_write(&new, |writer| Ok(writer.write_all(b"new")?)).unwrap();
+        write_with(&new, |writer| Ok(writer.write_all(b"new")?)).unwrap();
         assert_eq!(
             new.metadata().unwrap().permissions().mode(),
             plain.metadata().unwrap().permissions().mode()
@@ -200,7 +205,7 @@ mod tests {
         let path = dir.path().join("saved");
         fs::write(&path, b"previous").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o460)).unwrap();
-        let result = atomic_write(&path, |_| panic!("must reject before writing"));
+        let result = write_with(&path, |_| panic!("must reject before writing"));
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
             result
@@ -217,10 +222,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn writes_through_character_devices() {
-        atomic_write(Path::new("/dev/null"), |writer| {
-            Ok(writer.write_all(b"discarded")?)
-        })
-        .unwrap();
+        atomic_write(Path::new("/dev/null"), b"discarded").unwrap();
     }
 
     #[cfg(unix)]
@@ -241,7 +243,7 @@ mod tests {
             .custom_flags(libc::O_NONBLOCK)
             .open(&fifo)
             .unwrap();
-        atomic_write(&fifo, |writer| Ok(writer.write_all(b"result")?)).unwrap();
+        write_with(&fifo, |writer| Ok(writer.write_all(b"result")?)).unwrap();
         let mut received = Vec::new();
         reader.read_to_end(&mut received).unwrap();
         assert_eq!(received, b"result");
@@ -255,7 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink("missing", &link).unwrap();
-        assert!(atomic_write(&link, |_| panic!("must reject before writing")).is_err());
+        assert!(write_with(&link, |_| panic!("must reject before writing")).is_err());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(!dir.path().join("missing").exists());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);

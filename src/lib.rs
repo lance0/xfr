@@ -47,7 +47,7 @@ pub mod discover;
 pub mod net;
 pub mod output;
 mod pause;
-mod persistence;
+pub mod persistence;
 pub mod prefs;
 pub mod probe;
 pub mod protocol;

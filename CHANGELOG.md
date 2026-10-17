@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`xfr::persistence::atomic_write(path, bytes)`** — the library's crash-safe save routine (used for JSON results and preferences) is public, so other output paths can share it.
+
 ### Fixed
 - **Preference and JSON result saves are atomic** — writes now complete and sync beside the destination before replacing it, preserving the previous save on failure, Unix permission bits, and valid symlinks. Read-only files, broken symlinks, and directories are rejected; devices, FIFOs, and pipes (`-o /dev/null`, `-o /dev/stdout`) are written in place as before.
 
