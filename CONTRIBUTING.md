@@ -95,6 +95,7 @@ The two QUIC upload pacing tests are skipped on Windows pending LAN-2296, and th
 |------|-------------|
 | `prometheus` | Enable Prometheus metrics endpoint |
 | `discovery` | Enable mDNS LAN discovery (default) |
+| `update-check` | Background check for a newer release (default) |
 
 ## Architecture Overview
 
