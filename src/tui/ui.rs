@@ -984,7 +984,13 @@ fn draw_display_settings(
         ("Units:", settings.units.as_str().to_string()),
         (
             "Update check:",
-            if settings.update_check { "on" } else { "off" }.to_string(),
+            match settings.update_check_lock_reason {
+                Some(reason) => format!(
+                    "{} ({reason})",
+                    if settings.update_check { "on" } else { "off" }
+                ),
+                None => if settings.update_check { "on" } else { "off" }.to_string(),
+            },
         ),
     ];
 
@@ -1223,6 +1229,34 @@ mod small_terminal_tests {
             });
         }
         app
+    }
+
+    #[test]
+    fn settings_shows_update_check_lock_reason() {
+        for width in [50, 80] {
+            for reason in [
+                "not compiled in",
+                "locked: environment",
+                "locked: --no-update-check",
+                "locked: config.toml",
+            ] {
+                let mut app = App::default();
+                app.settings.visible = true;
+                app.settings.selected_index = 3;
+                app.settings.update_check = false;
+                app.settings.update_check_lock_reason = Some(reason);
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+                terminal.draw(|f| draw(f, &app)).unwrap();
+                let buf = terminal.backend().buffer();
+                let text: String = (0..24)
+                    .flat_map(|y| (0..width).map(move |x| buf[(x, y)].symbol()))
+                    .collect();
+                assert!(
+                    text.contains(&format!("off ({reason})")),
+                    "width {width}: {reason}"
+                );
+            }
+        }
     }
 
     fn rows(width: u16, height: u16) -> Vec<String> {

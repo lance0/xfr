@@ -83,6 +83,8 @@ pub struct SettingsState {
     pub units: Units,
     /// Whether the background update check is enabled (persisted to prefs).
     pub update_check: bool,
+    /// Higher-priority override preventing a saved preference change.
+    pub update_check_lock_reason: Option<&'static str>,
     /// Set once the user toggles `update_check`, so only an explicit choice is
     /// persisted (not the env/config-derived initial state).
     pub update_check_touched: bool,
@@ -116,6 +118,7 @@ impl Default for SettingsState {
             timestamp_format: TimestampFormat::Relative,
             units: Units::Auto,
             update_check: true,
+            update_check_lock_reason: None,
             update_check_touched: false,
 
             streams: 1,
@@ -155,6 +158,7 @@ impl SettingsState {
             timestamp_format: TimestampFormat::Relative,
             units: Units::Auto,
             update_check: true,
+            update_check_lock_reason: None,
             update_check_touched: false,
 
             streams,
@@ -249,6 +253,9 @@ impl SettingsState {
 
     /// Toggle the update-check setting and mark it as an explicit user choice.
     fn toggle_update_check(&mut self) {
+        if self.update_check_lock_reason.is_some() {
+            return;
+        }
         self.update_check = !self.update_check;
         self.update_check_touched = true;
     }
@@ -485,6 +492,23 @@ mod tests {
         assert_eq!(bitrate_display(None), "unlimited");
         assert_eq!(bitrate_display(Some(1_000_000)), "1 Mbps");
         assert_eq!(bitrate_display(Some(10_000_000_000)), "10 Gbps");
+    }
+
+    #[test]
+    fn locked_update_check_cannot_be_changed() {
+        for enabled in [true, false] {
+            let mut s = SettingsState {
+                selected_index: 3,
+                update_check: enabled,
+                update_check_lock_reason: Some("locked: config.toml"),
+                ..SettingsState::default()
+            };
+            s.value_next();
+            s.value_prev();
+            s.on_enter();
+            assert_eq!(s.update_check, enabled);
+            assert!(!s.update_check_touched);
+        }
     }
 
     #[test]
