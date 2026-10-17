@@ -214,6 +214,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         }
     }
 
