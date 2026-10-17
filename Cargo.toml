@@ -8,10 +8,27 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lance0/xfr"
 keywords = ["network", "bandwidth", "iperf", "benchmark", "tui"]
 categories = ["command-line-utilities", "network-programming"]
-# Keep the published crate lean: the demo recording + its cassette are README
-# assets (crates.io resolves the README's image link against the repo), not
-# needed to build or use the crate.
-exclude = ["docs/*.gif", "docs/*.tape", ".github/assets/*"]
+# Keep the published crate lean: README images (logo, demo recording) resolve
+# against `repository` on crates.io, and CI, packaging, netns test scripts and
+# dev tooling are repo-only. src/output/testdata/ must stay (include_str! in tests).
+exclude = [
+    "/docs/*.gif",
+    "/docs/*.tape",
+    "/xfr-logo.png",
+    "/.github/",
+    "/docker/",
+    "/scripts/",
+    "/test-*.sh",
+    "/flake.*",
+    "/justfile",
+    "/install.sh",
+    "/Cross.toml",
+    "/Dockerfile.release",
+    "/.dockerignore",
+    "/.pre-commit-config.yaml",
+    "/.gitignore",
+    "/deny.toml",
+]
 
 [dependencies]
 # Async runtime
@@ -51,7 +68,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 parking_lot = "0.12"
 humantime = "2"
-tempfile = "3"
+tempfile = "3.10"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 once_cell = "1"

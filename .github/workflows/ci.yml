@@ -69,14 +69,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-  typos:
-    name: Typos
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1.50.2
-
   doc:
     name: Doc (deny rustdoc warnings)
     runs-on: ubuntu-latest

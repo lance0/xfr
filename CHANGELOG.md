@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Less allocation in interval aggregation** — jitter and RTT averages and the total TCP congestion window are computed without temporary vectors. Missing and measured-zero values, RTT rounding, and saturating congestion-window totals retain their existing meaning.
 - **Less allocation in TUI reporting** — help paging counts wrapped rows without building a temporary vector, and server tables format only visible cells while borrowing protocol and direction labels.
 - **Native Windows tests in CI** — the Windows job now runs Clippy on all targets and the all-features test suite, including integration tests, instead of `cargo check`. The job is informational and does not fail the workflow while Windows support is experimental. The two QUIC upload pacing tests are skipped on Windows, where QUIC delivers far below the `-b` target (see [Known Issues](KNOWN_ISSUES.md#windows-support-is-experimental)).
-- **Typos check on documentation-only changes** — a `docs.yml` workflow runs `typos` on pushes and pull requests that touch only Markdown or `docs/`, which `ci.yml` skips.
+- **Dropped the typos CI check** — it mostly flagged false positives (test fixtures, changelog wording); spelling is left to review.
 - **Less allocation in Push Gateway formatting** — Prometheus metric lines are written directly into the payload buffer instead of allocating a temporary string for each line. Metric names, labels, ordering, and text formatting are unchanged.
 - **Less allocation in plain and CSV reporting** — formatted report fragments and CSV summary rows are written directly into their output buffer, and plain reports reuse a static separator. Output text and CSV column ordering are unchanged.
 
@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Library API (pre-1.0 break)
 - **`net::resolve_host` is now `async`** — callers must `.await` it. Lookups run on tokio's blocking pool so a surrounding timeout can abandon a stuck resolver.
 - Struct-literal constructors must supply new public fields: `tui::server::ServerApp.help_scroll` and `tui::widgets::StreamBar.dim_color` (`StreamBar::new` sets it; `StreamBar::dim_color` overrides it).
+- **`net::create_udp_socket*` no longer set `SO_REUSEADDR` on a port-0 bind** — `create_udp_socket` and `create_udp_socket_bound` set it only for an explicit port, and `create_udp_socket_for_remote`, which always binds port 0, no longer sets it.
+- Additive: `tui::ui::help_scroll` (help-overlay paging for a key press), `tui::ui::draw_help_overlay` (now public, with `scroll` and `server` parameters), `update::check_lock_reason`, and `impl Display for tui::app::AppState`.
 
 ## [0.11.0] - 2026-10-13
 
@@ -258,6 +260,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Repeated `q` no longer skips the test summary** — while a cancel was already in flight, a second `q` (or key-repeat from a held key) was treated as "exit now" and could leave before the server's final Result arrived. Now `q` stays graceful while cancelling (the existing 3-second deadline still bounds the wait), and a second Ctrl+C remains the explicit force-exit, matching the documented signal behavior.
+
+## [0.9.18] - 2026-06-11
 
 ### Added
 - **CSV interval rows carry the bidirectional split** (issue #56 follow-up) — `--csv` interval output gains `bytes_sent`, `bytes_received`, `throughput_send_mbps`, and `throughput_recv_mbps` columns, matching the fields the CSV summary row and final JSON already expose. The new columns are appended at the end of the row so existing parsers that index columns by position keep working; unidirectional tests leave them empty, like the summary row already does.
