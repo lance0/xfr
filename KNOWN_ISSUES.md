@@ -96,7 +96,7 @@ This document tracks known limitations and edge cases that are documented but no
 
 ### Saves Into a Read-Only Directory Are Not Atomic
 
-**Issue:** `-o` and preference saves replace a regular file atomically by writing a temporary file beside it and renaming it over the destination, which needs a writable directory. A writable file inside a directory you cannot write is overwritten in place instead, as before atomic saves, and xfr logs a warning that the save is not atomic: a crash or full disk mid-write can leave that file truncated. A new file cannot be created in such a directory at all. Separately, `-o /dev/stdout` with standard output redirected to a regular file (`xfr <host> -o /dev/stdout > out.json`) resolves to `out.json` and replaces it, so the file ends up holding only the saved result, not the output printed before it.
+**Issue:** `-o` and preference saves replace a regular file atomically by writing a temporary file beside it and renaming it over the destination, which needs a writable directory. A writable file inside a directory you cannot write is overwritten in place instead, as before atomic saves, and xfr logs a warning that the save is not atomic: a crash or full disk mid-write can leave that file truncated. A new file cannot be created in such a directory at all, and the client reports this before the test starts. Separately, `-o /dev/stdout` with standard output redirected to a regular file (`xfr <host> -o /dev/stdout > out.json`) resolves to `out.json` and replaces it, so the file ends up holding only the saved result, not the output printed before it.
 
 **Impact:** Saves into directories you cannot write lose the crash safety of atomic saves. Redirecting `-o /dev/stdout` to a file keeps only the saved result.
 

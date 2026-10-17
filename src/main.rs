@@ -1342,6 +1342,11 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             };
 
+            // Fail before the test, not after it, when `-o` cannot be saved.
+            if let Some(path) = &cli.output {
+                xfr::persistence::check_destination(path)?;
+            }
+
             let direction = if cli.bidir {
                 Direction::Bidir
             } else if cli.reverse {

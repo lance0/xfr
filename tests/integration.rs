@@ -3323,6 +3323,35 @@ async fn test_tcp_client_to_mptcp_server() {
     );
 }
 
+#[test]
+fn test_cli_unsavable_output_fails_before_connecting() {
+    // No server listens on this port: the preflight must fail before the
+    // client tries to connect.
+    let port = get_test_port();
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nodir").join("x.json");
+    for (path, reason) in [
+        (missing.as_path(), "directory does not exist"),
+        (dir.path(), "is a directory"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-t", "30sec"])
+            .arg("--no-tui")
+            .arg("-o")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("Cannot save to {}: {reason}", path.display())),
+            "{stderr}"
+        );
+        assert!(!stderr.contains(".xfr-"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
 #[tokio::test]
 async fn test_cli_csv_output_file_is_csv() {
     let port = get_test_port();
