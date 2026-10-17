@@ -31,6 +31,7 @@ src/
 │
 ├── config.rs        # Config file parsing
 ├── prefs.rs         # User preferences (theme)
+├── persistence.rs   # Atomic preference and result file replacement
 │
 ├── auth.rs          # PSK authentication (HMAC-SHA256)
 ├── control_crypto.rs # AEAD-protected control channel after PSK auth

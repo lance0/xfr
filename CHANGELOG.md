@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TUI theme readability** — the default theme uses the terminal foreground for light and dark terminals, and RGB themes use brighter secondary text on their intended dark backgrounds. Per-stream bar labels and empty tracks now follow the theme's dim text color instead of a fixed dark gray. Monochrome and loss indicators retain their existing styles.
 - **TUIs stay readable in small terminals** — the client prioritizes live throughput and progress on short terminals and keeps its `?` help hint at narrow widths; the server dashboard omits optional columns on narrow terminals and keeps its header and `[?] Help` footer on short ones; both help overlays page with PgUp/PgDn and Home/End and show a scroll hint in the border when they overflow.
 - **Update-check overrides stay locked in Settings** — builds without the checker, environment opt-outs, `--no-update-check`, and explicit config values show their reason and cannot overwrite saved preferences.
+### Added
+- **`xfr::persistence::atomic_write(path, bytes)`** — the library's crash-safe save routine (used for JSON results and preferences) is public, so other output paths can share it.
+
+### Fixed
+- **Preference and JSON result saves are atomic** — writes now complete and sync beside the destination before replacing it, preserving the previous save on failure, Unix permission bits, and valid symlinks. Read-only files, broken symlinks, and directories are rejected; devices, FIFOs, and pipes (`-o /dev/null`, `-o /dev/stdout`) are written in place as before.
 
 ### Security
 - **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
