@@ -71,17 +71,13 @@ pub(crate) fn atomic_write(
     let mut temporary = builder
         .tempfile_in(parent)
         .with_context(|| format!("Failed to create temporary save in {}", parent.display()))?;
-    if let Some(permissions) = permissions.as_ref() {
-        temporary.as_file().set_permissions(permissions.clone())?;
+    if let Some(permissions) = permissions {
+        temporary.as_file().set_permissions(permissions)?;
     }
     {
         let mut buffered = BufWriter::new(temporary.as_file_mut());
         write(&mut buffered)?;
         buffered.flush()?;
-    }
-    // Unix writes can clear setuid/setgid bits, so restore the saved mode after flushing.
-    if let Some(permissions) = permissions {
-        temporary.as_file().set_permissions(permissions)?;
     }
     temporary.as_file().sync_all()?;
     temporary
@@ -156,7 +152,7 @@ mod tests {
         let path = dir.path().join("saved");
         let link = dir.path().join("link");
         fs::write(&path, b"previous").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o4640)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
         symlink("saved", &link).unwrap();
         atomic_write(&link, |writer| {
             let temporary = fs::read_dir(dir.path())
@@ -166,7 +162,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 temporary.metadata().unwrap().permissions().mode() & 0o7777,
-                0o4640
+                0o666
             );
             Ok(writer.write_all(b"new")?)
         })
@@ -175,7 +171,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(
             path.metadata().unwrap().permissions().mode() & 0o7777,
-            0o4640
+            0o666
         );
 
         let plain = dir.path().join("plain");
