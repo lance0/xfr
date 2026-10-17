@@ -1559,11 +1559,17 @@ async fn main() -> Result<()> {
 
                 // Update check runs unless disabled. Precedence (higher wins):
                 // compiled-out > env > CLI flag > config.toml > saved pref.
+                let env_opt_out = xfr::update::env_opt_out();
                 let update_disabled = xfr::update::check_disabled(
-                    xfr::update::env_opt_out(),
+                    env_opt_out,
                     cli.no_update_check,
                     file_config.client.no_update_check,
                     prefs.disable_update_check,
+                );
+                let update_lock_reason = xfr::update::check_lock_reason(
+                    env_opt_out,
+                    cli.no_update_check,
+                    file_config.client.no_update_check,
                 );
 
                 let final_prefs = run_client_tui(
@@ -1572,6 +1578,7 @@ async fn main() -> Result<()> {
                     timestamp_format,
                     prefs.clone(),
                     update_disabled,
+                    update_lock_reason,
                 )
                 .await?;
 
@@ -1996,6 +2003,7 @@ async fn run_client_tui(
     timestamp_format: TimestampFormat,
     prefs: xfr::prefs::Prefs,
     update_disabled: bool,
+    update_lock_reason: Option<&'static str>,
 ) -> Result<xfr::prefs::Prefs> {
     // Setup terminal. The guard is armed before entering the alternate screen
     // so a failure there still restores cooked mode on the way out.
@@ -2016,6 +2024,7 @@ async fn run_client_tui(
         timestamp_format,
         prefs,
         update_disabled,
+        update_lock_reason,
     )
     .await;
     status.finish(terminal.backend_mut());
@@ -2342,6 +2351,7 @@ async fn run_tui_loop(
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
     update_disabled: bool,
+    update_lock_reason: Option<&'static str>,
 ) -> Result<TuiLoopExit> {
     // Spawn the background update check unless it's disabled (flag/env/config/
     // pref) or compiled out. `update_rx` still exists so the poller is a no-op.
@@ -2368,6 +2378,7 @@ async fn run_tui_loop(
     app.byte_budget = config.byte_budget;
     // Reflect the resolved update-check state in the Settings toggle.
     app.settings.update_check = !update_disabled;
+    app.settings.update_check_lock_reason = update_lock_reason;
 
     // Track if we've received the update check result (start "done" when the
     // check is disabled so the poller never blocks on the empty channel).

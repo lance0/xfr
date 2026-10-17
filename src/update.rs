@@ -107,6 +107,25 @@ pub fn check_disabled(
         }
 }
 
+/// Why Settings cannot override the effective update-check state.
+pub fn check_lock_reason(
+    env_opt_out: bool,
+    cli_flag: bool,
+    config: Option<bool>,
+) -> Option<&'static str> {
+    if !ENABLED {
+        Some("not compiled in")
+    } else if env_opt_out {
+        Some("locked: environment")
+    } else if cli_flag {
+        Some("locked: --no-update-check")
+    } else if config.is_some() {
+        Some("locked: config.toml")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::flag_is_truthy;
@@ -119,6 +138,37 @@ mod tests {
         for off in ["", "  ", "0", "false"] {
             assert!(!flag_is_truthy(off), "{off:?} should not opt out");
         }
+    }
+
+    #[test]
+    fn check_lock_precedence() {
+        use super::{ENABLED, check_lock_reason};
+        if !ENABLED {
+            assert_eq!(
+                check_lock_reason(true, true, Some(true)),
+                Some("not compiled in")
+            );
+            assert_eq!(
+                check_lock_reason(false, false, None),
+                Some("not compiled in")
+            );
+            return;
+        }
+        assert_eq!(
+            check_lock_reason(true, true, Some(true)),
+            Some("locked: environment")
+        );
+        assert_eq!(
+            check_lock_reason(false, true, Some(false)),
+            Some("locked: --no-update-check")
+        );
+        for config in [Some(true), Some(false)] {
+            assert_eq!(
+                check_lock_reason(false, false, config),
+                Some("locked: config.toml")
+            );
+        }
+        assert_eq!(check_lock_reason(false, false, None), None);
     }
 
     #[test]
