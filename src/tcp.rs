@@ -360,17 +360,25 @@ pub fn configure_control_stream(stream: &TcpStream) -> std::io::Result<()> {
 }
 
 /// Write one payload chunk to the socket: sendfile(2) from the memfd when
-/// zero-copy is active, otherwise a regular write. The readiness-then-try_write
-/// loop is the same mechanism `AsyncWriteExt::write` uses internally, so the
-/// regular path is behaviorally unchanged; both paths return bytes queued with
-/// partial-write semantics. Cancel-safe: dropping the future mid-await queues
-/// nothing.
+/// zero-copy is active, otherwise a regular write. Both paths return bytes
+/// queued with partial-write semantics. Cancel-safe: dropping the future
+/// mid-await queues nothing.
+///
+/// `writable()` + `try_write`/`try_io` bypass tokio's cooperative budget
+/// (unlike `AsyncWriteExt::write`), and on a fast link the socket stays
+/// writable, so without the explicit `consume_budget` an unpaced send loop
+/// never yields its worker. Tasks parked behind it — another stream's
+/// connect + DataHello in the worker's LIFO slot, the server's data-stream
+/// routing — then don't run until the test ends, and those streams carry
+/// zero bytes (LAN-2321).
 async fn write_chunk(
     stream: &TcpStream,
     buffer: &[u8],
     offset: usize,
     zerocopy: Option<&ZerocopyPayload>,
 ) -> io::Result<usize> {
+    // Before the write, so a forced yield never strands a written chunk.
+    tokio::task::coop::consume_budget().await;
     if let Some(payload) = zerocopy {
         // Cap at the slice the caller asked for: with `-n` the final write is
         // a partial chunk, and sendfile would otherwise run to the end of the
@@ -1669,6 +1677,37 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("not available"), "unexpected error: {}", msg);
+    }
+
+    /// LAN-2321: a send loop on a socket that never fills must still yield
+    /// its worker. 1-byte writes keep `writable()` permanently ready, so only
+    /// the cooperative budget can hand the thread to the other task; without
+    /// it the loop runs to completion first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_chunk_yields_while_socket_stays_writable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sender = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (_receiver, _) = listener.accept().await.unwrap();
+        #[cfg(target_os = "linux")]
+        let zerocopy = Some(ZerocopyPayload::new(&[0xAB]).unwrap());
+        #[cfg(not(target_os = "linux"))]
+        let zerocopy: Option<ZerocopyPayload> = None;
+
+        for payload in [None, zerocopy.as_ref()] {
+            let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = ran.clone();
+            tokio::spawn(async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) });
+            for _ in 0..1000 {
+                write_chunk(&sender, &[0xAB], 0, payload).await.unwrap();
+            }
+            assert!(
+                ran.load(std::sync::atomic::Ordering::SeqCst),
+                "send loop never yielded (zerocopy={})",
+                payload.is_some()
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

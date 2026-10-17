@@ -284,6 +284,7 @@ fn bench_protocol_serialize_result(c: &mut Criterion) {
         mtu_probe: None,
         server_udp_send_errors: None,
         client_udp_send_errors: None,
+        zero_byte_streams: None,
     };
     let msg = ControlMessage::Result(result);
 

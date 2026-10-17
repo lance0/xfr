@@ -347,6 +347,7 @@ fn test_result_message() {
         mtu_probe: None,
         server_udp_send_errors: None,
         client_udp_send_errors: None,
+        zero_byte_streams: None,
     };
 
     let msg = ControlMessage::Result(result);
@@ -431,6 +432,7 @@ fn test_large_result_message_exceeds_old_8k_guard_but_fits_64k() {
         mtu_probe: None,
         server_udp_send_errors: None,
         client_udp_send_errors: None,
+        zero_byte_streams: None,
     };
 
     let msg = ControlMessage::Result(result);
@@ -561,4 +563,28 @@ fn test_pause_resume_capability_in_hello() {
         server_json.contains("\"pause_resume\""),
         "server_hello should advertise pause_resume capability"
     );
+}
+
+#[test]
+fn test_result_counts_streams_empty_in_any_carried_direction() {
+    // Unidirectional streams have no split: only the total counts. Bidir
+    // streams count when either direction moved nothing.
+    let legacy = r#"{"type":"result","id":"t","bytes_total":0,"duration_ms":1000,"throughput_mbps":0.0,"streams":[
+        {"id":0,"bytes":10,"throughput_mbps":0.0},
+        {"id":1,"bytes":0,"throughput_mbps":0.0},
+        {"id":2,"bytes":10,"throughput_mbps":0.0,"bytes_sent":10,"bytes_received":0},
+        {"id":3,"bytes":20,"throughput_mbps":0.0,"bytes_sent":10,"bytes_received":10}]}"#;
+    let ControlMessage::Result(mut result) = ControlMessage::deserialize(legacy).unwrap() else {
+        panic!("wrong message type");
+    };
+    assert_eq!(result.zero_byte_streams, None);
+    assert_eq!(result.count_zero_byte_streams(), 2);
+    assert_eq!(result.describe_zero_byte_streams(), None);
+    result.zero_byte_streams = Some(2);
+    assert_eq!(
+        result.describe_zero_byte_streams().as_deref(),
+        Some("2 of 4 streams carried no data; the totals cover only the rest")
+    );
+    let json = ControlMessage::Result(result).serialize().unwrap();
+    assert!(json.contains(r#""zero_byte_streams":2"#), "got: {json}");
 }

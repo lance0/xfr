@@ -32,7 +32,7 @@ exclude = [
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "net", "time", "sync", "rt-multi-thread", "macros"] }
+tokio = { version = "1.44", features = ["full", "net", "time", "sync", "rt-multi-thread", "macros"] }
 futures = "0.3"
 
 # TUI

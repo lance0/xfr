@@ -435,9 +435,10 @@ pub struct TestResult {
     /// Path-MTU probe report (issue #64). Populated client-side after a
     /// `--probe-mtu` run — the client is the only side with the full
     /// per-size picture — so it rides into `--json` output. The server
-    /// never sets it; wire-additive, absent for throughput tests.
+    /// never sets it; wire-additive, absent for throughput tests. Boxed for
+    /// the same reason as `udp_stats_send`; JSON is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mtu_probe: Option<crate::probe::MtuProbeReport>,
+    pub mtu_probe: Option<Box<crate::probe::MtuProbeReport>>,
     /// UDP datagrams the server failed to send mid-test (download, or the
     /// server half of bidir). Wire-additive: absent when there were none,
     /// and older servers never send it; older clients ignore it.
@@ -447,6 +448,37 @@ pub struct TestResult {
     /// client half of bidir). Populated client-side only, like `mtu_probe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_udp_send_errors: Option<UdpSendErrors>,
+    /// TCP streams that carried no data in a direction the test ran, which
+    /// leaves the totals covering fewer streams than requested. Populated
+    /// client-side only, like `client_udp_send_errors`; absent when every
+    /// stream moved data, for `-n` tests (a small budget can leave streams
+    /// legitimately empty), and for UDP/QUIC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_byte_streams: Option<u8>,
+}
+
+impl TestResult {
+    /// Streams with no bytes in any direction they carried. Bidir results
+    /// check each direction; unidirectional ones have no split, so only
+    /// the total counts.
+    pub fn count_zero_byte_streams(&self) -> u8 {
+        let n = self
+            .streams
+            .iter()
+            .filter(|s| s.bytes == 0 || s.bytes_sent == Some(0) || s.bytes_received == Some(0))
+            .count();
+        u8::try_from(n).unwrap_or(u8::MAX)
+    }
+
+    /// One-line human summary of `zero_byte_streams`, if any.
+    pub fn describe_zero_byte_streams(&self) -> Option<String> {
+        let n = self.zero_byte_streams.filter(|&n| n > 0)?;
+        Some(format!(
+            "{} of {} streams carried no data; the totals cover only the rest",
+            n,
+            self.streams.len()
+        ))
+    }
 }
 
 /// Count of failed UDP sends plus the most recent error message. Errors in
