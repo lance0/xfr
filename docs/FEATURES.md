@@ -629,6 +629,16 @@ xfr_tcp_rtt_microseconds{test_id="abc"} 1200
 xfr_tcp_retransmits_total{test_id="abc"} 42
 ```
 
+Series labelled with `test_id` keep a test's final values after it ends, so a
+scrape that runs after a short test still sees it. The server keeps them for
+the 16 most recently finished tests, including tests that errored or were
+cancelled, and removes older tests' series. A running test's series are never
+removed. At one test every 10 seconds a finished test stays visible for about
+160 seconds, which is longer than common scrape intervals. If tests finish
+faster than your scraper polls, some per-test series can be missed. The
+aggregate `xfr_bytes_total`, `xfr_tests_total` and `xfr_test_duration_seconds`
+still count every test.
+
 ### Push Gateway
 
 Push metrics on test completion:

@@ -219,7 +219,9 @@ Prometheus push gateway URL (e.g., http://pushgateway:9091)
 Prometheus metrics endpoint port (requires the prometheus build feature). Each
 connection serves one request: headers must arrive within 5 seconds and the
 connection closes within 10 seconds. At most 64 connections are served at
-once; further connections wait in the accept backlog
+once; further connections wait in the accept backlog. Per-test series (those
+labelled with test_id) are kept for the 16 most recently finished tests and
+removed after that
 .TP
 .BI \-\-log\-file " PATH"
 Log file path
