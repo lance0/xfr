@@ -47,8 +47,9 @@ impl Theme {
 
             border: Color::Cyan,
             border_focused: Color::Cyan,
-            text: Color::White,
-            text_dim: Color::Gray,
+            // Follow the terminal foreground on both light and dark backgrounds.
+            text: Color::Reset,
+            text_dim: Color::DarkGray,
             highlight_bg: Color::DarkGray,
 
             success: Color::Green,
@@ -94,7 +95,7 @@ impl Theme {
             border: Color::Rgb(0, 255, 255),
             border_focused: Color::Rgb(0, 255, 255),
             text: Color::Rgb(255, 255, 255),
-            text_dim: Color::Rgb(100, 100, 120),
+            text_dim: Color::Rgb(121, 121, 138),
             highlight_bg: Color::Rgb(20, 20, 35),
 
             success: Color::Rgb(0, 255, 150),
@@ -117,7 +118,7 @@ impl Theme {
             border: Color::Rgb(189, 147, 249),
             border_focused: Color::Rgb(189, 147, 249),
             text: Color::Rgb(248, 248, 242),
-            text_dim: Color::Rgb(98, 114, 164),
+            text_dim: Color::Rgb(133, 146, 184),
             highlight_bg: Color::Rgb(68, 71, 90),
 
             success: Color::Rgb(80, 250, 123),
@@ -177,7 +178,7 @@ impl Theme {
             border: Color::Rgb(0, 255, 0),
             border_focused: Color::Rgb(0, 255, 0),
             text: Color::Rgb(0, 255, 0),
-            text_dim: Color::Rgb(0, 100, 0),
+            text_dim: Color::Rgb(0, 170, 60),
             highlight_bg: Color::Rgb(0, 20, 0),
 
             success: Color::Rgb(0, 255, 0),
@@ -200,7 +201,7 @@ impl Theme {
             border: Color::Rgb(136, 192, 208),
             border_focused: Color::Rgb(136, 192, 208),
             text: Color::Rgb(236, 239, 244),
-            text_dim: Color::Rgb(76, 86, 106),
+            text_dim: Color::Rgb(147, 158, 178),
             highlight_bg: Color::Rgb(59, 66, 82),
 
             success: Color::Rgb(163, 190, 140),
@@ -223,7 +224,7 @@ impl Theme {
             border: Color::Rgb(254, 128, 25),
             border_focused: Color::Rgb(254, 128, 25),
             text: Color::Rgb(235, 219, 178),
-            text_dim: Color::Rgb(146, 131, 116),
+            text_dim: Color::Rgb(168, 153, 132),
             highlight_bg: Color::Rgb(80, 73, 69),
 
             success: Color::Rgb(184, 187, 38),
@@ -246,7 +247,7 @@ impl Theme {
             border: Color::Rgb(203, 166, 247),
             border_focused: Color::Rgb(203, 166, 247),
             text: Color::Rgb(205, 214, 244),
-            text_dim: Color::Rgb(108, 112, 134),
+            text_dim: Color::Rgb(147, 153, 178),
             highlight_bg: Color::Rgb(88, 91, 112),
 
             success: Color::Rgb(166, 227, 161),
@@ -269,7 +270,7 @@ impl Theme {
             border: Color::Rgb(187, 154, 247),
             border_focused: Color::Rgb(187, 154, 247),
             text: Color::Rgb(192, 202, 245),
-            text_dim: Color::Rgb(86, 95, 137),
+            text_dim: Color::Rgb(125, 132, 164),
             highlight_bg: Color::Rgb(59, 66, 97),
 
             success: Color::Rgb(158, 206, 106),
@@ -291,8 +292,8 @@ impl Theme {
 
             border: Color::Rgb(42, 161, 152),
             border_focused: Color::Rgb(42, 161, 152),
-            text: Color::Rgb(131, 148, 150),
-            text_dim: Color::Rgb(88, 110, 117),
+            text: Color::Rgb(147, 161, 161),
+            text_dim: Color::Rgb(131, 148, 150),
             highlight_bg: Color::Rgb(7, 54, 66),
 
             success: Color::Rgb(133, 153, 0),
@@ -357,6 +358,51 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_theme_follows_terminal_foreground() {
+        let theme = Theme::default();
+        assert_eq!(theme.text, Color::Reset);
+        assert_eq!(theme.text_dim, Color::DarkGray);
+    }
+
+    #[test]
+    fn rgb_text_is_readable_on_intended_dark_backgrounds() {
+        // RGB palettes assume these dark backgrounds; ANSI palettes stay terminal controlled.
+        let backgrounds = [
+            ("kawaii", [40, 30, 45]),
+            ("cyber", [10, 10, 20]),
+            ("dracula", [40, 42, 54]),
+            ("matrix", [0, 0, 0]),
+            ("nord", [46, 52, 64]),
+            ("gruvbox", [40, 40, 40]),
+            ("catppuccin", [30, 30, 46]),
+            ("tokyo_night", [26, 27, 38]),
+            ("solarized", [0, 43, 54]),
+        ];
+        fn luminance(rgb: [u8; 3]) -> f64 {
+            let linear = rgb.map(|channel| {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            });
+            linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
+        }
+        for (name, background) in backgrounds {
+            let theme = Theme::by_name(name);
+            for color in [theme.text, theme.text_dim] {
+                let Color::Rgb(r, g, b) = color else {
+                    panic!("{name}: expected RGB text");
+                };
+                let (fg, bg) = (luminance([r, g, b]), luminance(background));
+                let contrast = (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05);
+                assert!(contrast >= 4.5, "{name}: {color:?} contrast {contrast}");
+            }
+        }
+    }
 
     #[test]
     fn test_by_name_default() {
