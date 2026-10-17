@@ -7,22 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
+
+### Added
+- **`xfr::persistence::atomic_write(path, bytes)`** — the library's crash-safe save routine (used for JSON and CSV results and preferences) is public, so other output paths can share it.
+
 ### Fixed
 - **Ctrl-C works throughout both TUIs** — client Settings no longer swallows interrupts (Ctrl-C closes it and cancels the test), and the server dashboard now accepts Ctrl-C. Terminals that send a literal ETX are supported too. Client cancellation keeps the existing summary wait and second-interrupt force exit.
 - **TUI theme readability** — the default theme uses the terminal foreground for light and dark terminals, and RGB themes use brighter secondary text on their intended dark backgrounds. Per-stream bar labels and empty tracks now follow the theme's dim text color instead of a fixed dark gray. Monochrome and loss indicators retain their existing styles.
 - **TUIs stay readable in small terminals** — the client prioritizes live throughput and progress on short terminals and keeps its `?` help hint at narrow widths; the server dashboard omits optional columns on narrow terminals and keeps its header and `[?] Help` footer on short ones; both help overlays page with PgUp/PgDn and Home/End and show a scroll hint in the border when they overflow.
 - **Update-check overrides stay locked in Settings** — builds without the checker, environment opt-outs, `--no-update-check`, and explicit config values show their reason and cannot overwrite saved preferences.
-### Added
-- **`xfr::persistence::atomic_write(path, bytes)`** — the library's crash-safe save routine (used for JSON results and preferences) is public, so other output paths can share it.
-
-### Fixed
-- **Preference and JSON result saves are atomic** — writes now complete and sync beside the destination before replacing it, preserving the previous save on failure, Unix permission bits, and valid symlinks. Read-only files, broken symlinks, and directories are rejected; devices, FIFOs, and pipes (`-o /dev/null`, `-o /dev/stdout`) are written in place as before.
+- **Preference, JSON result and CSV result saves are atomic** — writes now complete and sync beside the destination before replacing it, preserving the previous save on failure, Unix permission bits, and valid symlinks. Read-only files, broken symlinks, and directories are rejected; devices, FIFOs, and pipes (`-o /dev/null`, `-o /dev/stdout`) are written in place as before.
 - **Bounded Prometheus HTTP connections** — request headers have a 5-second total deadline and connections have a 10-second total lifetime, including stalled response writes. HTTP keep-alive is disabled; each connection serves one request. At most 64 connections are served at once; further connections wait in the accept backlog. An accept error (e.g. `Too many open files` during a connection flood) no longer stops the metrics server: it is logged and retried after 100 ms. Per-connection errors are logged at debug level instead of being printed to stderr, which corrupted the server TUI.
-
-### Security
-- **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
-
-### Fixed
 - **`--connect-timeout` now bounds hostname resolution** — the client resolved the target with the blocking system resolver on a runtime thread, so a stuck DNS lookup hung the connect and the timeout could never fire; QUIC also resolved outside its connect deadline entirely. Lookups now run on tokio's blocking pool inside the deadline for TCP, UDP and QUIC. Library: `xfr::net::resolve_host` is now `async`.
 - **`--csv -o FILE` saves CSV** — the file always received the JSON result, even though `--csv -o data.csv` is the documented way to save CSV. With `--csv` the file now holds the same header and summary row printed to stdout; every other mode still saves JSON.
 - **Client options given with a subcommand are rejected instead of ignored** — `xfr --json -t 5 -P 4 diff a b` or `xfr -p 9000 serve` used to run with those options silently dropped. Top-level test, output and connection options typed alongside `serve`, `diff` or `discover` now fail with a usage error (exit 2) naming the option; pass server options after `serve` (`xfr serve -p 9000`). `--theme`, `--log-file`, `--log-level`, `--no-update-check` and `--completions` still work with any subcommand, and options set through environment variables (`XFR_DURATION`, `XFR_PORT`, `XFR_PSK`, ...) are not affected.

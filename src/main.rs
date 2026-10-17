@@ -1981,7 +1981,7 @@ async fn run_client_plain(
     // Don't save incomplete fallback results to file — only save real server results
     if !interrupted && let Some(path) = output {
         if opts.csv {
-            std::fs::write(&path, &output_str)?;
+            xfr::persistence::atomic_write(&path, output_str.as_bytes())?;
         } else {
             xfr::output::json::save_json(&result, &path)?;
         }
