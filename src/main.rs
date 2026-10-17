@@ -1089,7 +1089,25 @@ fn parse_cli() -> Cli {
                 && matches.value_source(id) == Some(ValueSource::CommandLine)
         });
         if let Some(arg) = ignored {
-            let message = format!("the argument '{arg}' cannot be used with '{subcommand}'");
+            let long = arg.get_long();
+            let accepted = long.is_some()
+                && cmd
+                    .find_subcommand(subcommand)
+                    .is_some_and(|sub| sub.get_arguments().any(|a| a.get_long() == long));
+            let tip = if accepted {
+                let mut usage = format!("xfr {subcommand} --{}", long.unwrap_or_default());
+                if arg.get_action().takes_values() {
+                    for value in matches.get_raw(arg.get_id().as_str()).into_iter().flatten() {
+                        usage.push(' ');
+                        usage.push_str(&value.to_string_lossy());
+                    }
+                }
+                format!("put {subcommand} options after the subcommand: {usage}")
+            } else {
+                "this option only applies to client tests (xfr <HOST> ...)".to_string()
+            };
+            let message =
+                format!("the argument '{arg}' cannot be used with '{subcommand}'\n\n  tip: {tip}");
             cmd.error(clap::error::ErrorKind::ArgumentConflict, message)
                 .exit();
         }

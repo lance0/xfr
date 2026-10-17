@@ -3395,13 +3395,25 @@ fn test_cli_client_options_rejected_with_subcommands() {
     });
     std::fs::write(&result_path, result.to_string()).unwrap();
 
-    for (args, subcommand) in [
+    let client_only = "tip: this option only applies to client tests";
+    for (args, subcommand, tip) in [
         (
             &["--json", "-t", "5", "-P", "4", "diff", "a", "b"][..],
             "diff",
+            client_only,
         ),
-        (&["--csv", "-q", "-R", "discover"][..], "discover"),
-        (&["-t", "5", "serve"][..], "serve"),
+        (
+            &["--csv", "-q", "-R", "discover"][..],
+            "discover",
+            client_only,
+        ),
+        (&["-t", "5", "serve"][..], "serve", client_only),
+        // serve accepts --port itself, so the tip shows where it goes.
+        (
+            &["-p", "9000", "serve"][..],
+            "serve",
+            "tip: put serve options after the subcommand: xfr serve --port 9000",
+        ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args(args)
@@ -3413,6 +3425,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
             stderr.contains(&format!("cannot be used with '{subcommand}'")),
             "{args:?}: {stderr}"
         );
+        assert!(stderr.contains(tip), "{args:?}: {stderr}");
     }
 
     // Options subcommands use, and env-backed client options, still work.
