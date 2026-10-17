@@ -2,6 +2,8 @@
 //!
 //! Pushes test metrics to a Prometheus Push Gateway at test completion.
 
+use std::fmt::Write;
+
 use reqwest::Client;
 use tracing::{debug, error, info, warn};
 
@@ -100,17 +102,18 @@ impl PushGatewayClient {
 
         /// Write # HELP/# TYPE headers once per metric family, then any samples.
         fn write_family_header(output: &mut String, name: &str, help: &str, metric_type: &str) {
-            output.push_str(&format!("# HELP {} {}\n", name, help));
-            output.push_str(&format!("# TYPE {} {}\n", name, metric_type));
+            writeln!(output, "# HELP {} {}", name, help).expect("writing to String cannot fail");
+            writeln!(output, "# TYPE {} {}", name, metric_type)
+                .expect("writing to String cannot fail");
         }
 
         /// Write a single sample (gauge or counter) for an aggregate metric.
         fn write_sample(output: &mut String, name: &str, value: f64) {
-            output.push_str(&format!("{} {}\n", name, value));
+            writeln!(output, "{} {}", name, value).expect("writing to String cannot fail");
         }
 
         // Add labels for the test
-        output.push_str(&format!("# Test ID: {}\n", test_id));
+        writeln!(output, "# Test ID: {}", test_id).expect("writing to String cannot fail");
 
         // Aggregate metrics
         write_family_header(
@@ -164,18 +167,24 @@ impl PushGatewayClient {
                 let stream_throughput = stream.throughput_mbps();
                 let stream_retransmits = stream.retransmits() as f64;
 
-                output.push_str(&format!(
-                    "xfr_stream_bytes_total{{test_id=\"{}\",stream_id=\"{}\"}} {}\n",
+                writeln!(
+                    output,
+                    "xfr_stream_bytes_total{{test_id=\"{}\",stream_id=\"{}\"}} {}",
                     test_id, stream_id, stream_bytes
-                ));
-                output.push_str(&format!(
-                    "xfr_stream_throughput_mbps{{test_id=\"{}\",stream_id=\"{}\"}} {}\n",
+                )
+                .expect("writing to String cannot fail");
+                writeln!(
+                    output,
+                    "xfr_stream_throughput_mbps{{test_id=\"{}\",stream_id=\"{}\"}} {}",
                     test_id, stream_id, stream_throughput
-                ));
-                output.push_str(&format!(
-                    "xfr_stream_retransmits_total{{test_id=\"{}\",stream_id=\"{}\"}} {}\n",
+                )
+                .expect("writing to String cannot fail");
+                writeln!(
+                    output,
+                    "xfr_stream_retransmits_total{{test_id=\"{}\",stream_id=\"{}\"}} {}",
                     test_id, stream_id, stream_retransmits
-                ));
+                )
+                .expect("writing to String cannot fail");
             }
         }
 
@@ -305,6 +314,87 @@ mod tests {
     use crate::output::push_gateway::PushGatewayClient;
     use crate::protocol::{TcpInfoSnapshot, UdpStats};
     use crate::stats::TestStats;
+
+    #[test]
+    fn metrics_payload_keeps_exact_text_format() {
+        let mut stats = TestStats::new("fixture".into(), 2);
+        // Keep elapsed time at zero so the full payload is deterministic.
+        let start = Instant::now() + Duration::from_secs(3600);
+        stats.start_time = start;
+        for stream in &mut stats.streams {
+            std::sync::Arc::get_mut(stream).unwrap().start_time = start;
+        }
+        stats.streams[0].add_bytes_sent(1_000_000);
+        stats.streams[1].add_bytes_sent(2_000_000);
+        stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
+            retransmits: 5,
+            rtt_us: 1200,
+            rtt_var_us: 300,
+            cwnd: 65536,
+            bytes_acked: None,
+        });
+        stats.add_udp_stats(UdpStats {
+            packets_sent: 100,
+            packets_received: 95,
+            lost: 5,
+            lost_percent: 5.0,
+            jitter_ms: 1.5,
+            jitter_max_ms: Some(3.0),
+            out_of_order: 0,
+            packet_size: Some(1400),
+        });
+        let client = PushGatewayClient::new("http://localhost".into()).unwrap();
+        assert_eq!(
+            client.format_metrics(&stats),
+            r#"# Test ID: fixture
+# HELP xfr_bytes_total Total bytes transferred
+# TYPE xfr_bytes_total counter
+xfr_bytes_total 3000000
+# HELP xfr_throughput_mbps Average throughput in Mbps
+# TYPE xfr_throughput_mbps gauge
+xfr_throughput_mbps 0
+# HELP xfr_duration_seconds Test duration in seconds
+# TYPE xfr_duration_seconds gauge
+xfr_duration_seconds 0
+# HELP xfr_stream_bytes_total Per-stream total bytes transferred
+# TYPE xfr_stream_bytes_total counter
+# HELP xfr_stream_throughput_mbps Per-stream average throughput in Mbps
+# TYPE xfr_stream_throughput_mbps gauge
+# HELP xfr_stream_retransmits_total Per-stream TCP retransmits
+# TYPE xfr_stream_retransmits_total counter
+xfr_stream_bytes_total{test_id="fixture",stream_id="0"} 1000000
+xfr_stream_throughput_mbps{test_id="fixture",stream_id="0"} 0
+xfr_stream_retransmits_total{test_id="fixture",stream_id="0"} 0
+xfr_stream_bytes_total{test_id="fixture",stream_id="1"} 2000000
+xfr_stream_throughput_mbps{test_id="fixture",stream_id="1"} 0
+xfr_stream_retransmits_total{test_id="fixture",stream_id="1"} 0
+# HELP xfr_tcp_rtt_microseconds TCP round-trip time in microseconds
+# TYPE xfr_tcp_rtt_microseconds gauge
+xfr_tcp_rtt_microseconds 1200
+# HELP xfr_tcp_retransmits_total TCP retransmits
+# TYPE xfr_tcp_retransmits_total counter
+xfr_tcp_retransmits_total 5
+# HELP xfr_tcp_cwnd_bytes TCP congestion window in bytes
+# TYPE xfr_tcp_cwnd_bytes gauge
+xfr_tcp_cwnd_bytes 65536
+# HELP xfr_udp_packets_sent UDP packets sent
+# TYPE xfr_udp_packets_sent counter
+xfr_udp_packets_sent 100
+# HELP xfr_udp_packets_received UDP packets received
+# TYPE xfr_udp_packets_received counter
+xfr_udp_packets_received 95
+# HELP xfr_udp_packets_lost UDP packets lost
+# TYPE xfr_udp_packets_lost counter
+xfr_udp_packets_lost 5
+# HELP xfr_udp_jitter_ms UDP jitter in milliseconds
+# TYPE xfr_udp_jitter_ms gauge
+xfr_udp_jitter_ms 1.5
+# HELP xfr_udp_lost_percent UDP packet loss percentage
+# TYPE xfr_udp_lost_percent gauge
+xfr_udp_lost_percent 5
+"#
+        );
+    }
 
     #[test]
     fn extreme_udp_sequence_gaps_cannot_overflow_metrics() {
