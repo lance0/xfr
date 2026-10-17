@@ -11,20 +11,23 @@ A modern iperf3 alternative with a live TUI, multi-client server, MPTCP, and QUI
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-tip-ff5e5b?logo=ko-fi)](https://ko-fi.com/lance0)
 
+[Documentation](docs/README.md) · [Installation](docs/INSTALL.md) ·
+[Releases](https://github.com/lance0/xfr/releases) · [Known issues](KNOWN_ISSUES.md)
+
 ## Quick Start
 
 ```bash
-# Server
-xfr serve
-
-# Client (in another terminal or machine)
-xfr 192.168.1.1              # Basic TCP test
-xfr 192.168.1.1 -b 100M      # TCP at 100 Mbps
-xfr 192.168.1.1 -P 4         # 4 parallel streams
+cargo install xfr            # Rust 1.88+; or brew install lance0/tap/xfr
+xfr serve                   # On the server
+xfr 192.168.1.1              # On the client: TCP, 10 seconds
+xfr 192.168.1.1 -P 4         # Four parallel streams
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
 ```
 
-See [Installation](#installation) below for setup instructions.
+Use the same xfr version on both peers for all current features. xfr uses its
+own protocol and does not connect to iperf3 servers. Allow port 5201 for TCP
+and UDP; see [firewall requirements](docs/SCRIPTING.md#firewall--port-requirements)
+for older peers and client source ports.
 
 ## TUI Preview
 
@@ -34,682 +37,132 @@ See [Installation](#installation) below for setup instructions.
 
 ## Features
 
-- **Live TUI** with real-time throughput graphs and per-stream stats
-- **Server dashboard** - `xfr serve --tui` for monitoring active tests
-- **Terminal status** - both TUIs report test status via OSC 7501 (Program Status Protocol) for tab headers and session pickers; terminals without support ignore it
-- **Multi-client server** - handle multiple simultaneous tests
-- **TCP, UDP, QUIC, and MPTCP** with configurable bitrate pacing and parallel streams
-- **Firewall-friendly** - single-port TCP *and* UDP (all traffic on 5201), QUIC multiplexing, and `--cport` for pinning data source ports
-- **Bidirectional testing** - measure upload and download simultaneously
-- **Multiple output formats** - plain text, JSON, JSON streaming, CSV
-- **Result comparison** - `xfr diff` to detect performance regressions
-- **LAN discovery** - find xfr servers with mDNS (`xfr discover`)
-- **Prometheus metrics** - export stats for monitoring dashboards
-- **Config file** - save defaults in the platform configuration directory
-- **Environment variables** - `XFR_PORT`, `XFR_DURATION` overrides
+- Live client TUI with throughput graphs and per-stream statistics.
+- Multi-client server with an optional dashboard: `xfr serve --tui`.
+- TCP, UDP, QUIC, and Linux MPTCP; parallel streams and bidirectional tests.
+- Plain text, JSON, streaming JSON, and CSV output for automation.
+- Saved configuration, LAN discovery, result comparison, and optional Prometheus metrics.
+- Both TUIs report status through OSC 7501; unsupported terminals ignore it.
 
-### vs iperf3
+<a id="vs-iperf3"></a>
 
-| Feature | iperf3 | xfr |
-|---------|--------|-----|
-| Live TUI | No | Yes (client & server) |
-| Multi-client server | No | Yes |
-| MPTCP | Yes (3.19+, Linux) | Yes (auto on server, `--mptcp` on client, Linux 5.6+) |
-| Firewall-friendly | `--cport` (TCP/UDP) | Single-port TCP & UDP + `--cport` |
-| Output formats | Text/JSON | Text/JSON/CSV |
-| Prometheus metrics | No | Yes (optional feature) |
-| Compare runs | No | `xfr diff` |
-| LAN discovery | No | `xfr discover` |
-| Config file | No | Yes |
-
-## Real-World Use Cases
-
-### VPN Tunnel Testing
-Measure actual throughput through your VPN:
-```bash
-# On VPN server
-xfr serve
-
-# From client, through VPN
-xfr 10.8.0.1 -t 30s
-```
-
-### UDP Congestion Detection
-Test UDP at your expected rate to detect packet loss:
-```bash
-xfr <host> -u -b 500M -t 60s    # Watch for loss percentage in TUI
-```
-
-### Path MTU Discovery
-Find the largest UDP payload that survives the path — per direction, with
-the don't-fragment flag set so middleboxes can't hide the limit by
-fragmenting (useful for NFS-over-UDP and VPN/tunnel tuning):
-```bash
-xfr <host> --probe-mtu
-```
-
-### Before/After Comparison
-Quantify the impact of network changes:
-```bash
-xfr <host> --json -o before.json
-# ... make changes ...
-xfr <host> --json -o after.json
-xfr diff before.json after.json --threshold 5
-```
-
-### Multi-Stream for Bonded Connections
-Test aggregate bandwidth across bonded/LACP interfaces:
-```bash
-xfr <host> -P 8 -t 30s          # 8 streams to utilize all links
-```
-
-### Prometheus Monitoring
-Continuous performance monitoring:
-```bash
-xfr serve --prometheus 9090 --push-gateway http://pushgateway:9091
-# Scrape metrics or view in Grafana
-```
+See the [iperf3 comparison and migration guide](docs/COMPARISON.md).
 
 ## Installation
 
-### From crates.io (Recommended)
-
-Requires [Rust 1.88+](https://www.rust-lang.org/tools/install):
-
-```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-
-# Install xfr
-cargo install xfr
-```
-
-### Homebrew (macOS/Linux)
-
-```bash
-brew install lance0/tap/xfr
-```
-
-### Docker (GHCR)
-
-Multi-arch image (amd64/arm64), handy for running a server:
+<a id="from-cratesio-recommended"></a>
+<a id="homebrew-macoslinux"></a>
+<a id="docker-ghcr"></a>
+<a id="pre-built-binaries"></a>
+<a id="eget"></a>
+<a id="arch-linux-aur"></a>
+<a id="from-source"></a>
+<a id="quick-install-script"></a>
+<a id="termux-android"></a>
+<a id="nix"></a>
+<a id="netbsd"></a>
+<a id="optional-features"></a>
+<a id="shell-completions"></a>
 
 ```bash
-docker run --rm -p 5201:5201 -p 5201:5201/udp ghcr.io/lance0/xfr:latest serve
+cargo install xfr                       # Default features
+cargo install xfr --features prometheus # Add metrics support
+brew install lance0/tap/xfr             # macOS/Linux
 ```
 
-### Pre-built Binaries
-
-Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
-
-| Platform | Target |
-|----------|--------|
-| Linux x86_64 | `xfr-x86_64-unknown-linux-musl.tar.gz` |
-| Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` (or `-musl` for fully static) |
-| macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | Use `cargo install xfr` |
-| Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
-| Windows | Use WSL2 (native support is experimental) |
-
-```bash
-# Example: Linux x86_64
-curl -LO https://github.com/lance0/xfr/releases/latest/download/xfr-x86_64-unknown-linux-musl.tar.gz
-tar xzf xfr-*.tar.gz && sudo mv xfr /usr/local/bin/
-```
-
-### eget
-
-```bash
-eget lance0/xfr
-```
-
-### Arch Linux (AUR)
-
-```bash
-yay -S xfr-bin
-```
-
-### From Source
-
-```bash
-git clone https://github.com/lance0/xfr
-cd xfr && cargo build --release
-sudo cp target/release/xfr /usr/local/bin/
-```
-
-### Quick Install Script
-
-> **Note**: Review scripts before piping to sh. See the [install script](install.sh) source.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
-```
-
-### Termux (Android)
-
-Download the `aarch64-linux-android` binary from [releases](https://github.com/lance0/xfr/releases), or build from source:
-
-```bash
-pkg install rust
-cargo install xfr
-```
-
-### Nix
-
-```bash
-nix run github:lance0/xfr          # Run without installing
-nix profile install github:lance0/xfr  # Install to profile
-```
-
-Or add to your flake inputs:
-
-```nix
-inputs.xfr.url = "github:lance0/xfr";
-```
-
-A dev shell is also available via `nix develop`.
-
-### NetBSD
-
-Available via [pkgsrc](https://pkgsrc.se/net/xfr):
-
-```bash
-pkgin install xfr
-```
-
-### Optional Features
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `discovery` | Yes | mDNS LAN discovery (`xfr discover`) |
-| `prometheus` | No | Prometheus metrics endpoint and Push Gateway support |
-
-```bash
-cargo install xfr --features prometheus    # Prometheus support
-cargo install xfr --all-features           # All features
-```
-
-### Shell Completions
-
-```bash
-# Bash
-xfr --completions bash > ~/.local/share/bash-completion/completions/xfr
-
-# Zsh (add ~/.zfunc to fpath in .zshrc first)
-xfr --completions zsh > ~/.zfunc/_xfr
-
-# Fish
-xfr --completions fish > ~/.config/fish/completions/xfr.fish
-
-# PowerShell (add to $PROFILE)
-xfr --completions powershell >> $PROFILE
-
-# Elvish
-xfr --completions elvish > ~/.elvish/lib/xfr.elv
-```
-
-## Usage
-
-### Server
-
-```bash
-xfr serve                    # Listen on port 5201
-xfr serve -p 9000            # Custom port
-xfr serve --tui              # Live dashboard showing active tests
-xfr serve --one-off          # Exit after one test
-xfr serve --max-duration 60s # Limit test duration
-xfr serve --push-gateway http://pushgateway:9091  # Push metrics on test complete
-xfr serve --psk mysecret     # Require PSK authentication
-xfr serve --rate-limit 2     # Max 2 concurrent tests per IP
-xfr serve --allow 192.168.0.0/16  # Only allow the local subnet
-xfr serve --preset internal  # Apply a [[presets]] entry from the config file
-```
-
-### Client
-
-```bash
-xfr 192.168.1.1              # TCP test, 10s, single stream
-xfr 192.168.1.1 -t 30s       # 30 second test
-xfr 192.168.1.1 -P 4         # 4 parallel streams
-xfr 192.168.1.1 -R           # Reverse (download test)
-xfr 192.168.1.1 --bidir      # Bidirectional
-xfr 192.168.1.1 -6           # Force IPv6 only
-xfr ::1 -6                   # IPv6 localhost
-xfr fe80::2%eth0             # IPv6 link-local: zone = interface name or index
-```
-
-### UDP Mode
-
-```bash
-xfr 192.168.1.1 -u           # UDP mode
-xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
-xfr 192.168.1.1 -u -b 100M   # UDP at 100 Mbps
-xfr 192.168.1.1 -u -b 60M -l 1368  # Smaller datagrams for a 1420-MTU tunnel
-```
-
-`-l/--length` sets the complete UDP payload size, including xfr's 16-byte
-sequence/timestamp header (16–65507 bytes; default 1400). It applies in both
-directions and across all streams. Both peers must support `udp_payload_size_v1`;
-an explicit size fails with an upgrade message against an older server.
-
-Choose a size that fits the path: allow 28 bytes for IPv4 + UDP headers or
-48 bytes for IPv6 + UDP headers, plus any IP options or extension headers.
-For example, 1368 fits a 1420-byte MTU with either address family's basic headers.
-Use `--probe-mtu` separately to find the largest payload that survives each
-direction, then pass the smaller result to `-l`. The default remains 1400;
-throughput tests do not automatically probe or adjust the size. JSON
-`udp_stats.packet_size` reports the largest valid datagram received, or is absent
-when no data arrived.
-
-### QUIC Mode
-
-```bash
-xfr 192.168.1.1 --quic       # QUIC transport (encrypted)
-xfr 192.168.1.1 --quic -P 4  # QUIC with 4 parallel streams
-xfr 192.168.1.1 --quic -R    # QUIC download test
-```
-
-QUIC provides built-in TLS 1.3 encryption with stream multiplexing over a single connection.
-
-**Security Note:** QUIC encrypts each connection but does not verify server
-identity without a PSK. With a PSK, xfr binds mutual authentication and the
-protected control channel to the exact TLS connection using the RFC 9266
-exporter, so a terminating relay cannot splice the handshake onto another QUIC
-connection. Both peers must support `quic_channel_binding_v1`; QUIC + PSK fails
-closed otherwise. The self-signed certificate is still not a public PKI identity.
-
-### MPTCP Mode
-
-```bash
-xfr 192.168.1.1 --mptcp       # MPTCP (Multi-Path TCP, Linux 5.6+)
-xfr 192.168.1.1 --mptcp -P 4  # MPTCP with 4 parallel streams
-xfr 192.168.1.1 --mptcp -R    # MPTCP download test
-```
-
-MPTCP enables a single connection to use multiple network paths simultaneously (e.g., WiFi + Ethernet). The server automatically creates MPTCP listeners — no flag needed on the server side. All TCP features (nodelay, congestion control, window size, bidir, multi-stream) work transparently with MPTCP.
-
-### Output Formats
-
-```bash
-xfr <host> --json              # JSON summary
-xfr <host> --json-stream       # JSON per interval (for scripting)
-xfr <host> --csv               # CSV output
-xfr <host> -q                  # Quiet mode (summary only)
-xfr <host> -o results.json     # Save to file
-xfr <host> --no-tui            # Plain text, no TUI
-xfr <host> --timestamp-format iso8601  # ISO 8601 timestamps
-```
-
-**Note:** Log messages go to stderr, allowing clean JSON/CSV piping: `xfr <host> --json 2>/dev/null`
-
-### Interval Control
-
-```bash
-xfr <host> -i 2                # Report every 2 seconds
-xfr <host> --omit 3            # Skip first 3s of intervals (TCP ramp-up)
-```
-
-### Compare Results
-
-```bash
-xfr diff baseline.json current.json
-xfr diff baseline.json current.json --threshold 5
-```
-
-### Discovery
-
-```bash
-xfr discover                 # Find xfr servers on LAN
-xfr discover --timeout 10s   # Extended search
-```
-
-## Keybindings (Client TUI)
-
-| Key | Action |
-|-----|--------|
-| `q` | Quit (cancels test) |
-| `p` | Pause/Resume test traffic |
-| `s` | Settings modal |
-| `t` | Cycle color theme |
-| `d` | Toggle per-stream view |
-| `?` / `F1` | Help |
-| `j` | Print JSON result |
-| `u` | Dismiss update notification |
-
-The Display settings' Timestamp choice reformats history immediately.
-`--timestamp-format` selects its initial format.
-
-## Keybindings (Server TUI)
-
-| Key | Action |
-|-----|--------|
-| `q` | Quit server |
-| `?` / `F1` | Help |
-| `Esc` | Close help |
-
-## Themes
-
-xfr includes 11 built-in color themes. Select with `--theme` or press `t` during a test:
-
-```bash
-xfr <host> --theme dracula     # Dark purple theme
-xfr <host> --theme matrix      # Green on black hacker style
-xfr <host> --theme catppuccin  # Soothing pastels
-xfr <host> --theme nord        # Arctic blue tones
-```
-
-Available themes: `default`, `kawaii`, `cyber`, `dracula`, `monochrome`, `matrix`, `nord`, `gruvbox`, `catppuccin`, `tokyo_night`, `solarized`
-
-The `monochrome` theme (alias `mono`) is the high-visibility choice: it uses
-the terminal's own default colors at maximum contrast, so it works on both
-dark and light terminal backgrounds — pair it with a light background at full
-brightness when working in direct sunlight. Loss severity in the throughput
-graph is always also encoded without color — light loss underlines the bar
-(or the baseline when throughput is zero or too small to draw),
-and in a theme with no hue to spend heavy loss additionally stipples the empty
-cells above it, marking the whole column while the bar keeps its true height —
-so lossy intervals stay visible through glare, in monochrome, and for
-colorblind users. Setting the standard
-[`NO_COLOR`](https://no-color.org) environment variable selects `monochrome`
-automatically unless a theme is chosen explicitly.
-
-Your theme preference is auto-saved beside `config.toml` as `xfr/prefs.toml`
-in the same platform configuration directory when you change it in the TUI.
-Use `--theme default` to override a config or saved theme for a run. Automatic
-choices, including `NO_COLOR`'s monochrome palette, are not saved.
-The server dashboard
-(`xfr serve --tui`) resolves its palette through the same precedence, so
-`--theme`, a saved preference, and `NO_COLOR` all apply to it too.
-For example: `xfr serve --tui --theme default`.
-
-## Configuration
-
-xfr reads defaults from:
-- **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
-- **macOS:** `~/Library/Application Support/xfr/config.toml`
-- **Windows:** `%APPDATA%\xfr\config.toml`
-
-```toml
-[client]
-duration_secs = 10
-parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
-tcp_nodelay = false
-window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
-# bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
-# congestion = "bbr"          # TCP congestion-control algorithm
-# dscp = "EF"                 # DSCP name or raw TOS byte (0-255)
-interval_secs = 1.0           # report interval; default is 1.0 seconds
-json_output = false
-no_tui = false
-theme = "default"            # or dracula, catppuccin, nord, matrix, etc.
-timestamp_format = "relative" # or "iso8601", "unix"
-address_family = "dual"      # "ipv4", "ipv6", or "dual"
-omit_secs = 0                # omit first N seconds (TCP ramp-up)
-# bind = "192.168.1.100"      # local address, optionally with :port
-# cport = 5202                # client source port for firewall traversal
-psk = "my-secret-key"
-log_file = "~/.config/xfr/xfr.log"
-log_level = "info"
-
-[server]
-port = 5201
-one_off = false
-no_mdns = false
-address_family = "dual"      # "ipv4", "ipv6", or "dual"
-psk = "my-secret-key"
-rate_limit = 5
-rate_limit_window = 60       # whole seconds; must be at least 1
-allow = ["192.168.0.0/16", "10.0.0.0/8"]
-deny = []
-acl_file = "/path/to/acl.txt"
-push_gateway = "http://pushgateway:9091"
-log_file = "~/.config/xfr/xfr-server.log"
-log_level = "info"
-
-[[presets]]                  # selected with `xfr serve --preset internal`
-name = "internal"
-allowed_clients = ["192.168.1.0/24"]  # extra allowlist on top of allow/deny
-max_duration_secs = 60       # applies when --max-duration is not given
-```
-
-On Unix, a config containing either `psk` must grant no access to group or
-other users, so the shared key is not exposed to another local account:
-
-```bash
-# Linux
-chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
-
-# macOS
-chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
-```
-
-The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
-
-The `address_family` setting accepts `ipv4`, `ipv6`, or `dual`, including existing
-aliases such as `4`, `6`, and `both`. Unknown effective values are rejected.
-`-4`/`--ipv4` and `-6`/`--ipv6` override config defaults and cannot be used together.
-A specific server `--bind` address also selects its address family; any `-4`/`-6`
-flag must agree with that address.
-
-Environment variables override config file:
-
-```bash
-export XFR_PORT=9000
-export XFR_DURATION=30s
-```
-
-For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes precedence over
-`server.port` in the config file. If none is set, the server uses port 5201. An explicit
-port of 5201 also overrides the config file.
-
-## Prometheus Metrics
-
-Enable with `--features prometheus`:
-
-```bash
-xfr serve --prometheus 9090
-```
-
-Metrics available at `http://localhost:9090/metrics` include:
-
-- `xfr_bytes_total`, `xfr_throughput_mbps`, `xfr_tests_total`, and
-  `xfr_active_tests` - aggregate transfer and server state
-- `xfr_test_duration_seconds` - test duration histogram
-- `xfr_stream_bytes_total`, `xfr_stream_throughput_mbps`, and
-  `xfr_stream_retransmits_total` - per-stream metrics labeled by `test_id` and
-  `stream_id`
-- `xfr_tcp_rtt_microseconds` and `xfr_tcp_retransmits_total` - TCP metrics
-  labeled by `test_id`
-
-See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
-
-## CLI Reference
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--port` | `-p` | 5201 | Server/client port |
-| `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
-| `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
-| `--udp` | `-u` | false | UDP mode |
-| `--length` | `-l` | 1400 | UDP payload bytes, including the 16-byte xfr header (16–65507); requires `-u` and server `udp_payload_size_v1` support |
-| `--quic` | `-Q` | false | QUIC mode (encrypted, multiplexed streams) |
-| `--bitrate` | `-b` | unlimited | Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M). 0 = unlimited. Global across all streams |
-| `--parallel` | `-P` | 1 | Parallel streams |
-| `--reverse` | `-R` | false | Reverse direction (download) |
-| `--bidir` | | false | Bidirectional test |
-| `--ipv4` | `-4` | false | Force IPv4 only |
-| `--ipv6` | `-6` | false | Force IPv6 only |
-| `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
-| `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
-| `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
-| `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
-| `--random` | | true | Use random payload data for client-sent TCP/UDP traffic (default) |
-| `--zeros` | | false | Use zero-filled payload data (client-sent traffic only) |
-| `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
-| `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
-| `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; needs server ≥ this version) |
-| `--connect-timeout` | | none | Fail if the control connection takes longer than this (e.g. `5s`); without it, dead servers are bounded only by OS defaults |
-| `--json` | | false | JSON output |
-| `--json-stream` | | false | JSON per interval |
-| `--csv` | | false | CSV output |
-| `--quiet` | `-q` | false | Summary only |
-| `--interval` | `-i` | 1.0 | Report interval in seconds (must be > 0) |
-| `--omit` | | 0 | Omit first N seconds |
-| `--output` | `-o` | stdout | Output file |
-| `--no-tui` | | false | Disable TUI |
-| `--no-update-check` | | false | Disable the background update check (also honors `DO_NOT_TRACK` / `XFR_NO_UPDATE_CHECK`) |
-| `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |
-| `--tcp-nodelay` | | false | Disable Nagle algorithm |
-| `--window` | `-w` | OS default | Socket buffer size for TCP and UDP (SO_SNDBUF/SO_RCVBUF on both ends); when unset, TCP autotunes and UDP uses the kernel default |
-| `--congestion` | | OS default | TCP congestion control algorithm (e.g. cubic, bbr, reno) |
-| `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
-| `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
-| `--log-level` | | info | Log level (error, warn, info, debug, trace) |
-| `--push-gateway` | | none | Prometheus Push Gateway URL (server) |
-| `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
-| `--psk` | | none | Pre-shared key for authentication |
-| `--psk-file` | | none | Read PSK from file |
-| `--rate-limit` | | none | Max concurrent tests per IP (server) |
-| `--rate-limit-window` | | config or 60s | Rate limit time window in whole seconds, at least 1s (server) |
-| `--completions` | | none | Generate shell completions (bash, zsh, fish, powershell, elvish) |
-| `--allow` | | none | Allow IP/subnet, repeatable (server) |
-| `--deny` | | none | Deny IP/subnet, repeatable (server) |
-| `--acl-file` | | none | ACL rules file (server) |
-| `--max-duration` | | none | Maximum test duration, server-side limit (server) |
-| `--tui` | | false | Enable live dashboard (server) |
-| `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
-| `--no-mdns` | | false | Disable mDNS service registration (server) |
-
-TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
-
-`--dscp` applies to TCP and UDP sockets on both ends when relevant, including server-sent download and bidirectional traffic. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
-
-## Security Considerations
-
-### Transport Encryption
-
-| Mode | Bulk test data | Control channel |
-|------|----------------|-----------------|
-| TCP | Plaintext | Plaintext without PSK; ChaCha20-Poly1305 after PSK authentication |
-| UDP | Plaintext | Uses the same TCP control channel behavior |
-| QUIC | TLS 1.3; identity unverified without PSK | TLS 1.3; exporter-bound PSK protection when enabled |
-
-**QUIC mode** (`-Q/--quic`) uses a self-signed server certificate without PKI
-verification. Without a PSK, an active relay can terminate and forward the QUIC
-connection. With a PSK, xfr mixes the RFC 9266 TLS exporter into the
-authentication proof and protected-control keys, binding them to the exact QUIC
-connection that carries the bulk streams. A relay cannot splice authentication
-across two QUIC connections without the PSK. This requires both peers to
-advertise `quic_channel_binding_v1`; the session fails closed otherwise.
-
-### Authentication
-
-PSK authentication (`--psk`) authenticates both peers and protects post-auth
-control messages with ChaCha20-Poly1305. TCP and UDP bulk test payloads remain
-plaintext. QUIC bulk payloads are TLS-encrypted, and on upgraded PSK sessions
-that TLS connection is authenticated by the exporter-bound PSK handshake. The
-self-signed certificate is still not a public PKI identity; use an authenticated
-VPN when you need centrally managed endpoint identities or isolation between
-different holders of a shared PSK.
-
-To combine QUIC transport encryption with PSK-protected control:
-
-```bash
-# Server
-xfr serve --psk "secretkey"
-
-# Client (QUIC transport + PSK-protected control)
-xfr <host> -Q --psk "secretkey"
-```
-
-> **Security note:** `--psk` and the `XFR_PSK` environment variable expose the
-> key through process metadata such as `ps`, shell history, and
-> `/proc/<pid>/environ`. For production deployments, store the key in a file
-> readable only by the owner and use `--psk-file` instead.
-
-### Network Considerations
-
-- **Single-port TCP**: TCP uses single-port mode by default -- control and data connections share port 5201. Data connections are validated against the control connection's IP address, preventing unauthorized access.
-- **UDP on untrusted networks**: UDP mode may be susceptible to reflection attacks from spoofed source addresses. Use TCP or QUIC on public networks.
-- **Rate limiting**: Use `--rate-limit` on public servers to prevent abuse.
-- **ACLs**: Use `--allow`/`--deny` to restrict client access.
-
-### DoS Protections
-
-- **Slow-loris resistance**: New connections must send their first message within 5 seconds, preventing slow-loris attacks from blocking the accept loop.
-- **DataHello flood protection**: DataHello messages for unknown test IDs are rejected immediately without allocating resources.
-- **Bounded reads**: All control messages are limited to 8KB, preventing memory exhaustion from oversized messages.
-- **Capability negotiation**: Client and server exchange capabilities during the Hello handshake (protocol version 1.1), enabling safe feature evolution.
-- **Concurrent connection limits**: Server limits concurrent handlers (default 100) to prevent connection floods.
-
-### Server Resource Usage
-
-Each TCP stream allocates a 128 KB application read/write buffer. Kernel socket buffers are managed by TCP autotuning unless the client passes `-w`/`--window`, in which case the requested size is applied via `SO_SNDBUF`/`SO_RCVBUF` on both ends. Memory usage scales with concurrent clients:
-
-| Streams per client | App buffer per client | 10 clients (app buffers) |
-|-------------------|-----------------------|--------------------------|
-| 1 (`-P 1`) | 128 KB | 1.3 MB |
-| 8 (`-P 8`) | 1 MB | 10 MB |
-| 128 (`-P 128`) | 16 MB | 160 MB |
-
-On top of that, the kernel holds autotuned socket buffers (typically a few hundred KB per stream, capped by `net.ipv4.tcp_rmem[2]`/`tcp_wmem[2]`). When a client passes `-w N`, add roughly `N` bytes per stream on each side. The server limits concurrent handlers (default 100) to prevent resource exhaustion. Use `--rate-limit` to restrict tests per IP.
+[All installation channels and shell completions](docs/INSTALL.md), including
+release binaries, Docker, AUR, Termux, Nix, pkgsrc, and source builds.
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| Linux x86_64/ARM64 | Full support, pre-built binaries |
-| macOS Apple Silicon | Full support, pre-built binaries |
-| macOS Intel | Full support, build from crate: `cargo install xfr` |
-| Android (Termux) | Full support, pre-built binaries |
-| NetBSD | Full support, via pkgsrc: `pkgin install xfr` |
-| Windows | Experimental (WSL2 recommended). Native builds work but lack TCP_INFO metrics. |
+Release binaries cover Linux x86_64/ARM64, macOS Apple Silicon, and Android
+ARM64. macOS Intel can build from crates.io; NetBSD has a community pkgsrc
+package. Native Windows remains experimental; WSL2 is recommended.
 
-## Troubleshooting
+CI runs tests on Ubuntu and macOS and checks Windows compilation. Packaging
+and CI coverage do not establish runtime qualification for every platform or
+transport. See [platform details and limitations](docs/INSTALL.md#platform-support).
 
-### Permission denied on port 5201
+## Real-World Use Cases
 
-Use a port above 1024 or run with elevated privileges:
+<a id="usage"></a>
+<a id="server"></a>
+<a id="client"></a>
+<a id="udp-mode"></a>
+<a id="quic-mode"></a>
+<a id="mptcp-mode"></a>
+<a id="output-formats"></a>
+<a id="interval-control"></a>
+<a id="compare-results"></a>
+<a id="discovery"></a>
+<a id="vpn-tunnel-testing"></a>
+<a id="udp-congestion-detection"></a>
+<a id="path-mtu-discovery"></a>
+<a id="beforeafter-comparison"></a>
+<a id="multi-stream-for-bonded-connections"></a>
+<a id="prometheus-monitoring"></a>
 
-```bash
-xfr serve -p 9000
-```
+| Task | Command or guide |
+|------|------------------|
+| Measure a VPN tunnel | `xfr 10.8.0.1 -t 30s` |
+| Download or test both directions | `xfr <host> -R` / `xfr <host> --bidir` |
+| Detect UDP congestion | `xfr <host> -u -b 500M -t 60s` |
+| Find a path's UDP payload limit | `xfr <host> --probe-mtu`; [UDP sizing](docs/FEATURES.md#udp) |
+| Exercise multiple paths/streams | `xfr <host> -P 8 -t 30s`; [MPTCP](docs/FEATURES.md#mptcp-multi-path-tcp) |
+| Compare before and after | Save with `-o before.json` / `-o after.json`, then `xfr diff before.json after.json --threshold 5` |
+| Find servers on the LAN | `xfr discover` |
+| Automate tests and collect metrics | [Scripting, Docker, CI/CD, Prometheus](docs/SCRIPTING.md) |
+| Look up flags | `xfr --help`, `xfr serve --help`, [CLI reference](docs/FEATURES.md#cli-reference) |
 
-### Connection refused
+<a id="keybindings-client-tui"></a>
+<a id="keybindings-server-tui"></a>
+<a id="themes"></a>
 
-Ensure the server is running and the port is not blocked by a firewall. TCP, UDP, and QUIC all run entirely on port 5201 (or your custom port) when both ends are current -- no server-side ephemeral data ports are needed (UDP single-port requires both ends ≥ v0.9.18; older pairings fall back to ephemeral server ports automatically). For strict egress policies or ECMP testing, use `--cport` to pin client source ports.
+Press `?` / `F1` for TUI help. Client keys include `s` for settings, `t` for
+themes, and `p` to pause/resume traffic. See [client keys](docs/FEATURES.md#keybindings-client-tui),
+[server keys](docs/FEATURES.md#keybindings-server-tui), and [themes](docs/FEATURES.md#themes).
 
-### Low throughput
+<a id="configuration"></a>
+<a id="prometheus-metrics"></a>
+<a id="cli-reference"></a>
 
-- Try multiple parallel streams: `-P 4`
-- Disable Nagle's algorithm: `--tcp-nodelay`
-- Increase TCP socket buffer: `--window 4M`
-- On CPU-bound senders (embedded routers, SBCs), the per-write userspace copy is skipped by default via sendfile(2) (TCP, Linux). This applies to client sends, and to server sends in `-R`/`--bidir` when the server supports it; pass `-Z` to get a warning when zero-copy can't take effect, or `--no-zerocopy` to disable it
+Set defaults in the platform configuration directory; CLI values override them.
+See [configuration and precedence](docs/FEATURES.md#configuration),
+[metrics](docs/FEATURES.md#prometheus-metrics), and the [CLI reference](docs/FEATURES.md#cli-reference).
 
-### UDP packet loss
+<a id="security-considerations"></a>
+<a id="transport-encryption"></a>
+<a id="authentication"></a>
+<a id="network-considerations"></a>
+<a id="dos-protections"></a>
+<a id="server-resource-usage"></a>
 
-- Reduce bitrate: `-b 500M`
-- Check for network congestion or firewall issues
-- If the receiver may be CPU-bound or its kernel UDP buffer is small, increase `--window` (e.g. `-w 16M`) — `-w` applies to UDP `SO_SNDBUF`/`SO_RCVBUF` and propagates to the server, helping high-rate flows avoid kernel tail-drops that hide as live `0.0%` loss
+TCP and UDP bulk payloads are plaintext. QUIC encrypts traffic but verifies
+peer identity only when a PSK is configured. Prefer `--psk-file` to placing a
+key in command arguments or environment variables. Read the
+[transport security details](docs/FEATURES.md#security-considerations),
+[authentication requirements](docs/FEATURES.md#psk-authentication), and
+[security policy](SECURITY.md) before exposing a server.
+
+<a id="troubleshooting"></a>
+<a id="permission-denied-on-port-5201"></a>
+<a id="connection-refused"></a>
+<a id="low-throughput"></a>
+<a id="udp-packet-loss"></a>
+
+For connection failures, throughput tuning, and UDP loss, start with
+[troubleshooting](docs/INSTALL.md#troubleshooting) and [known issues](KNOWN_ISSUES.md).
 
 ## Documentation
 
-- [Comparison with iperf3](docs/COMPARISON.md) - Feature matrix and migration guide
-- [Scripting & CI/CD](docs/SCRIPTING.md) - Automation, Docker, Prometheus
-- [Features Reference](docs/FEATURES.md) - Detailed feature documentation
-- [Architecture](docs/ARCHITECTURE.md) - For contributors
-- [Changelog](CHANGELOG.md) - Release history
-- [Known Issues](KNOWN_ISSUES.md) - Edge cases and limitations
-- [Roadmap](ROADMAP.md) - Planned features
-- [Contributing](CONTRIBUTING.md) - Development guidelines
-- [Security Policy](SECURITY.md) - Supported versions and private reporting
+The [documentation index](docs/README.md) covers installation, features,
+automation, architecture, development, release history, and demo sources.
 
 ## See Also
 
-- [Terminal Trove](https://terminaltrove.com/xfr/) - xfr listing and discovery
-- [AUR](https://aur.archlinux.org/packages/xfr-bin) - Arch Linux package (community-maintained)
-- [pkgsrc](https://pkgsrc.se/net/xfr) - NetBSD package (community-maintained)
+- [Terminal Trove](https://terminaltrove.com/xfr/) — xfr listing and discovery
+- [AUR](https://aur.archlinux.org/packages/xfr-bin) — community Arch Linux package
+- [pkgsrc](https://pkgsrc.se/net/xfr) — community NetBSD package
 
 ## Acknowledgments
 
