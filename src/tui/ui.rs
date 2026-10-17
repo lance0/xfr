@@ -807,16 +807,22 @@ PgUp/PgDn  page help
 Home/End  first/last page
 Esc  close";
 
-fn help_lines(width: u16, server: bool) -> Vec<Line<'static>> {
+/// Help rows hard-wrapped to `width`, each split into its (key, description)
+/// parts. Help text is ASCII, so byte slicing keeps paging exact even at one
+/// column.
+fn help_rows(width: u16, server: bool) -> Vec<(&'static str, &'static str)> {
     let text = if server { SERVER_HELP } else { CLIENT_HELP };
-    text.lines()
-        .flat_map(|line| {
-            // Help text is ASCII; hard wrapping keeps paging exact even at one column.
-            line.as_bytes()
-                .chunks(usize::from(width.max(1)))
-                .map(|chunk| Line::from(String::from_utf8(chunk.to_vec()).expect("ASCII help")))
-        })
-        .collect()
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let key_len = line.find("  ").unwrap_or(0);
+        for start in (0..line.len()).step_by(width) {
+            let end = (start + width).min(line.len());
+            let split = key_len.clamp(start, end);
+            rows.push((&line[start..split], &line[split..end]));
+        }
+    }
+    rows
 }
 
 pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u16, server: bool) {
@@ -828,15 +834,39 @@ pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u
         width,
         height,
     );
-    let help = Paragraph::new(help_lines(width.saturating_sub(2), server))
-        .style(Style::default().fg(theme.text))
-        .scroll((scroll, 0))
-        .block(
-            Block::default()
-                .title(" Help ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
-        );
+    let rows = help_rows(width.saturating_sub(2), server);
+    let max = (rows.len() as u16).saturating_sub(height.saturating_sub(2));
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(key, desc)| {
+            Line::from(vec![
+                Span::styled(key, Style::default().fg(theme.accent)),
+                Span::styled(desc, Style::default().fg(theme.text_dim)),
+            ])
+        })
+        .collect();
+    let mut block = Block::default()
+        .title(Span::styled(
+            " Help ",
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    // Overflowing help says which way the rest of it is.
+    if scroll < max {
+        block = block.title_bottom(Span::styled(
+            " PgDn more ",
+            Style::default().fg(theme.accent),
+        ));
+    } else if max > 0 {
+        block = block.title_bottom(Span::styled(
+            " PgUp back ",
+            Style::default().fg(theme.accent),
+        ));
+    }
+    let help = Paragraph::new(lines).scroll((scroll, 0)).block(block);
     frame.render_widget(Clear, help_area);
     frame.render_widget(help, help_area);
 }
@@ -1374,6 +1404,41 @@ mod small_terminal_tests {
     }
 
     #[test]
+    fn help_hints_scrolling_only_when_it_overflows() {
+        use crossterm::event::KeyCode;
+        use ratatui::layout::Size;
+        let theme = Theme::default();
+        let render = |width, height, scroll, server| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| draw_help_overlay(f, &theme, f.area(), scroll, server))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let text = |buf: &ratatui::buffer::Buffer| -> String {
+            buf.content.iter().map(|c| c.symbol()).collect()
+        };
+        let end = help_scroll(0, Size::new(40, 10), false, Some(KeyCode::End));
+        assert!(end > 0);
+        let top = text(&render(40, 10, 0, false));
+        assert!(
+            top.contains("PgDn more") && !top.contains("PgUp back"),
+            "{top}"
+        );
+        let bottom = text(&render(40, 10, end, false));
+        assert!(bottom.contains("PgUp back") && !bottom.contains("PgDn more"));
+        for (width, height, server) in [(80, 24, false), (40, 8, true)] {
+            let fits = text(&render(width, height, 0, server));
+            assert!(!fits.contains("more") && !fits.contains("back"), "{fits}");
+        }
+        // Keys keep the accent colour, descriptions stay dim.
+        let buf = render(80, 24, 0, false);
+        let q = buf.content.iter().position(|c| c.symbol() == "q").unwrap();
+        assert_eq!(buf.content[q].fg, theme.accent);
+        assert_eq!(buf.content[q + 3].fg, theme.text_dim);
+    }
+
+    #[test]
     fn ultra_small_client_and_help_do_not_panic() {
         let mut app = App::default();
         let mut terminal = Terminal::new(TestBackend::new(1, 1)).unwrap();
@@ -1613,7 +1678,7 @@ pub fn help_scroll(
         .height
         .min(if server { 8 } else { 16 })
         .saturating_sub(2);
-    let max = (help_lines(size.width.min(40).saturating_sub(2), server).len() as u16)
+    let max = (help_rows(size.width.min(40).saturating_sub(2), server).len() as u16)
         .saturating_sub(visible);
     let scroll = scroll.min(max);
     match key {
