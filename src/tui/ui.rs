@@ -1056,11 +1056,14 @@ fn draw_display_settings(
         ),
     ];
 
+    // A locked update check cannot be changed, so it gets no change arrows.
+    let locked_row = settings.update_check_lock_reason.map(|_| 3);
     draw_setting_items(
         frame,
         &items,
         settings.selected_index,
         settings.button_focused,
+        locked_row,
         theme,
         area,
     );
@@ -1088,6 +1091,7 @@ fn draw_test_settings(
         &items,
         settings.selected_index,
         settings.button_focused,
+        None,
         theme,
         area,
     );
@@ -1098,6 +1102,7 @@ fn draw_setting_items(
     items: &[(&str, String)],
     selected_index: usize,
     button_focused: bool,
+    locked_row: Option<usize>,
     theme: &Theme,
     area: Rect,
 ) {
@@ -1106,10 +1111,13 @@ fn draw_setting_items(
 
     for (i, (label, value)) in items.iter().enumerate() {
         let is_selected = !button_focused && i == selected_index;
+        let locked = locked_row == Some(i);
 
         let prefix = if is_selected { "▶ " } else { "  " };
         let label_style = Style::default().fg(theme.text_dim);
-        let value_style = if is_selected {
+        let value_style = if locked {
+            label_style
+        } else if is_selected {
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
@@ -1121,11 +1129,12 @@ fn draw_setting_items(
         // change arrows (prefix 2 + label column 14 + value + arrows 4). The
         // selection prefix still identifies the active row.
         let value_width = Span::raw(value.as_str()).width();
-        let value_display = if is_selected && 2 + 14 + value_width + 4 <= area.width as usize {
-            format!("◀ {} ▶", value)
-        } else {
-            value.clone()
-        };
+        let value_display =
+            if is_selected && !locked && 2 + 14 + value_width + 4 <= area.width as usize {
+                format!("◀ {} ▶", value)
+            } else {
+                value.clone()
+            };
 
         lines.push(Line::from(vec![
             Span::raw(prefix),
@@ -1317,6 +1326,35 @@ mod small_terminal_tests {
                     text.contains(&format!("off ({reason})")),
                     "width {width}: {reason}"
                 );
+            }
+        }
+    }
+
+    /// Right does nothing on a locked update-check row, so it must not
+    /// offer the change arrows; it reads dimmed and keeps its reason.
+    #[test]
+    fn locked_update_check_row_has_no_change_arrows() {
+        let theme = Theme::default();
+        for locked in [false, true] {
+            let mut app = App::default();
+            app.settings.visible = true;
+            app.settings.selected_index = 3;
+            app.settings.update_check = false;
+            app.settings.update_check_lock_reason = locked.then_some("locked: --no-update-check");
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let row = (0..24)
+                .map(|y| (y, (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()))
+                .find(|(_, row)| row.contains("Update check:"))
+                .unwrap();
+            assert!(row.1.contains("▶ Update check:"), "{}", row.1);
+            assert_eq!(row.1.contains('◀'), !locked, "{}", row.1);
+            if locked {
+                assert!(row.1.contains("(locked: --no-update-check)"), "{}", row.1);
+                let at = row.1.find("off (").unwrap();
+                let x = row.1[..at].chars().count() as u16;
+                assert_eq!(buf[(x, row.0)].fg, theme.text_dim);
             }
         }
     }
