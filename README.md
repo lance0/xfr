@@ -556,7 +556,7 @@ See `examples/grafana-dashboard.json` for a sample Grafana dashboard.
 | `--quiet` | `-q` | false | Summary only |
 | `--interval` | `-i` | 1.0 | Report interval in seconds (must be > 0) |
 | `--omit` | | 0 | Omit first N seconds |
-| `--output` | `-o` | stdout | Output file |
+| `--output` | `-o` | | Also save the final result to a file (CSV with `--csv`, otherwise JSON) |
 | `--no-tui` | | false | Disable TUI |
 | `--no-update-check` | | false | Disable the background update check (also honors `DO_NOT_TRACK` / `XFR_NO_UPDATE_CHECK`) |
 | `--theme` | | default | Color theme (dracula, nord, matrix, etc.) |

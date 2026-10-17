@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`--connect-timeout` now bounds hostname resolution** — the client resolved the target with the blocking system resolver on a runtime thread, so a stuck DNS lookup hung the connect and the timeout could never fire; QUIC also resolved outside its connect deadline entirely. Lookups now run on tokio's blocking pool inside the deadline for TCP, UDP and QUIC. Library: `xfr::net::resolve_host` is now `async`.
+- **`--csv -o FILE` saves CSV** — the file always received the JSON result, even though `--csv -o data.csv` is the documented way to save CSV. With `--csv` the file now holds the same header and summary row printed to stdout; every other mode still saves JSON.
+- **Client options given with a subcommand are rejected instead of ignored** — `xfr --json -t 5 -P 4 diff a b` or `xfr -p 9000 serve` used to run with those options silently dropped. Top-level test, output and connection options typed alongside `serve`, `diff` or `discover` now fail with a usage error (exit 2) naming the option; pass server options after `serve` (`xfr serve -p 9000`). `--theme`, `--log-file`, `--log-level`, `--no-update-check` and `--completions` still work with any subcommand, and options set through environment variables (`XFR_DURATION`, `XFR_PORT`, `XFR_PSK`, ...) are not affected.
+- **`--json-stream` and `-q` are rejected together** — `-q` suppresses interval output, so the combination silently emitted only the final summary line instead of a stream. Use `--json` for the summary alone.
 
 ## [0.11.0] - 2026-10-13
 
