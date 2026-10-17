@@ -91,15 +91,19 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   windows-check:
-    name: Windows cargo check
+    name: Windows tests and Clippy
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Cargo check
-        run: cargo check --locked --all-features
+      - name: Clippy
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-features
 
   msrv:
     name: MSRV (1.88)
