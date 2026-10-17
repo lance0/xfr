@@ -39,6 +39,18 @@ pub enum AppState {
     Error,
 }
 
+impl std::fmt::Display for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AppState::Connecting => "Connecting...",
+            AppState::Running => "Running...",
+            AppState::Paused => "Paused",
+            AppState::Completed => "Complete",
+            AppState::Error => "Error",
+        })
+    }
+}
+
 pub struct StreamData {
     pub id: u8,
     pub bytes: u64,

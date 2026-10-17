@@ -123,8 +123,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_footer(frame, app, theme, chunks[2]);
     }
 
-    // Show pause overlay (behind other modals)
-    if app.state == AppState::Paused && !app.show_help && !app.settings.visible {
+    // Show pause overlay (behind other modals). The compact view (content
+    // under 10 rows) already reads "Paused" and the box would hide its rate.
+    let compact = chunks[chunks.len() - 2].height < 10;
+    if app.state == AppState::Paused && !compact && !app.show_help && !app.settings.visible {
         draw_pause_overlay(frame, theme, size);
     }
 
@@ -205,7 +207,7 @@ fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             };
             let lines = vec![
                 Line::from(format!(
-                    "{:?}  {}",
+                    "{}  {}",
                     app.state,
                     mbps_to_human(if app.state == AppState::Completed {
                         app.average_throughput_mbps
@@ -685,14 +687,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let status_text = match cancel_wait_secs {
         Some(secs) => format!("Waiting for server ({secs}s)..."),
-        None => match app.state {
-            AppState::Connecting => "Connecting...",
-            AppState::Running => "Running...",
-            AppState::Paused => "Paused",
-            AppState::Completed => "Complete",
-            AppState::Error => "Error",
-        }
-        .to_string(),
+        None => app.state.to_string(),
     };
 
     let status_color = if cancel_wait_secs.is_some() {
@@ -707,12 +702,14 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     };
 
+    // Help leads: hints are dropped from the right as the width shrinks, and
+    // help lists every other key.
     let mut keys = vec![
+        ("?", "Help"),
         ("q", "Quit"),
         ("p", "Pause"),
         ("r", "Restart"),
         ("s", "Settings"),
-        ("?", "Help"),
         ("t", "Theme"),
     ];
     if app.streams_count > 1 {
@@ -1371,7 +1368,7 @@ mod small_terminal_tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(text.contains("Completed  42.0 Mbps"), "{text}");
+        assert!(text.contains("Complete  42.0 Mbps"), "{text}");
         assert!(!text.contains("99.0 Mbps"), "{text}");
     }
 
@@ -1655,6 +1652,40 @@ mod small_terminal_tests {
             "expected full hints: {footer:?}"
         );
         assert!(footer.contains("Status:"), "footer lost Status: {footer:?}");
+    }
+
+    /// Hints drop from the right, so help leads and survives narrow widths.
+    #[test]
+    fn footer_keeps_help_hint_at_narrow_widths() {
+        for (width, height) in [(40, 24), (40, 10), (60, 24), (80, 24)] {
+            let frame = rows(width, height);
+            let footer = frame.last().expect("footer row");
+            assert!(footer.contains("?:Help"), "{width}x{height}: {footer:?}");
+            assert!(footer.contains("Status: Running"), "{footer:?}");
+        }
+    }
+
+    /// The compact view already says "Paused"; the pause box would hide its rate.
+    #[test]
+    fn compact_pause_keeps_the_rate_visible() {
+        let mut app = running_app_with_history();
+        app.state = AppState::Paused;
+        app.current_throughput_mbps = 94.0;
+        for (height, boxed) in [(8, false), (12, true)] {
+            let mut terminal = Terminal::new(TestBackend::new(40, height)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert_eq!(text.contains("PAUSED"), boxed, "{text}");
+            if !boxed {
+                assert!(text.contains("Paused  94.0 Mbps"), "{text}");
+            }
+        }
     }
 
     /// Tiny terminals must degrade, not panic.
