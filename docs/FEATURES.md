@@ -761,7 +761,10 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 Server options go after `serve` (`xfr serve -p 9000`). Client options typed
 alongside `serve`, `diff` or `discover` (`xfr -p 9000 serve`) are a usage
 error; only `--theme`, `--log-file`, `--log-level`, `--no-update-check` and
-`--completions` work with any subcommand. Environment variables such as
+`--completions` work with any subcommand, and they go before it
+(`xfr --no-update-check serve`, not `xfr serve --no-update-check`). Only
+`--theme` is also accepted after the subcommand; `serve` has its own
+`--log-file` and `--log-level`, given after it. Environment variables such as
 `XFR_PORT` are not affected.
 
 TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.

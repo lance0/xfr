@@ -205,18 +205,20 @@ fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     transferred
                 )
             };
-            let lines = vec![
-                Line::from(format!(
-                    "{}  {}",
-                    app.state,
-                    mbps_to_human(if app.state == AppState::Completed {
-                        app.average_throughput_mbps
-                    } else {
-                        app.current_throughput_mbps
-                    })
-                )),
-                Line::from(progress),
-            ];
+            let rate = mbps_to_human(if app.state == AppState::Completed {
+                app.average_throughput_mbps
+            } else {
+                app.current_throughput_mbps
+            });
+            // The rate is the point of this view: shorten the state label,
+            // then drop it, before the rate would be cut mid-unit.
+            let state = app.state.to_string();
+            let headline = [state.as_str(), state.trim_end_matches('.')]
+                .into_iter()
+                .map(|state| format!("{state}  {rate}"))
+                .find(|line| line.chars().count() <= usize::from(area.width))
+                .unwrap_or(rate);
+            let lines = vec![Line::from(headline), Line::from(progress)];
             frame.render_widget(
                 Paragraph::new(lines).style(Style::default().fg(theme.text)),
                 area,
@@ -681,6 +683,80 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 }
 
+/// Hints every client footer shows; Streams and Dismiss are conditional.
+const BASE_KEYS: [(&str, &str); 6] = [
+    ("?", "Help"),
+    ("q", "Quit"),
+    ("p", "Pause"),
+    ("r", "Restart"),
+    ("s", "Settings"),
+    ("t", "Theme"),
+];
+
+/// Width of the roomy "[q] Quit | ..." form: len(key) + len(label) + 3 per
+/// hint plus 3-column separators. The compact "q:Quit ..." form drops to
+/// len + 1 and single spaces, which fits the default hint set beside Status
+/// on 80 columns.
+fn full_hints_width(keys: &[(&str, &str)]) -> usize {
+    keys.iter()
+        .map(|(k, l)| k.len() + l.len() + 3)
+        .sum::<usize>()
+        + 3 * keys.len().saturating_sub(1)
+}
+
+/// Whether the client footer uses the roomy hint form at `width` with its
+/// base hints beside "Status: Running...". The server footer follows this,
+/// so both TUIs show the same hint style at the same width.
+pub(super) fn roomy_hints_fit(width: u16) -> bool {
+    full_hints_width(&BASE_KEYS) + " Status: Running...".len() <= usize::from(width)
+}
+
+/// Footer key hints, in order, as compact `q:Quit` or roomy `[q] Quit`.
+/// Whole hints that don't fit are dropped rather than letting ratatui clip
+/// the last one part-way through its label. A shorter list reads as a
+/// shorter list; half a label reads as a rendering bug.
+pub(super) fn key_hints(
+    keys: &[(&'static str, &'static str)],
+    width: u16,
+    compact: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let sep_width = if compact { 1 } else { 3 };
+    let hint_pad = if compact { 1 } else { 3 };
+    let available = usize::from(width);
+    let mut used = 0usize;
+
+    let mut spans = Vec::with_capacity(keys.len() * 3);
+    for (i, &(key, label)) in keys.iter().enumerate() {
+        let sep_cost = if i > 0 { sep_width } else { 0 };
+        let cost = sep_cost + key.len() + label.len() + hint_pad;
+        if used + cost > available {
+            break;
+        }
+        used += cost;
+
+        if i > 0 {
+            let sep = if compact { " " } else { " | " };
+            spans.push(Span::styled(sep, Style::default().fg(theme.text_dim)));
+        }
+        if compact {
+            spans.push(Span::styled(key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!(":{}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        } else {
+            spans.push(Span::styled("[", Style::default().fg(theme.text_dim)));
+            spans.push(Span::styled(key, Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                format!("] {}", label),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // A pending quit overrides the state label: show a live countdown so a
     // cancel on a dead link reads as a bounded wait, not a hang (issue #159).
@@ -705,14 +781,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     // Help leads: hints are dropped from the right as the width shrinks, and
     // help lists every other key.
-    let mut keys = vec![
-        ("?", "Help"),
-        ("q", "Quit"),
-        ("p", "Pause"),
-        ("r", "Restart"),
-        ("s", "Settings"),
-        ("t", "Theme"),
-    ];
+    let mut keys = BASE_KEYS.to_vec();
     if app.streams_count > 1 {
         keys.push(("d", "Streams"));
     }
@@ -724,86 +793,52 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // chunk on the right and the key hints absorb any clipping. Laid out as
     // one line, the full hint list runs ~107 columns and an 80-column
     // terminal used to lose "Status: ..." off the right edge entirely —
-    // truncating the single field worth reading.
-    let status_label = format!(" Status: {}", status_text);
-    let status_width = status_label.chars().count() as u16;
+    // truncating the single field worth reading. The `?:Help` hint still
+    // outranks it: on very narrow terminals Status loses its label first,
+    // then disappears.
+    let room = usize::from(area.width).saturating_sub("?:Help".len());
+    let status_label = [" Status: ", " "]
+        .into_iter()
+        .find(|label| label.len() + status_text.chars().count() <= room);
+    let status_width =
+        status_label.map_or(0, |label| label.len() + status_text.chars().count()) as u16;
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(status_width)])
         .split(area);
 
-    // "[q] Quit | ..." costs len(key) + len(label) + 3 per hint plus 3-column
-    // separators; the compact "q:Quit ..." form drops to len+1 and single
-    // spaces, which fits the default hint set beside Status on 80 columns.
-    let full_width: usize = keys
-        .iter()
-        .map(|(k, l)| k.len() + l.len() + 3)
-        .sum::<usize>()
-        + 3 * keys.len().saturating_sub(1);
-    let compact = full_width > chunks[0].width as usize;
+    let compact = full_hints_width(&keys) > usize::from(chunks[0].width);
+    frame.render_widget(
+        Paragraph::new(key_hints(&keys, chunks[0].width, compact, theme)),
+        chunks[0],
+    );
 
-    // Drop whole hints that don't fit rather than letting ratatui clip the
-    // last one part-way through its label. A shorter list reads as a shorter
-    // list; half a label reads as a rendering bug.
-    let sep_width = if compact { 1 } else { 3 };
-    let hint_pad = if compact { 1 } else { 3 };
-    let available = chunks[0].width as usize;
-    let mut used = 0usize;
-
-    let mut spans = Vec::with_capacity(keys.len() * 3);
-    for (i, (key, label)) in keys.iter().enumerate() {
-        let sep_cost = if i > 0 { sep_width } else { 0 };
-        let cost = sep_cost + key.len() + label.len() + hint_pad;
-        if used + cost > available {
-            break;
-        }
-        used += cost;
-
-        if i > 0 {
-            let sep = if compact { " " } else { " | " };
-            spans.push(Span::styled(sep, Style::default().fg(theme.text_dim)));
-        }
-        if compact {
-            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
-            spans.push(Span::styled(
-                format!(":{}", label),
-                Style::default().fg(theme.text_dim),
-            ));
-        } else {
-            spans.push(Span::styled("[", Style::default().fg(theme.text_dim)));
-            spans.push(Span::styled(*key, Style::default().fg(theme.accent)));
-            spans.push(Span::styled(
-                format!("] {}", label),
-                Style::default().fg(theme.text_dim),
-            ));
-        }
+    if let Some(label) = status_label {
+        let status = Line::from(vec![
+            Span::styled(label, Style::default().fg(theme.text_dim)),
+            Span::styled(status_text, Style::default().fg(status_color)),
+        ]);
+        frame.render_widget(Paragraph::new(status), chunks[1]);
     }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-
-    let status = Line::from(vec![
-        Span::styled(" Status: ", Style::default().fg(theme.text_dim)),
-        Span::styled(status_text, Style::default().fg(status_color)),
-    ]);
-    frame.render_widget(Paragraph::new(status), chunks[1]);
 }
 
-const CLIENT_HELP: &str = "q  quit
-r  restart
-p  pause/resume
-s  settings
-t  cycle theme
-j  print JSON
-d  toggle streams
-?  toggle help
+// The key column is padded to the widest key so descriptions line up.
+const CLIENT_HELP: &str = "q          quit
+r          restart
+p          pause/resume
+s          settings
+t          cycle theme
+j          print JSON
+d          toggle streams
+?          toggle help
 PgUp/PgDn  page help
-Home/End  first/last page
-Esc  close";
-const SERVER_HELP: &str = "q  quit server
-?  toggle help
+Home/End   first/last page
+Esc        close";
+const SERVER_HELP: &str = "q          quit server
+?          toggle help
 PgUp/PgDn  page help
-Home/End  first/last page
-Esc  close";
+Home/End   first/last page
+Esc        close";
 
 /// Help rows hard-wrapped to `width`, each split into its (key, description)
 /// parts. Help text is ASCII, so byte slicing keeps paging exact even at one
@@ -837,7 +872,7 @@ pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u
         .map(|(key, desc)| {
             Line::from(vec![
                 Span::styled(key, Style::default().fg(theme.accent)),
-                Span::styled(desc, Style::default().fg(theme.text_dim)),
+                Span::styled(desc, Style::default().fg(theme.text)),
             ])
         })
         .collect();
@@ -1055,11 +1090,14 @@ fn draw_display_settings(
         ),
     ];
 
+    // A locked update check cannot be changed, so it gets no change arrows.
+    let locked_row = settings.update_check_lock_reason.map(|_| 3);
     draw_setting_items(
         frame,
         &items,
         settings.selected_index,
         settings.button_focused,
+        locked_row,
         theme,
         area,
     );
@@ -1087,6 +1125,7 @@ fn draw_test_settings(
         &items,
         settings.selected_index,
         settings.button_focused,
+        None,
         theme,
         area,
     );
@@ -1097,6 +1136,7 @@ fn draw_setting_items(
     items: &[(&str, String)],
     selected_index: usize,
     button_focused: bool,
+    locked_row: Option<usize>,
     theme: &Theme,
     area: Rect,
 ) {
@@ -1105,10 +1145,13 @@ fn draw_setting_items(
 
     for (i, (label, value)) in items.iter().enumerate() {
         let is_selected = !button_focused && i == selected_index;
+        let locked = locked_row == Some(i);
 
         let prefix = if is_selected { "▶ " } else { "  " };
         let label_style = Style::default().fg(theme.text_dim);
-        let value_style = if is_selected {
+        let value_style = if locked {
+            label_style
+        } else if is_selected {
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
@@ -1120,11 +1163,12 @@ fn draw_setting_items(
         // change arrows (prefix 2 + label column 14 + value + arrows 4). The
         // selection prefix still identifies the active row.
         let value_width = Span::raw(value.as_str()).width();
-        let value_display = if is_selected && 2 + 14 + value_width + 4 <= area.width as usize {
-            format!("◀ {} ▶", value)
-        } else {
-            value.clone()
-        };
+        let value_display =
+            if is_selected && !locked && 2 + 14 + value_width + 4 <= area.width as usize {
+                format!("◀ {} ▶", value)
+            } else {
+                value.clone()
+            };
 
         lines.push(Line::from(vec![
             Span::raw(prefix),
@@ -1320,6 +1364,35 @@ mod small_terminal_tests {
         }
     }
 
+    /// Right does nothing on a locked update-check row, so it must not
+    /// offer the change arrows; it reads dimmed and keeps its reason.
+    #[test]
+    fn locked_update_check_row_has_no_change_arrows() {
+        let theme = Theme::default();
+        for locked in [false, true] {
+            let mut app = App::default();
+            app.settings.visible = true;
+            app.settings.selected_index = 3;
+            app.settings.update_check = false;
+            app.settings.update_check_lock_reason = locked.then_some("locked: --no-update-check");
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let row = (0..24)
+                .map(|y| (y, (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()))
+                .find(|(_, row)| row.contains("Update check:"))
+                .unwrap();
+            assert!(row.1.contains("▶ Update check:"), "{}", row.1);
+            assert_eq!(row.1.contains('◀'), !locked, "{}", row.1);
+            if locked {
+                assert!(row.1.contains("(locked: --no-update-check)"), "{}", row.1);
+                let at = row.1.find("off (").unwrap();
+                let x = row.1[..at].chars().count() as u16;
+                assert_eq!(buf[(x, row.0)].fg, theme.text_dim);
+            }
+        }
+    }
+
     fn rows(width: u16, height: u16) -> Vec<String> {
         let app = running_app_with_history();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1427,7 +1500,7 @@ mod small_terminal_tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            assert!(text.contains("Esc  close"), "{text}");
+            assert!(text.contains("Esc        close"), "{text}");
             assert_eq!(help_scroll(end, Size::new(80, 30), server, None), 0);
             assert_eq!(help_scroll(end, size, server, Some(KeyCode::Home)), 0);
         }
@@ -1485,11 +1558,28 @@ mod small_terminal_tests {
             let fits = text(&render(width, height, 0, server));
             assert!(!fits.contains("more") && !fits.contains("back"), "{fits}");
         }
-        // Keys keep the accent colour, descriptions stay dim.
-        let buf = render(80, 24, 0, false);
-        let q = buf.content.iter().position(|c| c.symbol() == "q").unwrap();
-        assert_eq!(buf.content[q].fg, theme.accent);
-        assert_eq!(buf.content[q + 3].fg, theme.text_dim);
+        // Keys keep the accent colour; descriptions use body text and start
+        // in one column, past the widest key.
+        for server in [false, true] {
+            let buf = render(80, 24, 0, server);
+            let width = usize::from(buf.area.width);
+            // Cell index of a needle: every cell here holds one char.
+            let cell = |needle: &str| {
+                let all = text(&buf);
+                all[..all.find(needle).unwrap()].chars().count()
+            };
+            let column = |needle: &str| {
+                let at = cell(needle);
+                assert_eq!(buf.content[at].fg, theme.text, "{needle}");
+                at % width
+            };
+            let quit = column("quit");
+            for desc in ["toggle help", "page help", "first/last page", "close"] {
+                assert_eq!(column(desc), quit, "{desc}, server={server}");
+            }
+            let q = cell("q   ");
+            assert_eq!(buf.content[q].fg, theme.accent);
+        }
     }
 
     #[test]
@@ -1782,6 +1872,31 @@ mod small_terminal_tests {
             assert!(footer.contains("?:Help"), "{width}x{height}: {footer:?}");
             assert!(footer.contains("Status: Running"), "{footer:?}");
         }
+    }
+
+    /// At 20x5 the footer kept "Status: Running..." and lost the help hint,
+    /// and the compact headline cut the rate to "4.00 Gbp".
+    #[test]
+    fn tiny_client_keeps_help_hint_and_whole_rate() {
+        let mut app = running_app_with_history();
+        app.current_throughput_mbps = 4000.0;
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..5)
+            .map(|y| (0..20).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows[1].starts_with("Running  4.00 Gbps"), "{rows:?}");
+        assert!(rows[4].starts_with("?:Help"), "{rows:?}");
+        assert!(rows[4].trim_end().ends_with(" Running..."), "{rows:?}");
+        // Narrower still, the state label goes before the rate is cut.
+        let mut terminal = Terminal::new(TestBackend::new(12, 5)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let headline: String = (0..12).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(headline.trim_end(), "4.00 Gbps");
+        let footer: String = (0..12).map(|x| buf[(x, 4)].symbol()).collect();
+        assert_eq!(footer.trim_end(), "?:Help");
     }
 
     /// The compact view already says "Paused"; the pause box would hide its rate.
