@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Maintenance
 - **Native Windows tests in CI** — the Windows job now runs Clippy on all targets and the all-features test suite, including integration tests, instead of `cargo check`. The job is informational and does not fail the workflow while Windows support is experimental. The two QUIC upload pacing tests are skipped on Windows, where QUIC delivers far below the `-b` target (see [Known Issues](KNOWN_ISSUES.md#windows-support-is-experimental)).
 - **Typos check on documentation-only changes** — a `docs.yml` workflow runs `typos` on pushes and pull requests that touch only Markdown or `docs/`, which `ci.yml` skips.
+- **Less allocation in Push Gateway formatting** — Prometheus metric lines are written directly into the payload buffer instead of allocating a temporary string for each line. Metric names, labels, ordering, and text formatting are unchanged.
 
 ### Documentation
 - **README restructured** — the README is now a short entry point; installation moved to `docs/INSTALL.md`, a documentation index to `docs/README.md`, and the detailed reference into `docs/FEATURES.md`. Old README anchors are kept so existing links still land. `docs/COMPARISON.md` no longer says iperf3 uses a port per stream, describes its authentication as username/password with RSA-encrypted credentials, and credits its `--json-stream`.
