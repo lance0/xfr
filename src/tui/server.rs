@@ -34,7 +34,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 const BANDWIDTH_HISTORY: usize = 60;
 
@@ -355,12 +355,12 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
         return;
     }
 
-    let columns: Vec<usize> = if inner.width >= 71 {
-        vec![0, 1, 2, 3, 4, 5]
+    let columns: &[usize] = if inner.width >= 71 {
+        &[0, 1, 2, 3, 4, 5]
     } else if inner.width >= 49 {
-        vec![0, 1, 2, 5]
+        &[0, 1, 2, 5]
     } else {
-        vec![0, 5]
+        &[0, 5]
     };
     let labels = [
         "Client",
@@ -378,29 +378,20 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
         )
         .bottom_margin(u16::from(inner.height >= 4));
 
-    let rows: Vec<Row> = app
-        .active_tests
-        .iter()
-        .map(|test| {
-            let elapsed = test.started.elapsed().as_secs();
-            let throughput = mbps_to_human(test.throughput_mbps);
-
-            let cells = [
-                test.client_ip.to_string(),
-                test.protocol.clone(),
-                test.direction.clone(),
-                test.streams.to_string(),
-                format!("{}s / {}s", elapsed, test.duration_secs),
-                throughput,
-            ];
-            Row::new(
-                columns
-                    .iter()
-                    .map(|&i| cells[i].clone())
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
+    let rows = app.active_tests.iter().map(|test| {
+        Row::new(columns.iter().map(|&i| match i {
+            0 => Cell::from(test.client_ip.to_string()),
+            1 => Cell::from(test.protocol.as_str()),
+            2 => Cell::from(test.direction.as_str()),
+            3 => Cell::from(test.streams.to_string()),
+            4 => Cell::from(format!(
+                "{}s / {}s",
+                test.started.elapsed().as_secs(),
+                test.duration_secs
+            )),
+            _ => Cell::from(mbps_to_human(test.throughput_mbps)),
+        }))
+    });
 
     let table = Table::new(
         rows,
@@ -448,13 +439,15 @@ mod tests {
             client_ip: "192.0.2.1".parse().unwrap(),
             protocol: "TCP".into(),
             direction: "Download".into(),
-            streams: 1,
+            streams: 128,
             started: Instant::now(),
             duration_secs: 10,
             bytes: 0,
             throughput_mbps: 42.0,
         });
         for (width, height) in [
+            (73, 16),
+            (51, 16),
             (80, 16),
             (80, 10),
             (80, 8),
@@ -481,7 +474,15 @@ mod tests {
                 assert!(text.contains("192.0.2.1"), "{text}");
                 assert!(text.contains("42.0 Mbps"), "{text}");
             }
-            assert_eq!(text.contains("Protocol"), width >= 80, "{text}");
+            assert_eq!(text.contains("Protocol"), width >= 51, "{text}");
+            if width >= 51 {
+                assert!(text.contains("TCP") && text.contains("Download"), "{text}");
+            }
+            assert_eq!(text.contains("Streams"), width >= 73, "{text}");
+            assert_eq!(text.contains("Elapsed"), width >= 73, "{text}");
+            if width >= 73 {
+                assert!(text.contains("128"), "{text}");
+            }
         }
         app.active_tests.clear();
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
