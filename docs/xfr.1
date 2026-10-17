@@ -230,7 +230,7 @@ Pre-shared key for mutual peer authentication and protected post-auth control me
 Read PSK from file
 .TP
 .BI \-\-preset " NAME"
-Use a named server preset from the config file. Preset \fBallowed_clients\fR entries, if present, are enforced as an additional allowlist together with the normal ACL. Preset \fBmax_duration_secs\fR, if present, is used only when \fB\-\-max-duration\fR is not also supplied on the command line. The \fBbandwidth_limit\fR field is reserved for future use and is not enforced today.
+Use a named server preset from the config file. Preset \fBallowed_clients\fR entries, if present, are enforced as an additional allowlist together with the normal ACL. Preset \fBmax_duration_secs\fR, if present, is used only when \fB\-\-max\-duration\fR is not also supplied on the command line. The \fBbandwidth_limit\fR field is reserved for future use and is not enforced today.
 .TP
 .BI \-\-rate\-limit " N"
 Max concurrent tests per IP
@@ -465,7 +465,7 @@ peers must support this capability.
 .TP
 .B byte_budget_v1
 Server honors fixed-size transfers requested with
-.BR -n / --bytes .
+.BR \-n / \-\-bytes .
 This is a hard requirement: the client refuses a byte-budget test when the
 server lacks the capability.
 
@@ -504,7 +504,7 @@ Dismiss the update notification (client)
 .SH SIGNALS
 .TP
 .B SIGINT (Ctrl+C)
-Gracefully cancels the running test: signals the server over the control channel, waits briefly for the final result, then displays the accumulated test summary. Works in both plain text and TUI modes. A second Ctrl+C during the cancel window force-exits immediately.
+Gracefully cancels the running test: signals the server over the control channel, waits briefly for the final result, then displays the accumulated test summary. Works in both plain text and TUI modes. A second Ctrl+C during the cancel window force-exits immediately: without the TUI it exits with status 130; in the TUI it stops the test without waiting for the summary, prints \fBTest cancelled.\fR (or the result, if one had already arrived) and exits with status 0.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -517,7 +517,7 @@ Error, including a server that rejects the test (auth, rate limit, ACL), or regr
 Invalid arguments
 .TP
 .B 130
-Test was interrupted by SIGINT before server could report a full result (partial summary printed if any data was collected)
+Non-TUI run interrupted by SIGINT before the server could report a full result (partial summary printed if any data was collected). A cancelled TUI run exits 0.
 .SH FILES
 .TP
 .I ~/.config/xfr/config.toml
