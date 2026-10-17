@@ -808,19 +808,17 @@ Esc  close";
 /// Help rows hard-wrapped to `width`, each split into its (key, description)
 /// parts. Help text is ASCII, so byte slicing keeps paging exact even at one
 /// column.
-fn help_rows(width: u16, server: bool) -> Vec<(&'static str, &'static str)> {
+fn help_rows(width: u16, server: bool) -> impl Iterator<Item = (&'static str, &'static str)> {
     let text = if server { SERVER_HELP } else { CLIENT_HELP };
     let width = usize::from(width.max(1));
-    let mut rows = Vec::new();
-    for line in text.lines() {
+    text.lines().flat_map(move |line| {
         let key_len = line.find("  ").unwrap_or(0);
-        for start in (0..line.len()).step_by(width) {
+        (0..line.len()).step_by(width).map(move |start| {
             let end = (start + width).min(line.len());
             let split = key_len.clamp(start, end);
-            rows.push((&line[start..split], &line[split..end]));
-        }
-    }
-    rows
+            (&line[start..split], &line[split..end])
+        })
+    })
 }
 
 pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u16, server: bool) {
@@ -832,7 +830,7 @@ pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u
         width,
         height,
     );
-    let rows = help_rows(width.saturating_sub(2), server);
+    let rows: Vec<_> = help_rows(width.saturating_sub(2), server).collect();
     let max = (rows.len() as u16).saturating_sub(height.saturating_sub(2));
     let lines: Vec<Line> = rows
         .into_iter()
@@ -1436,6 +1434,30 @@ mod small_terminal_tests {
     }
 
     #[test]
+    fn help_scroll_bounds_match_wrapped_text_at_every_width() {
+        use crossterm::event::KeyCode;
+        use ratatui::layout::Size;
+        for server in [false, true] {
+            let text = if server { SERVER_HELP } else { CLIENT_HELP };
+            for width in 0..=80u16 {
+                let content_width = usize::from(width.min(40).saturating_sub(2).max(1));
+                let rows: usize = text
+                    .lines()
+                    .map(|line| line.len().div_ceil(content_width))
+                    .sum();
+                for height in 0..=24u16 {
+                    let visible = height.min(if server { 8 } else { 16 }).saturating_sub(2);
+                    assert_eq!(
+                        help_scroll(0, Size::new(width, height), server, Some(KeyCode::End)),
+                        (rows as u16).saturating_sub(visible),
+                        "{width}x{height}, server={server}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn help_hints_scrolling_only_when_it_overflows() {
         use crossterm::event::KeyCode;
         use ratatui::layout::Size;
@@ -1806,7 +1828,7 @@ pub fn help_scroll(
         .height
         .min(if server { 8 } else { 16 })
         .saturating_sub(2);
-    let max = (help_rows(size.width.min(40).saturating_sub(2), server).len() as u16)
+    let max = (help_rows(size.width.min(40).saturating_sub(2), server).count() as u16)
         .saturating_sub(visible);
     let scroll = scroll.min(max);
     match key {
