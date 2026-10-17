@@ -11,7 +11,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **QUIC support** | Yes (TLS 1.3) | No | No | No | Yes |
 | **MPTCP** | Yes (auto on server, `--mptcp` on client) | Yes (`--mptcp` both sides, 3.19+) | No | No | No |
 | **TCP/UDP** | Yes | Yes | Yes | Yes | Yes |
-| **Single-port TCP** | Yes | No (port per stream) | No | No | ? |
+| **Firewall-friendly** | Yes (one port for TCP, UDP and QUIC; `--cport`) | Yes (one port; `--cport`) | ? | ? | ? |
 | **Multi-stream** | Yes | Yes | Yes | Yes | Yes |
 | **Bidirectional** | Yes | Yes | Yes (`-d`) | Yes | ? |
 | **One-off mode** | Yes (`--one-off`) | Yes (`--one-off`) | No | No | ? |
@@ -25,12 +25,12 @@ A comparison of xfr with other network bandwidth testing tools.
 | **TCP/UDP bitrate pacing** | Yes (`-b`, kernel FQ pacing on Linux) | Yes (`-b`) | Yes (`-b`) | No | ? |
 | **Live UDP loss under saturation** | Yes (`udp_feedback_v1`, 2 Hz on data socket; bypasses TCP control) | No (rides TCP control; bunches under load) | No | No | ? |
 | **Congestion control selection** | Yes (`--congestion`) | Yes (`--congestion`) | Yes (`-Z`) | No | ? |
-| **PSK authentication** | Yes | Yes | No | No | ? |
+| **Authentication** | Yes (PSK) | Yes (username/password, RSA-encrypted) | No | No | ? |
 | **Capability negotiation** | Yes (protocol v1.1) | No | No | No | ? |
 | **Connection rate limiting** | Yes (per-IP) | No | No | No | ? |
 | **Slow-loris protection** | Yes | No | No | No | ? |
 | **Language** | Rust | C | C | Rust | Rust |
-| **Active development** | Yes | Maintenance | Yes | Yes | Yes |
+| **Active development** | Yes | Yes (3.19 added MPTCP and keepalives; 3.21 added UDP GSO/GRO) | Yes | Yes | Yes |
 
 The "Live UDP loss under saturation" row refers to xfr's TUI live Packet Loss
 counter and the freshness of UDP loss values. Non-TUI interval formats
@@ -87,7 +87,7 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 
 4. **JSON streaming**: xfr supports `--json-stream` for one JSON object per interval (useful for real-time parsing).
 
-5. **Single-port TCP and UDP**: xfr multiplexes all TCP data connections over the control port (5201) using `DataHello` identification, and (since v0.9.18) routes all UDP stream data to the same port number via per-stream connected sockets negotiated with a token-bearing hello. iperf3 opens separate ephemeral ports for each TCP stream, which can be problematic with firewalls.
+5. **Single-port TCP, UDP and QUIC**: xfr multiplexes all TCP data connections over the control port (5201) using `DataHello` identification, and (since v0.9.18) routes all UDP stream data to the same port number via per-stream connected sockets negotiated with a token-bearing hello. QUIC also listens on that port number. `--cport` pins client source ports for strict egress policies.
 
 6. **Protocol negotiation**: xfr clients and servers exchange capabilities during the Hello handshake (protocol v1.1). The server falls back to multi-port TCP for legacy clients that do not advertise `single_port_tcp`.
 
@@ -140,7 +140,7 @@ xfr serve --one-off
 ### Use xfr when you need:
 
 - **Multi-client server** - iperf3's single-client limitation is its biggest complaint
-- **Firewall-friendly testing** - Single-port TCP and UDP keep everything on one port (no ephemeral data ports to open)
+- **Firewall-friendly testing** - TCP, UDP and QUIC on one port, with `--cport` to pin client source ports
 - **Visual monitoring** - Live TUI with throughput graphs
 - **CI/CD integration** - JSON streaming, result comparison, Prometheus metrics
 - **QUIC testing** - Test encrypted transport with built-in TLS 1.3
@@ -171,15 +171,12 @@ xfr uses its own control protocol (v1.1) over newline-delimited JSON messages. K
 |--------|-----|--------|
 | **Control protocol** | JSON over TCP/QUIC | Custom binary/text |
 | **Protocol version** | 1.1 (numeric major comparison) | N/A |
-| **TCP data ports** | Single port (DataHello routing) | Separate port per stream |
 | **Capability exchange** | Client/server Hello with capabilities list | None |
-| **Authentication** | PSK with HMAC challenge-response | PSK (RSA-based) |
+| **Authentication** | PSK with HMAC challenge-response | Username/password, RSA-encrypted |
 | **MPTCP support** | Yes (auto on server, `--mptcp` on client, Linux 5.6+) | Yes (`--mptcp` on both sides, 3.19+) |
 | **Transport encryption** | QUIC mode: TLS 1.3 built-in | None |
 
 ### Single-Port TCP Architecture
-
-iperf3 opens a separate ephemeral TCP port for each data stream. This requires firewall rules for each port and causes issues in locked-down environments.
 
 xfr v1.1 multiplexes all connections over the control port (default 5201):
 
@@ -194,7 +191,7 @@ The server falls back to multi-port mode automatically when connecting to legacy
 
 | Protection | xfr | iperf3 |
 |------------|-----|--------|
-| **PSK authentication** | Yes (HMAC challenge-response) | Yes (RSA-based) |
+| **Authentication** | Yes (PSK, HMAC challenge-response) | Yes (username/password, RSA-encrypted) |
 | **Transport encryption** | QUIC mode (TLS 1.3) | No |
 | **Slow-loris protection** | Yes (5s initial read timeout, per-connection tasks) | No |
 | **Connection flood protection** | Yes (DataHello validation, unknown test_ids dropped) | No |
