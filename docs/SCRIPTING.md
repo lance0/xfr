@@ -36,8 +36,9 @@ wait $SERVER_PID
 | Code | Meaning |
 |------|---------|
 | 0 | Test completed successfully |
-| 1 | Connection or protocol error |
-| 2 | Invalid arguments |
+| 1 | Connection or protocol error, a server rejection (auth, rate limit, ACL), or a regression from `xfr diff` |
+| 2 | Invalid arguments, including client options given with a subcommand (`xfr -p 9000 serve`; use `xfr serve -p 9000`) |
+| 130 | Non-TUI run interrupted with Ctrl-C before the server reported a full result |
 
 ## Firewall / Port Requirements
 

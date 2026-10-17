@@ -351,13 +351,21 @@ xfr <host> --json-stream       # JSON per interval (one object per line)
 xfr <host> -o result.json      # Save to file
 ```
 
+`--json-stream` cannot be combined with `-q`, which would suppress its
+interval lines; use `--json` for the summary alone.
+
+`-o` replaces an existing regular file atomically: the result is written to a
+temporary file in the same directory and renamed over the destination, so a
+failed save leaves the previous file intact. The directory must be writable.
+Devices and pipes such as `/dev/null` are written in place.
+
 ### CSV
 
 Spreadsheet-compatible output:
 
 ```bash
 xfr <host> --csv               # CSV output
-xfr <host> --csv -o data.csv   # Save to file
+xfr <host> --csv -o data.csv   # Save the CSV header and summary row
 ```
 
 ### Timestamps
@@ -476,6 +484,10 @@ Environment variables override config file settings:
 | `XFR_DURATION` | Test duration (e.g., "30s") |
 | `XFR_LOG_LEVEL` | Log level (error, warn, info, debug, trace) |
 | `XFR_LOG_FILE` | Log file path |
+| `XFR_BYTES` | Byte count for a fixed-size transfer (`-n`) |
+| `XFR_PSK` | Pre-shared key (visible in process metadata; prefer `--psk-file`) |
+| `XFR_PUSH_GATEWAY` | Prometheus push gateway URL (server) |
+| `XFR_TIMESTAMP_FORMAT` | Timestamp format (relative, iso8601, unix) |
 
 ### User Preferences
 
@@ -500,8 +512,6 @@ xfr serve --one-off          # Exit after one test (TCP or QUIC)
 ```
 
 The `--one-off` flag causes the server to shut down after a single test completes. This works for both TCP and QUIC connections. When one-off mode is active, the shutdown signal is shared between the TCP accept loop and the QUIC acceptor task, so whichever protocol completes a test first triggers the server exit.
-
-The client prioritizes live throughput, status, and progress on short terminals. The server dashboard drops optional columns on narrow terminals while retaining client and throughput. In either help overlay (`?` or F1), use PgUp/PgDn to page and Home/End to jump; paging adjusts when the terminal resizes.
 
 ### Server TUI Dashboard
 
@@ -600,8 +610,9 @@ xfr serve --prometheus 9090
 The endpoint accepts one request per connection (HTTP keep-alive is disabled).
 Request headers must arrive within 5 seconds total, and each connection closes
 within 10 seconds total, including response writes. At most 64 connections
-are served at once; further connections wait in the accept backlog.
-`/health` returns `OK`.
+are served at once; further connections wait in the accept backlog. An accept
+error, such as running out of file descriptors, is logged and retried after
+100 ms instead of stopping the endpoint. `/health` returns `OK`.
 
 Available at `http://localhost:9090/metrics`:
 
@@ -714,9 +725,9 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
 | `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
 | `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; requires server `mtu_probe_v1` support) |
-| `--connect-timeout` | | none | Fail if the control connection takes longer than this (e.g. `5s`); without it, dead servers are bounded only by OS defaults |
+| `--connect-timeout` | | none | Fail if the control connection, including hostname resolution, takes longer than this (e.g. `5s`); without it, dead servers and stuck DNS lookups are bounded only by OS defaults |
 | `--json` | | false | JSON output |
-| `--json-stream` | | false | JSON per interval |
+| `--json-stream` | | false | JSON per interval (not with `-q`) |
 | `--csv` | | false | CSV output |
 | `--quiet` | `-q` | false | Summary only |
 | `--interval` | `-i` | 1.0 | Report interval in seconds (must be > 0) |
@@ -747,6 +758,12 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
 | `--no-mdns` | | false | Disable mDNS service registration (server) |
 
+Server options go after `serve` (`xfr serve -p 9000`). Client options typed
+alongside `serve`, `diff` or `discover` (`xfr -p 9000 serve`) are a usage
+error; only `--theme`, `--log-file`, `--log-level`, `--no-update-check` and
+`--completions` work with any subcommand. Environment variables such as
+`XFR_PORT` are not affected.
+
 TCP and UDP tests use random payloads by default to avoid inflated results on WAN-optimized or compressing paths. `--random` and `--zeros` control client-sent traffic. Server-sent TCP/UDP traffic also defaults to random, but payload mode is not negotiated over the wire.
 
 `--dscp` applies to TCP and UDP sockets on both ends when relevant, including server-sent download and bidirectional traffic. QUIC ignores it because the underlying socket is managed by Quinn, and non-Unix platforms currently warn instead of applying socket marking.
@@ -755,14 +772,18 @@ TCP and UDP tests use random payloads by default to avoid inflated results on WA
 
 | Key | Action |
 |-----|--------|
-| `q` | Quit (cancels test) |
+| `q` / `Ctrl-C` | Quit (cancels a running test; a second `Ctrl-C` force-exits) |
 | `p` | Pause/Resume test traffic |
+| `r` | Restart the test |
 | `s` | Settings modal |
 | `t` | Cycle color theme |
 | `d` | Toggle per-stream view |
 | `?` / `F1` | Help |
 | `j` | Print JSON result |
 | `u` | Dismiss update notification |
+
+`Ctrl-C` also works while Settings is open. The footer lists `?` first, so on
+narrow terminals the other hints drop off before the help hint.
 
 The Display settings' Timestamp choice reformats history immediately.
 `--timestamp-format` selects its initial format.
@@ -771,9 +792,11 @@ The Display settings' Timestamp choice reformats history immediately.
 
 | Key | Action |
 |-----|--------|
-| `q` | Quit server |
+| `q` / `Ctrl-C` | Quit server |
 | `?` / `F1` | Help |
 | `Esc` | Close help |
+
+The client prioritizes live throughput, status, and progress on short terminals. The server dashboard drops optional columns on narrow terminals while retaining client and throughput. In either help overlay, use PgUp/PgDn to page and Home/End to jump; the border shows `PgDn more` while there is more help below. Paging adjusts when the terminal resizes.
 
 ## Themes
 
