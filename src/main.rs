@@ -2494,6 +2494,9 @@ async fn run_tui_loop(
                         let _ = active.client.cancel();
                     }
                     app.cancel_deadline = Some(std::time::Instant::now() + TUI_CANCEL_WAIT);
+                    // An interrupt from Settings must not leave its restart
+                    // action one Enter away from overriding the cancel.
+                    app.settings.close();
                     app.log(format!(
                         "Cancelling, waiting up to {}s for the server summary...",
                         TUI_CANCEL_WAIT.as_secs()

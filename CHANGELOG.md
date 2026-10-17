@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Ctrl-C works throughout both TUIs** — client Settings no longer swallows interrupts, and the server dashboard now accepts Ctrl-C. Terminals that send a literal ETX are supported too. Client cancellation keeps the existing summary wait and second-interrupt force exit.
+- **Ctrl-C works throughout both TUIs** — client Settings no longer swallows interrupts (Ctrl-C closes it and cancels the test), and the server dashboard now accepts Ctrl-C. Terminals that send a literal ETX are supported too. Client cancellation keeps the existing summary wait and second-interrupt force exit.
 
 ### Security
 - **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
