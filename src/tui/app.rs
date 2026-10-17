@@ -853,7 +853,15 @@ impl App {
                 self.jitter_history.pop_front();
             }
         }
-        self.udp_packets_lost = total_lost;
+        // Keep the lost count cumulative, like the final result: stream
+        // `lost` values are per-interval deltas, so prefer the cumulative
+        // `udp_progress` (the server's receiver, or our own in download
+        // mode, where streams carry no `lost`) and fall back to summing the
+        // deltas for servers that predate it.
+        self.udp_packets_lost = match self.latest_udp_progress {
+            Some(progress) => progress.packets_lost,
+            None => self.udp_packets_lost.saturating_add(total_lost),
+        };
 
         // Live UDP loss percent. Derived locally from the server's cumulative
         // packet counts so absence-of-progress (None) is distinguishable from
@@ -906,14 +914,16 @@ impl App {
         }
         self.prev_retransmits = self.total_retransmits;
 
-        // UDP packet loss
+        // UDP packet loss since the last report. The baseline only rises: a
+        // late packet can take one back off the cumulative count, and that
+        // must not make the next report repeat loss already logged.
         if self.udp_packets_lost > self.prev_udp_lost {
             let delta = self.udp_packets_lost - self.prev_udp_lost;
             if delta >= 5 {
                 self.log(format!("UDP loss: +{} packets", delta));
             }
+            self.prev_udp_lost = self.udp_packets_lost;
         }
-        self.prev_udp_lost = self.udp_packets_lost;
     }
 
     pub fn on_result(&mut self, result: TestResult) {
@@ -1916,6 +1926,85 @@ mod tests {
         assert_eq!(app.udp_recv.jitter_ms, Some(0.25));
         app.reset_for_restart();
         assert_eq!(app.streams[0].throughput_send_mbps, None);
+    }
+
+    /// Stream `lost` values are per-interval, so diffing them as if they were
+    /// cumulative logged "+708" and then the jitter between intervals
+    /// ("+8", "+73") at a steady ~700 lost per second, and download mode,
+    /// whose streams carry no `lost`, never logged loss at all.
+    #[test]
+    fn udp_loss_log_reports_each_interval_new_loss() {
+        // (per-stream interval loss, cumulative (received, lost))
+        type Report = (Option<u64>, Option<(u64, u64)>);
+        let interval = |per_stream: Option<u64>, cumulative: Option<(u64, u64)>| {
+            let mut progress = make_progress(
+                100.0,
+                cumulative.map(|(packets_received, packets_lost)| UdpIntervalProgress {
+                    packets_received,
+                    packets_lost,
+                }),
+            );
+            progress.streams.push(crate::protocol::StreamInterval {
+                id: 0,
+                bytes: 1000,
+                retransmits: None,
+                jitter_ms: None,
+                lost: per_stream,
+                error: None,
+                rtt_us: None,
+                cwnd: None,
+                bytes_sent: None,
+                bytes_received: None,
+                throughput_send_mbps: None,
+                throughput_recv_mbps: None,
+            });
+            progress
+        };
+        // Newest first, as History shows them.
+        let loss_lines = |app: &App| -> Vec<String> {
+            logged(app)
+                .into_iter()
+                .filter(|m| m.starts_with("UDP loss"))
+                .collect()
+        };
+        let expected = [
+            "UDP loss: +643 packets",
+            "UDP loss: +716 packets",
+            "UDP loss: +708 packets",
+        ];
+        // Upload: per-interval stream counts beside the server's cumulative.
+        // Download (`-R`): the client's own cumulative only. Pre-0.9.11
+        // server: per-interval stream counts only.
+        let runs: [&[Report]; 3] = [
+            &[
+                (Some(708), Some((10_000, 708))),
+                (Some(716), Some((20_000, 1424))),
+                (Some(643), Some((30_000, 2067))),
+            ],
+            &[
+                (None, Some((10_000, 708))),
+                (None, Some((20_000, 1424))),
+                (None, Some((30_000, 2067))),
+            ],
+            &[(Some(708), None), (Some(716), None), (Some(643), None)],
+        ];
+        for run in runs {
+            let mut app = App::default();
+            for &(per_stream, cumulative) in run {
+                app.on_progress(interval(per_stream, cumulative));
+            }
+            assert_eq!(loss_lines(&app), expected, "{run:?}");
+            assert_eq!(app.udp_packets_lost, 2067);
+        }
+
+        // A late packet taking one back off the cumulative count must not
+        // make the next report repeat loss already logged.
+        let mut app = App::default();
+        for cumulative in [(10_000, 708), (10_009, 700), (20_000, 710)] {
+            app.on_progress(interval(None, Some(cumulative)));
+        }
+        assert_eq!(app.udp_packets_lost, 710);
+        assert_eq!(loss_lines(&app), ["UDP loss: +708 packets"]);
     }
 
     #[test]
