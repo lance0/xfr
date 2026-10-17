@@ -367,6 +367,32 @@ mod tests {
     }
 
     #[test]
+    fn default_theme_uses_only_terminal_palette_colors() {
+        // Named ANSI colors are remapped by the terminal for its own
+        // background; fixed RGB (e.g. bright green) washes out on white.
+        let t = Theme::default();
+        for (role, color) in [
+            ("border", t.border),
+            ("border_focused", t.border_focused),
+            ("text", t.text),
+            ("text_dim", t.text_dim),
+            ("highlight_bg", t.highlight_bg),
+            ("success", t.success),
+            ("warning", t.warning),
+            ("error", t.error),
+            ("accent", t.accent),
+            ("header", t.header),
+            ("graph_primary", t.graph_primary),
+            ("graph_secondary", t.graph_secondary),
+        ] {
+            assert!(
+                !matches!(color, Color::Rgb(..) | Color::Indexed(_)),
+                "default {role} is fixed: {color:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rgb_text_is_readable_on_intended_dark_backgrounds() {
         // RGB palettes assume these dark backgrounds; ANSI palettes stay terminal controlled.
         let backgrounds = [
