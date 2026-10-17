@@ -66,6 +66,13 @@ throughput tests do not automatically probe or adjust the size. JSON
 `udp_stats.packet_size` reports the largest valid datagram received, or is absent
 when no data arrived.
 
+`--probe-mtu` sets the don't-fragment flag so middleboxes can't hide the limit
+by fragmenting, which makes it useful for NFS-over-UDP and VPN/tunnel tuning:
+
+```bash
+xfr <host> --probe-mtu
+```
+
 #### Single-Port UDP (Default, v0.9.18+)
 
 When both peers advertise `single_port_udp_v1`, all per-stream UDP data flows to the server's main port (5201/UDP by default) instead of per-stream ephemeral server ports — the UDP firewall story matches single-port TCP. Per stream, the client sends a token-bearing hello datagram to the main port; the server creates a connected same-port socket (`SO_REUSEPORT`) for that stream and acks from it, after which the kernel routes the stream's traffic to its dedicated socket. The server advertises the capability only after a startup self-test proves the running kernel's connected-socket routing; on unsupported platforms (e.g. Windows) or against older peers, it falls back to ephemeral per-stream ports automatically.
@@ -96,6 +103,7 @@ Encrypted transport over UDP using TLS 1.3:
 ```bash
 xfr <host> --quic              # QUIC transport (short: -Q)
 xfr <host> --quic -P 4         # QUIC with 4 multiplexed streams
+xfr <host> --quic -R           # QUIC download test
 xfr <host> --quic --psk secret # PSK-authenticated QUIC
 ```
 
@@ -309,6 +317,7 @@ xfr serve -4                   # IPv4 only
 xfr serve -6                   # IPv6 only
 xfr <host> -4                  # Client: force IPv4
 xfr <host> -6                  # Client: force IPv6
+xfr ::1 -6                     # IPv6 localhost
 ```
 
 IPv6 link-local addresses need a zone naming the interface, as in `xfr fe80::2%eth0` or `xfr [fe80::2%eth0]`; a numeric interface index (`%3`) also works, and is the only form accepted on non-Unix platforms. The zone is carried through to every control, data and QUIC socket, which makes a direct cable between two machines testable with no IP configuration at all. `xfr discover` prints link-local answers with their zone. `xfr serve --bind` takes a plain IP, so serve link-local clients from the default wildcard listener.
@@ -328,6 +337,9 @@ xfr <host> -q                  # Quiet mode (summary only)
 ```
 
 The client TUI and `xfr serve --tui` report test status to the terminal through OSC 7501 ([Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)): working with a progress percentage and the current rate, paused, done with the summary, or the error. Terminals that do not implement it ignore the sequence. Plain, JSON and CSV output never emit it.
+
+Log messages go to stderr, so JSON and CSV output pipe cleanly:
+`xfr <host> --json 2>/dev/null`.
 
 ### JSON
 
@@ -417,6 +429,12 @@ name = "internal"
 allowed_clients = ["192.168.1.0/24"]  # extra allowlist on top of allow/deny
 max_duration_secs = 60       # applies when --max-duration is not given
 ```
+
+```bash
+xfr serve --preset internal  # Apply the [[presets]] entry named "internal"
+```
+
+Unknown preset names are rejected.
 
 On Unix, a config containing either `psk` must grant no access to group or
 other users, so the shared key is not exposed to another local account:
@@ -677,7 +695,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--bidir` | | false | Bidirectional test |
 | `--ipv4` | `-4` | false | Force IPv4 only |
 | `--ipv6` | `-6` | false | Force IPv6 only |
-| `--bind` | | none | Local address to bind (e.g., 192.168.1.100) |
+| `--bind` | `-B` (server) | none | Local address to bind: IP or IP:port on the client (e.g., 192.168.1.100), plain IP on the server |
 | `--cport` | | none | Client source port for firewall traversal (UDP/QUIC/TCP data streams) |
 | `--dscp` | | none | DSCP/TOS marking for TCP/UDP QoS testing (0-255 or name: EF, AF11, CS1, etc.) |
 | `--mptcp` | | false | MPTCP mode (client-only, Linux 5.6+; server auto-enables) |
@@ -714,6 +732,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--deny` | | none | Deny IP/subnet, repeatable (server) |
 | `--acl-file` | | none | ACL rules file (server) |
 | `--max-duration` | | none | Maximum test duration, server-side limit (server) |
+| `--preset` | | none | Apply a named `[[presets]]` entry from the config file (server) |
 | `--tui` | | false | Enable live dashboard (server) |
 | `--one-off` | | false | Exit after one test (server, works with TCP and QUIC) |
 | `--no-mdns` | | false | Disable mDNS service registration (server) |

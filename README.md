@@ -18,7 +18,7 @@ A modern iperf3 alternative with a live TUI, multi-client server, MPTCP, and QUI
 
 ```bash
 cargo install xfr            # Rust 1.88+; or brew install lance0/tap/xfr
-xfr serve                   # On the server
+xfr serve                    # On the server
 xfr 192.168.1.1              # On the client: TCP, 10 seconds
 xfr 192.168.1.1 -P 4         # Four parallel streams
 xfr 192.168.1.1 -u -b 1G     # UDP at 1 Gbps
