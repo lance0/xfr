@@ -1,9 +1,11 @@
 //! Prometheus metrics endpoint
 
 #[cfg(feature = "prometheus")]
+use std::collections::VecDeque;
+#[cfg(feature = "prometheus")]
 use std::net::SocketAddr;
 #[cfg(feature = "prometheus")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 #[cfg(feature = "prometheus")]
 use std::time::Duration;
 
@@ -53,7 +55,18 @@ pub struct XfrMetrics {
 
     // Test state
     pub active_tests: IntGauge,
+
+    /// Finished tests whose `test_id` series are still exported, oldest
+    /// first, with the stream IDs each one wrote.
+    finished: Mutex<VecDeque<(String, Vec<String>)>>,
 }
+
+/// Number of finished tests whose per-test (`test_id`-labelled) series stay in
+/// `/metrics`. Older tests' series are removed so a long-running server does
+/// not export one more set of series per test forever. Counting tests, not
+/// time, bounds the series count regardless of test rate.
+#[cfg(feature = "prometheus")]
+const RETAINED_TESTS: usize = 16;
 
 #[cfg(feature = "prometheus")]
 impl XfrMetrics {
@@ -135,7 +148,59 @@ impl XfrMetrics {
             tcp_rtt_microseconds,
             tcp_retransmits_total,
             active_tests,
+            finished: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Record a finished test's final values and retire the series of tests
+    /// beyond the most recent [`RETAINED_TESTS`]. `completed` is false for a
+    /// test that errored or was cancelled.
+    fn finish(&self, stats: &TestStats, completed: bool) {
+        // Held across the writes so a concurrent finish cannot retire this
+        // test's series before they are written.
+        let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+
+        // A reused test ID replaces the earlier test's series.
+        if let Some(pos) = finished.iter().position(|(id, _)| *id == stats.test_id) {
+            let (id, streams) = finished.remove(pos).expect("position is in range");
+            self.remove_series(&id, &streams);
+        }
+
+        self.active_tests.dec();
+        if completed {
+            self.tests_total.inc();
+            self.test_duration_seconds
+                .observe(stats.elapsed_ms() as f64 / 1000.0);
+        }
+        self.update_metrics(stats);
+        if completed {
+            // Counters only at completion to avoid overcounting.
+            self.update_counters(stats);
+        }
+
+        let streams = stats
+            .streams
+            .iter()
+            .map(|s| s.stream_id.to_string())
+            .collect();
+        finished.push_back((stats.test_id.clone(), streams));
+        while finished.len() > RETAINED_TESTS {
+            let (id, streams) = finished.pop_front().expect("deque is not empty");
+            self.remove_series(&id, &streams);
+        }
+    }
+
+    /// Remove every `test_id`-labelled series of one test. Series a test never
+    /// wrote (e.g. TCP RTT for UDP) are absent, so removal errors are ignored.
+    fn remove_series(&self, test_id: &str, streams: &[String]) {
+        for stream_id in streams {
+            let labels = [test_id, stream_id.as_str()];
+            let _ = self.stream_bytes_total.remove_label_values(&labels);
+            let _ = self.stream_throughput_mbps.remove_label_values(&labels);
+            let _ = self.stream_retransmits.remove_label_values(&labels);
+        }
+        let _ = self.tcp_rtt_microseconds.remove_label_values(&[test_id]);
+        let _ = self.tcp_retransmits_total.remove_label_values(&[test_id]);
     }
 }
 
@@ -297,27 +362,13 @@ pub fn on_test_start() {
 /// does NOT increment `tests_total` or counters.
 #[cfg(feature = "prometheus")]
 pub fn on_test_aborted(stats: &TestStats) {
-    let m = &*METRICS;
-    m.active_tests.dec();
-    update_metrics(stats);
+    METRICS.finish(stats, false);
 }
 
 /// Called when a test completes. Updates all relevant metrics.
 #[cfg(feature = "prometheus")]
 pub fn on_test_complete(stats: &TestStats) {
-    let m = &*METRICS;
-
-    m.active_tests.dec();
-    m.tests_total.inc();
-
-    let duration_secs = stats.elapsed_ms() as f64 / 1000.0;
-    m.test_duration_seconds.observe(duration_secs);
-
-    // Update gauges one final time
-    update_metrics(stats);
-
-    // Update counters (only at completion to avoid overcounting)
-    update_counters(stats);
+    METRICS.finish(stats, true);
 }
 
 /// Update metrics with current test stats for live monitoring.
@@ -325,67 +376,74 @@ pub fn on_test_complete(stats: &TestStats) {
 /// Counters are only updated at test completion via on_test_complete().
 #[cfg(feature = "prometheus")]
 pub fn update_metrics(stats: &TestStats) {
-    let m = &*METRICS;
-    let test_id = &stats.test_id;
-
-    // Update throughput gauge (instantaneous value)
-    let total_bytes = stats.total_bytes();
-    let duration_ms = stats.elapsed_ms();
-    if duration_ms > 0 {
-        let throughput = (total_bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
-        m.throughput_mbps.set(throughput);
-    }
-
-    // Per-stream gauges (instantaneous values)
-    for stream in &stats.streams {
-        let stream_id = stream.stream_id.to_string();
-        let labels = &[test_id.as_str(), stream_id.as_str()];
-
-        let stream_throughput = stream.throughput_mbps();
-        m.stream_throughput_mbps
-            .with_label_values(labels)
-            .set(stream_throughput);
-    }
-
-    // TCP RTT gauge (instantaneous value)
-    if let Some(ref tcp_info) = stats.get_tcp_info() {
-        m.tcp_rtt_microseconds
-            .with_label_values(&[test_id])
-            .set(tcp_info.rtt_us as f64);
-    }
+    METRICS.update_metrics(stats);
 }
 
-/// Update counters with final test stats. Called only once per test at completion.
 #[cfg(feature = "prometheus")]
-fn update_counters(stats: &TestStats) {
-    let m = &*METRICS;
-    let test_id = &stats.test_id;
+impl XfrMetrics {
+    fn update_metrics(&self, stats: &TestStats) {
+        let m = self;
+        let test_id = &stats.test_id;
 
-    // Aggregate byte counter
-    let total_bytes = stats.total_bytes();
-    m.bytes_total.inc_by(total_bytes as f64);
+        // Update throughput gauge (instantaneous value)
+        let total_bytes = stats.total_bytes();
+        let duration_ms = stats.elapsed_ms();
+        if duration_ms > 0 {
+            let throughput =
+                (total_bytes as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0;
+            m.throughput_mbps.set(throughput);
+        }
 
-    // Per-stream counters
-    for stream in &stats.streams {
-        let stream_id = stream.stream_id.to_string();
-        let labels = &[test_id.as_str(), stream_id.as_str()];
+        // Per-stream gauges (instantaneous values)
+        for stream in &stats.streams {
+            let stream_id = stream.stream_id.to_string();
+            let labels = &[test_id.as_str(), stream_id.as_str()];
 
-        let bytes = stream.total_bytes();
-        m.stream_bytes_total
-            .with_label_values(labels)
-            .inc_by(bytes as f64);
+            let stream_throughput = stream.throughput_mbps();
+            m.stream_throughput_mbps
+                .with_label_values(labels)
+                .set(stream_throughput);
+        }
 
-        let retransmits = stream.retransmits();
-        m.stream_retransmits
-            .with_label_values(labels)
-            .inc_by(retransmits as f64);
+        // TCP RTT gauge (instantaneous value)
+        if let Some(ref tcp_info) = stats.get_tcp_info() {
+            m.tcp_rtt_microseconds
+                .with_label_values(&[test_id])
+                .set(tcp_info.rtt_us as f64);
+        }
     }
 
-    // TCP retransmits counter
-    if let Some(ref tcp_info) = stats.get_tcp_info() {
-        m.tcp_retransmits_total
-            .with_label_values(&[test_id])
-            .inc_by(tcp_info.retransmits as f64);
+    /// Update counters with final test stats. Called only once per test at completion.
+    fn update_counters(&self, stats: &TestStats) {
+        let m = self;
+        let test_id = &stats.test_id;
+
+        // Aggregate byte counter
+        let total_bytes = stats.total_bytes();
+        m.bytes_total.inc_by(total_bytes as f64);
+
+        // Per-stream counters
+        for stream in &stats.streams {
+            let stream_id = stream.stream_id.to_string();
+            let labels = &[test_id.as_str(), stream_id.as_str()];
+
+            let bytes = stream.total_bytes();
+            m.stream_bytes_total
+                .with_label_values(labels)
+                .inc_by(bytes as f64);
+
+            let retransmits = stream.retransmits();
+            m.stream_retransmits
+                .with_label_values(labels)
+                .inc_by(retransmits as f64);
+        }
+
+        // TCP retransmits counter
+        if let Some(ref tcp_info) = stats.get_tcp_info() {
+            m.tcp_retransmits_total
+                .with_label_values(&[test_id])
+                .inc_by(tcp_info.retransmits as f64);
+        }
     }
 }
 
@@ -394,6 +452,89 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Text exposition of one `XfrMetrics` instance, isolated from the global
+    /// registry so parallel tests cannot disturb it.
+    fn exposition(m: &XfrMetrics) -> String {
+        let registry = prometheus::Registry::new();
+        registry
+            .register(Box::new(m.stream_bytes_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(m.stream_throughput_mbps.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(m.stream_retransmits.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(m.tcp_rtt_microseconds.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(m.tcp_retransmits_total.clone()))
+            .unwrap();
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    fn test_stats(id: &str, streams: u8) -> TestStats {
+        let stats = TestStats::new(id.to_string(), streams);
+        stats.streams[0].add_bytes_received(1000);
+        stats.add_tcp_info(crate::protocol::TcpInfoSnapshot {
+            retransmits: 1,
+            rtt_us: 100,
+            rtt_var_us: 10,
+            cwnd: 1000,
+            bytes_acked: None,
+        });
+        stats
+    }
+
+    #[test]
+    fn only_the_most_recent_finished_tests_keep_series() {
+        let m = XfrMetrics::new();
+        let extra = 5;
+        for i in 0..RETAINED_TESTS + extra {
+            let stats = test_stats(&format!("t{i}"), 2);
+            m.active_tests.inc();
+            // Errored tests write series too and must be retired as well.
+            m.finish(&stats, i % 3 != 0);
+        }
+        let text = exposition(&m);
+        for i in 0..RETAINED_TESTS + extra {
+            let present = text.contains(&format!("test_id=\"t{i}\""));
+            assert_eq!(present, i >= extra, "test t{i}:\n{text}");
+        }
+        assert_eq!(m.finished.lock().unwrap().len(), RETAINED_TESTS);
+        assert_eq!(m.active_tests.get(), 0);
+        // A completed 2-stream test exports 3 series per stream plus RTT and
+        // retransmits; an errored one only its stream throughput gauges and RTT.
+        let expected: usize = (extra..RETAINED_TESTS + extra)
+            .map(|i| if i % 3 != 0 { 8 } else { 3 })
+            .sum();
+        let series = text.lines().filter(|l| l.contains("test_id=")).count();
+        assert_eq!(series, expected, "{text}");
+    }
+
+    #[test]
+    fn running_test_series_are_not_retired() {
+        let m = XfrMetrics::new();
+        let running = test_stats("running", 1);
+        m.active_tests.inc();
+        m.update_metrics(&running);
+        for i in 0..RETAINED_TESTS * 2 {
+            m.active_tests.inc();
+            m.finish(&test_stats(&format!("t{i}"), 1), true);
+        }
+        let text = exposition(&m);
+        assert!(text.contains("test_id=\"running\""), "{text}");
+        assert!(!text.contains("test_id=\"t0\""), "{text}");
+        m.finish(&running, true);
+        let text = exposition(&m);
+        assert!(text.contains("xfr_stream_bytes_total{stream_id=\"0\",test_id=\"running\"} 1000"));
+    }
 
     #[tokio::test]
     async fn fragmented_requests_respond_and_close() {
