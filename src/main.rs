@@ -978,13 +978,17 @@ fn interval_retransmits(progress: &TestProgress, last_retransmits: &mut u64) -> 
     }
 }
 
+/// Warn about payload flags that cannot take effect. `random` and `zeros`
+/// are the explicit --random and --zeros flags, not the effective default,
+/// so a plain `-Q` run does not warn.
 fn random_payload_notice(
     protocol: Protocol,
     direction: Direction,
-    random_enabled: bool,
+    random: bool,
+    zeros: bool,
 ) -> Option<&'static str> {
     if protocol == Protocol::Quic {
-        if random_enabled {
+        if random {
             return Some("random payloads are ignored with QUIC (payload is already encrypted)");
         }
         // QUIC encrypts payload regardless, so --zeros is irrelevant
@@ -992,7 +996,7 @@ fn random_payload_notice(
     }
     // When --zeros is used with reverse/bidir, warn that the server's payload mode
     // is not negotiated — the client cannot control what the server sends.
-    if !random_enabled && matches!(direction, Direction::Download | Direction::Bidir) {
+    if zeros && matches!(direction, Direction::Download | Direction::Bidir) {
         return Some(
             "--zeros only affects client-sent traffic; server payload mode is not negotiated",
         );
@@ -1401,7 +1405,7 @@ async fn main() -> Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
 
-            if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
+            if let Some(msg) = random_payload_notice(protocol, direction, cli.random, cli.zeros) {
                 eprintln!("Warning: {msg}");
             }
 
@@ -4266,58 +4270,40 @@ mod tests {
 
     #[test]
     fn test_random_payload_notice() {
-        // Default (random enabled): no warnings for TCP/UDP in any direction
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Upload, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Download, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Bidir, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Upload, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Download, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Bidir, true),
-            None
-        );
-
-        // QUIC + random: payload is already encrypted
-        assert_eq!(
-            random_payload_notice(Protocol::Quic, Direction::Upload, true),
-            Some("random payloads are ignored with QUIC (payload is already encrypted)")
-        );
-        assert!(random_payload_notice(Protocol::Quic, Direction::Download, true).is_some());
+        let notice = |args: &[&str], protocol, direction| {
+            let cli = Cli::try_parse_from(["xfr", "host"].iter().chain(args)).unwrap();
+            random_payload_notice(protocol, direction, cli.random, cli.zeros)
+        };
+        let all = [Direction::Upload, Direction::Download, Direction::Bidir];
+        // Default payload: no warnings for any protocol or direction, QUIC included
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for direction in all {
+                assert_eq!(notice(&[], protocol, direction), None);
+            }
+        }
+        // Explicit --random: TCP/UDP use it, QUIC ignores it
+        for direction in all {
+            assert_eq!(notice(&["--random"], Protocol::Tcp, direction), None);
+            assert_eq!(notice(&["--random"], Protocol::Udp, direction), None);
+            assert_eq!(
+                notice(&["--random"], Protocol::Quic, direction),
+                Some("random payloads are ignored with QUIC (payload is already encrypted)")
+            );
+        }
 
         // --zeros + upload: no warning (client controls its own sends)
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Upload, false),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Upload, false),
-            None
-        );
+        assert_eq!(notice(&["--zeros"], Protocol::Tcp, Direction::Upload), None);
+        assert_eq!(notice(&["--zeros"], Protocol::Udp, Direction::Upload), None);
 
         // --zeros + reverse/bidir: warn that server still sends random
-        assert!(random_payload_notice(Protocol::Tcp, Direction::Download, false).is_some());
-        assert!(random_payload_notice(Protocol::Tcp, Direction::Bidir, false).is_some());
-        assert!(random_payload_notice(Protocol::Udp, Direction::Download, false).is_some());
-        assert!(random_payload_notice(Protocol::Udp, Direction::Bidir, false).is_some());
+        for protocol in [Protocol::Tcp, Protocol::Udp] {
+            assert!(notice(&["--zeros"], protocol, Direction::Download).is_some());
+            assert!(notice(&["--zeros"], protocol, Direction::Bidir).is_some());
+        }
 
         // --zeros + QUIC reverse: no warning (QUIC encrypts regardless)
         assert_eq!(
-            random_payload_notice(Protocol::Quic, Direction::Download, false),
+            notice(&["--zeros"], Protocol::Quic, Direction::Download),
             None
         );
     }
