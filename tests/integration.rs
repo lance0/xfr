@@ -3311,6 +3311,98 @@ async fn test_tcp_client_to_mptcp_server() {
     );
 }
 
+#[tokio::test]
+async fn test_cli_csv_output_file_is_csv() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.csv");
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1", "--no-tui"])
+            .arg("--csv")
+            .arg("-o")
+            .arg(&path)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = saved.lines().collect();
+    assert_eq!(lines.len(), 2, "header plus one summary row: {saved}");
+    assert!(lines[0].starts_with("test_id,duration_secs,"), "{saved}");
+    assert_eq!(lines[0].split(',').count(), lines[1].split(',').count());
+    server.abort();
+}
+
+#[test]
+fn test_cli_client_options_rejected_with_subcommands() {
+    let dir = tempfile::tempdir().unwrap();
+    let result_path = dir.path().join("result.json");
+    let result = serde_json::json!({
+        "id": "subcommand-test", "bytes_total": 1000, "duration_ms": 1000,
+        "throughput_mbps": 1.0, "streams": [],
+    });
+    std::fs::write(&result_path, result.to_string()).unwrap();
+
+    for (args, subcommand) in [
+        (
+            &["--json", "-t", "5", "-P", "4", "diff", "a", "b"][..],
+            "diff",
+        ),
+        (&["--csv", "-q", "-R", "discover"][..], "discover"),
+        (&["-t", "5", "serve"][..], "serve"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("cannot be used with '{subcommand}'")),
+            "{args:?}: {stderr}"
+        );
+    }
+
+    // Options subcommands use, and env-backed client options, still work.
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["--theme", "nord", "--log-level", "warn", "diff"])
+        .arg(&result_path)
+        .arg(&result_path)
+        .env("XFR_DURATION", "5")
+        .env("XFR_PORT", "9000")
+        .env("XFR_PSK", "secret")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_cli_json_stream_conflicts_with_quiet() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "--json-stream", "-q", "--no-tui"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--json-stream") && stderr.contains("--quiet"));
+}
+
 #[test]
 fn test_cli_mptcp_conflicts() {
     // --mptcp conflicts with --udp

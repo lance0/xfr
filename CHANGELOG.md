@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
 
+### Fixed
+- **`--csv -o FILE` saves CSV** — the file always received the JSON result, even though `--csv -o data.csv` is the documented way to save CSV. With `--csv` the file now holds the same header and summary row printed to stdout; every other mode still saves JSON.
+- **Client options given with a subcommand are rejected instead of ignored** — `xfr --json -t 5 -P 4 diff a b` or `xfr -p 9000 serve` used to run with those options silently dropped. Top-level test, output and connection options typed alongside `serve`, `diff` or `discover` now fail with a usage error (exit 2) naming the option; pass server options after `serve` (`xfr serve -p 9000`). `--theme`, `--log-file`, `--log-level`, `--no-update-check` and `--completions` still work with any subcommand, and options set through environment variables (`XFR_DURATION`, `XFR_PORT`, `XFR_PSK`, ...) are not affected.
+- **`--json-stream` and `-q` are rejected together** — `-q` suppresses interval output, so the combination silently emitted only the final summary line instead of a stream. Use `--json` for the summary alone.
+
 ## [0.11.0] - 2026-10-13
 
 ### Security

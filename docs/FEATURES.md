@@ -634,7 +634,7 @@ See `xfr --help` for complete CLI documentation.
 | `--quiet` | `-q` | false | Summary only |
 | `--interval` | `-i` | 1.0 | Report interval (seconds) |
 | `--omit` | | 0 | Omit first N seconds |
-| `--output` | `-o` | stdout | Output file |
+| `--output` | `-o` | | Also save the final result to a file (CSV with `--csv`, otherwise JSON) |
 | `--no-tui` | | false | Disable TUI |
 | `--theme` | | default | Color theme |
 | `--tcp-nodelay` | | false | Disable Nagle algorithm |

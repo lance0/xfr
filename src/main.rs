@@ -143,6 +143,8 @@ fn expand_log_path(file_path: &str) -> PathBuf {
     }
 }
 
+// Top-level options are client options and are rejected alongside a
+// subcommand unless listed in SUBCOMMAND_COMPATIBLE_ARGS.
 #[derive(Parser)]
 #[command(name = "xfr")]
 #[command(author, version, about = "Modern network bandwidth testing with TUI")]
@@ -215,7 +217,7 @@ struct Cli {
     json: bool,
 
     /// JSON streaming output (one object per line)
-    #[arg(long, conflicts_with_all = ["csv", "json"])]
+    #[arg(long, conflicts_with_all = ["csv", "json", "quiet"])]
     #[arg(help_heading = "Output Options")]
     json_stream: bool,
 
@@ -229,7 +231,7 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     quiet: bool,
 
-    /// Output file
+    /// Also save the final result to a file (CSV with --csv, otherwise JSON)
     #[arg(short = 'o', long)]
     #[arg(help_heading = "Output Options")]
     output: Option<PathBuf>,
@@ -1059,9 +1061,44 @@ fn generate_completions(shell: &str) {
     generate(shell, &mut cmd, "xfr", &mut std::io::stdout());
 }
 
+/// Top-level options that still take effect when a subcommand runs. Every
+/// other top-level option configures the client test and would be ignored.
+const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
+    "completions",
+    "theme",
+    "log_file",
+    "log_level",
+    "no_update_check",
+];
+
+/// Parse the command line, rejecting client options given alongside a
+/// subcommand. Only options typed on the command line count: env-backed
+/// options (`XFR_DURATION`, `XFR_PSK`, `XFR_PORT`, ...) and defaults must
+/// not break `xfr serve` for users who export them.
+fn parse_cli() -> Cli {
+    use clap::parser::ValueSource;
+    use clap::{CommandFactory, FromArgMatches};
+
+    let mut cmd = Cli::command();
+    let matches = cmd.get_matches_mut();
+    if let Some(subcommand) = matches.subcommand_name() {
+        let ignored = cmd.get_arguments().find(|arg| {
+            let id = arg.get_id().as_str();
+            !SUBCOMMAND_COMPATIBLE_ARGS.contains(&id)
+                && matches.value_source(id) == Some(ValueSource::CommandLine)
+        });
+        if let Some(arg) = ignored {
+            let message = format!("the argument '{arg}' cannot be used with '{subcommand}'");
+            cmd.error(clap::error::ErrorKind::ArgumentConflict, message)
+                .exit();
+        }
+    }
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     // Handle shell completions early (before logging init)
     if let Some(ref shell) = cli.completions {
@@ -1936,7 +1973,11 @@ async fn run_client_plain(
 
     // Don't save incomplete fallback results to file — only save real server results
     if !interrupted && let Some(path) = output {
-        xfr::output::json::save_json(&result, &path)?;
+        if opts.csv {
+            std::fs::write(&path, &output_str)?;
+        } else {
+            xfr::output::json::save_json(&result, &path)?;
+        }
         info!("Results saved to {}", path.display());
     }
 
