@@ -1,0 +1,27 @@
+────────────────────────────────────────────────────────────
+  xfr Test Results
+────────────────────────────────────────────────────────────
+
+  Duration:    1.00s
+  Transfer:    1.00 KB
+  Throughput:  8.0 Mbps
+
+  Upload UDP Stats:
+    Packets Sent:     100
+    Packets Received: 80
+    Lost:             20 (20.00%)
+    Jitter:           0.50ms
+    Out of Order:     0
+
+  Download UDP Stats:
+    Packets Sent:     100
+    Packets Received: 100
+    Lost:             0 (0.00%)
+    Jitter:           0.00ms
+    Out of Order:     0
+
+  Per-Stream Results:
+    [0] 1.00 KB @ 8.0 Mbps  rtx: 1
+        Upload: 400 B @ 3.0 Mbps  Download: 624 B @ 5.0 Mbps
+
+────────────────────────────────────────────────────────────

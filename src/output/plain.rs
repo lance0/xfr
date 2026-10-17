@@ -1,8 +1,12 @@
 //! Plain text output
 
+use std::fmt::Write;
+
 use crate::probe::{MtuProbeReport, SizeVerdict};
 use crate::protocol::{TestResult, UdpDirectionProgress, UdpStats};
 use crate::stats::{bytes_to_human, mbps_to_human};
+
+const REPORT_SEPARATOR: &str = "────────────────────────────────────────────────────────────";
 
 pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     // A probe run carries no meaningful throughput numbers; the
@@ -12,17 +16,19 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     }
     let mut output = String::new();
 
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push('\n');
     output.push_str("  xfr Test Results\n");
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push('\n');
     output.push('\n');
 
-    output.push_str(&format!(
-        "  Duration:    {:.2}s\n",
+    writeln!(
+        output,
+        "  Duration:    {:.2}s",
         result.duration_ms as f64 / 1000.0
-    ));
+    )
+    .expect("writing to String cannot fail");
 
     // Bidirectional tests: show per-direction bytes/throughput alongside the total.
     // Unidirectional tests report only the combined number (which equals the
@@ -33,27 +39,35 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         result.throughput_send_mbps,
         result.throughput_recv_mbps,
     ) {
-        output.push_str(&format!(
-            "  Transfer:    Send: {}    Recv: {}    (Total: {})\n",
+        writeln!(
+            output,
+            "  Transfer:    Send: {}    Recv: {}    (Total: {})",
             bytes_to_human(sent),
             bytes_to_human(recv),
             bytes_to_human(result.bytes_total)
-        ));
-        output.push_str(&format!(
-            "  Throughput:  Send: {}  Recv: {}  (Total: {})\n",
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "  Throughput:  Send: {}  Recv: {}  (Total: {})",
             mbps_to_human(ts_send),
             mbps_to_human(ts_recv),
             mbps_to_human(result.throughput_mbps)
-        ));
+        )
+        .expect("writing to String cannot fail");
     } else {
-        output.push_str(&format!(
-            "  Transfer:    {}\n",
+        writeln!(
+            output,
+            "  Transfer:    {}",
             bytes_to_human(result.bytes_total)
-        ));
-        output.push_str(&format!(
-            "  Throughput:  {}\n",
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "  Throughput:  {}",
             mbps_to_human(result.throughput_mbps)
-        ));
+        )
+        .expect("writing to String cannot fail");
     }
     output.push('\n');
 
@@ -63,16 +77,22 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         } else {
             output.push_str("  Sender TCP Info:\n");
         }
-        output.push_str(&format!("    Retransmits: {}\n", tcp_info.retransmits));
-        output.push_str(&format!(
-            "    RTT:         {:.2}ms\n",
+        writeln!(output, "    Retransmits: {}", tcp_info.retransmits)
+            .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "    RTT:         {:.2}ms",
             tcp_info.rtt_us as f64 / 1000.0
-        ));
-        output.push_str(&format!(
-            "    RTT Var:     {:.2}ms\n",
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "    RTT Var:     {:.2}ms",
             tcp_info.rtt_var_us as f64 / 1000.0
-        ));
-        output.push_str(&format!("    Cwnd:        {} KB\n", tcp_info.cwnd / 1024));
+        )
+        .expect("writing to String cannot fail");
+        writeln!(output, "    Cwnd:        {} KB", tcp_info.cwnd / 1024)
+            .expect("writing to String cannot fail");
         output.push('\n');
     }
 
@@ -96,7 +116,8 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
         ("Client", &result.client_udp_send_errors),
     ] {
         if let Some(errors) = errors {
-            output.push_str(&format!("  Warning: {}\n\n", errors.describe(side)));
+            writeln!(output, "  Warning: {}\n", errors.describe(side))
+                .expect("writing to String cannot fail");
         }
     }
 
@@ -108,14 +129,16 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     {
         output.push_str("  Per-Stream Results:\n");
         for stream in &result.streams {
-            output.push_str(&format!(
+            write!(
+                output,
                 "    [{}] {} @ {}",
                 stream.id,
                 bytes_to_human(stream.bytes),
                 mbps_to_human(stream.throughput_mbps)
-            ));
+            )
+            .expect("writing to String cannot fail");
             if let Some(rtx) = stream.retransmits {
-                output.push_str(&format!("  rtx: {}", rtx));
+                write!(output, "  rtx: {}", rtx).expect("writing to String cannot fail");
             }
             output.push('\n');
             // The bidir split gets its own indented line: on one line it
@@ -126,52 +149,54 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
                 stream.throughput_send_mbps,
                 stream.throughput_recv_mbps,
             ) {
-                output.push_str(&format!(
-                    "        Upload: {} @ {}  Download: {} @ {}\n",
+                writeln!(
+                    output,
+                    "        Upload: {} @ {}  Download: {} @ {}",
                     bytes_to_human(sent),
                     mbps_to_human(send_rate),
                     bytes_to_human(recv),
                     mbps_to_human(recv_rate)
-                ));
+                )
+                .expect("writing to String cannot fail");
             }
         }
         output.push('\n');
     }
 
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push('\n');
 
     output
 }
 
 fn append_udp_stats(output: &mut String, title: &str, stats: Option<&UdpStats>) {
-    output.push_str(&format!("  {title}:\n"));
+    writeln!(output, "  {title}:").expect("writing to String cannot fail");
     if let Some(udp_stats) = stats {
-        output.push_str(&format!(
-            "    Packets Sent:     {}\n",
-            udp_stats.packets_sent
-        ));
-        output.push_str(&format!(
-            "    Packets Received: {}\n",
+        writeln!(output, "    Packets Sent:     {}", udp_stats.packets_sent)
+            .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "    Packets Received: {}",
             udp_stats.packets_received
-        ));
-        output.push_str(&format!(
-            "    Lost:             {} ({:.2}%)\n",
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            output,
+            "    Lost:             {} ({:.2}%)",
             udp_stats.lost, udp_stats.lost_percent
-        ));
-        output.push_str(&format!(
-            "    Jitter:           {:.2}ms\n",
-            udp_stats.jitter_ms
-        ));
+        )
+        .expect("writing to String cannot fail");
+        writeln!(output, "    Jitter:           {:.2}ms", udp_stats.jitter_ms)
+            .expect("writing to String cannot fail");
         if let Some(max) = udp_stats.jitter_max_ms {
-            output.push_str(&format!("    Jitter Max:       {:.2}ms\n", max));
+            writeln!(output, "    Jitter Max:       {:.2}ms", max)
+                .expect("writing to String cannot fail");
         }
-        output.push_str(&format!(
-            "    Out of Order:     {}\n",
-            udp_stats.out_of_order
-        ));
+        writeln!(output, "    Out of Order:     {}", udp_stats.out_of_order)
+            .expect("writing to String cannot fail");
         if let Some(size) = udp_stats.packet_size {
-            output.push_str(&format!("    Packet Size:      {} bytes\n", size));
+            writeln!(output, "    Packet Size:      {} bytes", size)
+                .expect("writing to String cannot fail");
         }
         output.push('\n');
     } else {
@@ -184,48 +209,56 @@ fn append_udp_stats(output: &mut String, title: &str, stats: Option<&UdpStats>) 
 fn format_mtu_probe(probe: &MtuProbeReport) -> String {
     let mut output = String::new();
 
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push('\n');
     output.push_str("  xfr Path MTU Probe\n");
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push_str("\n\n");
 
-    output.push_str(&format!(
-        "  Address family: {} ({} bytes IP+UDP overhead)\n\n",
+    writeln!(
+        output,
+        "  Address family: {} ({} bytes IP+UDP overhead)\n",
         if probe.ipv6 { "IPv6" } else { "IPv4" },
         crate::probe::ip_overhead(probe.ipv6)
-    ));
+    )
+    .expect("writing to String cannot fail");
 
     output.push_str("  Payload      client → server    server → client\n");
     for size in &probe.sizes {
-        output.push_str(&format!(
-            "  {:>7}      {:<18} {}\n",
+        writeln!(
+            output,
+            "  {:>7}      {:<18} {}",
             size.payload,
             format_verdict(size.forward, size.forward_ok, size.attempts),
             format_verdict(size.reverse, size.reverse_ok, size.attempts),
-        ));
+        )
+        .expect("writing to String cannot fail");
     }
     output.push('\n');
 
     match (probe.forward_max_payload, probe.forward_path_mtu) {
-        (Some(payload), Some(mtu)) => output.push_str(&format!(
-            "  Largest payload client → server: {} bytes  (path MTU ≈ {})\n",
+        (Some(payload), Some(mtu)) => writeln!(
+            output,
+            "  Largest payload client → server: {} bytes  (path MTU ≈ {})",
             payload, mtu
-        )),
+        )
+        .expect("writing to String cannot fail"),
         _ => output.push_str("  Largest payload client → server: none survived\n"),
     }
     match (probe.reverse_max_payload, probe.reverse_path_mtu) {
-        (Some(payload), Some(mtu)) => output.push_str(&format!(
-            "  Largest payload server → client: {} bytes  (path MTU ≈ {})\n",
+        (Some(payload), Some(mtu)) => writeln!(
+            output,
+            "  Largest payload server → client: {} bytes  (path MTU ≈ {})",
             payload, mtu
-        )),
+        )
+        .expect("writing to String cannot fail"),
         _ => output.push_str("  Largest payload server → client: none observed\n"),
     }
     // The echo can only ever be as large as the probe that triggered
     // it, so a wider reverse path is invisible from this side.
     output.push_str("  (server → client is a lower bound, capped by the client → server path)\n");
 
-    output.push_str("─".repeat(60).as_str());
+    output.push_str(REPORT_SEPARATOR);
     output.push('\n');
 
     output
@@ -265,16 +298,17 @@ pub fn output_interval_plain(
 
     // UDP shows jitter/lost; TCP shows rtx/rtt. Use jitter presence to distinguish.
     if let Some(jitter) = jitter_ms {
-        output.push_str(&format!("  jitter: {:>7.2}ms", jitter));
+        write!(output, "  jitter: {:>7.2}ms", jitter).expect("writing to String cannot fail");
         if let Some(l) = lost {
-            output.push_str(&format!("  lost: {}", l));
+            write!(output, "  lost: {}", l).expect("writing to String cannot fail");
         }
     } else {
         if let Some(rtx) = retransmits {
-            output.push_str(&format!("  rtx: {:>5}", rtx));
+            write!(output, "  rtx: {:>5}", rtx).expect("writing to String cannot fail");
         }
         if let Some(rtt) = rtt_us {
-            output.push_str(&format!("  rtt: {:.2}ms", rtt as f64 / 1000.0));
+            write!(output, "  rtt: {:.2}ms", rtt as f64 / 1000.0)
+                .expect("writing to String cannot fail");
         }
     }
 
@@ -540,6 +574,7 @@ mod tests {
         result.streams[0].throughput_send_mbps = Some(3.0);
         result.streams[0].throughput_recv_mbps = Some(5.0);
         let output = output_plain(&result, false);
+        assert_eq!(output, include_str!("testdata/plain-udp-bidir.txt"));
         assert!(output.contains("Upload UDP Stats:\n"));
         assert!(output.contains("Lost:             20 (20.00%)"));
         assert!(output.contains("Download UDP Stats:\n"));
@@ -548,6 +583,41 @@ mod tests {
         assert!(output.contains("Upload: 400 B @ 3.0 Mbps  Download: 624 B @ 5.0 Mbps"));
         result.udp_stats_send = None;
         assert!(output_plain(&result, false).contains("Upload UDP Stats:\n    Not reported\n"));
+    }
+
+    #[test]
+    fn mtu_probe_report_keeps_exact_text_format() {
+        use crate::probe::SizeResult;
+        let mut result = make_result_with_tcp_info();
+        result.mtu_probe = Some(MtuProbeReport {
+            forward_max_payload: Some(1472),
+            reverse_max_payload: None,
+            forward_path_mtu: Some(1500),
+            reverse_path_mtu: None,
+            ipv6: false,
+            sizes: vec![
+                SizeResult {
+                    payload: 1472,
+                    forward_ok: 2,
+                    reverse_ok: 0,
+                    attempts: 3,
+                    forward: SizeVerdict::Pass,
+                    reverse: SizeVerdict::Fail,
+                },
+                SizeResult {
+                    payload: 8972,
+                    forward_ok: 0,
+                    reverse_ok: 0,
+                    attempts: 3,
+                    forward: SizeVerdict::LocalLimit,
+                    reverse: SizeVerdict::Untested,
+                },
+            ],
+        });
+        assert_eq!(
+            output_plain(&result, false),
+            include_str!("testdata/plain-mtu.txt")
+        );
     }
 
     #[test]
@@ -584,14 +654,14 @@ mod tests {
     #[test]
     fn test_output_plain_sender_tcp_label_tcp() {
         let output = output_plain(&make_result_with_tcp_info(), false);
-        assert!(output.contains("Sender TCP Info:\n"));
+        assert_eq!(output, include_str!("testdata/plain-tcp.txt"));
         assert!(!output.contains("initial subflow"));
     }
 
     #[test]
     fn test_output_plain_sender_tcp_label_mptcp() {
         let output = output_plain(&make_result_with_tcp_info(), true);
-        assert!(output.contains("Sender TCP Info (initial subflow):\n"));
+        assert_eq!(output, include_str!("testdata/plain-mptcp.txt"));
     }
 
     #[test]
