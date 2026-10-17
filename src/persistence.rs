@@ -84,6 +84,10 @@ pub(crate) fn atomic_write(
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to replace {}", path.display()))?;
+    // Make the rename itself durable. Best effort: the new contents are already in place, and
+    // some filesystems refuse to open or fsync a directory.
+    #[cfg(unix)]
+    let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
     Ok(())
 }
 
