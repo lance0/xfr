@@ -205,18 +205,20 @@ fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     transferred
                 )
             };
-            let lines = vec![
-                Line::from(format!(
-                    "{}  {}",
-                    app.state,
-                    mbps_to_human(if app.state == AppState::Completed {
-                        app.average_throughput_mbps
-                    } else {
-                        app.current_throughput_mbps
-                    })
-                )),
-                Line::from(progress),
-            ];
+            let rate = mbps_to_human(if app.state == AppState::Completed {
+                app.average_throughput_mbps
+            } else {
+                app.current_throughput_mbps
+            });
+            // The rate is the point of this view: shorten the state label,
+            // then drop it, before the rate would be cut mid-unit.
+            let state = app.state.to_string();
+            let headline = [state.as_str(), state.trim_end_matches('.')]
+                .into_iter()
+                .map(|state| format!("{state}  {rate}"))
+                .find(|line| line.chars().count() <= usize::from(area.width))
+                .unwrap_or(rate);
+            let lines = vec![Line::from(headline), Line::from(progress)];
             frame.render_widget(
                 Paragraph::new(lines).style(Style::default().fg(theme.text)),
                 area,
@@ -724,9 +726,15 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // chunk on the right and the key hints absorb any clipping. Laid out as
     // one line, the full hint list runs ~107 columns and an 80-column
     // terminal used to lose "Status: ..." off the right edge entirely —
-    // truncating the single field worth reading.
-    let status_label = format!(" Status: {}", status_text);
-    let status_width = status_label.chars().count() as u16;
+    // truncating the single field worth reading. The `?:Help` hint still
+    // outranks it: on very narrow terminals Status loses its label first,
+    // then disappears.
+    let room = usize::from(area.width).saturating_sub("?:Help".len());
+    let status_label = [" Status: ", " "]
+        .into_iter()
+        .find(|label| label.len() + status_text.chars().count() <= room);
+    let status_width =
+        status_label.map_or(0, |label| label.len() + status_text.chars().count()) as u16;
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(status_width)])
@@ -781,11 +789,13 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
 
-    let status = Line::from(vec![
-        Span::styled(" Status: ", Style::default().fg(theme.text_dim)),
-        Span::styled(status_text, Style::default().fg(status_color)),
-    ]);
-    frame.render_widget(Paragraph::new(status), chunks[1]);
+    if let Some(label) = status_label {
+        let status = Line::from(vec![
+            Span::styled(label, Style::default().fg(theme.text_dim)),
+            Span::styled(status_text, Style::default().fg(status_color)),
+        ]);
+        frame.render_widget(Paragraph::new(status), chunks[1]);
+    }
 }
 
 // The key column is padded to the widest key so descriptions line up.
@@ -1838,6 +1848,31 @@ mod small_terminal_tests {
             assert!(footer.contains("?:Help"), "{width}x{height}: {footer:?}");
             assert!(footer.contains("Status: Running"), "{footer:?}");
         }
+    }
+
+    /// At 20x5 the footer kept "Status: Running..." and lost the help hint,
+    /// and the compact headline cut the rate to "4.00 Gbp".
+    #[test]
+    fn tiny_client_keeps_help_hint_and_whole_rate() {
+        let mut app = running_app_with_history();
+        app.current_throughput_mbps = 4000.0;
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..5)
+            .map(|y| (0..20).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows[1].starts_with("Running  4.00 Gbps"), "{rows:?}");
+        assert!(rows[4].starts_with("?:Help"), "{rows:?}");
+        assert!(rows[4].trim_end().ends_with(" Running..."), "{rows:?}");
+        // Narrower still, the state label goes before the rate is cut.
+        let mut terminal = Terminal::new(TestBackend::new(12, 5)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let headline: String = (0..12).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(headline.trim_end(), "4.00 Gbps");
+        let footer: String = (0..12).map(|x| buf[(x, 4)].symbol()).collect();
+        assert_eq!(footer.trim_end(), "?:Help");
     }
 
     /// The compact view already says "Paused"; the pause box would hide its rate.
