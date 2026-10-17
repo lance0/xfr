@@ -1129,6 +1129,10 @@ async fn main() -> Result<()> {
     // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
     let file_config = Config::load()?;
 
+    // The TUIs draw on stdout and read keys from stdin. Without a terminal on
+    // both, fall back to plain output as --no-tui does.
+    let terminal = io::stdout().is_terminal() && io::stdin().is_terminal();
+
     // Determine logging config based on command (server vs client)
     let (effective_log_file, effective_log_level, tui_enabled) = match &cli.command {
         Some(Commands::Serve {
@@ -1147,7 +1151,7 @@ async fn main() -> Result<()> {
                 .or(file_config.server.log_level.as_ref())
                 .or(cli.log_level.as_ref())
                 .or(file_config.client.log_level.as_ref());
-            (file, level, *server_tui)
+            (file, level, *server_tui && terminal)
         }
         Some(Commands::Diff { .. }) | Some(Commands::Discover { .. }) => {
             let file = cli
@@ -1171,7 +1175,7 @@ async fn main() -> Result<()> {
                 .as_ref()
                 .or(file_config.client.log_level.as_ref());
             let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
-            (file, level, !no_tui)
+            (file, level, !no_tui && terminal)
         }
     };
     // Hold the logging guard until program exit to ensure all logs are flushed
@@ -1307,7 +1311,10 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            if server_tui {
+            if server_tui && !terminal {
+                warn!("--tui needs a terminal; running the plain server");
+            }
+            if server_tui && terminal {
                 // Same precedence as the client TUI: --theme > saved pref >
                 // NO_COLOR-derived default. There is no server section for a
                 // theme in config.toml, so the saved pref carries a user's
@@ -1460,7 +1467,7 @@ async fn main() -> Result<()> {
                 || (!cli.json_stream
                     && !cli.csv
                     && file_config.client.json_output.unwrap_or(false));
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
+            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false) || !terminal;
 
             // Determine timestamp format (CLI > config > default)
             let timestamp_format = cli

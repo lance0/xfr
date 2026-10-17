@@ -3323,6 +3323,37 @@ async fn test_tcp_client_to_mptcp_server() {
     );
 }
 
+#[tokio::test]
+async fn test_cli_without_terminal_falls_back_to_plain_output() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // No --no-tui: piped stdout and a null stdin must select plain output.
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1sec"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("client must not hang without a terminal")
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("xfr Test Results"), "{stdout}");
+    assert!(
+        !stdout.contains("\x1b[?1049h"),
+        "alternate screen: {stdout}"
+    );
+    server.abort();
+}
+
 #[test]
 fn test_cli_unsavable_output_fails_before_connecting() {
     // No server listens on this port: the preflight must fail before the
