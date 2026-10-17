@@ -1714,6 +1714,17 @@ impl Client {
                     crate::protocol::UdpSendErrors::sanitize_message(&errors.last_error);
             }
             result.client_udp_send_errors = stats.udp_send_errors();
+            // An empty stream means part of the requested parallelism never
+            // ran, so the totals are not the test that was asked for. `-n`
+            // is exempt: a budget smaller than one chunk per stream leaves
+            // streams empty by design.
+            if self.config.protocol == Protocol::Tcp && self.config.byte_budget.is_none() {
+                result.zero_byte_streams =
+                    Some(result.count_zero_byte_streams()).filter(|&n| n > 0);
+                if let Some(msg) = result.describe_zero_byte_streams() {
+                    warn!("{}", msg);
+                }
+            }
         }
 
         test_result
@@ -2061,7 +2072,7 @@ impl Client {
             }
         };
 
-        result.mtu_probe = Some(report);
+        result.mtu_probe = Some(Box::new(report));
         Ok(result)
     }
 
@@ -3467,6 +3478,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         };
 
         overlay_udp_download_result(&mut result, &stats);
@@ -3501,6 +3513,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         };
         overlay_udp_download_result(&mut result, &stats);
         assert_eq!(result.bytes_total, 1_000);
@@ -3679,6 +3692,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -3719,6 +3733,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         };
 
         overlay_udp_bidir_result(&mut result, &stats);
@@ -4094,6 +4109,7 @@ mod tests {
                         .to_string(),
                 }),
                 client_udp_send_errors: None,
+                zero_byte_streams: None,
             };
             for msg in [
                 ControlMessage::Cancelled {

@@ -2230,6 +2230,7 @@ async fn run_quic_test(
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         });
 
         reports.finish(&mut ctrl_send, &result.serialize()?).await?;
@@ -2770,7 +2771,23 @@ async fn run_test<W: AsyncWrite + Unpin>(
             mtu_probe: None,
             server_udp_send_errors: stats.udp_send_errors(),
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         });
+        // Server-side counterpart of the client's zero_byte_streams warning.
+        if let ControlMessage::Result(r) = &result
+            && protocol == Protocol::Tcp
+            && byte_budget.is_none()
+        {
+            let empty = r.count_zero_byte_streams();
+            if empty > 0 {
+                warn!(
+                    "Test {}: {} of {} streams carried no data",
+                    id,
+                    empty,
+                    r.streams.len()
+                );
+            }
+        }
 
         // Send result FIRST so the client isn't blocked by slow post-processing
         // (push gateway retries, metrics hooks, etc.)

@@ -993,6 +993,9 @@ impl App {
                 self.log(errors.describe(side));
             }
         }
+        if let Some(msg) = result.describe_zero_byte_streams() {
+            self.log(msg);
+        }
         self.result = Some(result);
     }
 
@@ -1591,6 +1594,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
             udp_stats_send: None,
             udp_stats_recv: None,
         });
@@ -1905,6 +1909,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
             udp_stats_send: None,
             udp_stats_recv: Some(Box::new(crate::protocol::UdpStats {
                 packets_sent: 100,
@@ -2792,6 +2797,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
             udp_stats_send: None,
             udp_stats_recv: None,
         };
@@ -2824,6 +2830,7 @@ mod tests {
                 last_error: "Connection refused (os error 111)".to_string(),
             }),
             client_udp_send_errors: None,
+            zero_byte_streams: None,
         });
         assert_eq!(
             app.history[0].message,
@@ -2932,6 +2939,7 @@ mod tests {
                     mtu_probe: None,
                     server_udp_send_errors: None,
                     client_udp_send_errors: None,
+                    zero_byte_streams: None,
                     udp_stats_send: None,
                     udp_stats_recv: None,
                 })

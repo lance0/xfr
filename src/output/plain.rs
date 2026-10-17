@@ -120,6 +120,9 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
                 .expect("writing to String cannot fail");
         }
     }
+    if let Some(msg) = result.describe_zero_byte_streams() {
+        writeln!(output, "  Warning: {msg}\n").expect("writing to String cannot fail");
+    }
 
     if result.streams.len() > 1
         || result
@@ -459,6 +462,7 @@ mod tests {
             mtu_probe: None,
             server_udp_send_errors: None,
             client_udp_send_errors: None,
+            zero_byte_streams: None,
             udp_stats_send: None,
             udp_stats_recv: None,
         }
@@ -589,7 +593,7 @@ mod tests {
     fn mtu_probe_report_keeps_exact_text_format() {
         use crate::probe::SizeResult;
         let mut result = make_result_with_tcp_info();
-        result.mtu_probe = Some(MtuProbeReport {
+        result.mtu_probe = Some(Box::new(MtuProbeReport {
             forward_max_payload: Some(1472),
             reverse_max_payload: None,
             forward_path_mtu: Some(1500),
@@ -613,7 +617,7 @@ mod tests {
                     reverse: SizeVerdict::Untested,
                 },
             ],
-        });
+        }));
         assert_eq!(
             output_plain(&result, false),
             include_str!("testdata/plain-mtu.txt")
