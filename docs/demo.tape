@@ -2,9 +2,15 @@
 #
 # Rendered with VHS (https://github.com/charmbracelet/vhs):
 #   cargo build
-#   ./target/debug/xfr serve >/dev/null 2>&1 &          # throwaway local server
-#   PATH="$PWD/target/debug:$PATH" vhs docs/demo.tape    # -> docs/demo.gif
-#   kill %1                                              # stop the server
+#   xfr_demo_server_dir=$(mktemp -d)
+#   XDG_CONFIG_HOME="$xfr_demo_server_dir" ./target/debug/xfr serve --bind 127.0.0.1 --no-mdns -p 45201 >/dev/null 2>&1 &
+#   xfr_demo_server_pid=$!
+#   VHS_NO_SANDBOX=1 PATH="$HOME/.cache/rod/browser/chromium-1321438:$PWD/target/debug:$HOME/go/bin:$HOME/.local/bin:$PATH" vhs docs/demo.tape
+#   kill "$xfr_demo_server_pid"
+#   rm -rf "$xfr_demo_server_dir"
+#
+# The pinned Chromium on PATH avoids VHS 0.11/go-rod hangs with newer Chrome.
+# Launch and quit are hidden, so the GIF starts and ends on the populated TUI.
 #
 # The client runs a rate-limited (-b 1G) TCP test against a local `xfr serve`,
 # so the graph reads like a clean gigabit link. No external network or creds.
@@ -23,21 +29,23 @@ Set CursorBlink false
 
 Require xfr
 
-# --- Fresh throwaway HOME so the demo is deterministic (default theme, no saved
-# prefs) and never touches real config. Not captured. -------------------------
+# --- Isolated preferences/cache; keep the user's HOME intact. ----------------
 Hide
-Type "export HOME=$(mktemp -d)"
+Type "export XFR_DEMO_DIR=$(mktemp -d)"
+Enter
+Type "export XDG_CONFIG_HOME=$XFR_DEMO_DIR/config XDG_CACHE_HOME=$XFR_DEMO_DIR/cache"
+Enter
+Type "trap 'rm -rf $XFR_DEMO_DIR' EXIT"
 Enter
 Sleep 300ms
 Type "clear"
 Enter
 Sleep 300ms
-Show
-
-# --- Launch the client TUI (server already listening on 127.0.0.1:5201) -------
-Type@40ms "xfr 127.0.0.1 -b 1G -t 60sec"
+# --- Launch off-camera; the graph has data before the first visible frame. ---
+Type "xfr 127.0.0.1 -p 45201 -b 1G -t 60sec --no-update-check --theme default"
 Enter
 Sleep 6s          # connect + the live throughput graph fills
+Show
 Sleep 5s          # hold as per-second interval updates animate the graph
 
 # --- Peek at the Settings modal (theme picker + the update-check toggle) -------
@@ -57,3 +65,5 @@ Sleep 4s
 Hide
 Type "q"
 Sleep 500ms
+Type "exit"
+Enter
