@@ -534,15 +534,15 @@ impl TestStats {
 
         // Observed UDP streams can measure zero jitter. Retain positive
         // readings from older snapshots that lack cumulative UDP counters.
-        let jitter_values: Vec<f64> = intervals
+        let jitter_values = intervals
             .iter()
             .filter(|i| i.jitter_ms > 0.0 || i.cumulative_packets_received > 0)
-            .map(|i| i.jitter_ms)
-            .collect();
-        let avg_jitter = if jitter_values.is_empty() {
+            .map(|i| i.jitter_ms);
+        let jitter_count = jitter_values.clone().count();
+        let avg_jitter = if jitter_count == 0 {
             None
         } else {
-            Some(jitter_values.iter().sum::<f64>() / jitter_values.len() as f64)
+            Some(jitter_values.sum::<f64>() / jitter_count as f64)
         };
 
         // Cumulative UDP packet counts across all streams. Read from the
@@ -570,21 +570,20 @@ impl TestStats {
         };
 
         // Average RTT across streams that have TCP_INFO
-        let rtt_values: Vec<u32> = intervals.iter().filter_map(|i| i.rtt_us).collect();
-        let avg_rtt = if rtt_values.is_empty() {
+        let rtt_values = intervals.iter().filter_map(|i| i.rtt_us);
+        let rtt_count = rtt_values.clone().count();
+        let avg_rtt = if rtt_count == 0 {
             None
         } else {
-            let rtt_sum = rtt_values.iter().map(|&r| r as u64).sum::<u64>();
-            Some((rtt_sum as f64 / rtt_values.len() as f64).round() as u32)
+            let rtt_sum = rtt_values.map(u64::from).sum::<u64>();
+            Some((rtt_sum as f64 / rtt_count as f64).round() as u32)
         };
 
         // Sum cwnd across streams (total sending capacity)
-        let cwnd_values: Vec<u32> = intervals.iter().filter_map(|i| i.cwnd).collect();
-        let total_cwnd = if cwnd_values.is_empty() {
-            None
-        } else {
-            Some(cwnd_values.iter().copied().fold(0u32, u32::saturating_add))
-        };
+        let total_cwnd = intervals
+            .iter()
+            .filter_map(|i| i.cwnd)
+            .reduce(u32::saturating_add);
 
         AggregateInterval {
             bytes: total_bytes,
@@ -1093,6 +1092,59 @@ mod tests {
         });
 
         assert_eq!(stats.to_aggregate(&intervals).cwnd, Some(u32::MAX));
+    }
+
+    #[test]
+    fn aggregate_interval_distinguishes_missing_and_zero_measurements() {
+        let stats = TestStats::new("test".into(), 0);
+        let empty = stats.to_aggregate(&[]);
+        assert_eq!(
+            (empty.jitter_ms, empty.rtt_us, empty.cwnd),
+            (None, None, None)
+        );
+
+        let unknown = IntervalStats {
+            timestamp: Instant::now(),
+            bytes: 0,
+            throughput_mbps: 0.0,
+            retransmits: 0,
+            jitter_ms: 0.0,
+            lost: 0,
+            rtt_us: None,
+            cwnd: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            cumulative_packets_received: 0,
+            cumulative_packets_lost: 0,
+        };
+        let measured_zero = IntervalStats {
+            rtt_us: Some(0),
+            cwnd: Some(0),
+            cumulative_packets_received: 1,
+            ..unknown.clone()
+        };
+        let measured = IntervalStats {
+            jitter_ms: 2.0,
+            rtt_us: Some(101),
+            cwnd: Some(10),
+            ..unknown.clone()
+        };
+        for (intervals, expected) in [
+            (vec![unknown.clone()], (None, None, None)),
+            (vec![measured_zero.clone()], (Some(0.0), Some(0), Some(0))),
+            (
+                vec![unknown, measured_zero, measured],
+                (Some(1.0), Some(51), Some(10)),
+            ),
+        ] {
+            for bidir in [false, true] {
+                let aggregate = stats.to_aggregate_with_direction(&intervals, bidir);
+                assert_eq!(
+                    (aggregate.jitter_ms, aggregate.rtt_us, aggregate.cwnd),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
