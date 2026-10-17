@@ -12,7 +12,7 @@ use hyper::service::service_fn;
 #[cfg(feature = "prometheus")]
 use hyper::{Request, Response};
 #[cfg(feature = "prometheus")]
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 #[cfg(feature = "prometheus")]
 use once_cell::sync::Lazy;
 #[cfg(feature = "prometheus")]
@@ -154,20 +154,31 @@ impl MetricsServer {
 
         loop {
             let (stream, _) = listener.accept().await?;
-            let io = TokioIo::new(stream);
-
             tokio::spawn(async move {
-                let service = service_fn(|req| async move { handle_request(req).await });
-
-                if let Err(err) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await
-                {
+                if let Err(err) = serve_connection(stream).await {
                     eprintln!("Error serving connection: {:?}", err);
                 }
             });
         }
     }
+}
+
+#[cfg(feature = "prometheus")]
+async fn serve_connection<T>(stream: T) -> anyhow::Result<()>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = service_fn(handle_request);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(std::time::Duration::from_secs(5))
+            .keep_alive(false)
+            .serve_connection(TokioIo::new(stream), service),
+    )
+    .await??;
+    Ok(())
 }
 
 #[cfg(feature = "prometheus")]
@@ -317,5 +328,78 @@ fn update_counters(stats: &TestStats) {
         m.tcp_retransmits_total
             .with_label_values(&[test_id])
             .inc_by(tcp_info.retransmits as f64);
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn fragmented_requests_respond_and_close() {
+        register_metrics();
+        for (path, body) in [("/health", "OK"), ("/metrics", "xfr_bytes_total")] {
+            let (mut client, server) = tokio::io::duplex(1);
+            let task = tokio::spawn(serve_connection(server));
+            client
+                .write_all(format!("GET {path} HTTP/1.1\r\nHo").as_bytes())
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            client.write_all(b"st: localhost\r\n\r\n").await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response.contains("connection: close\r\n"));
+            assert!(response.contains(body));
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn header_deadline_is_not_reset_by_trickling_bytes() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_connection(server));
+        client.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            client.write_all(b"X").await.unwrap();
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(task.is_finished());
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.downcast_ref::<hyper::Error>().unwrap().is_timeout());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_deadline_bounds_stalled_response_writes() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let task = tokio::spawn(serve_connection(server));
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(task.is_finished());
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
     }
 }

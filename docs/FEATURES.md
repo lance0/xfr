@@ -532,6 +532,10 @@ Build with `--features prometheus` for metrics support.
 xfr serve --prometheus 9090
 ```
 
+The endpoint accepts one request per connection (HTTP keep-alive is disabled).
+Request headers must arrive within 5 seconds total, and each connection closes
+within 10 seconds total, including response writes. `/health` returns `OK`.
+
 Available at `http://localhost:9090/metrics`:
 
 ```
