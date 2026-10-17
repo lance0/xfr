@@ -39,9 +39,16 @@ so server options go after the subcommand
 not
 .BR "xfr \-p 9000 serve" ).
 Only \fB\-\-theme\fR, \fB\-\-log\-file\fR, \fB\-\-log\-level\fR,
-\fB\-\-no\-update\-check\fR and \fB\-\-completions\fR may also appear before a
-subcommand. Values from environment variables (XFR_PORT, XFR_DURATION,
-XFR_PSK, ...) are not affected.
+\fB\-\-no\-update\-check\fR and \fB\-\-completions\fR may be combined with a
+subcommand, and they must come before it
+.RB ( "xfr \-\-no\-update\-check serve" ,
+not
+.BR "xfr serve \-\-no\-update\-check" ).
+Only \fB\-\-theme\fR is also accepted after the subcommand;
+.B serve
+has its own \fB\-\-log\-file\fR and \fB\-\-log\-level\fR, given after it.
+Values from environment variables (XFR_PORT, XFR_DURATION, XFR_PSK, ...)
+are not affected.
 .SH CLIENT OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
