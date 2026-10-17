@@ -1,6 +1,7 @@
 # xfr — README demo cassette (live throughput TUI)
 #
-# Rendered with VHS (https://github.com/charmbracelet/vhs):
+# Render on Linux from the repo root (needs vhs, ttyd, ffmpeg). Preferences
+# are isolated via XDG_CONFIG_HOME, which dirs::config_dir() ignores on macOS.
 #   cargo build
 #   xfr_demo_server_dir=$(mktemp -d)
 #   XDG_CONFIG_HOME="$xfr_demo_server_dir" ./target/debug/xfr serve --bind 127.0.0.1 --no-mdns -p 45201 >/dev/null 2>&1 &
@@ -9,28 +10,38 @@
 #   kill "$xfr_demo_server_pid"
 #   rm -rf "$xfr_demo_server_dir"
 #
-# The pinned Chromium on PATH avoids VHS 0.11/go-rod hangs with newer Chrome.
-# Launch and quit are hidden, so the GIF starts and ends on the populated TUI.
+# vhs: `go install github.com/charmbracelet/vhs@v0.11.0` (lands in ~/go/bin);
+# ttyd: a release binary from github.com/tsl0922/ttyd in ~/.local/bin.
+# VHS 0.11 (go-rod 0.116) hangs opening its page on current Chrome, so it is
+# pointed at rod's pinned Chromium 128 (picked up as `chrome` on PATH); fetch once:
+#   curl -LO https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1321438/chrome-linux.zip
+#   unzip chrome-linux.zip && mkdir -p ~/.cache/rod/browser && mv chrome-linux ~/.cache/rod/browser/chromium-1321438
+# VHS_NO_SANDBOX is needed where unprivileged user namespaces are restricted
+# (Ubuntu AppArmor).
 #
+# Launch and quit are hidden, so the GIF starts and ends on the populated TUI.
 # The client runs a rate-limited (-b 1G) TCP test against a local `xfr serve`,
 # so the graph reads like a clean gigabit link. No external network or creds.
 
 Output "docs/demo.gif"
 
-# Rendered at 2x (was 1200x720 / FontSize 15). Same 127x36 terminal, twice the
-# pixels per character cell, so the block glyphs in the throughput graph and the
-# transfer bar stay sharp when GitHub scales the image down.
-Set Width 2400
-Set Height 1440
-Set FontSize 30
-Set Padding 36
+# 1x size: at 2x VHS drops frames and the GIF plays ~2x fast. The short height
+# still fits the 19-row Settings modal without a mostly-empty History pane.
+Set Width 1200
+Set Height 540
+Set FontSize 15
+Set Padding 18
 Set Theme "Catppuccin Mocha"
 Set CursorBlink false
 
 Require xfr
 
 # --- Isolated preferences/cache; keep the user's HOME intact. ----------------
+# NO_COLOR in the recording shell would strip the theme's colours (crossterm
+# honours it even with an explicit --theme), so clear it.
 Hide
+Type "unset NO_COLOR"
+Enter
 Type "export XFR_DEMO_DIR=$(mktemp -d)"
 Enter
 Type "export XDG_CONFIG_HOME=$XFR_DEMO_DIR/config XDG_CACHE_HOME=$XFR_DEMO_DIR/cache"
