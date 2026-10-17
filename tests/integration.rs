@@ -3324,6 +3324,66 @@ async fn test_tcp_client_to_mptcp_server() {
 }
 
 #[tokio::test]
+async fn test_cli_without_terminal_falls_back_to_plain_output() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // No --no-tui: piped stdout and a null stdin must select plain output.
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1sec"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("client must not hang without a terminal")
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("xfr Test Results"), "{stdout}");
+    assert!(
+        !stdout.contains("\x1b[?1049h"),
+        "alternate screen: {stdout}"
+    );
+    server.abort();
+}
+
+#[test]
+fn test_cli_unsavable_output_fails_before_connecting() {
+    // No server listens on this port: the preflight must fail before the
+    // client tries to connect.
+    let port = get_test_port();
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nodir").join("x.json");
+    for (path, reason) in [
+        (missing.as_path(), "directory does not exist"),
+        (dir.path(), "is a directory"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-t", "30sec"])
+            .arg("--no-tui")
+            .arg("-o")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("Cannot save to {}: {reason}", path.display())),
+            "{stderr}"
+        );
+        assert!(!stderr.contains(".xfr-"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn test_cli_csv_output_file_is_csv() {
     let port = get_test_port();
     let server = start_test_server(port).await;
@@ -3366,13 +3426,25 @@ fn test_cli_client_options_rejected_with_subcommands() {
     });
     std::fs::write(&result_path, result.to_string()).unwrap();
 
-    for (args, subcommand) in [
+    let client_only = "tip: this option only applies to client tests";
+    for (args, subcommand, tip) in [
         (
             &["--json", "-t", "5", "-P", "4", "diff", "a", "b"][..],
             "diff",
+            client_only,
         ),
-        (&["--csv", "-q", "-R", "discover"][..], "discover"),
-        (&["-t", "5", "serve"][..], "serve"),
+        (
+            &["--csv", "-q", "-R", "discover"][..],
+            "discover",
+            client_only,
+        ),
+        (&["-t", "5", "serve"][..], "serve", client_only),
+        // serve accepts --port itself, so the tip shows where it goes.
+        (
+            &["-p", "9000", "serve"][..],
+            "serve",
+            "tip: put serve options after the subcommand: xfr serve --port 9000",
+        ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args(args)
@@ -3384,6 +3456,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
             stderr.contains(&format!("cannot be used with '{subcommand}'")),
             "{args:?}: {stderr}"
         );
+        assert!(stderr.contains(tip), "{args:?}: {stderr}");
     }
 
     // Options subcommands use, and env-backed client options, still work.

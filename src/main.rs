@@ -978,13 +978,17 @@ fn interval_retransmits(progress: &TestProgress, last_retransmits: &mut u64) -> 
     }
 }
 
+/// Warn about payload flags that cannot take effect. `random` and `zeros`
+/// are the explicit --random and --zeros flags, not the effective default,
+/// so a plain `-Q` run does not warn.
 fn random_payload_notice(
     protocol: Protocol,
     direction: Direction,
-    random_enabled: bool,
+    random: bool,
+    zeros: bool,
 ) -> Option<&'static str> {
     if protocol == Protocol::Quic {
-        if random_enabled {
+        if random {
             return Some("random payloads are ignored with QUIC (payload is already encrypted)");
         }
         // QUIC encrypts payload regardless, so --zeros is irrelevant
@@ -992,7 +996,7 @@ fn random_payload_notice(
     }
     // When --zeros is used with reverse/bidir, warn that the server's payload mode
     // is not negotiated — the client cannot control what the server sends.
-    if !random_enabled && matches!(direction, Direction::Download | Direction::Bidir) {
+    if zeros && matches!(direction, Direction::Download | Direction::Bidir) {
         return Some(
             "--zeros only affects client-sent traffic; server payload mode is not negotiated",
         );
@@ -1089,7 +1093,25 @@ fn parse_cli() -> Cli {
                 && matches.value_source(id) == Some(ValueSource::CommandLine)
         });
         if let Some(arg) = ignored {
-            let message = format!("the argument '{arg}' cannot be used with '{subcommand}'");
+            let long = arg.get_long();
+            let accepted = long.is_some()
+                && cmd
+                    .find_subcommand(subcommand)
+                    .is_some_and(|sub| sub.get_arguments().any(|a| a.get_long() == long));
+            let tip = if accepted {
+                let mut usage = format!("xfr {subcommand} --{}", long.unwrap_or_default());
+                if arg.get_action().takes_values() {
+                    for value in matches.get_raw(arg.get_id().as_str()).into_iter().flatten() {
+                        usage.push(' ');
+                        usage.push_str(&value.to_string_lossy());
+                    }
+                }
+                format!("put {subcommand} options after the subcommand: {usage}")
+            } else {
+                "this option only applies to client tests (xfr <HOST> ...)".to_string()
+            };
+            let message =
+                format!("the argument '{arg}' cannot be used with '{subcommand}'\n\n  tip: {tip}");
             cmd.error(clap::error::ErrorKind::ArgumentConflict, message)
                 .exit();
         }
@@ -1111,6 +1133,10 @@ async fn main() -> Result<()> {
     // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
     let file_config = Config::load()?;
 
+    // The TUIs draw on stdout and read keys from stdin. Without a terminal on
+    // both, fall back to plain output as --no-tui does.
+    let terminal = io::stdout().is_terminal() && io::stdin().is_terminal();
+
     // Determine logging config based on command (server vs client)
     let (effective_log_file, effective_log_level, tui_enabled) = match &cli.command {
         Some(Commands::Serve {
@@ -1129,7 +1155,7 @@ async fn main() -> Result<()> {
                 .or(file_config.server.log_level.as_ref())
                 .or(cli.log_level.as_ref())
                 .or(file_config.client.log_level.as_ref());
-            (file, level, *server_tui)
+            (file, level, *server_tui && terminal)
         }
         Some(Commands::Diff { .. }) | Some(Commands::Discover { .. }) => {
             let file = cli
@@ -1153,7 +1179,7 @@ async fn main() -> Result<()> {
                 .as_ref()
                 .or(file_config.client.log_level.as_ref());
             let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
-            (file, level, !no_tui)
+            (file, level, !no_tui && terminal)
         }
     };
     // Hold the logging guard until program exit to ensure all logs are flushed
@@ -1289,7 +1315,10 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            if server_tui {
+            if server_tui && !terminal {
+                warn!("--tui needs a terminal; running the plain server");
+            }
+            if server_tui && terminal {
                 // Same precedence as the client TUI: --theme > saved pref >
                 // NO_COLOR-derived default. There is no server section for a
                 // theme in config.toml, so the saved pref carries a user's
@@ -1342,6 +1371,11 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             };
 
+            // Fail before the test, not after it, when `-o` cannot be saved.
+            if let Some(path) = &cli.output {
+                xfr::persistence::check_destination(path)?;
+            }
+
             let direction = if cli.bidir {
                 Direction::Bidir
             } else if cli.reverse {
@@ -1371,7 +1405,7 @@ async fn main() -> Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
 
-            if let Some(msg) = random_payload_notice(protocol, direction, random_payload) {
+            if let Some(msg) = random_payload_notice(protocol, direction, cli.random, cli.zeros) {
                 eprintln!("Warning: {msg}");
             }
 
@@ -1437,7 +1471,7 @@ async fn main() -> Result<()> {
                 || (!cli.json_stream
                     && !cli.csv
                     && file_config.client.json_output.unwrap_or(false));
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
+            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false) || !terminal;
 
             // Determine timestamp format (CLI > config > default)
             let timestamp_format = cli
@@ -4236,58 +4270,40 @@ mod tests {
 
     #[test]
     fn test_random_payload_notice() {
-        // Default (random enabled): no warnings for TCP/UDP in any direction
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Upload, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Download, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Bidir, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Upload, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Download, true),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Bidir, true),
-            None
-        );
-
-        // QUIC + random: payload is already encrypted
-        assert_eq!(
-            random_payload_notice(Protocol::Quic, Direction::Upload, true),
-            Some("random payloads are ignored with QUIC (payload is already encrypted)")
-        );
-        assert!(random_payload_notice(Protocol::Quic, Direction::Download, true).is_some());
+        let notice = |args: &[&str], protocol, direction| {
+            let cli = Cli::try_parse_from(["xfr", "host"].iter().chain(args)).unwrap();
+            random_payload_notice(protocol, direction, cli.random, cli.zeros)
+        };
+        let all = [Direction::Upload, Direction::Download, Direction::Bidir];
+        // Default payload: no warnings for any protocol or direction, QUIC included
+        for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+            for direction in all {
+                assert_eq!(notice(&[], protocol, direction), None);
+            }
+        }
+        // Explicit --random: TCP/UDP use it, QUIC ignores it
+        for direction in all {
+            assert_eq!(notice(&["--random"], Protocol::Tcp, direction), None);
+            assert_eq!(notice(&["--random"], Protocol::Udp, direction), None);
+            assert_eq!(
+                notice(&["--random"], Protocol::Quic, direction),
+                Some("random payloads are ignored with QUIC (payload is already encrypted)")
+            );
+        }
 
         // --zeros + upload: no warning (client controls its own sends)
-        assert_eq!(
-            random_payload_notice(Protocol::Tcp, Direction::Upload, false),
-            None
-        );
-        assert_eq!(
-            random_payload_notice(Protocol::Udp, Direction::Upload, false),
-            None
-        );
+        assert_eq!(notice(&["--zeros"], Protocol::Tcp, Direction::Upload), None);
+        assert_eq!(notice(&["--zeros"], Protocol::Udp, Direction::Upload), None);
 
         // --zeros + reverse/bidir: warn that server still sends random
-        assert!(random_payload_notice(Protocol::Tcp, Direction::Download, false).is_some());
-        assert!(random_payload_notice(Protocol::Tcp, Direction::Bidir, false).is_some());
-        assert!(random_payload_notice(Protocol::Udp, Direction::Download, false).is_some());
-        assert!(random_payload_notice(Protocol::Udp, Direction::Bidir, false).is_some());
+        for protocol in [Protocol::Tcp, Protocol::Udp] {
+            assert!(notice(&["--zeros"], protocol, Direction::Download).is_some());
+            assert!(notice(&["--zeros"], protocol, Direction::Bidir).is_some());
+        }
 
         // --zeros + QUIC reverse: no warning (QUIC encrypts regardless)
         assert_eq!(
-            random_payload_notice(Protocol::Quic, Direction::Download, false),
+            notice(&["--zeros"], Protocol::Quic, Direction::Download),
             None
         );
     }
