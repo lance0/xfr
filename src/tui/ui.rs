@@ -625,7 +625,8 @@ fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         .jitter(stream.jitter_ms)
         .directions(stream.throughput_send_mbps, stream.throughput_recv_mbps)
         .bar_color(theme.graph_primary)
-        .text_color(theme.text);
+        .text_color(theme.text)
+        .dim_color(theme.text_dim);
 
         frame.render_widget(bar, stream_area);
     }
@@ -1266,6 +1267,68 @@ mod small_terminal_tests {
                 .any(|row| row.contains("Download: loss 0.0% jitter 0.00ms")),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn default_theme_headline_numbers_use_terminal_palette_colors() {
+        // Fixed RGB is tuned for one background; on the default theme the
+        // numbers people read must use named colors the terminal remaps.
+        let mut app = running_app_with_history();
+        app.current_throughput_mbps = 42.0;
+        app.elapsed = app.duration / 2;
+        assert_eq!(app.theme.name(), "default");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let cell_of = |needle: &str, nth: usize| {
+            rows.iter()
+                .enumerate()
+                .flat_map(|(y, row)| {
+                    row.match_indices(needle)
+                        .map(move |(i, _)| (row[..i].chars().count() as u16, y as u16))
+                })
+                .nth(nth)
+                .unwrap_or_else(|| panic!("{needle:?} #{nth} not rendered: {rows:#?}"))
+        };
+        let current = cell_of("Current Speed: ", 0);
+        let cells = [
+            ("headline", cell_of("42.0 Mbps", 0)),
+            ("current speed", (current.0 + 15, current.1)),
+            // Last filled cell before the track; the sparkline has no `░`.
+            ("transfer bar", cell_of("█░", 0)),
+            ("sparkline", cell_of("▂", 0)),
+        ];
+        for (role, (x, y)) in cells {
+            let fg = buf[(x, y)].fg;
+            assert_eq!(fg, app.theme.graph_primary, "{role} at ({x},{y})");
+            assert!(
+                !matches!(fg, Color::Rgb(..) | Color::Indexed(_)),
+                "{role}: {fg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_bars_use_the_theme_dim_color() {
+        let mut app = App::default();
+        app.theme = Theme::dracula();
+        app.streams[0].throughput_mbps = 8.0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_streams(frame, &app, &app.theme, area)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: Vec<_> = (0..80).map(|x| &buffer[(x, 1)]).collect();
+        let label = row.iter().find(|c| c.symbol() == "[").expect("label");
+        let track = row.iter().find(|c| c.symbol() == "─").expect("empty track");
+        assert_eq!(label.fg, app.theme.text_dim);
+        assert_eq!(track.fg, app.theme.text_dim);
     }
 
     #[test]

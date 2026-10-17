@@ -147,6 +147,8 @@ pub struct StreamBar {
     pub throughput_recv_mbps: Option<f64>,
     pub bar_color: Color,
     pub text_color: Color,
+    /// Stream label and empty-track color.
+    pub dim_color: Color,
 }
 
 impl StreamBar {
@@ -161,6 +163,7 @@ impl StreamBar {
             throughput_recv_mbps: None,
             bar_color: Color::Green,
             text_color: Color::White,
+            dim_color: Color::DarkGray,
         }
     }
 
@@ -182,6 +185,11 @@ impl StreamBar {
 
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
+        self
+    }
+
+    pub fn dim_color(mut self, color: Color) -> Self {
+        self.dim_color = color;
         self
     }
 }
@@ -217,7 +225,7 @@ impl Widget for StreamBar {
         let bar_width = area.width.saturating_sub(label_width + stats_width);
 
         // Render label
-        buf.set_string(area.x, area.y, &label, Style::default().fg(Color::DarkGray));
+        buf.set_string(area.x, area.y, &label, Style::default().fg(self.dim_color));
 
         // Render bar using line characters for cleaner look
         let progress = if self.max_throughput > 0.0 {
@@ -232,7 +240,7 @@ impl Widget for StreamBar {
             let style = if x < filled {
                 Style::default().fg(self.bar_color)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(self.dim_color)
             };
             buf[(area.x + label_width + x, area.y)]
                 .set_char(ch)
