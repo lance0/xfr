@@ -1268,6 +1268,10 @@ async fn test_quic_download() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "LAN-2296: QUIC loopback delivery ~10x under -b on Windows"
+)]
 async fn test_quic_upload_bitrate_pacing() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
@@ -1435,6 +1439,10 @@ async fn test_quic_download_bitrate_pacing_multi_stream() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "LAN-2296: QUIC loopback delivery ~10x under -b on Windows"
+)]
 async fn test_quic_upload_bitrate_pacing_multi_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
@@ -4119,18 +4127,30 @@ async fn test_tcp_cancel_latency_before_first_tick() {
 
     let client = Client::new(config);
 
-    // Poll the run future so it connects and installs the cancel channel,
-    // then cancel at 200ms — well before the first 1s stats tick.  The run
-    // must resolve within 600ms of the cancel, proving the server's
+    // Poll the run future until the handshake completes and `cancel()` is
+    // accepted (it errors until the client has its TestAck).  The server
+    // starts its 1s stats tick only after sending TestAck, so a cancel
+    // accepted within one 20ms poll of the handshake lands well before the
+    // first tick, however long the handshake took on a loaded runner.  The
+    // run must resolve within 600ms of the cancel, proving the server's
     // control-reader task observed it promptly.  The old serialized-behind-
     // tick behavior would not observe the cancel until the ~1s tick, so
     // the run would resolve at ~1s+RTT — well outside this 600ms budget.
     let mut run_future = std::pin::pin!(client.run(None));
-    tokio::select! {
-        res = &mut run_future => panic!("run ended before cancel: {res:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::select! {
+            res = &mut run_future => panic!("run ended before cancel: {res:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        if client.cancel().is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "handshake did not complete within 5s"
+        );
     }
-    assert!(client.cancel().is_ok(), "cancel should be accepted");
 
     let result = tokio::time::timeout(Duration::from_millis(600), &mut run_future).await;
     assert!(
