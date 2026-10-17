@@ -2266,6 +2266,16 @@ fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
         || key.code == KeyCode::Char('\x03')
 }
 
+/// Settings owns every key while open, except interrupts, which must still
+/// reach the normal cancel path.
+fn settings_captures_key(settings_visible: bool, key: &crossterm::event::KeyEvent) -> bool {
+    settings_visible && !is_ctrl_c(key)
+}
+
+fn server_tui_quit_key(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::Char('q') || is_ctrl_c(key)
+}
+
 fn tui_quit_action(
     key: &crossterm::event::KeyEvent,
     state: AppState,
@@ -2441,8 +2451,7 @@ async fn run_tui_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            // Interrupts use the normal cancel path even while Settings is open.
-            if app.settings.visible && !is_ctrl_c(&key) {
+            if settings_captures_key(app.settings.visible, &key) {
                 if handle_tui_settings_key(&mut app, key) == SettingsAction::Restart {
                     apply_tui_settings(config, &mut app);
                     app.cancel_deadline = None;
@@ -2667,13 +2676,10 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            if is_ctrl_c(&key) {
+            if server_tui_quit_key(&key) {
                 break;
             }
             match key.code {
-                KeyCode::Char('q') => {
-                    break;
-                }
                 KeyCode::Char('?') | KeyCode::F(1) => {
                     app.toggle_help();
                 }
@@ -3099,6 +3105,26 @@ mod tests {
         for code in [KeyCode::Char('c'), KeyCode::Char('q'), KeyCode::Esc] {
             assert!(!is_ctrl_c(&test_key(code)));
         }
+    }
+
+    #[test]
+    fn tui_settings_lets_interrupts_through() {
+        for key in [ctrl_c_key(), test_key(KeyCode::Char('\x03'))] {
+            assert!(!settings_captures_key(true, &key));
+            assert!(server_tui_quit_key(&key));
+        }
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('q'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ] {
+            assert!(settings_captures_key(true, &test_key(code)));
+            assert!(!settings_captures_key(false, &test_key(code)));
+        }
+        assert!(server_tui_quit_key(&test_key(KeyCode::Char('q'))));
+        assert!(!server_tui_quit_key(&test_key(KeyCode::Char('c'))));
+        assert!(!server_tui_quit_key(&test_key(KeyCode::Esc)));
     }
 
     #[test]
