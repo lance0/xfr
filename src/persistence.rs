@@ -26,6 +26,8 @@ pub(crate) fn atomic_write(
                 "Save destination is read-only: {}",
                 path.display()
             );
+            // Preserve fs::write's access check without creating or truncating the file.
+            drop(fs::OpenOptions::new().write(true).open(path)?);
             Some(metadata.permissions())
         }
         Err(error) if error.kind() == ErrorKind::NotFound => None,
@@ -164,6 +166,32 @@ mod tests {
             new.metadata().unwrap().permissions().mode(),
             plain.metadata().unwrap().permissions().mode()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_destination_the_owner_cannot_write() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root bypasses the owner permission check this regression exercises.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved");
+        fs::write(&path, b"previous").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o460)).unwrap();
+        let result = atomic_write(&path, |_| panic!("must reject before writing"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"previous");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
