@@ -26,13 +26,29 @@ that implement it can show it in tab headers and session pickers: working with
 a progress percentage and the current rate, paused, done with the summary, or
 the error. Terminals without support ignore the sequence. Plain, JSON and CSV
 output never emit it.
+.PP
+The options under CLIENT OPTIONS configure a client test. Given on the
+command line together with
+.BR serve ,
+.B diff
+or
+.BR discover ,
+they are rejected with a usage error (exit status 2) instead of being ignored,
+so server options go after the subcommand
+.RB ( "xfr serve \-p 9000" ,
+not
+.BR "xfr \-p 9000 serve" ).
+Only \fB\-\-theme\fR, \fB\-\-log\-file\fR, \fB\-\-log\-level\fR,
+\fB\-\-no\-update\-check\fR and \fB\-\-completions\fR may also appear before a
+subcommand. Values from environment variables (XFR_PORT, XFR_DURATION,
+XFR_PSK, ...) are not affected.
 .SH CLIENT OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
 Server port (default: 5201). Environment: XFR_PORT
 .TP
 .BI \-t ", " \-\-time " DURATION"
-Test duration (default: 10s). Supports units: s, m, h. Environment: XFR_DURATION
+Test duration (default: 10s, or 60s with \fB\-\-probe\-mtu\fR and no \fB\-t\fR). Bare integers are seconds; supports units: s, m, h. 0 runs until interrupted. Environment: XFR_DURATION
 .TP
 .BI \-n ", " \-\-bytes " COUNT"
 Transfer this many bytes, then stop, instead of running for a fixed time.
@@ -59,7 +75,7 @@ Use QUIC transport (encrypted, multiplexed streams over UDP)
 Target bitrate for TCP, UDP and QUIC (e.g., 1G, 100M, 10K). Global across all streams; 0 means unlimited
 .TP
 .BI \-P ", " \-\-parallel " N"
-Number of parallel streams (default: 1)
+Number of parallel streams, 1\-128 (default: \fBparallel_streams\fR from the config file, else 1)
 .TP
 .B \-R ", " \-\-reverse
 Reverse direction (server sends to client, i.e., download test)
@@ -71,7 +87,9 @@ Bidirectional test (both upload and download)
 Output results as JSON
 .TP
 .B \-\-json\-stream
-JSON streaming output (one JSON object per line per interval)
+JSON streaming output (one JSON object per line per interval). Cannot be
+combined with \fB\-q\fR, which would suppress the intervals; use
+\fB\-\-json\fR for the summary alone
 .TP
 .B \-\-csv
 CSV output format
@@ -81,8 +99,11 @@ Quiet mode \- suppress interval output, show only summary
 .TP
 .BI \-o ", " \-\-output " FILE"
 Also save the final result to FILE: CSV with
-.BR \-\-csv ,
-otherwise JSON
+.B \-\-csv
+(the same header and summary row printed to standard output), otherwise JSON.
+A regular file is replaced atomically, so a failed save leaves the previous
+file intact; the directory must be writable. Devices and pipes such as
+/dev/null are written in place
 .TP
 .B \-\-no\-tui
 Disable terminal UI, use plain text output
@@ -111,8 +132,8 @@ Omit first N seconds from interval output (TCP ramp-up)
 .B \-\-tcp\-nodelay
 Disable Nagle algorithm (TCP_NODELAY)
 .TP
-.BI \-\-window " SIZE"
-TCP window size (e.g., 512K, 1M, 4M)
+.BI \-w ", " \-\-window " SIZE"
+Socket buffer size (SO_SNDBUF/SO_RCVBUF) for TCP, and for UDP on both ends (e.g., 512K, 1M, 16M). When unset, TCP uses kernel autotuning and UDP uses the kernel default
 .TP
 .BI \-\-congestion " ALGO"
 TCP congestion control algorithm (e.g., cubic, bbr, reno). Applied on both client and server sockets via setsockopt(TCP_CONGESTION). Requires kernel support for the selected algorithm.
@@ -166,7 +187,7 @@ Disable zero\-copy TCP sends (use regular buffered writes)
 Probe the path MTU instead of running a throughput test: walks UDP payload sizes with the don't\-fragment flag set and reports the largest size surviving in each direction. Implies UDP; requires a server with mtu_probe_v1 support (xfr >= 0.9.17)
 .TP
 .BI \-\-connect\-timeout " DURATION"
-Fail if the control connection (TCP connect or QUIC handshake) takes longer than this (e.g. 5s). Without it, a dead or filtered server is bounded only by OS defaults
+Fail if the control connection, including hostname resolution and the TCP connect or QUIC handshake, takes longer than this (e.g. 5s). Without it, a dead or filtered server or a stuck DNS lookup is bounded only by OS defaults
 .TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
@@ -188,13 +209,19 @@ Maximum test duration (server-side limit)
 Prometheus push gateway URL (e.g., http://pushgateway:9091)
 .TP
 .BI \-\-prometheus " PORT"
-Prometheus metrics endpoint port (requires the prometheus build feature)
+Prometheus metrics endpoint port (requires the prometheus build feature). Each
+connection serves one request: headers must arrive within 5 seconds and the
+connection closes within 10 seconds. At most 64 connections are served at
+once; further connections wait in the accept backlog
 .TP
 .BI \-\-log\-file " PATH"
 Log file path
 .TP
 .BI \-\-log\-level " LEVEL"
 Log level: error, warn, info, debug, trace
+.TP
+.BI \-\-theme " THEME"
+Color theme for the \fB\-\-tui\fR dashboard (same values as the client option)
 .TP
 .BI \-\-psk " KEY"
 Pre-shared key for mutual peer authentication and protected post-auth control messages. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
@@ -238,10 +265,16 @@ Force IPv6 only
 .TP
 .BI \-\-threshold " PERCENT"
 Regression threshold percentage (default: 5). Must be finite and non-negative; zero detects any regression.
+.TP
+.BI \-\-theme " THEME"
+Color theme (same values as the client option)
 .SH DISCOVER OPTIONS
 .TP
 .BI \-\-timeout " DURATION"
 Discovery timeout (default: 5s)
+.TP
+.BI \-\-theme " THEME"
+Color theme (same values as the client option)
 .SH CONFIGURATION
 .B xfr
 reads configuration from \fI$XDG_CONFIG_HOME/xfr/config.toml\fR (Linux, defaulting to \fI~/.config/xfr/config.toml\fR), \fI~/Library/Application Support/xfr/config.toml\fR (macOS), or \fI%APPDATA%\\xfr\\config.toml\fR (Windows) if present.
@@ -436,6 +469,38 @@ Server honors fixed-size transfers requested with
 This is a hard requirement: the client refuses a byte-budget test when the
 server lacks the capability.
 
+.SH TUI KEYS
+.TP
+.BR q ", " Ctrl+C
+Client: quit. A running test is cancelled first, with a brief wait for the
+server's summary; a second Ctrl+C force-exits. Ctrl+C also works while the
+Settings modal is open. Server dashboard: quit the server.
+.TP
+.BR ? ", " F1
+Toggle the help overlay. When help does not fit, its border shows
+\fBPgDn more\fR: PgUp/PgDn page through it and Home/End jump to the first or
+last page. Esc closes it.
+.TP
+.B p
+Pause or resume test traffic (client)
+.TP
+.B r
+Restart the test (client)
+.TP
+.B s
+Open or close the Settings modal (client)
+.TP
+.B t
+Cycle the color theme (client)
+.TP
+.B d
+Toggle the per-stream view (client)
+.TP
+.B j
+Print the JSON result on exit, once the test has a result (client)
+.TP
+.B u
+Dismiss the update notification (client)
 .SH SIGNALS
 .TP
 .B SIGINT (Ctrl+C)
@@ -446,13 +511,10 @@ Gracefully cancels the running test: signals the server over the control channel
 Success
 .TP
 .B 1
-Error or regression detected (with diff command)
+Error, including a server that rejects the test (auth, rate limit, ACL), or regression detected (with diff command)
 .TP
 .B 2
 Invalid arguments
-.TP
-.B 3
-Server rejected test (auth, rate limit, ACL)
 .TP
 .B 130
 Test was interrupted by SIGINT before server could report a full result (partial summary printed if any data was collected)
