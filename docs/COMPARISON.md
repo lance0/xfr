@@ -17,7 +17,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **One-off mode** | Yes (`--one-off`) | Yes (`--one-off`) | No | No | ? |
 | **JSON output** | Yes | Yes | Yes | Yes | ? |
 | **CSV output** | Yes | No | Yes | No | ? |
-| **JSON streaming** | Yes (`--json-stream`) | No | No | No | ? |
+| **JSON streaming** | Yes (`--json-stream`) | Yes (3.17+) | No | No | ? |
 | **Prometheus metrics** | Yes (opt-in feature) | No | No | No | No |
 | **Result comparison** | `xfr diff` | No | No | No | No |
 | **LAN discovery** | `xfr discover` (mDNS) | No | No | No | No |
@@ -56,7 +56,7 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 | `-b RATE` | `-b RATE` | Target bitrate |
 | `-i SECS` | `-i SECS` | Report interval |
 | `-J` | `--json` | JSON output |
-| N/A | `--json-stream` | JSON streaming (one object per interval) |
+| `--json-stream` | `--json-stream` | JSON streaming (one object per interval) |
 | N/A | `--csv` | CSV output |
 | N/A | `-Q` / `--quic` | QUIC mode (TLS 1.3) |
 | `--bidir` | `--bidir` | Bidirectional test |
@@ -85,15 +85,13 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 
 3. **TUI is default**: xfr shows a live TUI by default. Use `--no-tui` for plain text output.
 
-4. **JSON streaming**: xfr supports `--json-stream` for one JSON object per interval (useful for real-time parsing).
+4. **Single-port TCP, UDP and QUIC**: xfr multiplexes all TCP data connections over the control port (5201) using `DataHello` identification, and (since v0.9.18) routes all UDP stream data to the same port number via per-stream connected sockets negotiated with a token-bearing hello. QUIC also listens on that port number. `--cport` pins client source ports for strict egress policies.
 
-5. **Single-port TCP, UDP and QUIC**: xfr multiplexes all TCP data connections over the control port (5201) using `DataHello` identification, and (since v0.9.18) routes all UDP stream data to the same port number via per-stream connected sockets negotiated with a token-bearing hello. QUIC also listens on that port number. `--cport` pins client source ports for strict egress policies.
+5. **Protocol negotiation**: xfr clients and servers exchange capabilities during the Hello handshake (protocol v1.1). The server falls back to multi-port TCP for legacy clients that do not advertise `single_port_tcp`.
 
-6. **Protocol negotiation**: xfr clients and servers exchange capabilities during the Hello handshake (protocol v1.1). The server falls back to multi-port TCP for legacy clients that do not advertise `single_port_tcp`.
+6. **QUIC transport**: xfr supports QUIC (`--quic` or `-Q`) with built-in TLS 1.3 encryption and multiplexed streams. iperf3 has no QUIC support.
 
-7. **QUIC transport**: xfr supports QUIC (`--quic` or `-Q`) with built-in TLS 1.3 encryption and multiplexed streams. iperf3 has no QUIC support.
-
-8. **Bitrate is global**: xfr's `-b` sets a total bitrate shared across all parallel streams. iperf3's `-b` is per-stream, so `iperf3 -c host -P 4 -b 100M` sends 400M total, while `xfr host -P 4 -b 100M` sends 100M total. Use `-b 400M` in xfr to match iperf3's behavior.
+7. **Bitrate is global**: xfr's `-b` sets a total bitrate shared across all parallel streams. iperf3's `-b` is per-stream, so `iperf3 -c host -P 4 -b 100M` sends 400M total, while `xfr host -P 4 -b 100M` sends 100M total. Use `-b 400M` in xfr to match iperf3's behavior.
 
 ### Migration Examples
 
@@ -142,7 +140,7 @@ xfr serve --one-off
 - **Multi-client server** - iperf3's single-client limitation is its biggest complaint
 - **Firewall-friendly testing** - TCP, UDP and QUIC on one port, with `--cport` to pin client source ports
 - **Visual monitoring** - Live TUI with throughput graphs
-- **CI/CD integration** - JSON streaming, result comparison, Prometheus metrics
+- **CI/CD integration** - CSV output, result comparison, Prometheus metrics
 - **QUIC testing** - Test encrypted transport with built-in TLS 1.3
 - **Server hardening** - Connection rate limiting, slow-loris protection, DataHello flood protection, PSK authentication
 - **Modern tooling** - Config files, environment variables, auto-discovery, capability negotiation
