@@ -788,22 +788,23 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(status), chunks[1]);
 }
 
-const CLIENT_HELP: &str = "q  quit
-r  restart
-p  pause/resume
-s  settings
-t  cycle theme
-j  print JSON
-d  toggle streams
-?  toggle help
+// The key column is padded to the widest key so descriptions line up.
+const CLIENT_HELP: &str = "q          quit
+r          restart
+p          pause/resume
+s          settings
+t          cycle theme
+j          print JSON
+d          toggle streams
+?          toggle help
 PgUp/PgDn  page help
-Home/End  first/last page
-Esc  close";
-const SERVER_HELP: &str = "q  quit server
-?  toggle help
+Home/End   first/last page
+Esc        close";
+const SERVER_HELP: &str = "q          quit server
+?          toggle help
 PgUp/PgDn  page help
-Home/End  first/last page
-Esc  close";
+Home/End   first/last page
+Esc        close";
 
 /// Help rows hard-wrapped to `width`, each split into its (key, description)
 /// parts. Help text is ASCII, so byte slicing keeps paging exact even at one
@@ -837,7 +838,7 @@ pub fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect, scroll: u
         .map(|(key, desc)| {
             Line::from(vec![
                 Span::styled(key, Style::default().fg(theme.accent)),
-                Span::styled(desc, Style::default().fg(theme.text_dim)),
+                Span::styled(desc, Style::default().fg(theme.text)),
             ])
         })
         .collect();
@@ -1427,7 +1428,7 @@ mod small_terminal_tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            assert!(text.contains("Esc  close"), "{text}");
+            assert!(text.contains("Esc        close"), "{text}");
             assert_eq!(help_scroll(end, Size::new(80, 30), server, None), 0);
             assert_eq!(help_scroll(end, size, server, Some(KeyCode::Home)), 0);
         }
@@ -1485,11 +1486,28 @@ mod small_terminal_tests {
             let fits = text(&render(width, height, 0, server));
             assert!(!fits.contains("more") && !fits.contains("back"), "{fits}");
         }
-        // Keys keep the accent colour, descriptions stay dim.
-        let buf = render(80, 24, 0, false);
-        let q = buf.content.iter().position(|c| c.symbol() == "q").unwrap();
-        assert_eq!(buf.content[q].fg, theme.accent);
-        assert_eq!(buf.content[q + 3].fg, theme.text_dim);
+        // Keys keep the accent colour; descriptions use body text and start
+        // in one column, past the widest key.
+        for server in [false, true] {
+            let buf = render(80, 24, 0, server);
+            let width = usize::from(buf.area.width);
+            // Cell index of a needle: every cell here holds one char.
+            let cell = |needle: &str| {
+                let all = text(&buf);
+                all[..all.find(needle).unwrap()].chars().count()
+            };
+            let column = |needle: &str| {
+                let at = cell(needle);
+                assert_eq!(buf.content[at].fg, theme.text, "{needle}");
+                at % width
+            };
+            let quit = column("quit");
+            for desc in ["toggle help", "page help", "first/last page", "close"] {
+                assert_eq!(column(desc), quit, "{desc}, server={server}");
+            }
+            let q = cell("q   ");
+            assert_eq!(buf.content[q].fg, theme.accent);
+        }
     }
 
     #[test]
