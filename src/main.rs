@@ -191,7 +191,7 @@ struct Cli {
     #[arg(help_heading = "Test Options")]
     quic: bool,
 
-    /// Target bitrate (e.g., 1G, 100M). Applies to TCP and UDP. 0 = unlimited.
+    /// Target bitrate (e.g., 1G, 100M). Applies to TCP, UDP and QUIC. 0 = unlimited.
     #[arg(short = 'b', long, value_parser = parse_bitrate)]
     #[arg(help_heading = "Test Options")]
     bitrate: Option<u64>,
@@ -377,9 +377,10 @@ struct Cli {
     #[arg(help_heading = "Test Options")]
     probe_mtu: bool,
 
-    /// Fail if the control connection (TCP connect / QUIC handshake)
-    /// takes longer than this (e.g. 5s). Without it, a dead or filtered
-    /// server is bounded only by OS defaults, which can be minutes.
+    /// Fail if the control connection (hostname resolution plus TCP connect
+    /// or QUIC handshake) takes longer than this (e.g. 5s). Without it, a dead
+    /// or filtered server or a stuck DNS lookup is bounded only by OS
+    /// defaults, which can be minutes.
     #[arg(long, value_parser = parse_nonzero_duration, value_name = "DURATION")]
     #[arg(help_heading = "Connection Options")]
     connect_timeout: Option<Duration>,
