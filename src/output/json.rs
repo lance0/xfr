@@ -370,13 +370,13 @@ mod tests {
     fn test_save_json_writes_valid_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("result.json");
-        std::fs::write(
-            &path,
-            "previous save with stale trailing contents".repeat(100),
-        )
-        .unwrap();
+        let snapshot = dir.path().join("snapshot.json");
+        std::fs::write(&path, "previous").unwrap();
+        std::fs::hard_link(&path, &snapshot).unwrap();
         save_json(&make_result(), &path).expect("save_json should succeed");
 
+        // Replacement swaps in a new inode; an in-place write would show through the link.
+        assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), "previous");
         let contents = std::fs::read_to_string(&path).expect("read file");
         assert!(contents.contains("\"id\": \"test\""));
         let parsed: serde_json::Value =
