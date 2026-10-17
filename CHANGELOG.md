@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Library API (pre-1.0 break)
 - **`net::resolve_host` is now `async`** — callers must `.await` it. Lookups run on tokio's blocking pool so a surrounding timeout can abandon a stuck resolver.
 - Struct-literal constructors must supply new public fields: `tui::server::ServerApp.help_scroll` and `tui::widgets::StreamBar.dim_color` (`StreamBar::new` sets it; `StreamBar::dim_color` overrides it).
+- **`net::create_udp_socket*` no longer set `SO_REUSEADDR` on a port-0 bind** — `create_udp_socket` and `create_udp_socket_bound` set it only for an explicit port, and `create_udp_socket_for_remote`, which always binds port 0, no longer sets it.
+- Additive: `tui::ui::help_scroll` (help-overlay paging for a key press), `tui::ui::draw_help_overlay` (now public, with `scroll` and `server` parameters), `update::check_lock_reason`, and `impl Display for tui::app::AppState`.
 
 ## [0.11.0] - 2026-10-13
 
