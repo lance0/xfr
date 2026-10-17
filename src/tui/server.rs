@@ -212,9 +212,12 @@ pub fn draw(frame: &mut Frame, app: &ServerApp, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if size.height < 10 { 1 } else { 5 }), // Header with stats
-            Constraint::Min(10),                                      // Active tests table
-            Constraint::Length(1),                                    // Footer
+            // Header with stats, collapsed to its uptime title below 10 rows.
+            Constraint::Length(if size.height < 10 { 1 } else { 5 }),
+            // Active tests table. It shrinks first so the header and the
+            // footer's help hint survive on short terminals.
+            Constraint::Min(0),
+            Constraint::Length(1), // Footer
         ])
         .split(size);
 
@@ -451,7 +454,16 @@ mod tests {
             bytes: 0,
             throughput_mbps: 42.0,
         });
-        for (width, height) in [(40, 16), (40, 12), (40, 10), (40, 8)] {
+        for (width, height) in [
+            (80, 16),
+            (80, 10),
+            (80, 8),
+            (40, 16),
+            (40, 12),
+            (40, 10),
+            (40, 8),
+            (40, 3),
+        ] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
             let text: String = terminal
@@ -461,9 +473,15 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            assert!(text.contains("192.0.2.1"), "{text}");
-            assert!(text.contains("42.0 Mbps"), "{text}");
-            assert!(!text.contains("Protocol"));
+            // The header and the footer's help hint must never be squeezed out.
+            assert!(text.contains("uptime"), "{width}x{height}\n{text}");
+            assert!(text.contains("[?] Help"), "{width}x{height}\n{text}");
+            assert_eq!(text.contains("Bandwidth"), height >= 10, "{text}");
+            if height >= 8 {
+                assert!(text.contains("192.0.2.1"), "{text}");
+                assert!(text.contains("42.0 Mbps"), "{text}");
+            }
+            assert_eq!(text.contains("Protocol"), width >= 80, "{text}");
         }
         app.active_tests.clear();
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
