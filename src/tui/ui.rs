@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::app::{App, AppState};
 use super::settings::SettingsCategory;
@@ -176,7 +176,17 @@ fn draw_update_banner(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if area.height < 20 {
-        if area.height >= 10 {
+        if app.state == AppState::Error {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Error: {}",
+                    app.error.as_deref().unwrap_or("Test failed")
+                ))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(theme.error)),
+                area,
+            );
+        } else if area.height >= 10 {
             draw_realtime_stats(frame, app, theme, area);
         } else {
             let elapsed = app.elapsed.as_secs();
@@ -197,7 +207,11 @@ fn draw_content(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Line::from(format!(
                     "{:?}  {}",
                     app.state,
-                    mbps_to_human(app.current_throughput_mbps)
+                    mbps_to_human(if app.state == AppState::Completed {
+                        app.average_throughput_mbps
+                    } else {
+                        app.current_throughput_mbps
+                    })
                 )),
                 Line::from(progress),
             ];
@@ -1297,6 +1311,38 @@ mod small_terminal_tests {
                 .collect();
             assert!(text.contains(expected), "{text}");
         }
+    }
+
+    #[test]
+    fn compact_client_keeps_error_reason_and_final_average() {
+        let mut app = App::default();
+        app.on_error("Connection refused".into());
+        for height in [8, 16] {
+            let mut terminal = Terminal::new(TestBackend::new(40, height)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Error: Connection refused"), "{text}");
+        }
+        app.state = AppState::Completed;
+        app.average_throughput_mbps = 42.0;
+        app.current_throughput_mbps = 99.0;
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Completed  42.0 Mbps"), "{text}");
+        assert!(!text.contains("99.0 Mbps"), "{text}");
     }
 
     #[test]
