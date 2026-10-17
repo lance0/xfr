@@ -3112,13 +3112,56 @@ async fn test_quic_one_off() {
     assert!(result.duration_ms > 0, "Should have duration");
     assert_eq!(result.streams.len(), 2, "Should have 2 stream results");
 
-    // Server should have exited after the test. QUIC teardown can lag the
-    // client's result under CPU load; 5 s still catches a server that stays up.
+    // Server should have exited after the test. It closes once the client
+    // acknowledges the Result and lingers at most 1 s for that close to go
+    // out; 5 s is headroom for slow CI, not for the 30 s idle timeout.
     let server_result = timeout(Duration::from_secs(5), server_handle).await;
     assert!(
         server_result.is_ok(),
         "Server should exit after QUIC one-off test"
     );
+}
+
+/// A server shutting down mid-test closes its QUIC connections, so the
+/// client fails fast instead of waiting out the 30 s idle timeout (LAN-2195).
+#[tokio::test]
+async fn test_quic_server_shutdown_closes_client() {
+    let port = get_test_port();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        let server = Server::new(ServerConfig {
+            port,
+            #[cfg(feature = "prometheus")]
+            prometheus_port: None,
+            ..Default::default()
+        });
+        let _ = server
+            .run_until(async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let client = Client::new(ClientConfig {
+        port,
+        protocol: Protocol::Quic,
+        duration: Duration::from_secs(30),
+        ..Default::default()
+    });
+    let client_task = tokio::spawn(async move { client.run(None).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let _ = stop_tx.send(());
+
+    let result = timeout(Duration::from_secs(5), client_task)
+        .await
+        .expect("client should notice the server shutdown well before the idle timeout")
+        .unwrap();
+    assert!(result.is_err(), "interrupted test must not report success");
+    timeout(Duration::from_secs(5), server_handle)
+        .await
+        .expect("server should exit after shutdown")
+        .unwrap();
 }
 
 #[test]

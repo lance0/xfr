@@ -48,8 +48,6 @@ const INITIAL_READ_TIMEOUT_PER_STREAM_MS: u64 = 80;
 const INITIAL_READ_TIMEOUT_MAX: Duration = Duration::from_secs(20);
 /// Interval between progress/stats updates sent to the client
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
-/// Brief delay before sending final result to allow buffered writes to flush
-const RESULT_FLUSH_DELAY: Duration = Duration::from_millis(100);
 /// How long a `-n` test waits after the client's `Finish` for the tail of the
 /// transfer to arrive. `Finish` means "written and closed", not "delivered":
 /// with pacing or a slow link the kernel send buffer can still hold megabytes,
@@ -533,7 +531,18 @@ impl Server {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        self.run_until(std::future::pending()).await
+    }
+
+    /// Like [`run`](Self::run), but also stops when `shutdown` completes
+    /// (e.g. on SIGTERM). Connected QUIC clients are sent CONNECTION_CLOSE
+    /// on the way out instead of being left to their idle timeout.
+    pub async fn run_until(
+        &self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> anyhow::Result<()> {
         self.config.validate()?;
+        let mut shutdown = std::pin::pin!(shutdown);
 
         let listener = if let Some(ip) = self.config.bind_addr {
             let addr = SocketAddr::new(ip, self.config.port);
@@ -676,6 +685,7 @@ impl Server {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         // Spawn QUIC acceptor task (only if QUIC is enabled)
+        let mut quic_task = None;
         if let Some(quic_endpoint) = quic_endpoint {
             let quic_security = security.clone();
             let quic_active_tests = self.active_tests.clone();
@@ -685,7 +695,7 @@ impl Server {
             let quic_one_off = self.config.one_off;
             let quic_shutdown_tx = shutdown_tx.clone();
             let mut quic_shutdown_rx = shutdown_rx.clone();
-            tokio::spawn(async move {
+            quic_task = Some(tokio::spawn(async move {
                 loop {
                     // Use select! to accept connections OR receive shutdown signal
                     let incoming = tokio::select! {
@@ -796,7 +806,13 @@ impl Server {
                         });
                     }
                 }
-            });
+
+                // Tell connected clients we are going away (LAN-2195), and
+                // give the closes a bounded chance to go out before exit.
+                quic_endpoint.close(quic::QUIC_CLOSE_SHUTDOWN, b"server shutting down");
+                let _ =
+                    tokio::time::timeout(quic::QUIC_CLOSE_GRACE, quic_endpoint.wait_idle()).await;
+            }));
         }
 
         // Register mDNS service for discovery (unless --no-mdns)
@@ -833,6 +849,11 @@ impl Server {
                         break;
                     }
                     continue;
+                }
+                () = &mut shutdown => {
+                    info!("Shutting down");
+                    let _ = shutdown_tx.send(true);
+                    break;
                 }
             };
             let peer_ip = peer_addr.ip();
@@ -906,6 +927,10 @@ impl Server {
             });
         }
 
+        // The QUIC task exits on the same shutdown signal; its close is bounded.
+        if let Some(quic_task) = quic_task {
+            let _ = quic_task.await;
+        }
         Ok(())
     }
 }
@@ -2243,8 +2268,10 @@ async fn run_quic_test(
         // terminal deadline that bounded the writes.
         let _ = tokio::time::timeout_at(reports.finish_deadline, ctrl_send.stopped()).await;
 
-        // Give client time to receive the result before connection closes
-        tokio::time::sleep(RESULT_FLUSH_DELAY).await;
+        // Close explicitly rather than leaving it to whenever the last handle
+        // drops. Clients wait (bounded) for this close before closing their
+        // side, so it is what releases them.
+        connection.close(quic::QUIC_CLOSE_DONE, b"test complete");
 
         Ok((bytes_total, throughput_mbps))
     }

@@ -2767,7 +2767,6 @@ impl Client {
                                     }
                                     ControlMessage::Result(result) => {
                                         let _ = cancel_tx.send(true);
-                                        endpoint.close(0u32.into(), b"done");
                                         break 'control Ok(result);
                                     }
                                     ControlMessage::Error { message } => {
@@ -2918,6 +2917,17 @@ impl Client {
                 }
             }
         }
+
+        if test_result.is_ok() {
+            // Closing on receipt of the Result can lose its ACK: the ACK would
+            // ride in our CONNECTION_CLOSE, which quinn holds back while an
+            // upload has the congestion window full, and the server waits on
+            // that ACK before it lets go of the test. Stay connected until the
+            // server closes, so a normal ACK goes out, bounded in case its
+            // close is the packet that gets held back.
+            let _ = tokio::time::timeout(quic::QUIC_CLOSE_GRACE, connection.closed()).await;
+        }
+        endpoint.close(quic::QUIC_CLOSE_DONE, b"done");
 
         test_result
     }
