@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Updated `rustls` to 0.23.46** — closes [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346) (`Debug` impls could expose TLS session secrets), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349) (a `ServerHello` could downgrade the handshake to classical key exchange), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347) (data leak after an ECH rejection; xfr does not use ECH), and [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348) (brotli certificate decompression; xfr does not enable rustls's `brotli` feature). rustls backs xfr's QUIC transport and its HTTPS clients (update check, Prometheus push gateway). Lockfile-only; no source or API changes.
 
+### Fixed
+- **UDP streams could lose their traffic to another socket on the same port** — every UDP data socket set `SO_REUSEADDR`, including the ones bound to an ephemeral port. With that option the kernel can give a new socket a port another live socket already holds: on Linux, after a few hundred live sockets in one process, and Windows shares ports the same way. The newer socket then receives every datagram sent to that port. A server's per-stream UDP socket (on servers that don't support single-port UDP, such as Windows, or with clients that predate it) could count zero packets for an upload, or never learn the client's address in a `-R` or `--bidir` test. The odds grew with stream count and concurrent tests. Ephemeral UDP sockets no longer set `SO_REUSEADDR`. Sockets on an explicit port (`--cport`) still set it.
+
 ## [0.11.0] - 2026-10-13
 
 ### Security

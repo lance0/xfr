@@ -295,12 +295,25 @@ pub async fn create_tcp_listener_auto_mptcp(
     create_tcp_listener(port, family, false).await
 }
 
+/// SO_REUSEADDR on a UDP data socket only when the caller picked the port
+/// (`--cport` rebinding the same port run after run). On an ephemeral
+/// (port 0) bind it lets the kernel hand out a port another live
+/// SO_REUSEADDR socket already holds (a birthday collision after a few
+/// hundred live sockets on Linux; Windows shares ports the same way), and
+/// the newer socket then takes every datagram addressed to that port. A
+/// server stream socket that lost its port this way counted zero packets,
+/// or never learned the client's address in a reverse test.
+fn set_udp_addr_reuse(socket: &Socket, port: u16) -> io::Result<()> {
+    if port != 0 {
+        socket.set_reuse_address(true)?;
+    }
+    Ok(())
+}
+
 /// Create a UDP socket with proper address family handling
 pub async fn create_udp_socket(port: u16, family: AddressFamily) -> io::Result<UdpSocket> {
     let socket = Socket::new(family.domain(), Type::DGRAM, Some(Protocol::UDP))?;
-
-    // Allow address reuse
-    socket.set_reuse_address(true)?;
+    set_udp_addr_reuse(&socket, port)?;
 
     // Configure IPv6 behavior
     if family != AddressFamily::V4Only {
@@ -352,7 +365,7 @@ pub async fn create_udp_socket_bound(
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
+    set_udp_addr_reuse(&socket, addr.port())?;
     set_v6only_for_addr(&socket, addr, family)?;
     socket.bind(&SockAddr::from(addr))?;
     socket.set_nonblocking(true)?;
@@ -373,7 +386,6 @@ pub async fn create_udp_socket_for_remote(remote: SocketAddr) -> io::Result<UdpS
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
 
     // Bind to appropriate unspecified address
     let bind_addr = if remote.is_ipv4() {
@@ -1793,6 +1805,25 @@ mod tests {
             !matches!(result, Ok(Ok(_))),
             "IPv4 connect to V6Only [::] listener should fail, got {result:?}"
         );
+    }
+
+    /// Ephemeral UDP data sockets must never share a port: with
+    /// SO_REUSEADDR the kernel reuses a live socket's port after a few
+    /// hundred binds, and the newer socket steals its datagrams. Legacy
+    /// per-stream server sockets all bind the same address, like this.
+    #[tokio::test]
+    async fn ephemeral_udp_data_sockets_get_distinct_ports() {
+        let local: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut sockets = Vec::new();
+        let mut ports = std::collections::HashSet::new();
+        for _ in 0..512 {
+            let socket = create_udp_socket_bound(local, AddressFamily::V4Only)
+                .await
+                .unwrap();
+            let port = socket.local_addr().unwrap().port();
+            assert!(ports.insert(port), "port {port} handed out twice");
+            sockets.push(socket);
+        }
     }
 
     /// Regression for LAN-169 #29: `create_udp_socket_bound` with
