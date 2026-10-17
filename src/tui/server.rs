@@ -63,6 +63,7 @@ pub struct ServerApp {
     pub auth_failures: u64,
     pub start_time: Instant,
     pub show_help: bool,
+    pub help_scroll: u16,
 }
 
 impl Default for ServerApp {
@@ -83,6 +84,7 @@ impl ServerApp {
             auth_failures: 0,
             start_time: Instant::now(),
             show_help: false,
+            help_scroll: 0,
         }
     }
 
@@ -135,6 +137,7 @@ impl ServerApp {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        self.help_scroll = 0;
     }
 
     /// Hash of every value rendered by [`draw`]. The server loop compares
@@ -160,6 +163,7 @@ impl ServerApp {
             auth_failures,
             start_time,
             show_help,
+            help_scroll,
         } = self;
 
         let mut h = DefaultHasher::new();
@@ -172,6 +176,7 @@ impl ServerApp {
         connections_blocked.hash(&mut h);
         auth_failures.hash(&mut h);
         show_help.hash(&mut h);
+        help_scroll.hash(&mut h);
 
         active_tests.len().hash(&mut h);
         for ActiveTestInfo {
@@ -207,8 +212,11 @@ pub fn draw(frame: &mut Frame, app: &ServerApp, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Header with stats
-            Constraint::Min(10),   // Active tests table
+            // Header with stats, collapsed to its uptime title below 10 rows.
+            Constraint::Length(if size.height < 10 { 1 } else { 5 }),
+            // Active tests table. It shrinks first so the header and the
+            // footer's help hint survive on short terminals.
+            Constraint::Min(0),
             Constraint::Length(1), // Footer
         ])
         .split(size);
@@ -218,7 +226,7 @@ pub fn draw(frame: &mut Frame, app: &ServerApp, theme: &Theme) {
     draw_footer(frame, theme, chunks[2]);
 
     if app.show_help {
-        draw_help_overlay(frame, theme, size);
+        super::ui::draw_help_overlay(frame, theme, size, app.help_scroll, true);
     }
 }
 
@@ -347,20 +355,28 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
         return;
     }
 
-    let header = Row::new(vec![
+    let columns: Vec<usize> = if inner.width >= 71 {
+        vec![0, 1, 2, 3, 4, 5]
+    } else if inner.width >= 49 {
+        vec![0, 1, 2, 5]
+    } else {
+        vec![0, 5]
+    };
+    let labels = [
         "Client",
         "Protocol",
         "Direction",
         "Streams",
         "Elapsed",
         "Throughput",
-    ])
-    .style(
-        Style::default()
-            .fg(theme.header)
-            .add_modifier(Modifier::BOLD),
-    )
-    .bottom_margin(1);
+    ];
+    let header = Row::new(columns.iter().map(|&i| labels[i]))
+        .style(
+            Style::default()
+                .fg(theme.header)
+                .add_modifier(Modifier::BOLD),
+        )
+        .bottom_margin(u16::from(inner.height >= 4));
 
     let rows: Vec<Row> = app
         .active_tests
@@ -369,27 +385,35 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
             let elapsed = test.started.elapsed().as_secs();
             let throughput = mbps_to_human(test.throughput_mbps);
 
-            Row::new(vec![
+            let cells = [
                 test.client_ip.to_string(),
                 test.protocol.clone(),
                 test.direction.clone(),
                 test.streams.to_string(),
                 format!("{}s / {}s", elapsed, test.duration_secs),
                 throughput,
-            ])
+            ];
+            Row::new(
+                columns
+                    .iter()
+                    .map(|&i| cells[i].clone())
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect();
 
     let table = Table::new(
         rows,
-        [
-            Constraint::Length(16), // Client IP
-            Constraint::Length(8),  // Protocol
-            Constraint::Length(10), // Direction
-            Constraint::Length(8),  // Streams
-            Constraint::Length(12), // Elapsed
-            Constraint::Length(12), // Throughput
-        ],
+        columns
+            .iter()
+            .map(|&i| match i {
+                0 => Constraint::Min(8),
+                5 => Constraint::Length(12),
+                1 | 3 => Constraint::Length(8),
+                2 => Constraint::Length(10),
+                _ => Constraint::Length(12),
+            })
+            .collect::<Vec<_>>(),
     )
     .header(header)
     .style(Style::default().fg(theme.text));
@@ -408,52 +432,6 @@ fn draw_footer(frame: &mut Frame, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(footer), area);
 }
 
-fn draw_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let help_width = 40;
-    let help_height = 8;
-    let help_area = Rect {
-        x: (area.width.saturating_sub(help_width)) / 2,
-        y: (area.height.saturating_sub(help_height)) / 2,
-        width: help_width.min(area.width),
-        height: help_height.min(area.height),
-    };
-
-    let help_text = vec![
-        Line::from(vec![
-            Span::styled("q", Style::default().fg(theme.accent)),
-            Span::styled(" - Quit server", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("?", Style::default().fg(theme.accent)),
-            Span::styled(" - Toggle help", Style::default().fg(theme.text_dim)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Press ", Style::default().fg(theme.text_dim)),
-            Span::styled("Esc", Style::default().fg(theme.accent)),
-            Span::styled(" to close", Style::default().fg(theme.text_dim)),
-        ]),
-    ];
-
-    // No hardcoded background: `Clear` already blanks the cells, so the
-    // overlay inherits the terminal's own background and stays legible on a
-    // light theme instead of painting white-on-black into it.
-    let help = Paragraph::new(help_text).block(
-        Block::default()
-            .title(Span::styled(
-                " Help ",
-                Style::default()
-                    .fg(theme.header)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border)),
-    );
-
-    frame.render_widget(ratatui::widgets::Clear, help_area);
-    frame.render_widget(help, help_area);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +439,66 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn narrow_server_keeps_client_and_throughput() {
+        let mut app = ServerApp::new();
+        app.add_test(ActiveTestInfo {
+            id: "test".into(),
+            client_ip: "192.0.2.1".parse().unwrap(),
+            protocol: "TCP".into(),
+            direction: "Download".into(),
+            streams: 1,
+            started: Instant::now(),
+            duration_secs: 10,
+            bytes: 0,
+            throughput_mbps: 42.0,
+        });
+        for (width, height) in [
+            (80, 16),
+            (80, 10),
+            (80, 8),
+            (40, 16),
+            (40, 12),
+            (40, 10),
+            (40, 8),
+            (40, 3),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            // The header and the footer's help hint must never be squeezed out.
+            assert!(text.contains("uptime"), "{width}x{height}\n{text}");
+            assert!(text.contains("[?] Help"), "{width}x{height}\n{text}");
+            assert_eq!(text.contains("Bandwidth"), height >= 10, "{text}");
+            if height >= 8 {
+                assert!(text.contains("192.0.2.1"), "{text}");
+                assert!(text.contains("42.0 Mbps"), "{text}");
+            }
+            assert_eq!(text.contains("Protocol"), width >= 80, "{text}");
+        }
+        app.active_tests.clear();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("No active tests"));
+        let mut terminal = Terminal::new(TestBackend::new(1, 1)).unwrap();
+        terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+        app.show_help = true;
+        terminal.draw(|f| draw(f, &app, &Theme::default())).unwrap();
+    }
 
     /// Every foreground colour the dashboard actually paints.
     fn rendered_colors(app: &ServerApp, theme: &Theme) -> HashSet<Color> {

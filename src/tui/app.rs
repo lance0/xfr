@@ -39,6 +39,18 @@ pub enum AppState {
     Error,
 }
 
+impl std::fmt::Display for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AppState::Connecting => "Connecting...",
+            AppState::Running => "Running...",
+            AppState::Paused => "Paused",
+            AppState::Completed => "Complete",
+            AppState::Error => "Error",
+        })
+    }
+}
+
 pub struct StreamData {
     pub id: u8,
     pub bytes: u64,
@@ -194,6 +206,7 @@ pub struct App {
 
     pub start_time: Option<Instant>,
     pub show_help: bool,
+    pub help_scroll: u16,
     pub show_streams: bool,
     pub timestamp_format: TimestampFormat,
     pub theme: Theme,
@@ -319,6 +332,7 @@ impl App {
 
             start_time: None,
             show_help: false,
+            help_scroll: 0,
             show_streams: false,
             timestamp_format,
             theme,
@@ -1005,6 +1019,7 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        self.help_scroll = 0;
     }
 
     pub fn toggle_streams(&mut self) {
@@ -1148,6 +1163,7 @@ impl App {
             cancel_deadline: _, // hashed as whole seconds via cancel_wait_secs()
             start_time: _,      // tick() derives `elapsed` from it
             show_help,
+            help_scroll,
             show_streams,
             timestamp_format: _, // log timestamps are formatted when the entry is logged
             theme,
@@ -1230,6 +1246,7 @@ impl App {
         error.hash(&mut h);
         self.cancel_wait_secs().hash(&mut h);
         show_help.hash(&mut h);
+        help_scroll.hash(&mut h);
         show_streams.hash(&mut h);
         theme.hash(&mut h);
         theme_index.hash(&mut h);

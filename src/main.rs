@@ -2438,6 +2438,10 @@ async fn run_tui_loop(
         // part of the fingerprint: `terminal.draw`'s autoresize no longer
         // runs every tick, and the Key-only event match below discards the
         // Resize event, so a resize must show up here to re-flow the layout.
+        if app.show_help {
+            app.help_scroll =
+                xfr::tui::ui::help_scroll(app.help_scroll, terminal.size()?, false, None);
+        }
         let fingerprint = app.render_fingerprint(terminal.size()?);
         if last_drawn != Some(fingerprint) {
             terminal.draw(|f| draw(f, &app))?;
@@ -2465,6 +2469,15 @@ async fn run_tui_loop(
                     last_drawn = None;
                 }
                 continue;
+            }
+
+            if app.show_help {
+                app.help_scroll = xfr::tui::ui::help_scroll(
+                    app.help_scroll,
+                    terminal.size()?,
+                    false,
+                    Some(key.code),
+                );
             }
 
             match tui_quit_action(
@@ -2659,6 +2672,10 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
     let mut last_drawn: Option<u64> = None;
 
     loop {
+        if app.show_help {
+            app.help_scroll =
+                xfr::tui::ui::help_scroll(app.help_scroll, terminal.size()?, true, None);
+        }
         let fingerprint = app.render_fingerprint(terminal.size()?);
         if last_drawn != Some(fingerprint) {
             terminal.draw(|f| server_draw(f, &app, &theme))?;
@@ -2681,6 +2698,14 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
         {
             if server_tui_quit_key(&key) {
                 break;
+            }
+            if app.show_help {
+                app.help_scroll = xfr::tui::ui::help_scroll(
+                    app.help_scroll,
+                    terminal.size()?,
+                    true,
+                    Some(key.code),
+                );
             }
             match key.code {
                 KeyCode::Char('?') | KeyCode::F(1) => {
