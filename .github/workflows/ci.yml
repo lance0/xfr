@@ -100,10 +100,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test --locked --all-features
       - name: Clippy
         run: cargo clippy --locked --all-features --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-features
 
   msrv:
     name: MSRV (1.88)

@@ -77,6 +77,7 @@ just netns
 CI runs the all-features test suite and Clippy for all targets on native Windows,
 including integration tests. Windows support remains experimental; TCP_INFO is
 unsupported. Passing CI does not qualify throughput or interactive terminal behavior.
+The two QUIC upload pacing tests are skipped on Windows pending LAN-2296.
 
 ## Pull Request Process
 
