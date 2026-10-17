@@ -2,6 +2,10 @@
 
 #[cfg(feature = "prometheus")]
 use std::net::SocketAddr;
+#[cfg(feature = "prometheus")]
+use std::sync::Arc;
+#[cfg(feature = "prometheus")]
+use std::time::Duration;
 
 #[cfg(feature = "prometheus")]
 use http_body_util::Full;
@@ -12,7 +16,7 @@ use hyper::service::service_fn;
 #[cfg(feature = "prometheus")]
 use hyper::{Request, Response};
 #[cfg(feature = "prometheus")]
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 #[cfg(feature = "prometheus")]
 use once_cell::sync::Lazy;
 #[cfg(feature = "prometheus")]
@@ -23,7 +27,9 @@ use prometheus::{
 #[cfg(feature = "prometheus")]
 use tokio::net::TcpListener;
 #[cfg(feature = "prometheus")]
-use tracing::info;
+use tokio::sync::Semaphore;
+#[cfg(feature = "prometheus")]
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "prometheus")]
 use crate::stats::TestStats;
@@ -152,22 +158,85 @@ impl MetricsServer {
         let listener = TcpListener::bind(addr).await?;
         info!("Prometheus metrics available at http://{}/metrics", addr);
 
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let io = TokioIo::new(stream);
-
-            tokio::spawn(async move {
-                let service = service_fn(|req| async move { handle_request(req).await });
-
-                if let Err(err) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await
-                {
-                    eprintln!("Error serving connection: {:?}", err);
-                }
-            });
-        }
+        let listener = Arc::new(listener);
+        accept_loop(move || {
+            let listener = listener.clone();
+            async move { listener.accept().await.map(|(stream, _)| stream) }
+        })
+        .await
     }
+}
+
+/// Maximum metrics connections served at once. Further connections wait in
+/// the kernel accept backlog until a slot frees up.
+#[cfg(feature = "prometheus")]
+const MAX_CONNECTIONS: usize = 64;
+
+/// Pause after an accept error (e.g. EMFILE) so a persistent error does not
+/// spin the loop.
+#[cfg(feature = "prometheus")]
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Accept and serve connections forever. Accept errors are logged and retried
+/// after a short backoff instead of ending the server.
+#[cfg(feature = "prometheus")]
+async fn accept_loop<S, F, Fut>(mut accept: F) -> !
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<S>>,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let mut failing = false;
+    loop {
+        let permit = slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("metrics connection semaphore is never closed");
+        let stream = match accept().await {
+            Ok(stream) => {
+                failing = false;
+                stream
+            }
+            Err(err) => {
+                // Warn once per run of consecutive errors; repeats go to debug.
+                if failing {
+                    debug!("Prometheus metrics accept error: {err}");
+                } else {
+                    warn!("Prometheus metrics accept error, retrying: {err}");
+                }
+                failing = true;
+                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(err) = serve_connection(stream).await {
+                debug!("Prometheus metrics connection error: {err:?}");
+            }
+            drop(permit);
+        });
+    }
+}
+
+#[cfg(feature = "prometheus")]
+async fn serve_connection<T>(stream: T) -> anyhow::Result<()>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let service = service_fn(handle_request);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(Duration::from_secs(5))
+            .keep_alive(false)
+            .max_buf_size(16 * 1024)
+            .serve_connection(TokioIo::new(stream), service),
+    )
+    .await??;
+    Ok(())
 }
 
 #[cfg(feature = "prometheus")]
@@ -317,5 +386,137 @@ fn update_counters(stats: &TestStats) {
         m.tcp_retransmits_total
             .with_label_values(&[test_id])
             .inc_by(tcp_info.retransmits as f64);
+    }
+}
+
+#[cfg(all(test, feature = "prometheus"))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn fragmented_requests_respond_and_close() {
+        register_metrics();
+        for (path, body) in [("/health", "OK"), ("/metrics", "xfr_bytes_total")] {
+            let (mut client, server) = tokio::io::duplex(1);
+            let task = tokio::spawn(serve_connection(server));
+            client
+                .write_all(format!("GET {path} HTTP/1.1\r\nHo").as_bytes())
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            client.write_all(b"st: localhost\r\n\r\n").await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response.contains("connection: close\r\n"));
+            assert!(response.contains(body));
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn header_deadline_is_not_reset_by_trickling_bytes() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_connection(server));
+        client.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            client.write_all(b"X").await.unwrap();
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(task.is_finished());
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.downcast_ref::<hyper::Error>().unwrap().is_timeout());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_deadline_bounds_stalled_response_writes() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let task = tokio::spawn(serve_connection(server));
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(task.is_finished());
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_error_does_not_end_loop() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        // Popped from the end: one accept error, then a real connection.
+        let mut results = vec![Ok(server), Err(std::io::Error::other("EMFILE"))];
+        let loop_task = tokio::spawn(accept_loop(move || {
+            let next = results.pop();
+            async move {
+                match next {
+                    Some(result) => result,
+                    None => std::future::pending().await,
+                }
+            }
+        }));
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(!loop_task.is_finished());
+        loop_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_cap_defers_accept_until_a_slot_frees() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (mut clients, mut servers): (Vec<_>, Vec<_>) =
+            (0..=MAX_CONNECTIONS).map(|_| tokio::io::duplex(64)).unzip();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = accepts.clone();
+        let loop_task = tokio::spawn(accept_loop(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let next = servers.pop();
+            async move {
+                match next {
+                    Some(stream) => Ok(stream),
+                    None => std::future::pending().await,
+                }
+            }
+        }));
+
+        // Every slot holds a stalled connection, well inside the 5 s header
+        // deadline, so the loop must not accept again.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(accepts.load(Ordering::SeqCst), MAX_CONNECTIONS);
+
+        // Closing an accepted connection frees its slot.
+        drop(clients.pop());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(accepts.load(Ordering::SeqCst), MAX_CONNECTIONS + 1);
+        loop_task.abort();
     }
 }
