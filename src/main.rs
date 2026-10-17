@@ -133,6 +133,21 @@ fn init_logging(
     }
 }
 
+/// Resolves on SIGINT, or SIGTERM on Unix, so the server can close its
+/// QUIC connections before exiting.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 fn expand_log_path(file_path: &str) -> PathBuf {
     if file_path.starts_with("~/") {
         dirs::home_dir()
@@ -1327,7 +1342,7 @@ async fn main() -> Result<()> {
                 run_server_tui(config, prefs.theme_name()).await?;
             } else {
                 let server = Server::new(config);
-                server.run().await?;
+                server.run_until(shutdown_signal()).await?;
             }
         }
 

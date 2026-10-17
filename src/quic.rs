@@ -78,6 +78,15 @@ const MAX_DIVERT_ITERATIONS: u32 = 16;
 /// deadline, which can precede ours by the path RTT plus scheduling slop
 /// (mirrors tcp.rs SEND_TEARDOWN_GRACE).
 const SEND_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
+/// Application close code: the test finished normally.
+pub(crate) const QUIC_CLOSE_DONE: VarInt = VarInt::from_u32(0);
+/// Application close code: the server is shutting down.
+pub(crate) const QUIC_CLOSE_SHUTDOWN: VarInt = VarInt::from_u32(1);
+/// Upper bound on lingering at teardown so a CONNECTION_CLOSE can be sent
+/// and re-sent. Quinn withholds a close while the congestion window is full
+/// of unacknowledged data, so neither side may depend on the peer's close
+/// arriving.
+pub(crate) const QUIC_CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// TLS exporter label for binding application PSK authentication to the QUIC
 /// connection. RFC 9266 defines this exact label; it is wire-stable.
 const PSK_CHANNEL_BINDING_EXPORTER_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
