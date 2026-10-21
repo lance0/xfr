@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.1] - 2026-10-21
 
 ### Security
 - **Distrusted emSign intermediates are rejected** — updated `webpki-roots` and `webpki-root-certs` to 1.0.10 and `rustls-webpki` to 0.103.16, closing [RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381), [RUSTSEC-2026-0383](https://rustsec.org/advisories/RUSTSEC-2026-0383) and [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382). The private keys of several emSign intermediate CAs are now public. The bundled roots still included `emSign ECC Root CA - G3`, and certificate verification did not reject the compromised intermediates, so a network attacker holding one of those keys could impersonate an HTTPS server xfr talks to: the update check and the Prometheus push gateway. The new roots drop that CA and verification rejects paths through those intermediates. QUIC tests are unaffected, since xfr authenticates QUIC peers with the PSK channel binding, not the public CA set. Lockfile-only; no source or API changes.
