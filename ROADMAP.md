@@ -283,7 +283,7 @@ Client behind strict firewall → which protocol?
 ## Low Priority
 
 ### Distribution & Visibility
-- [ ] **Homebrew core submission** - well past the notability bar at 500+ stars. Caveat: Homebrew prefers formulae submitted by users rather than authors — recruit a tap user to submit, or make the popularity case directly
+- [x] **Homebrew core submission** - available as [`brew install xfr`](https://formulae.brew.sh/formula/xfr); the `lance0/tap/xfr` tap remains available
 - [ ] **Keep downstream packages fresh** - openSUSE Tumbleweed ships 0.9.3 and nixpkgs is at 0.9.21; a badly stale package is a worse first impression than none. File update requests and check why the nixpkgs auto-bump bot hasn't fired. AUR and pkgsrc are current
 - [ ] **Alpine and Void packages** - the static musl binaries already exist and are ABI-verified on every release, so both are near-mechanical; Alpine matters disproportionately for the container audience
 - [ ] **Fedora / EPEL** - `rust2rpm` makes the spec mechanical; needs a sponsored packager (Rust SIG). EPEL brings RHEL/Rocky homelab servers

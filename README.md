@@ -17,7 +17,7 @@ A modern iperf3 alternative with a live TUI, multi-client server, MPTCP, and QUI
 ## Quick Start
 
 ```bash
-cargo install xfr            # Rust 1.88+; or brew install lance0/tap/xfr
+cargo install xfr            # Rust 1.88+; or brew install xfr
 xfr serve                    # On the server
 xfr 192.168.1.1              # On the client: TCP, 10 seconds
 xfr 192.168.1.1 -P 4         # Four parallel streams
@@ -67,8 +67,11 @@ See the [iperf3 comparison and migration guide](docs/COMPARISON.md).
 ```bash
 cargo install xfr                       # Default features
 cargo install xfr --features prometheus # Add metrics support
-brew install lance0/tap/xfr             # macOS/Linux
+brew install xfr                       # macOS/Linux
 ```
+
+The `lance0/tap/xfr` tap remains available; see the
+[Homebrew installation options](docs/INSTALL.md#homebrew-macoslinux).
 
 [All installation channels and shell completions](docs/INSTALL.md), including
 release binaries, Docker, AUR, Termux, Nix, pkgsrc, and source builds.
