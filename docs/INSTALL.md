@@ -19,6 +19,16 @@ cargo install xfr
 
 ### Homebrew (macOS/Linux)
 
+Available directly from [Homebrew core](https://formulae.brew.sh/formula/xfr):
+
+```bash
+brew install xfr
+```
+
+The [lance0/tap](https://github.com/lance0/homebrew-tap) tap remains available
+for pre-built release binaries and may receive new releases before the core
+formula updates:
+
 ```bash
 brew install lance0/tap/xfr
 ```
