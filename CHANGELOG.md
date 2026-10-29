@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Completed results survive a stalled metrics gateway** — client stdout and result files are written before delivery, the TUI shows completion immediately, and delivery has a five-second total deadline. Ctrl-C skips delivery while preserving the successful measurement. Delivery status appears on stderr or in TUI history; invalid URLs fail before testing and gateway credentials are omitted from delivery logs.
 - **Library API:** `PushGatewayClient::with_server` and fallible `push_test_result` export finalized client results explicitly after they have been consumed or saved. `ClientConfig` and `Client::run` keep their existing measurement-only behavior; the existing `TestStats` exporter API is preserved.
 
+### Changed
+- **Second Ctrl-C only forces exit while stopping a measurement** — after a real result is finalized, Ctrl-C skips outstanding metric delivery and preserves the successful exit status and saved result.
+
 ## [0.12.1] - 2026-10-21
 
 ### Security

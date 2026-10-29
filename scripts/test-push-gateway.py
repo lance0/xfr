@@ -57,6 +57,11 @@ def read_samples(url, job, victoria):
 
 
 def run(binary, gateway, storage, victoria, flags):
+    client_gateway = server_gateway = gateway
+    if victoria:
+        separator = "&" if "?" in gateway else "?"
+        client_gateway += separator + urlencode({"extra_label": "host=smoke-client"})
+        server_gateway += separator + urlencode({"extra_label": "host=smoke-server"})
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -76,7 +81,7 @@ def run(binary, gateway, storage, victoria, flags):
                 "--no-mdns",
                 "--one-off",
                 "--push-gateway",
-                gateway,
+                server_gateway,
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -108,7 +113,7 @@ def run(binary, gateway, storage, victoria, flags):
                     "--json",
                     "--no-update-check",
                     "--push-gateway",
-                    gateway,
+                    client_gateway,
                     *flags,
                 ],
                 capture_output=True,
@@ -148,6 +153,11 @@ def run(binary, gateway, storage, victoria, flags):
                 assert client[0][1] == result["bytes_total"], (client, result)
                 assert server_rows[0][0]["client"] == "127.0.0.1", server_rows
                 assert server_rows[0][1] > 0, server_rows
+                if victoria:
+                    for _, labels, _ in samples:
+                        role = labels.get("role")
+                        if role in ("client", "server"):
+                            assert labels.get("host") == f"smoke-{role}", labels
                 for name, expected in [
                     ("xfr_throughput_mbps", result["throughput_mbps"]),
                     ("xfr_duration_seconds", result["duration_ms"] / 1000),

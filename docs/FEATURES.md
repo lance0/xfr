@@ -655,11 +655,22 @@ config. No build feature is required.
 
 Client pushes contain the final result reported by `--json`, including local
 UDP receiver corrections. Every pushed metric receives `role="client"` and
-`server="<target host>:<port>"` labels. IPv6 targets use `[address]:port`.
+`server="<target host>:<port>"` labels. The target host is preserved as given:
+`mesh-server:5201` and `100.64.0.10:5201` have different label values even if
+they resolve to the same peer. Use consistent target names in scheduled runs.
+IPv6 targets use `[address]:port`.
 Server pushes receive `role="server"` and `client="<peer IP>"`; IPv4-mapped IPv6
 peers use the plain IPv4 address. The client label is the address observed by
 the server, so a NAT can hide the original peer. Roles distinguish both
 measurements when client and server push the same test to one gateway.
+
+For delivered UDP throughput, graph the final client push (`role="client"`).
+Server pushes use the server's local counters: reverse UDP includes packets
+sent even when the client never received them, and bidirectional totals combine
+server sends and receives. Those totals can differ substantially on a lossy
+path. In bidirectional UDP, the current `xfr_udp_*` loss/jitter metrics describe
+the upload direction only; the JSON result also contains download measurements
+in `udp_stats_recv`. A reverse-only server has no receiver loss/jitter to export.
 
 For a peer with a local vmagent forwarding to VictoriaMetrics:
 
@@ -671,7 +682,20 @@ xfr mesh-server -u -b 10M -l 1368 \
 The exporter appends `/metrics/job/xfr_test_<test_id>` and grouping labels to
 the supplied URL, including an import path or reverse-proxy prefix. This URL
 shape is supported by [VictoriaMetrics and vmagent](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-data-in-prometheus-exposition-format).
-Use vmagent's relabeling or external labels to identify the source host.
+Client pushes need a source-host label when multiple peers test the same target.
+For vmagent/VictoriaMetrics, add a label to this request with `extra_label`:
+
+```bash
+xfr mesh-server --push-gateway \
+  'http://127.0.0.1:8429/api/v1/import/prometheus?extra_label=host%3Dhome'
+```
+
+Alternatively, configure vmagent with `-remoteWrite.label=host=home` to label
+all metrics it forwards. Labels from scrape targets or `global.external_labels`
+apply only to scraped metrics, not incoming pushes. See [vmagent label
+configuration](https://docs.victoriametrics.com/victoriametrics/vmagent/#adding-labels-to-metrics).
+The `extra_label` parameter is specific to VictoriaMetrics/vmagent; a classic
+Pushgateway does not provide it.
 
 Client JSON/plain/CSV output is flushed and `--output` is saved before delivery
 starts. A stalled gateway cannot hide the result. Delivery has a five-second
