@@ -61,7 +61,7 @@
 
 ### Platform
 - [x] **Environment variable overrides** - `XFR_PORT`, `XFR_DURATION`, etc.
-- [x] **Push gateway support** (`--push-gateway`) - push Prometheus metrics to gateway
+- [x] **Push gateway support** (`--push-gateway`) - server metrics export; client export and endpoint attribution added in Unreleased
 - [x] **File logging** (`--log-file`, `--log-level`) - with daily rotation via tracing-appender
 
 ---

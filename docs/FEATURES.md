@@ -407,6 +407,7 @@ window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF),
 interval_secs = 1.0           # report interval; default is 1.0 seconds
 json_output = false
 no_tui = false
+# push_gateway = "http://127.0.0.1:8429/api/v1/import/prometheus"
 theme = "default"            # or dracula, catppuccin, nord, matrix, etc.
 timestamp_format = "relative" # or "iso8601", "unix"
 address_family = "dual"      # "ipv4", "ipv6", or "dual"
@@ -486,7 +487,7 @@ Environment variables override config file settings:
 | `XFR_LOG_FILE` | Log file path |
 | `XFR_BYTES` | Byte count for a fixed-size transfer (`-n`) |
 | `XFR_PSK` | Pre-shared key (visible in process metadata; prefer `--psk-file`) |
-| `XFR_PUSH_GATEWAY` | Prometheus push gateway URL (server) |
+| `XFR_PUSH_GATEWAY` | Prometheus push gateway URL (client and server) |
 | `XFR_TIMESTAMP_FORMAT` | Timestamp format (relative, iso8601, unix) |
 
 ### User Preferences
@@ -644,8 +645,111 @@ still count every test.
 Push metrics on test completion:
 
 ```bash
+xfr server.example --push-gateway http://pushgateway:9091
 xfr serve --push-gateway http://pushgateway:9091
 ```
+
+Both modes accept `XFR_PUSH_GATEWAY` and `push_gateway` in their respective
+`[client]` or `[server]` config section. Precedence is CLI, environment, then
+config. No build feature is required.
+
+Client pushes contain the final result reported by `--json`, including local
+UDP receiver corrections. Every pushed metric receives `role="client"` and
+`server="<target host>:<port>"` labels. The target host is preserved as given:
+`mesh-server:5201` and `100.64.0.10:5201` have different label values even if
+they resolve to the same peer. Use consistent target names in scheduled runs.
+IPv6 targets use `[address]:port`.
+Server pushes receive `role="server"` and `client="<peer IP>"`; IPv4-mapped IPv6
+peers use the plain IPv4 address. The client label is the address observed by
+the server, so a NAT can hide the original peer. Roles distinguish both
+measurements when client and server push the same test to one gateway.
+
+For delivered UDP throughput, graph the final client push (`role="client"`).
+Server pushes use the server's local counters: reverse UDP includes packets
+sent even when the client never received them, and bidirectional totals combine
+server sends and receives. Those totals can differ substantially on a lossy
+path. In bidirectional UDP, the current `xfr_udp_*` loss/jitter metrics describe
+the upload direction only; the JSON result also contains download measurements
+in `udp_stats_recv`. A reverse-only server has no receiver loss/jitter to export.
+
+For a peer with a local vmagent forwarding to VictoriaMetrics:
+
+```bash
+xfr mesh-server -u -b 10M -l 1368 \
+  --push-gateway http://127.0.0.1:8429/api/v1/import/prometheus
+```
+
+The exporter appends `/metrics/job/xfr_test_<test_id>` and grouping labels to
+the supplied URL, including an import path or reverse-proxy prefix. This URL
+shape is supported by [VictoriaMetrics and vmagent](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-data-in-prometheus-exposition-format).
+Client pushes need a source-host label when multiple peers test the same target.
+For vmagent/VictoriaMetrics, add a label to this request with `extra_label`:
+
+```bash
+xfr mesh-server --push-gateway \
+  'http://127.0.0.1:8429/api/v1/import/prometheus?extra_label=host%3Dhome'
+```
+
+Alternatively, configure vmagent with `-remoteWrite.label=host=home` to label
+all metrics it forwards. Labels from scrape targets or `global.external_labels`
+apply only to scraped metrics, not incoming pushes. See [vmagent label
+configuration](https://docs.victoriametrics.com/victoriametrics/vmagent/#adding-labels-to-metrics).
+The `extra_label` parameter is specific to VictoriaMetrics/vmagent; a classic
+Pushgateway does not provide it.
+
+Client JSON/plain/CSV output is flushed and `--output` is saved before delivery
+starts. A stalled gateway cannot hide the result. Delivery has a five-second
+total deadline, including up to three attempts. Status goes to stderr, keeping
+JSON stdout parseable. Ctrl-C skips delivery without changing a completed
+test's successful exit status or saved result.
+
+The TUI shows test completion immediately and records delivery status in its
+history. Restarting a test does not cancel an earlier result's delivery. On
+exit, the summary is printed and saved before any outstanding pushes finish;
+Ctrl-C skips that remaining wait. HTTP errors and timeouts mean delivery was
+not confirmed; the gateway may have accepted a request whose reply was lost.
+There is no on-disk retry queue. Server pushes retain their existing three
+attempts with a 30-second timeout per attempt. Failed tests without a final
+result do not push. Invalid client gateway URLs fail before starting a test.
+
+For scheduled tests, keep a local result as well as the metrics:
+
+```bash
+XFR_PUSH_GATEWAY=http://127.0.0.1:8429/api/v1/import/prometheus \
+  xfr mesh-server -t 10 -u -b 10M -l 1368 --json --output latest.json
+```
+
+A zero exit status reports a successful measurement. Check stderr or the TUI
+history for metric delivery failures, and monitor ingestion in vmagent when
+using remote write. An HTTP acknowledgement from vmagent does not prove that
+VictoriaMetrics has stored the sample yet. The gateway URL may contain basic
+authentication or query parameters; xfr does not include it in delivery logs.
+
+Library callers can export explicitly after consuming or persisting the result
+with `PushGatewayClient::new(url)?.with_server(host, port)` and
+`push_test_result(&result).await`, which returns the delivery result. Network
+measurement in `Client::run` remains independent of metric delivery.
+
+The existing `xfr_test_<test_id>` jobs and per-stream `test_id` labels are
+retained. Each test creates new series; a real Pushgateway retains jobs until
+they are deleted. A stable job name alone would not remove the series churn
+from `test_id` labels. Periodic users must manage retention. Arbitrary
+`--push-label` labels are not supported.
+
+With a classic Pushgateway, delete a finished job only after Prometheus has
+scraped it. Use the exact grouping keys from the push; deleting only the job
+name does not delete groups that also have endpoint and role keys. For example,
+for a client test against `mesh-server:5201`, substitute the JSON result's `id`:
+
+```bash
+curl --fail -X DELETE \
+  'http://pushgateway:9091/metrics/job/xfr_test_TEST_ID/role/client/server/mesh-server:5201'
+```
+
+If server pushes are also enabled, their `role/server/client/<peer IP>` group
+needs separate deletion. vmagent's import endpoint forwards samples rather
+than retaining Pushgateway jobs; manage stored series through VictoriaMetrics
+retention instead.
 
 ## LAN Discovery
 
@@ -752,7 +856,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
-| `--push-gateway` | | none | Prometheus Push Gateway URL (server) |
+| `--push-gateway` | | none | Prometheus Push Gateway URL (client and server) |
 | `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
 | `--psk` | | none | Pre-shared key for authentication |
 | `--psk-file` | | none | Read PSK from file |

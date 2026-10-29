@@ -196,6 +196,16 @@ Probe the path MTU instead of running a throughput test: walks UDP payload sizes
 .BI \-\-connect\-timeout " DURATION"
 Fail if the control connection, including hostname resolution and the TCP connect or QUIC handshake, takes longer than this (e.g. 5s). Without it, a dead or filtered server or a stuck DNS lookup is bounded only by OS defaults
 .TP
+.BI \-\-push\-gateway " URL"
+Push the final client result to a Prometheus Pushgateway or vmagent import URL.
+Adds role="client" and server="host:port" grouping labels. Environment:
+XFR_PUSH_GATEWAY; config: [client] push_gateway. CLI overrides environment,
+which overrides config. No build feature is required. Push failures are logged
+without failing the test. Output is flushed and saved before delivery, which
+has a five-second total deadline including retries. Ctrl-C skips delivery
+without losing the completed result. TUI delivery runs in the background and
+finishes after the summary is printed on exit. Invalid URLs fail before the test
+.TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS
@@ -213,7 +223,10 @@ Enable TUI dashboard showing active tests
 Maximum test duration (server-side limit)
 .TP
 .BI \-\-push\-gateway " URL"
-Prometheus push gateway URL (e.g., http://pushgateway:9091)
+Prometheus push gateway URL (e.g., http://pushgateway:9091). Adds role="server"
+and client="peer IP" grouping labels. Environment: XFR_PUSH_GATEWAY;
+config: [server] push_gateway. Jobs remain named xfr_test_<test_id> and are not
+automatically deleted. Server pushes retain up to three 30-second attempts
 .TP
 .BI \-\-prometheus " PORT"
 Prometheus metrics endpoint port (requires the prometheus build feature). Each
@@ -353,7 +366,7 @@ Byte count for a fixed-size transfer (see \-n)
 Pre-shared key
 .TP
 .B XFR_PUSH_GATEWAY
-Prometheus push gateway URL
+Prometheus push gateway URL (client and server)
 .TP
 .B XFR_LOG_FILE
 Log file path

@@ -3482,6 +3482,11 @@ fn test_cli_client_options_rejected_with_subcommands() {
             client_only,
         ),
         (&["-t", "5", "serve"][..], "serve", client_only),
+        (
+            &["--push-gateway", "http://localhost:9091", "serve"][..],
+            "serve",
+            "tip: put serve options after the subcommand: xfr serve --push-gateway http://localhost:9091",
+        ),
         // serve accepts --port itself, so the tip shows where it goes.
         (
             &["-p", "9000", "serve"][..],
@@ -3510,6 +3515,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
         .env("XFR_DURATION", "5")
         .env("XFR_PORT", "9000")
         .env("XFR_PSK", "secret")
+        .env("XFR_PUSH_GATEWAY", "http://localhost:9091")
         .output()
         .unwrap();
     assert_eq!(
