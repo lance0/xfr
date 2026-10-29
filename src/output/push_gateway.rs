@@ -4,6 +4,7 @@
 
 use std::fmt::Write;
 use std::net::IpAddr;
+use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
@@ -13,8 +14,9 @@ use crate::protocol::{TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
 
 /// Push Gateway client for sending test metrics
+#[derive(Clone)]
 pub struct PushGatewayClient {
-    url: String,
+    url: reqwest::Url,
     client: Client,
     grouping_labels: Vec<(String, String)>,
 }
@@ -26,6 +28,11 @@ impl PushGatewayClient {
     }
 
     fn new_with_timeout(url: String, timeout: std::time::Duration) -> anyhow::Result<Self> {
+        let url = reqwest::Url::parse(&url)?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+            "push gateway URL must use HTTP or HTTPS and include a host"
+        );
         let client = Client::builder()
             .timeout(timeout)
             .build()
@@ -43,17 +50,31 @@ impl PushGatewayClient {
         self
     }
 
+    /// Identify the client push by the target host and listening port.
+    pub fn with_server(self, host: &str, port: u16) -> Self {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let server = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        self.with_endpoint("server", &server, "client")
+    }
+
     /// Push test metrics to the gateway
     ///
     /// # Arguments
     /// * `stats` - Test statistics to push
     pub async fn push_test_metrics(&self, stats: &TestStats) {
         let metrics = self.format_metrics(stats);
-        self.push_metrics(&stats.test_id, &metrics).await;
+        if let Err(error) = self.push_metrics(&stats.test_id, &metrics).await {
+            error!("Failed to push metrics: {error:#}");
+        }
     }
 
     /// Push the finalized result, including any client-side receiver corrections.
-    pub async fn push_test_result(&self, result: &TestResult) {
+    /// Delivery has a five-second total deadline, including retries.
+    pub async fn push_test_result(&self, result: &TestResult) -> anyhow::Result<()> {
         let metrics = Self::format_samples(
             &result.id,
             result.duration_ms,
@@ -66,15 +87,16 @@ impl PushGatewayClient {
             result.tcp_info.as_ref(),
             result.udp_stats.iter(),
         );
-        self.push_metrics(&result.id, &metrics).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.push_metrics(&result.id, &metrics),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("metrics delivery timed out after 5 seconds"))?
     }
 
     fn push_url(&self, test_id: &str) -> anyhow::Result<reqwest::Url> {
-        let mut url = reqwest::Url::parse(&self.url)?;
-        anyhow::ensure!(
-            matches!(url.scheme(), "http" | "https"),
-            "push gateway URL must use HTTP or HTTPS"
-        );
+        let mut url = self.url.clone();
         {
             let mut path = url
                 .path_segments_mut()
@@ -100,21 +122,15 @@ impl PushGatewayClient {
         Ok(url)
     }
 
-    async fn push_metrics(&self, test_id: &str, metrics: &str) {
-        let url = match self.push_url(test_id) {
-            Ok(url) => url,
-            Err(e) => {
-                error!("Invalid push gateway URL: {}", e);
-                return;
-            }
-        };
+    async fn push_metrics(&self, test_id: &str, metrics: &str) -> anyhow::Result<()> {
+        let url = self.push_url(test_id)?;
 
-        // Retry logic: try up to 3 times with exponential backoff
+        // Retry up to three times, with the caller bounding the full delivery.
         for attempt in 1..=3 {
             match self.push_with_retry(url.as_str(), metrics).await {
                 Ok(_) => {
-                    info!("Pushed metrics to {} (attempt {})", url, attempt);
-                    return;
+                    info!("Pushed metrics (attempt {})", attempt);
+                    return Ok(());
                 }
                 Err(e) => {
                     if attempt < 3 {
@@ -125,11 +141,12 @@ impl PushGatewayClient {
                         tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64))
                             .await;
                     } else {
-                        error!("Failed to push metrics after 3 attempts: {}", e);
+                        return Err(e.context("metrics delivery failed after 3 attempts"));
                     }
                 }
             }
         }
+        unreachable!("the final attempt always returns")
     }
 
     /// Push metrics with a single HTTP POST request
@@ -140,18 +157,14 @@ impl PushGatewayClient {
             .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
             .body(metrics.to_string())
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else {
-            let body = response.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Push gateway returned {}: {}",
-                status,
-                body
-            ))
+            Err(anyhow::anyhow!("Push gateway returned {}", status))
         }
     }
 
@@ -438,7 +451,7 @@ mod tests {
             "http://localhost:8429/api/v1/import/prometheus/?extra_label=site%3Dmesh".into(),
         )
         .unwrap()
-        .with_endpoint("server", "[fe80::1%eth0]:5201", "client");
+        .with_server("fe80::1%eth0", 5201);
         let url = client.push_url("fixture").unwrap();
         assert!(url.path().starts_with(
             "/api/v1/import/prometheus/metrics/job/xfr_test_fixture/role/client/server/"
@@ -456,12 +469,7 @@ mod tests {
             client.push_url("a/b").unwrap().path(),
             "/metrics/job@base64/eGZyX3Rlc3RfYS9i/role/client/server@base64/="
         );
-        assert!(
-            PushGatewayClient::new("file:///tmp/push".into())
-                .unwrap()
-                .push_url("test")
-                .is_err()
-        );
+        assert!(PushGatewayClient::new("file:///tmp/push".into()).is_err());
     }
 
     #[test]

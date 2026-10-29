@@ -403,8 +403,6 @@ impl ZerocopyMode {
 
 #[derive(Clone)]
 pub struct ClientConfig {
-    /// Push the final client result to this Prometheus Pushgateway URL.
-    pub push_gateway_url: Option<String>,
     pub host: String,
     pub port: u16,
     pub protocol: Protocol,
@@ -458,7 +456,6 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            push_gateway_url: None,
             host: "127.0.0.1".to_string(),
             port: crate::protocol::DEFAULT_PORT,
             protocol: Protocol::Tcp,
@@ -777,35 +774,7 @@ impl Client {
             );
         }
 
-        let result = self.run_transport(progress_tx).await?;
-        if let Some(url) = &self.config.push_gateway_url {
-            match crate::output::push_gateway::PushGatewayClient::new(url.clone()) {
-                Ok(client) => {
-                    let host = self
-                        .config
-                        .host
-                        .trim_start_matches('[')
-                        .trim_end_matches(']');
-                    let server = if host.contains(':') {
-                        format!("[{host}]:{}", self.config.port)
-                    } else {
-                        format!("{host}:{}", self.config.port)
-                    };
-                    client
-                        .with_endpoint("server", &server, "client")
-                        .push_test_result(&result)
-                        .await;
-                }
-                Err(e) => error!("Failed to initialize push gateway client: {}", e),
-            }
-        }
-        Ok(result)
-    }
-
-    async fn run_transport(
-        &self,
-        progress_tx: Option<mpsc::Sender<TestProgress>>,
-    ) -> anyhow::Result<TestResult> {
+        // Use QUIC transport if selected
         if self.config.protocol == Protocol::Quic {
             return self.run_quic(progress_tx).await;
         }

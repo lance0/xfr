@@ -201,7 +201,10 @@ Push the final client result to a Prometheus Pushgateway or vmagent import URL.
 Adds role="client" and server="host:port" grouping labels. Environment:
 XFR_PUSH_GATEWAY; config: [client] push_gateway. CLI overrides environment,
 which overrides config. No build feature is required. Push failures are logged
-without failing the test; three attempts can take up to 30 seconds each
+without failing the test. Output is flushed and saved before delivery, which
+has a five-second total deadline including retries. Ctrl-C skips delivery
+without losing the completed result. TUI delivery runs in the background and
+finishes after the summary is printed on exit. Invalid URLs fail before the test
 .TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
@@ -223,7 +226,7 @@ Maximum test duration (server-side limit)
 Prometheus push gateway URL (e.g., http://pushgateway:9091). Adds role="server"
 and client="peer IP" grouping labels. Environment: XFR_PUSH_GATEWAY;
 config: [server] push_gateway. Jobs remain named xfr_test_<test_id> and are not
-automatically deleted
+automatically deleted. Server pushes retain up to three 30-second attempts
 .TP
 .BI \-\-prometheus " PORT"
 Prometheus metrics endpoint port (requires the prometheus build feature). Each

@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Push final client results to Prometheus or vmagent** — `xfr <host> --push-gateway <url>`, `XFR_PUSH_GATEWAY`, and `[client] push_gateway` reuse the existing exporter after local result corrections. Client pushes carry `role="client"` and `server="host:port"`; server pushes carry `role="server"` and `client="peer IP"`. Existing job names and metric names are preserved. HTTP failures remain best effort and do not fail a completed test (#276).
-- **Library API:** `ClientConfig::push_gateway_url` and `PushGatewayClient::push_test_result` export finalized client results without changing the existing `TestStats` exporter API.
+- **Completed results survive a stalled metrics gateway** — client stdout and result files are written before delivery, the TUI shows completion immediately, and delivery has a five-second total deadline. Ctrl-C skips delivery while preserving the successful measurement. Delivery status appears on stderr or in TUI history; invalid URLs fail before testing and gateway credentials are omitted from delivery logs.
+- **Library API:** `PushGatewayClient::with_server` and fallible `push_test_result` export finalized client results explicitly after they have been consumed or saved. `ClientConfig` and `Client::run` keep their existing measurement-only behavior; the existing `TestStats` exporter API is preserved.
 
 ## [0.12.1] - 2026-10-21
 

@@ -673,15 +673,59 @@ the supplied URL, including an import path or reverse-proxy prefix. This URL
 shape is supported by [VictoriaMetrics and vmagent](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-data-in-prometheus-exposition-format).
 Use vmagent's relabeling or external labels to identify the source host.
 
-Pushes are awaited after the test, with up to three attempts and a 30-second
-timeout per attempt. Failures are logged and do not change a successful test's
-exit status or JSON output. Failed tests without a final result do not push.
+Client JSON/plain/CSV output is flushed and `--output` is saved before delivery
+starts. A stalled gateway cannot hide the result. Delivery has a five-second
+total deadline, including up to three attempts. Status goes to stderr, keeping
+JSON stdout parseable. Ctrl-C skips delivery without changing a completed
+test's successful exit status or saved result.
+
+The TUI shows test completion immediately and records delivery status in its
+history. Restarting a test does not cancel an earlier result's delivery. On
+exit, the summary is printed and saved before any outstanding pushes finish;
+Ctrl-C skips that remaining wait. HTTP errors and timeouts mean delivery was
+not confirmed; the gateway may have accepted a request whose reply was lost.
+There is no on-disk retry queue. Server pushes retain their existing three
+attempts with a 30-second timeout per attempt. Failed tests without a final
+result do not push. Invalid client gateway URLs fail before starting a test.
+
+For scheduled tests, keep a local result as well as the metrics:
+
+```bash
+XFR_PUSH_GATEWAY=http://127.0.0.1:8429/api/v1/import/prometheus \
+  xfr mesh-server -t 10 -u -b 10M -l 1368 --json --output latest.json
+```
+
+A zero exit status reports a successful measurement. Check stderr or the TUI
+history for metric delivery failures, and monitor ingestion in vmagent when
+using remote write. An HTTP acknowledgement from vmagent does not prove that
+VictoriaMetrics has stored the sample yet. The gateway URL may contain basic
+authentication or query parameters; xfr does not include it in delivery logs.
+
+Library callers can export explicitly after consuming or persisting the result
+with `PushGatewayClient::new(url)?.with_server(host, port)` and
+`push_test_result(&result).await`, which returns the delivery result. Network
+measurement in `Client::run` remains independent of metric delivery.
 
 The existing `xfr_test_<test_id>` jobs and per-stream `test_id` labels are
 retained. Each test creates new series; a real Pushgateway retains jobs until
 they are deleted. A stable job name alone would not remove the series churn
 from `test_id` labels. Periodic users must manage retention. Arbitrary
 `--push-label` labels are not supported.
+
+With a classic Pushgateway, delete a finished job only after Prometheus has
+scraped it. Use the exact grouping keys from the push; deleting only the job
+name does not delete groups that also have endpoint and role keys. For example,
+for a client test against `mesh-server:5201`, substitute the JSON result's `id`:
+
+```bash
+curl --fail -X DELETE \
+  'http://pushgateway:9091/metrics/job/xfr_test_TEST_ID/role/client/server/mesh-server:5201'
+```
+
+If server pushes are also enabled, their `role/server/client/<peer IP>` group
+needs separate deletion. vmagent's import endpoint forwards samples rather
+than retaining Pushgateway jobs; manage stored series through VictoriaMetrics
+retention instead.
 
 ## LAN Discovery
 

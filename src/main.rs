@@ -16,6 +16,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -23,10 +24,12 @@ use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
 use xfr::diff::{DEFAULT_DIFF_THRESHOLD_PERCENT, DiffConfig, run_diff};
 use xfr::net::AddressFamily;
+use xfr::output::push_gateway::PushGatewayClient;
 use xfr::output::{output_csv, output_json, output_plain};
 
 /// Output format options
 struct OutputOptions {
+    push_gateway: Option<PushGatewayClient>,
     json: bool,
     json_stream: bool,
     csv: bool,
@@ -1596,9 +1599,6 @@ async fn main() -> Result<()> {
             validate_bind_address(bind_addr, protocol, streams, cport.is_some())?;
 
             let config = ClientConfig {
-                push_gateway_url: cli
-                    .push_gateway
-                    .or_else(|| file_config.client.push_gateway.clone()),
                 host: host.clone(),
                 port: cli.port,
                 protocol,
@@ -1629,6 +1629,13 @@ async fn main() -> Result<()> {
 
             // Determine output format
             let output_opts = OutputOptions {
+                push_gateway: cli
+                    .push_gateway
+                    .or_else(|| file_config.client.push_gateway.clone())
+                    .map(|url| {
+                        PushGatewayClient::new(url).map(|client| client.with_server(host, cli.port))
+                    })
+                    .transpose()?,
                 json: json_output,
                 json_stream: cli.json_stream,
                 csv: cli.csv,
@@ -1674,6 +1681,7 @@ async fn main() -> Result<()> {
                     prefs.clone(),
                     update_disabled,
                     update_lock_reason,
+                    output_opts.push_gateway,
                 )
                 .await?;
 
@@ -2035,6 +2043,7 @@ async fn run_client_plain(
     };
 
     println!("{}", output_str);
+    io::stdout().flush()?;
 
     // Don't save incomplete fallback results to file — only save real server results
     if !interrupted && let Some(path) = output {
@@ -2050,7 +2059,66 @@ async fn run_client_plain(
         std::process::exit(130);
     }
 
+    let mut metrics = ClientMetrics {
+        gateway: opts.push_gateway,
+        ..Default::default()
+    };
+    metrics.queue(&result);
+    metrics.finish(sigint.notified()).await;
     Ok(())
+}
+
+#[derive(Default)]
+struct ClientMetrics {
+    gateway: Option<PushGatewayClient>,
+    pending: JoinSet<String>,
+}
+
+impl ClientMetrics {
+    fn queue(&mut self, result: &xfr::protocol::TestResult) -> bool {
+        let Some(gateway) = self.gateway.clone() else {
+            return false;
+        };
+        let result = result.clone();
+        self.pending.spawn(async move {
+            let id = xfr::protocol::UdpSendErrors::sanitize_message(&result.id);
+            match gateway.push_test_result(&result).await {
+                Ok(()) => format!("Metrics pushed for test {}", id),
+                Err(error) => format!(
+                    "Warning: metrics delivery for test {} was not confirmed: {error:#}",
+                    id
+                ),
+            }
+        });
+        true
+    }
+
+    async fn finish(&mut self, cancel: impl std::future::Future<Output = ()>) {
+        if self.pending.is_empty() {
+            return;
+        }
+        eprintln!("Finishing metrics delivery (Ctrl-C to skip; test results are preserved)...");
+        tokio::pin!(cancel);
+        while !self.pending.is_empty() {
+            tokio::select! {
+                biased;
+                outcome = self.pending.join_next() => {
+                    if let Some(outcome) = outcome {
+                        eprintln!("{}", Self::message(outcome));
+                    }
+                }
+                _ = &mut cancel => {
+                    eprintln!("Warning: metrics delivery not confirmed; test results are preserved.");
+                    self.pending.shutdown().await;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn message(outcome: Result<String, tokio::task::JoinError>) -> String {
+        outcome.unwrap_or_else(|error| format!("Warning: metrics task failed: {error}"))
+    }
 }
 
 /// Build a fallback TestResult from cumulative counters.
@@ -2104,6 +2172,7 @@ async fn run_client_tui(
     prefs: xfr::prefs::Prefs,
     update_disabled: bool,
     update_lock_reason: Option<&'static str>,
+    push_gateway: Option<PushGatewayClient>,
 ) -> Result<xfr::prefs::Prefs> {
     // Setup terminal. The guard is armed before entering the alternate screen
     // so a failure there still restores cooked mode on the way out.
@@ -2114,6 +2183,10 @@ async fn run_client_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut status = StatusReporter::new(io::stdout().is_terminal());
+    let mut metrics = ClientMetrics {
+        gateway: push_gateway,
+        ..Default::default()
+    };
 
     // The loop applies Settings edits to `config`, so afterwards it
     // describes the run that produced the final result.
@@ -2125,6 +2198,7 @@ async fn run_client_tui(
         prefs,
         update_disabled,
         update_lock_reason,
+        &mut metrics,
     )
     .await;
     status.finish(terminal.backend_mut());
@@ -2154,10 +2228,21 @@ async fn run_client_tui(
             } else {
                 println!("Test cancelled.");
             }
+            io::stdout().flush()?;
+            metrics
+                .finish(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
             Ok(final_prefs)
         }
         Err(e) => {
             eprintln!("Error: {}", e);
+            metrics
+                .finish(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
             Err(e)
         }
     }
@@ -2422,12 +2507,15 @@ async fn restart_tui_run(
     app: &mut App,
     run: &mut Option<TuiRun>,
     config: &ClientConfig,
+    metrics: &mut ClientMetrics,
 ) -> Result<()> {
     if let Some(current) = run.take() {
         app.log("Restarting, waiting for current test to stop...");
         terminal.draw(|f| draw(f, app))?;
         match cancel_tui_run(current, Duration::from_secs(3)).await {
-            Some(Ok(_)) => {}
+            Some(Ok(result)) => {
+                metrics.queue(&result);
+            }
             Some(Err(e)) => {
                 app.log(format!("Previous test ended while restarting: {}", e));
             }
@@ -2444,6 +2532,7 @@ async fn restart_tui_run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     status: &mut StatusReporter,
@@ -2452,6 +2541,7 @@ async fn run_tui_loop(
     mut prefs: xfr::prefs::Prefs,
     update_disabled: bool,
     update_lock_reason: Option<&'static str>,
+    metrics: &mut ClientMetrics,
 ) -> Result<TuiLoopExit> {
     // Spawn the background update check unless it's disabled (flag/env/config/
     // pref) or compiled out. `update_rx` still exists so the poller is a no-op.
@@ -2504,6 +2594,9 @@ async fn run_tui_loop(
     let mut last_drawn: Option<u64> = None;
 
     loop {
+        while let Some(outcome) = metrics.pending.try_join_next() {
+            app.log(ClientMetrics::message(outcome));
+        }
         // Preserve only explicit palette edits, including on cancel timeout.
         remember_tui_theme(&mut prefs, &app);
 
@@ -2573,7 +2666,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
                     // `restart_tui_run` may draw a transient "restarting"
                     // frame directly. Its replacement must not be skipped
                     // against the fingerprint from before that draw.
@@ -2665,7 +2758,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
                     last_drawn = None;
                 }
                 KeyCode::Char('t') => {
@@ -2724,6 +2817,9 @@ async fn run_tui_loop(
             let finished_run = run.take().expect("run exists after is_finished check");
             match finish_tui_run(finished_run).await {
                 Ok(result) => {
+                    if metrics.queue(&result) {
+                        app.log("Pushing metrics (test complete)...");
+                    }
                     app.on_result(result);
 
                     // If we were waiting for cancel to complete, exit now with result
