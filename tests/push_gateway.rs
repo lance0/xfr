@@ -389,7 +389,10 @@ async fn invalid_gateway_is_rejected_before_connecting() {
 
 async fn stalled_gateway_preserves_result(interrupt: bool) {
     let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", gateway.local_addr().unwrap());
+    let url = format!(
+        "http://mesh-user:gateway-secret@{}/?token=gateway-secret",
+        gateway.local_addr().unwrap()
+    );
     let (port, server) = server(None).await;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("result.json");
@@ -451,6 +454,10 @@ async fn stalled_gateway_preserves_result(interrupt: bool) {
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("mesh-user") && !stderr.contains("gateway-secret"),
+        "{stderr}"
+    );
     assert!(stderr.contains("not confirmed"), "{stderr}");
     assert!(
         !stderr.contains("partial results") && !stderr.contains("before any data"),
