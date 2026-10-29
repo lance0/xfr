@@ -1988,27 +1988,21 @@ async fn run_client_plain(
     let client_run = client.clone();
     let mut test_handle = tokio::spawn(async move { client_run.run(Some(tx)).await });
 
-    // Signal handler: first Ctrl+C = graceful cancel, second = force exit
-    let sigint = Arc::new(tokio::sync::Notify::new());
-    let sigint_bg = sigint.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        sigint_bg.notify_one();
-        // Second Ctrl+C = force exit
-        let _ = tokio::signal::ctrl_c().await;
-        std::process::exit(130);
-    });
-
     // Wait for either test completion or Ctrl+C
     let (result, interrupted) = tokio::select! {
         r = &mut test_handle => {
             (r??, false)
         }
-        _ = sigint.notified() => {
+        _ = tokio::signal::ctrl_c() => {
             eprintln!("\nInterrupted, waiting for summary...");
             let _ = client.cancel();
             // Wait for the test task to finish (client now waits for server Result after cancel)
-            match tokio::time::timeout(Duration::from_secs(5), &mut test_handle).await {
+            // Force-exit applies only while the measurement is stopping.
+            let stopped = tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(5), &mut test_handle) => result,
+                _ = tokio::signal::ctrl_c() => std::process::exit(130),
+            };
+            match stopped {
                 Ok(Ok(Ok(result))) => (result, false), // Got real server result after cancel
                 Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
                     // Server didn't respond or task failed — abort and build fallback
@@ -2064,7 +2058,11 @@ async fn run_client_plain(
         ..Default::default()
     };
     metrics.queue(&result);
-    metrics.finish(sigint.notified()).await;
+    metrics
+        .finish(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
     Ok(())
 }
 

@@ -25,6 +25,13 @@ def wait_for(check, description):
         time.sleep(0.1)
 
 
+def float_matches_storage(actual, expected, victoria):
+    # Twelve significant digits permit up to 1e-11 relative truncation error.
+    return actual == expected or (
+        victoria and math.isclose(actual, expected, rel_tol=1e-11, abs_tol=1e-12)
+    )
+
+
 def read_samples(url, job, victoria):
     if victoria:
         with urlopen(
@@ -146,11 +153,11 @@ def run(binary, gateway, storage, victoria, flags):
                     ("xfr_duration_seconds", result["duration_ms"] / 1000),
                 ]:
                     actual = metric(name, "client")[0][1]
-                    # VictoriaMetrics stores floats with up to 12 significant decimal digits.
-                    assert actual == expected or (
-                        victoria
-                        and math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-12)
-                    ), (name, actual, expected)
+                    assert float_matches_storage(actual, expected, victoria), (
+                        name,
+                        actual,
+                        expected,
+                    )
                 for stream in result["streams"]:
                     assert (
                         metric("xfr_stream_bytes_total", "client", stream["id"])[0][1]
@@ -182,6 +189,11 @@ def run(binary, gateway, storage, victoria, flags):
 
 
 if __name__ == "__main__":
+    expected = 1.9975544455544458
+    assert float_matches_storage(1.99755444555, expected, True)
+    assert float_matches_storage(1.0, 1.000000000009, True)
+    assert not float_matches_storage(1.99755444555, expected, False)
+    assert not float_matches_storage(1.9975544455, expected, True)
     binary, pushgateway, victoria, vmagent = sys.argv[1:]
     binary = str(Path(binary).resolve())
     for gateway, storage, is_victoria in [

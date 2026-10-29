@@ -387,7 +387,7 @@ async fn invalid_gateway_is_rejected_before_connecting() {
     }
 }
 
-async fn stalled_gateway_preserves_result(interrupt: bool) {
+async fn stalled_gateway_preserves_result(interrupt: bool, cancel_measurement: bool) {
     let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!(
         "http://mesh-user:gateway-secret@{}/?token=gateway-secret",
@@ -402,10 +402,14 @@ async fn stalled_gateway_preserves_result(interrupt: bool) {
             "-p",
             &port.to_string(),
             "-t",
-            "1",
+            if cancel_measurement { "0" } else { "1" },
             "-b",
             "2M",
-            "--json",
+            if cancel_measurement {
+                "--json-stream"
+            } else {
+                "--json"
+            },
             "--no-update-check",
             "--push-gateway",
             &url,
@@ -417,12 +421,26 @@ async fn stalled_gateway_preserves_result(interrupt: bool) {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    if cancel_measurement {
+        let mut interval = String::new();
+        timeout(Duration::from_secs(5), stdout.read_line(&mut interval))
+            .await
+            .unwrap()
+            .unwrap();
+        let interval: serde_json::Value = serde_json::from_str(&interval).unwrap();
+        assert!(interval["elapsed_secs"].as_f64().unwrap() > 0.0);
+        #[cfg(unix)]
+        assert_eq!(
+            unsafe { libc::kill(child.id().unwrap() as libc::pid_t, libc::SIGINT) },
+            0
+        );
+    }
     // Hold the HTTP connection open without a response, after the measurement completes.
     let (_connection, _) = timeout(Duration::from_secs(10), gateway.accept())
         .await
         .unwrap()
         .unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let result: xfr::protocol::TestResult = timeout(Duration::from_secs(2), async {
         let mut text = String::new();
         loop {
@@ -476,10 +494,16 @@ async fn stalled_gateway_preserves_result(interrupt: bool) {
 #[cfg(unix)]
 #[tokio::test]
 async fn ctrl_c_during_metrics_delivery_keeps_completed_json_and_file() {
-    stalled_gateway_preserves_result(true).await;
+    stalled_gateway_preserves_result(true, false).await;
 }
 
 #[tokio::test]
 async fn stalled_metrics_delivery_has_a_total_deadline_and_keeps_result() {
-    stalled_gateway_preserves_result(false).await;
+    stalled_gateway_preserves_result(false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_a_test_then_skipping_metrics_keeps_successful_result() {
+    stalled_gateway_preserves_result(true, true).await;
 }
