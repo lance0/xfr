@@ -95,6 +95,45 @@ fn sample(body: &str, name: &str) -> f64 {
         .unwrap()
 }
 
+async fn read_final_json(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    streaming: bool,
+) -> xfr::protocol::TestResult {
+    let mut text = String::new();
+    loop {
+        if streaming {
+            text.clear();
+        }
+        assert!(reader.read_line(&mut text).await.unwrap() > 0);
+        if let Ok(result) = serde_json::from_str(&text) {
+            return result;
+        }
+    }
+}
+
+#[tokio::test]
+async fn final_json_reader_accepts_extra_stream_intervals_and_pretty_json() {
+    let result: xfr::protocol::TestResult = serde_json::from_value(serde_json::json!({
+        "id": "reader-fixture", "bytes_total": 1234, "duration_ms": 1000,
+        "throughput_mbps": 1.25, "streams": []
+    }))
+    .unwrap();
+    for (streaming, text) in [
+        (
+            true,
+            format!(
+                "{{\"elapsed_secs\":1.0}}\n{{\"elapsed_secs\":2.0}}\n{}\n",
+                serde_json::to_string(&result).unwrap()
+            ),
+        ),
+        (false, xfr::output::output_json(&result).unwrap()),
+    ] {
+        let actual = read_final_json(&mut BufReader::new(text.as_bytes()), streaming).await;
+        assert_eq!(actual.id, result.id);
+        assert_eq!(actual.bytes_total, result.bytes_total);
+    }
+}
+
 async fn client(port: u16, gateway: &str, host: &str, flags: &[&str]) -> std::process::Output {
     timeout(
         Duration::from_secs(15),
@@ -441,15 +480,10 @@ async fn stalled_gateway_preserves_result(interrupt: bool, cancel_measurement: b
         .await
         .unwrap()
         .unwrap();
-    let result: xfr::protocol::TestResult = timeout(Duration::from_secs(2), async {
-        let mut text = String::new();
-        loop {
-            assert!(stdout.read_line(&mut text).await.unwrap() > 0);
-            if let Ok(result) = serde_json::from_str(&text) {
-                break result;
-            }
-        }
-    })
+    let result = timeout(
+        Duration::from_secs(2),
+        read_final_json(&mut stdout, cancel_measurement),
+    )
     .await
     .expect("final JSON must be flushed before gateway delivery finishes");
     assert!(result.bytes_total > 0);
