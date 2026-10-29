@@ -88,11 +88,30 @@ async fn server(push_gateway_url: Option<String>) -> (u16, tokio::task::JoinHand
 }
 
 fn sample(body: &str, name: &str) -> f64 {
-    body.lines()
+    let value = body
+        .lines()
         .find_map(|line| line.strip_prefix(&format!("{name} ")))
-        .unwrap_or_else(|| panic!("missing {name}: {body}"))
-        .parse()
-        .unwrap()
+        .unwrap_or_else(|| panic!("missing {name}: {body}"));
+    // Match the result JSON's parser so rounding differences do not weaken exact equality.
+    serde_json::from_str(value).unwrap()
+}
+
+#[test]
+fn metric_and_result_floats_use_the_same_parser() {
+    let result: xfr::protocol::TestResult = serde_json::from_str(
+        r#"{
+        "id":"float-parser", "bytes_total":1234, "duration_ms":1000,
+        "throughput_mbps":1.9896207584830339, "streams":[]
+    }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        sample(
+            "xfr_throughput_mbps 1.9896207584830339\n",
+            "xfr_throughput_mbps"
+        ),
+        result.throughput_mbps
+    );
 }
 
 async fn read_final_json(
