@@ -2287,7 +2287,12 @@ async fn run_quic_test(
             crate::output::prometheus::on_test_complete(&stats);
 
             // Push metrics to gateway if configured
-            crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+            crate::output::push_gateway::maybe_push_metrics_for_peer(
+                push_gateway_url,
+                &stats,
+                Some(peer_addr.ip()),
+            )
+            .await;
 
             if let Some(tx) = &tui_tx {
                 let _ = tx.try_send(ServerEvent::TestCompleted {
@@ -2832,7 +2837,12 @@ async fn run_test<W: AsyncWrite + Unpin>(
             #[cfg(feature = "prometheus")]
             crate::output::prometheus::on_test_complete(&stats);
 
-            crate::output::push_gateway::maybe_push_metrics(push_gateway_url, &stats).await;
+            crate::output::push_gateway::maybe_push_metrics_for_peer(
+                push_gateway_url,
+                &stats,
+                Some(peer_addr.ip()),
+            )
+            .await;
 
             if let Some(tx) = &tui_tx {
                 let _ = tx.try_send(ServerEvent::TestCompleted {

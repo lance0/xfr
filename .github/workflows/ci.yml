@@ -129,6 +129,36 @@ jobs:
       - name: Check licenses / bans / sources
         run: cargo deny check licenses bans sources
 
+  push-gateway:
+    name: Pushgateway + vmagent ingestion
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build client and server
+        run: cargo build --locked
+      - name: Start metrics backends
+        run: |
+          docker run -d --name xfr-pushgateway --network host prom/pushgateway:v1.11.4 --web.listen-address=127.0.0.1:19091
+          docker run -d --name xfr-victoriametrics --network host victoriametrics/victoria-metrics:v1.155.0 -httpListenAddr=127.0.0.1:18428
+          docker run -d --name xfr-vmagent --network host victoriametrics/vmagent:v1.155.0 -httpListenAddr=127.0.0.1:18429 -remoteWrite.url=http://127.0.0.1:18428/api/v1/write -remoteWrite.flushInterval=1s
+          for endpoint in 19091/-/healthy 18428/health 18429/health; do
+            curl --fail --retry 15 --retry-delay 1 --retry-connrefused "http://127.0.0.1:$endpoint"
+          done
+      - name: Verify client and server samples in both backends
+        run: python3 scripts/test-push-gateway.py target/debug/xfr http://127.0.0.1:19091 http://127.0.0.1:18428 http://127.0.0.1:18429/api/v1/import/prometheus
+      - name: Backend logs
+        if: failure()
+        run: |
+          docker logs xfr-pushgateway
+          docker logs xfr-victoriametrics
+          docker logs xfr-vmagent
+      - name: Stop metrics backends
+        if: always()
+        run: docker rm -f xfr-pushgateway xfr-vmagent xfr-victoriametrics
+
   # Build every shippable release target on each PR (debug, no packaging) with
   # the same toolchains as release.yml, so a target-specific build/link failure
   # is caught before tag. zigbuild covers the Linux gnu/musl targets (Zig bundles

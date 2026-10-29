@@ -175,6 +175,11 @@ struct Cli {
     #[arg(value_name = "HOST")]
     host: Option<String>,
 
+    /// Push the final result to a Prometheus Pushgateway URL
+    #[arg(long, env = "XFR_PUSH_GATEWAY")]
+    #[arg(help_heading = "Output Options")]
+    push_gateway: Option<String>,
+
     /// Test duration. Bare integers are seconds (`-t 10`), or use unit suffixes (`10s`, `1min`, `500ms`). Use 0 for infinite.
     /// Defaults to 10s unless `--probe-mtu` is used without `-t`, in which case it defaults to 60s.
     #[arg(short = 't', long, value_parser = parse_test_duration, env = "XFR_DURATION")]
@@ -1591,6 +1596,9 @@ async fn main() -> Result<()> {
             validate_bind_address(bind_addr, protocol, streams, cport.is_some())?;
 
             let config = ClientConfig {
+                push_gateway_url: cli
+                    .push_gateway
+                    .or_else(|| file_config.client.push_gateway.clone()),
                 host: host.clone(),
                 port: cli.port,
                 protocol,

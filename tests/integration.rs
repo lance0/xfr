@@ -158,6 +158,7 @@ async fn test_tcp_single_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -214,6 +215,7 @@ async fn test_tcp_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -252,6 +254,7 @@ async fn test_connection_refused() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -290,6 +293,7 @@ async fn test_tcp_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -333,6 +337,7 @@ async fn test_tcp_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -394,6 +399,7 @@ async fn test_udp_upload() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -615,6 +621,7 @@ async fn test_mtu_probe() {
         mtu_probe: true,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -668,6 +675,7 @@ async fn test_udp_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -709,6 +717,7 @@ async fn test_udp_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -752,6 +761,7 @@ async fn test_udp_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -800,6 +810,7 @@ async fn test_multi_client_concurrent() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -825,6 +836,7 @@ async fn test_multi_client_concurrent() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -946,6 +958,7 @@ async fn test_psk_auth_success() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -993,6 +1006,7 @@ async fn test_psk_auth_failure() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1040,6 +1054,7 @@ async fn test_psk_auth_missing_client_key() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1085,6 +1100,7 @@ async fn test_acl_allow() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1127,6 +1143,7 @@ async fn test_rate_limit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1159,6 +1176,7 @@ async fn test_rate_limit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1213,6 +1231,7 @@ async fn test_quic_upload() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1257,6 +1276,7 @@ async fn test_quic_download() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1306,6 +1326,7 @@ async fn test_quic_upload_bitrate_pacing() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1358,6 +1379,7 @@ async fn test_quic_download_bitrate_pacing() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1413,6 +1435,7 @@ async fn test_quic_download_bitrate_pacing_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1479,6 +1502,7 @@ async fn test_quic_upload_bitrate_pacing_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1533,6 +1557,7 @@ async fn test_quic_download_bitrate_pacing_4_streams() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1585,6 +1610,7 @@ async fn test_quic_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1632,6 +1658,7 @@ async fn test_quic_bidir() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1676,6 +1703,7 @@ async fn test_quic_with_psk() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1805,6 +1833,7 @@ async fn test_quic_psk_rejects_server_without_channel_binding() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     });
     let error = timeout(Duration::from_secs(5), client.run(None))
@@ -1852,6 +1881,7 @@ async fn test_tcp_with_psk() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1952,6 +1982,7 @@ async fn test_acl_deny() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -1998,6 +2029,7 @@ async fn test_preset_allowed_clients_allows_matching_ip() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2043,6 +2075,7 @@ async fn test_preset_allowed_clients_denies_non_matching_ip() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2107,6 +2140,7 @@ async fn test_ipv6_localhost() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2155,6 +2189,7 @@ async fn test_tcp_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2211,6 +2246,7 @@ async fn test_udp_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2372,6 +2408,7 @@ async fn test_quic_infinite_duration_with_cancel() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2455,6 +2492,7 @@ async fn test_udp_ipv4_explicit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2516,6 +2554,7 @@ async fn test_udp_ipv6_explicit() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: Some(1368),
     };
 
@@ -2577,6 +2616,7 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2622,6 +2662,7 @@ async fn test_tcp_cport_single_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2670,6 +2711,7 @@ async fn test_tcp_cport_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2734,6 +2776,7 @@ async fn test_tcp_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2794,6 +2837,7 @@ async fn test_quic_cport_dualstack_ipv6_target() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2839,6 +2883,7 @@ async fn test_udp_invalid_sequential_ports_config_fails() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2891,6 +2936,7 @@ async fn test_udp_bitrate_underflow_regression() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -2966,6 +3012,7 @@ async fn test_quic_ipv6() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -3027,6 +3074,7 @@ async fn test_tcp_one_off_multi_stream() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -3097,6 +3145,7 @@ async fn test_quic_one_off() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -3190,6 +3239,7 @@ fn test_pause_not_ready_before_test_run() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -3482,6 +3532,11 @@ fn test_cli_client_options_rejected_with_subcommands() {
             client_only,
         ),
         (&["-t", "5", "serve"][..], "serve", client_only),
+        (
+            &["--push-gateway", "http://localhost:9091", "serve"][..],
+            "serve",
+            "tip: put serve options after the subcommand: xfr serve --push-gateway http://localhost:9091",
+        ),
         // serve accepts --port itself, so the tip shows where it goes.
         (
             &["-p", "9000", "serve"][..],
@@ -3510,6 +3565,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
         .env("XFR_DURATION", "5")
         .env("XFR_PORT", "9000")
         .env("XFR_PSK", "secret")
+        .env("XFR_PUSH_GATEWAY", "http://localhost:9091")
         .output()
         .unwrap();
     assert_eq!(
@@ -4338,6 +4394,7 @@ async fn test_tcp_cancel_latency_before_first_tick() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -4409,6 +4466,7 @@ async fn test_tcp_psk_cancel_infinite_duration() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 
@@ -4463,6 +4521,7 @@ async fn test_udp_pause_resume_no_burst() {
         mtu_probe: false,
         connect_timeout: None,
         byte_budget: None,
+        push_gateway_url: None,
         udp_payload_size: None,
     };
 

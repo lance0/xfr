@@ -26,6 +26,9 @@ pub struct Config {
 /// Default settings for client mode
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientDefaults {
+    /// Prometheus push gateway URL for completed client results
+    pub push_gateway: Option<String>,
+
     /// Default test duration in seconds
     pub duration_secs: Option<u64>,
 
@@ -318,6 +321,7 @@ mod tests {
 duration_secs = 30
 parallel_streams = 4
 tcp_nodelay = true
+push_gateway = "http://localhost:8429/api/v1/import/prometheus"
 
 [server]
 port = 9000
@@ -337,6 +341,10 @@ allowed_clients = ["192.168.1.0/24"]
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.client.duration_secs, Some(30));
         assert_eq!(config.client.parallel_streams, Some(4));
+        assert_eq!(
+            config.client.push_gateway.as_deref(),
+            Some("http://localhost:8429/api/v1/import/prometheus")
+        );
         assert_eq!(config.server.port, Some(9000));
         assert_eq!(config.server.no_mdns, None);
         assert_eq!(config.presets.len(), 2);

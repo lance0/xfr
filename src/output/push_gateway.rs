@@ -3,16 +3,20 @@
 //! Pushes test metrics to a Prometheus Push Gateway at test completion.
 
 use std::fmt::Write;
+use std::net::IpAddr;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
 use tracing::{debug, error, info, warn};
 
+use crate::protocol::{TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
 
 /// Push Gateway client for sending test metrics
 pub struct PushGatewayClient {
     url: String,
     client: Client,
+    grouping_labels: Vec<(String, String)>,
 }
 
 impl PushGatewayClient {
@@ -27,23 +31,87 @@ impl PushGatewayClient {
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build push gateway HTTP client: {e}"))?;
 
-        Ok(Self { url, client })
+        Ok(Self {
+            url,
+            client,
+            grouping_labels: Vec::new(),
+        })
+    }
+
+    pub(crate) fn with_endpoint(mut self, name: &str, value: &str, role: &str) -> Self {
+        self.grouping_labels = vec![("role".into(), role.into()), (name.into(), value.into())];
+        self
     }
 
     /// Push test metrics to the gateway
     ///
     /// # Arguments
     /// * `stats` - Test statistics to push
-    /// * `test_id` - Unique identifier for this test (used as job label)
     pub async fn push_test_metrics(&self, stats: &TestStats) {
-        let job_name = format!("xfr_test_{}", stats.test_id);
-        let url = format!("{}/metrics/job/{}", self.url, job_name);
-
         let metrics = self.format_metrics(stats);
+        self.push_metrics(&stats.test_id, &metrics).await;
+    }
+
+    /// Push the finalized result, including any client-side receiver corrections.
+    pub async fn push_test_result(&self, result: &TestResult) {
+        let metrics = Self::format_samples(
+            &result.id,
+            result.duration_ms,
+            result.bytes_total,
+            result.throughput_mbps,
+            result
+                .streams
+                .iter()
+                .map(|s| (s.id, s.bytes, s.throughput_mbps, s.retransmits.unwrap_or(0))),
+            result.tcp_info.as_ref(),
+            result.udp_stats.iter(),
+        );
+        self.push_metrics(&result.id, &metrics).await;
+    }
+
+    fn push_url(&self, test_id: &str) -> anyhow::Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&self.url)?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https"),
+            "push gateway URL must use HTTP or HTTPS"
+        );
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|()| anyhow::anyhow!("invalid push gateway URL"))?;
+            path.pop_if_empty().push("metrics");
+            for (name, value) in std::iter::once(("job", format!("xfr_test_{test_id}"))).chain(
+                self.grouping_labels
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.clone())),
+            ) {
+                if value.is_empty() || value.contains('/') {
+                    path.push(&format!("{name}@base64"));
+                    path.push(&if value.is_empty() {
+                        "=".into()
+                    } else {
+                        URL_SAFE_NO_PAD.encode(value)
+                    });
+                } else {
+                    path.push(name).push(&value);
+                }
+            }
+        }
+        Ok(url)
+    }
+
+    async fn push_metrics(&self, test_id: &str, metrics: &str) {
+        let url = match self.push_url(test_id) {
+            Ok(url) => url,
+            Err(e) => {
+                error!("Invalid push gateway URL: {}", e);
+                return;
+            }
+        };
 
         // Retry logic: try up to 3 times with exponential backoff
         for attempt in 1..=3 {
-            match self.push_with_retry(&url, &metrics).await {
+            match self.push_with_retry(url.as_str(), metrics).await {
                 Ok(_) => {
                     info!("Pushed metrics to {} (attempt {})", url, attempt);
                     return;
@@ -89,8 +157,6 @@ impl PushGatewayClient {
 
     /// Format test stats as Prometheus text format
     fn format_metrics(&self, stats: &TestStats) -> String {
-        let mut output = String::new();
-        let test_id = &stats.test_id;
         let elapsed_ms = stats.elapsed_ms();
         let duration_secs = elapsed_ms as f64 / 1000.0;
         let bytes_total = stats.total_bytes();
@@ -99,6 +165,40 @@ impl PushGatewayClient {
         } else {
             0.0
         };
+
+        Self::format_samples(
+            &stats.test_id,
+            elapsed_ms,
+            bytes_total,
+            throughput_mbps,
+            stats.streams.iter().map(|s| {
+                (
+                    s.stream_id,
+                    s.total_bytes(),
+                    s.throughput_mbps(),
+                    s.retransmits(),
+                )
+            }),
+            stats.final_local_tcp_info().as_ref(),
+            stats.udp_stats.lock().iter(),
+        )
+    }
+
+    fn format_samples<'a>(
+        test_id: &str,
+        elapsed_ms: u64,
+        bytes_total: u64,
+        throughput_mbps: f64,
+        streams: impl ExactSizeIterator<Item = (u8, u64, f64, u64)>,
+        tcp_info: Option<&TcpInfoSnapshot>,
+        udp_stats: impl Iterator<Item = &'a UdpStats>,
+    ) -> String {
+        let mut output = String::new();
+        let test_id = test_id
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        let duration_secs = elapsed_ms as f64 / 1000.0;
 
         /// Write # HELP/# TYPE headers once per metric family, then any samples.
         fn write_family_header(output: &mut String, name: &str, help: &str, metric_type: &str) {
@@ -141,7 +241,7 @@ impl PushGatewayClient {
         write_sample(&mut output, "xfr_duration_seconds", duration_secs);
 
         // Per-stream metrics: headers emitted once, samples once per stream.
-        if !stats.streams.is_empty() {
+        if streams.len() > 0 {
             write_family_header(
                 &mut output,
                 "xfr_stream_bytes_total",
@@ -161,11 +261,9 @@ impl PushGatewayClient {
                 "counter",
             );
 
-            for stream in &stats.streams {
-                let stream_id = stream.stream_id;
-                let stream_bytes = stream.total_bytes() as f64;
-                let stream_throughput = stream.throughput_mbps();
-                let stream_retransmits = stream.retransmits() as f64;
+            for (stream_id, bytes, stream_throughput, retransmits) in streams {
+                let stream_bytes = bytes as f64;
+                let stream_retransmits = retransmits as f64;
 
                 writeln!(
                     output,
@@ -189,7 +287,7 @@ impl PushGatewayClient {
         }
 
         // Aggregate TCP info if available
-        if let Some(tcp_info) = stats.final_local_tcp_info() {
+        if let Some(tcp_info) = tcp_info {
             write_family_header(
                 &mut output,
                 "xfr_tcp_rtt_microseconds",
@@ -224,13 +322,13 @@ impl PushGatewayClient {
         }
 
         // Aggregate UDP stats if available
-        let udp_stats_vec = stats.udp_stats.lock();
-        if !udp_stats_vec.is_empty() {
+        let mut udp_stats = udp_stats.peekable();
+        if udp_stats.peek().is_some() {
             let mut total_sent = 0u64;
             let mut total_received = 0u64;
             let mut total_lost = 0u64;
             let mut max_jitter = 0.0f64;
-            for udp in udp_stats_vec.iter() {
+            for udp in udp_stats {
                 total_sent = total_sent.saturating_add(udp.packets_sent);
                 total_received = total_received.saturating_add(udp.packets_received);
                 total_lost = total_lost.saturating_add(udp.lost);
@@ -293,9 +391,28 @@ impl PushGatewayClient {
 
 /// Push metrics to the gateway if configured
 pub async fn maybe_push_metrics(push_gateway_url: &Option<String>, stats: &TestStats) {
+    maybe_push_metrics_for_peer(push_gateway_url, stats, None).await;
+}
+
+pub(crate) async fn maybe_push_metrics_for_peer(
+    push_gateway_url: &Option<String>,
+    stats: &TestStats,
+    peer: Option<IpAddr>,
+) {
     if let Some(url) = push_gateway_url {
         match PushGatewayClient::new(url.clone()) {
-            Ok(client) => client.push_test_metrics(stats).await,
+            Ok(client) => {
+                let client = if let Some(peer) = peer {
+                    client.with_endpoint(
+                        "client",
+                        &crate::net::normalize_ip(peer).to_string(),
+                        "server",
+                    )
+                } else {
+                    client
+                };
+                client.push_test_metrics(stats).await;
+            }
             Err(e) => {
                 error!("Failed to initialize push gateway client: {}", e);
             }
@@ -314,6 +431,50 @@ mod tests {
     use crate::output::push_gateway::PushGatewayClient;
     use crate::protocol::{TcpInfoSnapshot, UdpStats};
     use crate::stats::TestStats;
+
+    #[test]
+    fn grouping_preserves_gateway_path_query_and_ipv6_endpoint() {
+        let client = PushGatewayClient::new(
+            "http://localhost:8429/api/v1/import/prometheus/?extra_label=site%3Dmesh".into(),
+        )
+        .unwrap()
+        .with_endpoint("server", "[fe80::1%eth0]:5201", "client");
+        let url = client.push_url("fixture").unwrap();
+        assert!(url.path().starts_with(
+            "/api/v1/import/prometheus/metrics/job/xfr_test_fixture/role/client/server/"
+        ));
+        assert!(url.path().ends_with("[fe80::1%25eth0]:5201"));
+        assert_eq!(url.query(), Some("extra_label=site%3Dmesh"));
+    }
+
+    #[test]
+    fn grouping_encodes_slashes_and_empty_values() {
+        let client = PushGatewayClient::new("http://localhost".into())
+            .unwrap()
+            .with_endpoint("server", "", "client");
+        assert_eq!(
+            client.push_url("a/b").unwrap().path(),
+            "/metrics/job@base64/eGZyX3Rlc3RfYS9i/role/client/server@base64/="
+        );
+        assert!(
+            PushGatewayClient::new("file:///tmp/push".into())
+                .unwrap()
+                .push_url("test")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_ids_cannot_inject_prometheus_samples() {
+        let stats = TestStats::new("quote\"slash\\\nnewline".into(), 1);
+        let client = PushGatewayClient::new("http://localhost".into()).unwrap();
+        let text = client.format_metrics(&stats);
+        assert!(text.contains("test_id=\"quote\\\"slash\\\\\\nnewline\""));
+        assert_eq!(
+            text.lines().filter(|line| !line.starts_with('#')).count(),
+            6
+        );
+    }
 
     #[test]
     fn metrics_payload_keeps_exact_text_format() {

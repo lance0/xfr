@@ -32,6 +32,9 @@ json_output = false
 # Disable TUI by default
 no_tui = false
 
+# Push completed client results (also accepts a vmagent import URL)
+# push_gateway = "http://127.0.0.1:8429/api/v1/import/prometheus"
+
 # Disable the background check for a newer xfr release. Also honored via the
 # DO_NOT_TRACK or XFR_NO_UPDATE_CHECK environment variables, the
 # --no-update-check flag, or the Update check toggle in the TUI settings.
@@ -60,6 +63,9 @@ no_mdns = false
 
 # Prometheus metrics port (requires --features prometheus)
 # prometheus_port = 9090
+
+# Push completed server measurements
+# push_gateway = "http://pushgateway:9091"
 
 # Server presets - use with: xfr serve --preset limited
 [[presets]]
