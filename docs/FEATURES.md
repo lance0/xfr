@@ -392,10 +392,86 @@ xfr <host> --omit 3            # Skip first 3s of intervals (TCP ramp-up)
 
 ### Config File
 
-xfr reads defaults from:
-- **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
-- **macOS:** `~/Library/Application Support/xfr/config.toml`
-- **Windows:** `%APPDATA%\xfr\config.toml`
+xfr reads defaults from the first of these files that exists:
+1. The user config file:
+   - **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
+   - **macOS:** `~/Library/Application Support/xfr/config.toml`
+   - **Windows:** `%APPDATA%\xfr\config.toml`
+2. **Linux, macOS and other Unix (v0.14.0+):** `/etc/xfr/config.toml`
+
+When xfr cannot find a user config directory (no home directory, as in some
+containers), it skips step 1 and searches only `/etc/xfr/config.toml`.
+
+- **One file only.** xfr reads the first file that exists and ignores the rest.
+  A user config file hides `/etc/xfr/config.toml` completely; the two are not merged.
+- **Pick a file (v0.14.0+).** `--config <PATH>` or `XFR_CONFIG=<PATH>` names the
+  file to read, and nothing else is searched. `--config` wins over `XFR_CONFIG`.
+  If the named file does not exist, xfr exits with an error that names the path
+  and where it came from.
+- **Broken symlinks are errors (v0.14.0+).** When the config file, or a
+  directory on its path such as `/etc/xfr`, is a symlink to a missing path, xfr
+  stops with `config file <path>: <link> is a symlink to a missing path`, for a
+  client and a server alike, instead of running with defaults.
+- **Before or after `serve` (v0.14.0+).** `xfr --config x.toml serve` and
+  `xfr serve --config x.toml` do the same thing.
+- **See which file was used (v0.14.0+).** xfr logs `Using config <path>` at
+  startup (to stderr, or only to the log file while a TUI is up). With
+  `--log-level debug`, a run that found no file lists the paths it searched.
+
+### Running next to iperf3 (moving off port 5201)
+
+iperf3 and xfr both use port 5201 by default. xfr runs TCP, UDP and QUIC on
+that one port, so when you move xfr to another port, open the new port for
+both TCP and UDP in any firewall.
+
+**Server.** Set the port in a config file:
+
+```toml
+[server]
+port = 5202
+```
+
+Put it in `/etc/xfr/config.toml` (v0.14.0+), which works for services and
+containers no matter what `$HOME` is, or in the user config file listed above
+(all versions). Then start `xfr serve` and check the startup lines:
+
+```text
+INFO Using config /etc/xfr/config.toml
+INFO MPTCP listening on [::]:5202 (dual-stack)
+INFO QUIC server listening on [::]:5202 (dual-stack)
+```
+
+The `Using config` line appears in v0.14.0+. The first listening line starts
+with `TCP` instead of `MPTCP` on systems without MPTCP.
+
+**Clients.** Any of these reach the moved server:
+
+```bash
+xfr <host> -p 5202          # all versions
+xfr <host>:5202             # v0.14.0+
+```
+
+Or set it once in the client's config file (v0.14.0+), and a plain
+`xfr <host>` connects to 5202:
+
+```toml
+[client]
+port = 5202
+```
+
+**Containers and systemd.** `/etc/xfr/config.toml` inside the container works
+whatever `$HOME` is (v0.14.0+). On earlier versions, use the user config file
+of the account xfr runs as; for root that's `/root/.config/xfr/config.toml`.
+To keep the file elsewhere, pass `--config <PATH>` or set `XFR_CONFIG`
+(v0.14.0+). In a systemd unit:
+
+```ini
+[Service]
+Environment=XFR_CONFIG=/etc/xfr/server.toml
+ExecStart=/usr/local/bin/xfr serve
+```
+
+### Config Settings
 
 ```toml
 [client]
@@ -449,7 +525,9 @@ xfr serve --preset internal  # Apply the [[presets]] entry named "internal"
 Unknown preset names are rejected.
 
 On Unix, a config containing either `psk` must grant no access to group or
-other users, so the shared key is not exposed to another local account:
+other users, so the shared key is not exposed to another local account. This
+applies to whichever file is read, including `/etc/xfr/config.toml` and a
+`--config` file:
 
 ```bash
 # Linux
@@ -458,6 +536,22 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
 # macOS
 chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
+
+The file must also be readable by the account xfr runs as. A root-owned
+`/etc/xfr/config.toml` with mode 600 is only read by root. When another account
+finds a config file in the search that it is not allowed to open:
+
+- a client prints `Warning: cannot read <path> (permission denied); ignoring it`
+  and continues with its defaults;
+- `xfr serve` refuses to start with
+  `failed to read config file <path>: Permission denied (run as a user that can read it, or pass --config)`,
+  so a server never runs without the PSK or ACL settings it was given.
+
+A file named with `--config` or `XFR_CONFIG` that cannot be read is an error
+for both. For a server running as a service user, give the file to that user
+(for a user named `xfr`: `chown xfr: /etc/xfr/config.toml`), or keep the key
+out of the config and use `--psk-file` or systemd credentials (see
+[PSK Authentication](#psk-authentication)).
 
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
@@ -495,6 +589,7 @@ Environment variables override config file settings:
 | `XFR_DURATION` | Test duration (e.g., "30s") |
 | `XFR_LOG_LEVEL` | Log level (error, warn, info, debug, trace) |
 | `XFR_LOG_FILE` | Log file path |
+| `XFR_CONFIG` | Config file path (`--config` overrides it) |
 | `XFR_BYTES` | Byte count for a fixed-size transfer (`-n`) |
 | `XFR_PSK` | Pre-shared key (visible in process metadata; prefer `--psk-file`) |
 | `XFR_PUSH_GATEWAY` | Prometheus push gateway URL (client and server) |
@@ -502,8 +597,8 @@ Environment variables override config file settings:
 
 ### User Preferences
 
-Theme preference is saved beside `config.toml` as `xfr/prefs.toml` in the same
-platform configuration directory:
+Theme preference is saved as `xfr/prefs.toml` in the user configuration
+directory, even when the config comes from `/etc` or `--config`:
 
 ```toml
 theme = "dracula"
@@ -1018,6 +1113,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
+| `--config` | | searched | Config file to use instead of the default search (also `XFR_CONFIG`; before or after `serve`) |
 | `--push-gateway` | | none | Prometheus Push Gateway URL (client and server) |
 | `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
 | `--psk` | | none | Pre-shared key for authentication |

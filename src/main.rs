@@ -17,7 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
@@ -342,6 +342,15 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     log_level: Option<String>,
 
+    /// Config file to use instead of the first of xfr/config.toml in the user
+    /// config directory, then /etc/xfr/config.toml
+    #[arg(long, value_name = "PATH", env = "XFR_CONFIG", global = true)]
+    config: Option<PathBuf>,
+
+    /// Whether `config` came from XFR_CONFIG rather than `--config`.
+    #[arg(skip)]
+    config_from_env: bool,
+
     /// Pre-shared key for authentication.
     ///
     /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
@@ -664,6 +673,27 @@ fn resolve_server_max_duration(
 /// An explicit CLI or environment port wins even when it equals DEFAULT_PORT.
 fn resolve_server_port(cli_port: Option<u16>, config_port: Option<u16>) -> u16 {
     cli_port.or(config_port).unwrap_or(DEFAULT_PORT)
+}
+
+/// Whether the client prints summary JSON. An explicit --json-stream or --csv
+/// overrides a config-file JSON default; otherwise the summary-JSON mode would
+/// suppress the interval rows the user asked to stream.
+fn client_json_output(cli: &Cli, file_config: &xfr::config::Config) -> bool {
+    cli.json || (!cli.json_stream && !cli.csv && file_config.client.json_output.unwrap_or(false))
+}
+
+/// Whether a client run draws the TUI rather than plain, JSON or CSV output.
+/// Probe mode always uses plain output: there is no live throughput to graph,
+/// the run lasts seconds, and the deliverable is the per-size table.
+fn client_uses_tui(cli: &Cli, file_config: &xfr::config::Config, terminal: bool) -> bool {
+    terminal
+        && !(cli.no_tui
+            || file_config.client.no_tui.unwrap_or(false)
+            || client_json_output(cli, file_config)
+            || cli.json_stream
+            || cli.csv
+            || cli.quiet
+            || cli.probe_mtu)
 }
 
 /// Resolve the effective client test duration.
@@ -1171,6 +1201,7 @@ fn print_stdout(args: std::fmt::Arguments) {
 /// other top-level option configures the client test and would be ignored.
 const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
     "completions",
+    "config",
     "theme",
     "log_file",
     "log_level",
@@ -1219,6 +1250,7 @@ fn parse_cli() -> Cli {
     }
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
+    cli.config_from_env = matches.value_source("config") == Some(ValueSource::EnvVariable);
     cli
 }
 
@@ -1233,8 +1265,25 @@ async fn main() -> Result<()> {
     }
 
     // A missing config is fine, but an existing config must be usable. Silently
-    // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
-    let file_config = Config::load()?;
+    // dropping settings such as PSKs, ACLs, or rate limits is unsafe for a
+    // server; a client may pass over a search-path file it cannot open (say,
+    // a root-only /etc/xfr/config.toml) with a warning.
+    let config_source = if cli.config_from_env {
+        "XFR_CONFIG"
+    } else {
+        "--config"
+    };
+    let is_server = matches!(cli.command, Some(Commands::Serve { .. }));
+    let (file_config, config_file, unreadable) = Config::load_with(
+        cli.config.as_deref().map(|path| (path, config_source)),
+        !is_server,
+    )?;
+    for path in unreadable {
+        eprintln!(
+            "Warning: cannot read {} (permission denied); ignoring it",
+            path.display()
+        );
+    }
 
     // The TUIs draw on stdout and read keys from stdin. Without a terminal on
     // both, fall back to plain output as --no-tui does.
@@ -1281,8 +1330,7 @@ async fn main() -> Result<()> {
                 .log_level
                 .as_ref()
                 .or(file_config.client.log_level.as_ref());
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
-            (file, level, !no_tui && terminal)
+            (file, level, client_uses_tui(&cli, &file_config, terminal))
         }
     };
     // Hold the logging guard until program exit to ensure all logs are flushed
@@ -1292,6 +1340,17 @@ async fn main() -> Result<()> {
         effective_log_level.map(|s| s.as_str()),
         tui_enabled,
     )?;
+    match &config_file {
+        Some(path) => info!("Using config {}", path.display()),
+        None => debug!(
+            "No config file found (searched {})",
+            Config::search_paths()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 
     match cli.command {
         Some(Commands::Serve {
@@ -1603,14 +1662,7 @@ async fn main() -> Result<()> {
             let window_size =
                 resolve_window_size(cli.window, file_config.client.window_size.as_deref())?;
 
-            // An explicit --json-stream or --csv overrides a config-file JSON
-            // default; otherwise the summary-JSON mode would suppress the
-            // interval rows the user asked to stream.
-            let json_output = cli.json
-                || (!cli.json_stream
-                    && !cli.csv
-                    && file_config.client.json_output.unwrap_or(false));
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false) || !terminal;
+            let json_output = client_json_output(&cli, &file_config);
 
             // Determine timestamp format (CLI > config > default)
             let timestamp_format = cli
@@ -1797,10 +1849,7 @@ async fn main() -> Result<()> {
                 timestamp_format,
             };
 
-            // Probe mode always uses plain output: there is no live
-            // throughput to graph, the run lasts seconds, and the
-            // deliverable is the per-size table.
-            if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet || cli.probe_mtu {
+            if !tui_enabled {
                 // Plain/JSON/CSV mode
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {
@@ -4102,6 +4151,19 @@ mod tests {
         // -P 129 should fail
         let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_option_parses_before_or_after_the_server_subcommand() {
+        for args in [
+            ["xfr", "--config", "x.toml", "serve"],
+            ["xfr", "serve", "--config", "x.toml"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(Commands::Serve { .. })));
+            assert_eq!(cli.config.as_deref(), Some(std::path::Path::new("x.toml")));
+        }
+        assert!(SUBCOMMAND_COMPATIBLE_ARGS.contains(&"config"));
     }
 
     #[test]
