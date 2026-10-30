@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Second Ctrl-C only forces exit while stopping a measurement** — after a real result is finalized, Ctrl-C skips outstanding metric delivery and preserves the successful exit status and saved result.
 
+### Fixed
+- **`xfr serve` names the port when it is already taken** — a server whose TCP or QUIC port was held by another process (for example an iperf3 server on the shared default port 5201) failed with only `Address already in use (os error 98)`. The error now names the port and address and suggests another port with `-p`, and `xfr serve --tui` reports startup failures after restoring the terminal instead of exiting silently with status 0 (#273).
+
 ## [0.12.1] - 2026-10-21
 
 ### Security

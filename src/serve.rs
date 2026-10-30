@@ -456,6 +456,29 @@ fn legacy_udp_bind_addr(bind_addr: Option<IpAddr>, control_local: SocketAddr) ->
     }
 }
 
+/// Name the port and the fix when a startup listener's port is taken; a bare
+/// "Address already in use (os error 98)" leaves operators guessing (#273).
+/// Other errors pass through unchanged.
+fn startup_bind_error(e: impl Into<anyhow::Error>, addr: SocketAddr) -> anyhow::Error {
+    let e = e.into();
+    let in_use = e
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
+    if !in_use {
+        return e;
+    }
+    let port = addr.port();
+    let host = match addr {
+        SocketAddr::V4(a) => a.ip().to_string(),
+        SocketAddr::V6(a) => format!("[{}]", a.ip()),
+    };
+    let next = if port == u16::MAX { port - 1 } else { port + 1 };
+    anyhow::anyhow!(
+        "port {port} is already in use on {host} (another xfr or iperf3 server?). \
+         Pick another port with -p, e.g. xfr serve -p {next}"
+    )
+}
+
 /// Convert a wire-format window size (u64) to a host usize for setsockopt.
 ///
 /// On 64-bit targets this is lossless. On 32-bit targets, values larger than
@@ -564,10 +587,15 @@ impl Server {
         let listener = if let Some(ip) = self.config.bind_addr {
             let addr = SocketAddr::new(ip, self.config.port);
             info!("Binding to {}", addr);
-            net::create_tcp_listener_on_addr(addr, self.config.address_family).await?
+            net::create_tcp_listener_on_addr(addr, self.config.address_family)
+                .await
+                .map_err(|e| startup_bind_error(e, addr))?
         } else {
             net::create_tcp_listener_auto_mptcp(self.config.port, self.config.address_family)
-                .await?
+                .await
+                .map_err(|e| {
+                    startup_bind_error(e, self.config.address_family.bind_addr(self.config.port))
+                })?
         };
 
         // Single-port UDP (issue #63): advertise the capability only when
@@ -600,7 +628,8 @@ impl Server {
                 cert,
                 key,
                 udp_hello_tx.clone(),
-            )?;
+            )
+            .map_err(|e| startup_bind_error(e, udp_bind_addr))?;
             info!("QUIC endpoint ready on port {}", self.config.port);
             Some(endpoint)
         } else {
@@ -4617,6 +4646,25 @@ mod tests {
         assert!(error.to_string().contains("waiting for control stream"));
         assert_eq!(semaphore.available_permits(), 1);
         connection.close(0u32.into(), b"test complete");
+    }
+
+    #[tokio::test]
+    async fn run_names_occupied_port_and_suggests_another() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let config = ServerConfig {
+            port,
+            bind_addr: Some("127.0.0.1".parse().unwrap()),
+            ..Default::default()
+        };
+
+        let error = Server::new(config).run().await.unwrap_err().to_string();
+
+        assert!(
+            error.contains(&format!("port {port} is already in use")),
+            "{error}"
+        );
+        assert!(error.contains("-p"), "{error}");
     }
 
     #[tokio::test]

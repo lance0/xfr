@@ -3016,6 +3016,11 @@ async fn run_server_tui(
 
     // Restore terminal
     drop(_guard);
+    // A server that stopped on its own failed (e.g. its port is taken);
+    // report why instead of exiting silently.
+    if server_handle.is_finished() {
+        server_handle.await??;
+    }
     Ok(())
 }
 
