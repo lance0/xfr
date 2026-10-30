@@ -61,7 +61,7 @@
 
 ### Platform
 - [x] **Environment variable overrides** - `XFR_PORT`, `XFR_DURATION`, etc.
-- [x] **Push gateway support** (`--push-gateway`) - server metrics export; client export and endpoint attribution added in Unreleased
+- [x] **Push gateway support** (`--push-gateway`) - server metrics export; client export and endpoint attribution added in v0.13.0
 - [x] **File logging** (`--log-file`, `--log-level`) - with daily rotation via tracing-appender
 
 ---

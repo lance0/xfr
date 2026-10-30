@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-30
+
 ### Security
 - **Updated `ctutils` to 0.4.6** — closes [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385) (#275). v0.12.1 shipped `ctutils` 0.4.2, which `digest` (HMAC-SHA256) and `universal-hash` (Poly1305 in ChaCha20-Poly1305) use for constant-time tag comparison. Before 0.4.4, its `const fn` mask helpers could compile to a branch on common platforms, and its `u128` comparisons branched on 32-bit targets; branching on secret values can leak them through timing. xfr's MAC and AEAD tag checks compare `[u8]` slices through the `cmov`-backed path, not those helpers, so the exposure is believed to be theoretical. Lockfile-only; no source or API changes.
 

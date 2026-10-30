@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "xfr"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
