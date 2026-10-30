@@ -10,7 +10,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
 use tracing::{debug, error, info, warn};
 
-use crate::protocol::{TcpInfoSnapshot, TestResult, UdpStats};
+use crate::protocol::{Direction, Protocol, TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
 
 /// Push Gateway client for sending test metrics
@@ -19,6 +19,7 @@ pub struct PushGatewayClient {
     url: reqwest::Url,
     client: Client,
     grouping_labels: Vec<(String, String)>,
+    test: Option<(Protocol, Direction)>,
 }
 
 impl PushGatewayClient {
@@ -42,7 +43,17 @@ impl PushGatewayClient {
             url,
             client,
             grouping_labels: Vec::new(),
+            test: None,
         })
+    }
+
+    /// Supply run context for client-relative directional UDP snapshots.
+    /// Context-free callers retain the legacy metric payload.
+    /// Use finalized client results with `push_test_result`, or server-local
+    /// counters with `push_test_metrics`.
+    pub fn with_test(mut self, protocol: Protocol, direction: Direction) -> Self {
+        self.test = Some((protocol, direction));
+        self
     }
 
     pub(crate) fn with_endpoint(mut self, name: &str, value: &str, role: &str) -> Self {
@@ -62,6 +73,7 @@ impl PushGatewayClient {
     }
 
     /// Push test metrics to the gateway
+    /// Directional metrics interpret these as server-local send/receive counters.
     ///
     /// # Arguments
     /// * `stats` - Test statistics to push
@@ -75,7 +87,17 @@ impl PushGatewayClient {
     /// Push the finalized result, including any client-side receiver corrections.
     /// Delivery has a five-second total deadline, including retries.
     pub async fn push_test_result(&self, result: &TestResult) -> anyhow::Result<()> {
-        let metrics = Self::format_samples(
+        let metrics = self.format_result(result);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.push_metrics(&result.id, &metrics),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("metrics delivery timed out after 5 seconds"))?
+    }
+
+    fn format_result(&self, result: &TestResult) -> String {
+        let mut metrics = Self::format_samples(
             &result.id,
             result.duration_ms,
             result.bytes_total,
@@ -87,12 +109,39 @@ impl PushGatewayClient {
             result.tcp_info.as_ref(),
             result.udp_stats.iter(),
         );
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.push_metrics(&result.id, &metrics),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("metrics delivery timed out after 5 seconds"))?
+        if let Some((Protocol::Udp, direction)) = self.test {
+            let samples = match direction {
+                Direction::Upload | Direction::Download => vec![DirectionalUdp {
+                    direction: if direction == Direction::Upload {
+                        "upload"
+                    } else {
+                        "download"
+                    },
+                    view: "receiver",
+                    bytes: Some(result.bytes_total),
+                    throughput_mbps: Some(result.throughput_mbps),
+                    quality: result.udp_stats.as_ref(),
+                }],
+                Direction::Bidir => vec![
+                    DirectionalUdp {
+                        direction: "upload",
+                        view: "receiver",
+                        bytes: result.bytes_sent,
+                        throughput_mbps: result.throughput_send_mbps,
+                        quality: result.udp_stats_send.as_deref(),
+                    },
+                    DirectionalUdp {
+                        direction: "download",
+                        view: "receiver",
+                        bytes: result.bytes_received,
+                        throughput_mbps: result.throughput_recv_mbps,
+                        quality: result.udp_stats_recv.as_deref(),
+                    },
+                ],
+            };
+            append_udp_directions(&mut metrics, &samples);
+        }
+        metrics
     }
 
     fn push_url(&self, test_id: &str) -> anyhow::Result<reqwest::Url> {
@@ -179,7 +228,7 @@ impl PushGatewayClient {
             0.0
         };
 
-        Self::format_samples(
+        let mut metrics = Self::format_samples(
             &stats.test_id,
             elapsed_ms,
             bytes_total,
@@ -194,7 +243,40 @@ impl PushGatewayClient {
             }),
             stats.final_local_tcp_info().as_ref(),
             stats.udp_stats.lock().iter(),
-        )
+        );
+        if let Some((Protocol::Udp, direction)) = self.test {
+            let quality = stats.aggregate_udp_receiver_stats();
+            let throughput = |bytes: u64| {
+                if elapsed_ms > 0 {
+                    bytes as f64 * 8.0 / duration_secs / 1_000_000.0
+                } else {
+                    0.0
+                }
+            };
+            let mut samples = Vec::new();
+            if direction != Direction::Download {
+                let bytes = stats.total_bytes_received();
+                samples.push(DirectionalUdp {
+                    direction: "upload",
+                    view: "receiver",
+                    bytes: Some(bytes),
+                    throughput_mbps: Some(throughput(bytes)),
+                    quality: quality.as_ref(),
+                });
+            }
+            if direction != Direction::Upload {
+                let bytes = stats.total_bytes_sent();
+                samples.push(DirectionalUdp {
+                    direction: "download",
+                    view: "sender",
+                    bytes: Some(bytes),
+                    throughput_mbps: Some(throughput(bytes)),
+                    quality: None,
+                });
+            }
+            append_udp_directions(&mut metrics, &samples);
+        }
+        metrics
     }
 
     fn format_samples<'a>(
@@ -402,15 +484,89 @@ impl PushGatewayClient {
     }
 }
 
+struct DirectionalUdp<'a> {
+    direction: &'static str,
+    view: &'static str,
+    bytes: Option<u64>,
+    throughput_mbps: Option<f64>,
+    quality: Option<&'a UdpStats>,
+}
+
+fn append_udp_directions(output: &mut String, samples: &[DirectionalUdp<'_>]) {
+    for (metric, help) in [
+        ("bytes", "UDP bytes for this direction and measurement view"),
+        (
+            "throughput_mbps",
+            "UDP throughput in Mbps for this direction and measurement view",
+        ),
+        (
+            "packets_expected",
+            "UDP packets expected from receiver sequence observations",
+        ),
+        ("packets_received", "UDP packets received"),
+        ("packets_lost", "UDP packets lost according to the receiver"),
+        (
+            "lost_percent",
+            "UDP packet loss percentage measured by the receiver",
+        ),
+        (
+            "jitter_ms",
+            "UDP jitter in milliseconds measured by the receiver",
+        ),
+    ] {
+        let mut header = false;
+        for sample in samples {
+            let quality = sample
+                .quality
+                .filter(|stats| stats.packets_received > 0 || stats.lost > 0);
+            let value = match metric {
+                "bytes" => sample.bytes.map(|v| v.to_string()),
+                "throughput_mbps" => sample.throughput_mbps.map(|v| v.to_string()),
+                "packets_expected" => quality.map(|s| s.packets_sent.to_string()),
+                "packets_received" => quality.map(|s| s.packets_received.to_string()),
+                "packets_lost" => quality.map(|s| s.lost.to_string()),
+                "lost_percent" => quality.map(|s| s.lost_percent.to_string()),
+                "jitter_ms" => quality
+                    .filter(|s| s.packets_received > 0)
+                    .map(|s| s.jitter_ms.to_string()),
+                _ => unreachable!("fixed metric list"),
+            };
+            let Some(value) = value else { continue };
+            let name = format!("xfr_udp_direction_{metric}");
+            if !header {
+                writeln!(output, "# HELP {name} {help}\n# TYPE {name} gauge")
+                    .expect("writing to String cannot fail");
+                header = true;
+            }
+            if matches!(metric, "bytes" | "throughput_mbps") {
+                writeln!(
+                    output,
+                    "{name}{{direction=\"{}\",view=\"{}\"}} {value}",
+                    sample.direction, sample.view
+                )
+                .expect("writing to String cannot fail");
+            } else {
+                writeln!(
+                    output,
+                    "{name}{{direction=\"{}\"}} {value}",
+                    sample.direction
+                )
+                .expect("writing to String cannot fail");
+            }
+        }
+    }
+}
+
 /// Push metrics to the gateway if configured
 pub async fn maybe_push_metrics(push_gateway_url: &Option<String>, stats: &TestStats) {
-    maybe_push_metrics_for_peer(push_gateway_url, stats, None).await;
+    maybe_push_metrics_for_peer(push_gateway_url, stats, None, None).await;
 }
 
 pub(crate) async fn maybe_push_metrics_for_peer(
     push_gateway_url: &Option<String>,
     stats: &TestStats,
     peer: Option<IpAddr>,
+    test: Option<(Protocol, Direction)>,
 ) {
     if let Some(url) = push_gateway_url {
         match PushGatewayClient::new(url.clone()) {
@@ -421,6 +577,11 @@ pub(crate) async fn maybe_push_metrics_for_peer(
                         &crate::net::normalize_ip(peer).to_string(),
                         "server",
                     )
+                } else {
+                    client
+                };
+                let client = if let Some((protocol, direction)) = test {
+                    client.with_test(protocol, direction)
                 } else {
                     client
                 };
@@ -444,6 +605,109 @@ mod tests {
     use crate::output::push_gateway::PushGatewayClient;
     use crate::protocol::{TcpInfoSnapshot, UdpStats};
     use crate::stats::TestStats;
+
+    fn directional_result() -> crate::protocol::TestResult {
+        serde_json::from_value(serde_json::json!({
+            "id": "direction-fixture", "duration_ms": 1000, "bytes_total": 900,
+            "throughput_mbps": 0.0072, "streams": [],
+            "bytes_sent": 300, "bytes_received": 600,
+            "throughput_send_mbps": 0.0024, "throughput_recv_mbps": 0.0048,
+            "udp_stats": {"packets_sent": 10, "packets_received": 9, "lost": 1,
+                "lost_percent": 10.0, "jitter_ms": 1.0, "out_of_order": 0},
+            "udp_stats_send": {"packets_sent": 10, "packets_received": 9, "lost": 1,
+                "lost_percent": 10.0, "jitter_ms": 1.0, "out_of_order": 0},
+            "udp_stats_recv": {"packets_sent": 20, "packets_received": 12, "lost": 8,
+                "lost_percent": 40.0, "jitter_ms": 3.0, "out_of_order": 0}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn directional_context_distinguishes_upload_reverse_and_unknown() {
+        use crate::protocol::{Direction, Protocol};
+        let client = PushGatewayClient::new("http://localhost".into()).unwrap();
+        let result = directional_result();
+        assert!(!client.format_result(&result).contains("xfr_udp_direction_"));
+        assert!(
+            !client
+                .clone()
+                .with_test(Protocol::Tcp, Direction::Bidir)
+                .format_result(&result)
+                .contains("xfr_udp_direction_")
+        );
+        for (direction, name, absent) in [
+            (Direction::Upload, "upload", "download"),
+            (Direction::Download, "download", "upload"),
+        ] {
+            let text = client
+                .clone()
+                .with_test(Protocol::Udp, direction)
+                .format_result(&result);
+            assert!(text.contains(&format!(
+                "xfr_udp_direction_bytes{{direction=\"{name}\",view=\"receiver\"}} 900\n"
+            )));
+            assert!(text.contains(&format!(
+                "xfr_udp_direction_packets_expected{{direction=\"{name}\"}} 10\n"
+            )));
+            assert!(!text.contains(&format!("direction=\"{absent}\"")));
+        }
+    }
+
+    #[test]
+    fn directional_missing_halves_and_unobserved_quality_are_unknown() {
+        use crate::protocol::{Direction, Protocol};
+        let client = PushGatewayClient::new("http://localhost".into())
+            .unwrap()
+            .with_test(Protocol::Udp, Direction::Bidir);
+        let mut result = directional_result();
+        result.bytes_sent = None;
+        result.throughput_send_mbps = None;
+        result.udp_stats_send = None;
+        result.bytes_received = Some(0);
+        result.throughput_recv_mbps = Some(0.0);
+        let quality = result.udp_stats_recv.as_mut().unwrap();
+        quality.packets_sent = 0;
+        quality.packets_received = 0;
+        quality.lost = 0;
+        let text = client.format_result(&result);
+        assert!(!text.contains("direction=\"upload\""));
+        assert!(
+            text.contains("xfr_udp_direction_bytes{direction=\"download\",view=\"receiver\"} 0\n")
+        );
+        assert!(!text.contains("# TYPE xfr_udp_direction_packets_"));
+        assert!(!text.contains("# TYPE xfr_udp_direction_jitter_ms"));
+        result.udp_stats_recv.as_mut().unwrap().lost = 1;
+        let text = client.format_result(&result);
+        assert!(text.contains("xfr_udp_direction_packets_lost{direction=\"download\"} 1\n"));
+        assert!(!text.contains("# TYPE xfr_udp_direction_jitter_ms"));
+    }
+
+    #[test]
+    fn server_reverse_has_sender_bytes_without_receiver_quality() {
+        use crate::protocol::{Direction, Protocol};
+        let stats = TestStats::new("server-direction".into(), 1);
+        stats.streams[0].add_bytes_sent(500);
+        stats.streams[0].add_bytes_received(200);
+        stats.add_udp_stats(directional_result().udp_stats.unwrap());
+        let client = PushGatewayClient::new("http://localhost".into()).unwrap();
+        let reverse = client
+            .clone()
+            .with_test(Protocol::Udp, Direction::Download)
+            .format_metrics(&stats);
+        assert!(
+            reverse
+                .contains("xfr_udp_direction_bytes{direction=\"download\",view=\"sender\"} 500\n")
+        );
+        assert!(!reverse.contains("# TYPE xfr_udp_direction_packets_"));
+        let bidir = client
+            .with_test(Protocol::Udp, Direction::Bidir)
+            .format_metrics(&stats);
+        assert!(
+            bidir.contains("xfr_udp_direction_bytes{direction=\"upload\",view=\"receiver\"} 200\n")
+        );
+        assert!(bidir.contains("xfr_udp_direction_packets_lost{direction=\"upload\"} 1\n"));
+        assert!(!bidir.contains("xfr_udp_direction_packets_lost{direction=\"download\"}"));
+    }
 
     #[test]
     fn grouping_preserves_gateway_path_query_and_ipv6_endpoint() {

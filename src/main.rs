@@ -2057,7 +2057,7 @@ async fn run_client_plain(
         gateway: opts.push_gateway,
         ..Default::default()
     };
-    metrics.queue(&result);
+    metrics.queue(&result, (config.protocol, config.direction));
     metrics
         .finish(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -2073,10 +2073,11 @@ struct ClientMetrics {
 }
 
 impl ClientMetrics {
-    fn queue(&mut self, result: &xfr::protocol::TestResult) -> bool {
+    fn queue(&mut self, result: &xfr::protocol::TestResult, test: (Protocol, Direction)) -> bool {
         let Some(gateway) = self.gateway.clone() else {
             return false;
         };
+        let gateway = gateway.with_test(test.0, test.1);
         let result = result.clone();
         self.pending.spawn(async move {
             let id = xfr::protocol::UdpSendErrors::sanitize_message(&result.id);
@@ -2247,6 +2248,7 @@ async fn run_client_tui(
 }
 
 struct TuiRun {
+    test: (Protocol, Direction),
     client: Arc<Client>,
     handle: tokio::task::JoinHandle<Result<xfr::protocol::TestResult>>,
     progress_rx: mpsc::Receiver<TestProgress>,
@@ -2280,6 +2282,7 @@ fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
     let (progress_tx, progress_rx) = mpsc::channel::<TestProgress>(100);
     let handle = tokio::spawn(async move { client_for_task.run(Some(progress_tx)).await });
     TuiRun {
+        test: (config.protocol, config.direction),
         client,
         handle,
         progress_rx,
@@ -2510,9 +2513,10 @@ async fn restart_tui_run(
     if let Some(current) = run.take() {
         app.log("Restarting, waiting for current test to stop...");
         terminal.draw(|f| draw(f, app))?;
+        let test = current.test;
         match cancel_tui_run(current, Duration::from_secs(3)).await {
             Some(Ok(result)) => {
-                metrics.queue(&result);
+                metrics.queue(&result, test);
             }
             Some(Err(e)) => {
                 app.log(format!("Previous test ended while restarting: {}", e));
@@ -2813,9 +2817,10 @@ async fn run_tui_loop(
             .is_some_and(|active| active.handle.is_finished())
         {
             let finished_run = run.take().expect("run exists after is_finished check");
+            let test = finished_run.test;
             match finish_tui_run(finished_run).await {
                 Ok(result) => {
-                    if metrics.queue(&result) {
+                    if metrics.queue(&result, test) {
                         app.log("Pushing metrics (test complete)...");
                     }
                     app.on_result(result);
@@ -2966,6 +2971,21 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tui_run_keeps_context_when_settings_change_before_restart() {
+        let mut config = ClientConfig {
+            protocol: Protocol::Udp,
+            direction: Direction::Download,
+            ..Default::default()
+        };
+        let run = spawn_tui_run(&config);
+        config.protocol = Protocol::Tcp;
+        config.direction = Direction::Upload;
+        assert_ne!(run.test, (config.protocol, config.direction));
+        assert_eq!(run.test, (Protocol::Udp, Direction::Download));
+        abort_tui_run(run).await;
+    }
 
     #[test]
     fn diff_thresholds_reject_invalid_cli_values() {

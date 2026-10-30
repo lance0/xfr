@@ -188,6 +188,12 @@ async fn finalized_snapshot_values_are_not_recomputed() {
         "id": "snapshot", "bytes_total": 4242, "duration_ms": 2000,
         "throughput_mbps": 7.25,
         "streams": [{"id": 9, "bytes": 123, "throughput_mbps": 0.75, "retransmits": 4}],
+        "bytes_sent": 1000, "bytes_received": 3242,
+        "throughput_send_mbps": 1.5, "throughput_recv_mbps": 5.75,
+        "udp_stats_send": {"packets_sent": 100, "packets_received": 97, "lost": 3,
+                      "lost_percent": 3.0, "jitter_ms": 1.5, "out_of_order": 0},
+        "udp_stats_recv": {"packets_sent": 200, "packets_received": 120, "lost": 80,
+                      "lost_percent": 40.0, "jitter_ms": 8.5, "out_of_order": 0},
         "tcp_info": {"rtt_us": 1250, "rtt_var_us": 100, "cwnd": 65536, "retransmits": 4},
         "udp_stats": {"packets_sent": 100, "packets_received": 97, "lost": 3,
                       "lost_percent": 3.0, "jitter_ms": 1.5, "out_of_order": 0}
@@ -195,6 +201,7 @@ async fn finalized_snapshot_values_are_not_recomputed() {
     .unwrap();
     xfr::output::push_gateway::PushGatewayClient::new(url)
         .unwrap()
+        .with_test(Protocol::Udp, Direction::Bidir)
         .push_test_result(&result)
         .await
         .unwrap();
@@ -207,6 +214,46 @@ async fn finalized_snapshot_values_are_not_recomputed() {
     assert_eq!(sample(body, "xfr_udp_packets_lost"), 3.0);
     assert_eq!(sample(body, "xfr_udp_lost_percent"), 3.0);
     assert_eq!(sample(body, "xfr_udp_jitter_ms"), 1.5);
+    for (name, expected) in [
+        (
+            "xfr_udp_direction_bytes{direction=\"upload\",view=\"receiver\"}",
+            1000.0,
+        ),
+        (
+            "xfr_udp_direction_bytes{direction=\"download\",view=\"receiver\"}",
+            3242.0,
+        ),
+        (
+            "xfr_udp_direction_throughput_mbps{direction=\"upload\",view=\"receiver\"}",
+            1.5,
+        ),
+        (
+            "xfr_udp_direction_throughput_mbps{direction=\"download\",view=\"receiver\"}",
+            5.75,
+        ),
+        (
+            "xfr_udp_direction_packets_expected{direction=\"upload\"}",
+            100.0,
+        ),
+        ("xfr_udp_direction_packets_lost{direction=\"upload\"}", 3.0),
+        (
+            "xfr_udp_direction_packets_lost{direction=\"download\"}",
+            80.0,
+        ),
+        (
+            "xfr_udp_direction_lost_percent{direction=\"download\"}",
+            40.0,
+        ),
+        ("xfr_udp_direction_jitter_ms{direction=\"download\"}", 8.5),
+    ] {
+        assert_eq!(sample(body, name), expected, "{name}");
+    }
+    assert_eq!(
+        body.matches("# TYPE xfr_udp_direction_packets_lost gauge")
+            .count(),
+        1
+    );
+
     assert!(body.contains("xfr_stream_bytes_total{test_id=\"snapshot\",stream_id=\"9\"} 123\n"));
     assert!(
         body.contains("xfr_stream_throughput_mbps{test_id=\"snapshot\",stream_id=\"9\"} 0.75\n")
