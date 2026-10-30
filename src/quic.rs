@@ -554,10 +554,14 @@ pub async fn send_quic_data(
     }
     // `-n`: the transfer ends when the peer has ACKed the last byte, not when
     // it entered quinn's send buffer.
+    // Capped: with older peers the negotiated idle timeout is 30 s.
     if budget.is_some() && !*cancel.borrow() {
         tokio::select! {
             _ = send.stopped() => {}
             _ = cancel.changed() => {}
+            _ = tokio::time::sleep(crate::budget::ACK_WAIT_CAP) => {
+                debug!("QUIC -n delivery not acknowledged in time; ending anyway");
+            }
         }
     }
     Ok(())

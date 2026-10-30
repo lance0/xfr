@@ -812,17 +812,23 @@ pub async fn receive_data(
 /// `-n`: wait until the peer has ACKed everything queued on `stream`, FIN
 /// included, so a byte-budget sender stops its clock at delivery rather than
 /// at the last write into the kernel send buffer. Returns at once on cancel or
-/// where the kernel can't report the queue (non-Linux; MPTCP before 6.2).
+/// where the kernel can't report the queue (non-Linux; MPTCP before 6.2), and
+/// after [`crate::budget::ACK_WAIT_CAP`] at most.
 async fn wait_for_send_queue_acked(stream: &TcpStream, cancel: &mut watch::Receiver<bool>) {
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
+        let deadline = tokio::time::Instant::now() + crate::budget::ACK_WAIT_CAP;
         loop {
             let mut queued: libc::c_int = 0;
             // SAFETY: SIOCOUTQ (TIOCOUTQ) writes one c_int through the pointer,
             // and the fd stays open for the borrow of `stream`.
             let rc = unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut queued) };
             if rc != 0 || queued <= 0 || *cancel.borrow() {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                debug!("{queued} bytes still unACKed after the -n delivery wait; ending anyway");
                 return;
             }
             // ponytail: 1 ms poll; Linux has no wakeup for "send queue ACKed".
@@ -1511,6 +1517,44 @@ mod tests {
             stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
             budget_bytes
         );
+    }
+
+    /// A peer that never reads must not hold a `-n` sender past the cap.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn send_data_with_budget_ack_wait_is_capped() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(16 * 1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let _server = server.unwrap(); // held open, never read
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let config = TcpConfig {
+            window_size: Some(1024 * 1024),
+            ..TcpConfig::default()
+        };
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(
+            crate::budget::ACK_WAIT_CAP * 2,
+            send_data(
+                client.unwrap(),
+                Arc::new(StreamStats::new(0)),
+                Duration::ZERO,
+                config,
+                cancel_rx,
+                None,
+                pause_rx,
+                Some(crate::budget::ByteBudget::new(512 * 1024)),
+            ),
+        )
+        .await
+        .expect("the delivery wait must give up at its cap")
+        .unwrap();
+        assert!(start.elapsed() >= crate::budget::ACK_WAIT_CAP);
     }
 
     /// Regression: when `write()` is parked in Pending because the kernel send
