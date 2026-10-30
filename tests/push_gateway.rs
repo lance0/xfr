@@ -357,6 +357,7 @@ async fn client_cli_environment_and_config_precedence() {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"));
         cmd.env("XDG_CONFIG_HOME", dir.path())
             .env_remove("XFR_PUSH_GATEWAY")
+            .env_remove("XFR_CONFIG")
             .args([
                 "127.0.0.1",
                 "-p",
@@ -854,6 +855,7 @@ async fn invalid_push_options_fail_before_connecting() {
             .args(flags)
             .env("XDG_CONFIG_HOME", config_directory.path())
             .env_remove("XFR_PUSH_GATEWAY")
+            .env_remove("XFR_CONFIG")
             .output()
             .await
             .unwrap();
@@ -881,6 +883,7 @@ async fn config_push_options_without_gateway_are_ignored() {
         .args(["--json", "--no-update-check"])
         .env("XDG_CONFIG_HOME", directory.path())
         .env_remove("XFR_PUSH_GATEWAY")
+        .env_remove("XFR_CONFIG")
         .output()
         .await
         .unwrap();
@@ -896,6 +899,7 @@ async fn config_push_options_without_gateway_are_ignored() {
         .args(["serve", "-p", &port.to_string(), "--no-mdns"])
         .env("XDG_CONFIG_HOME", directory.path())
         .env_remove("XFR_PUSH_GATEWAY")
+        .env_remove("XFR_CONFIG")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -914,6 +918,7 @@ async fn config_push_options_without_gateway_are_ignored() {
         .args(["serve", "--push-label", "site=lab"])
         .env("XDG_CONFIG_HOME", directory.path())
         .env_remove("XFR_PUSH_GATEWAY")
+        .env_remove("XFR_CONFIG")
         .output()
         .await
         .unwrap();
@@ -954,6 +959,7 @@ async fn stable_client_labels_merge_cli_over_config() {
             .args(extra)
             .env("XDG_CONFIG_HOME", directory.path())
             .env_remove("XFR_PUSH_GATEWAY")
+            .env_remove("XFR_CONFIG")
             .output()
             .await
             .unwrap();

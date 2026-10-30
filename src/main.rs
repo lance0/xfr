@@ -675,6 +675,27 @@ fn resolve_server_port(cli_port: Option<u16>, config_port: Option<u16>) -> u16 {
     cli_port.or(config_port).unwrap_or(DEFAULT_PORT)
 }
 
+/// Whether the client prints summary JSON. An explicit --json-stream or --csv
+/// overrides a config-file JSON default; otherwise the summary-JSON mode would
+/// suppress the interval rows the user asked to stream.
+fn client_json_output(cli: &Cli, file_config: &xfr::config::Config) -> bool {
+    cli.json || (!cli.json_stream && !cli.csv && file_config.client.json_output.unwrap_or(false))
+}
+
+/// Whether a client run draws the TUI rather than plain, JSON or CSV output.
+/// Probe mode always uses plain output: there is no live throughput to graph,
+/// the run lasts seconds, and the deliverable is the per-size table.
+fn client_uses_tui(cli: &Cli, file_config: &xfr::config::Config, terminal: bool) -> bool {
+    terminal
+        && !(cli.no_tui
+            || file_config.client.no_tui.unwrap_or(false)
+            || client_json_output(cli, file_config)
+            || cli.json_stream
+            || cli.csv
+            || cli.quiet
+            || cli.probe_mtu)
+}
+
 /// Resolve the effective client test duration.
 /// - CLI `-t`/`--time` always wins when present.
 /// - `--probe-mtu` without an explicit duration extends to 60s.
@@ -1309,8 +1330,7 @@ async fn main() -> Result<()> {
                 .log_level
                 .as_ref()
                 .or(file_config.client.log_level.as_ref());
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false);
-            (file, level, !no_tui && terminal)
+            (file, level, client_uses_tui(&cli, &file_config, terminal))
         }
     };
     // Hold the logging guard until program exit to ensure all logs are flushed
@@ -1642,14 +1662,7 @@ async fn main() -> Result<()> {
             let window_size =
                 resolve_window_size(cli.window, file_config.client.window_size.as_deref())?;
 
-            // An explicit --json-stream or --csv overrides a config-file JSON
-            // default; otherwise the summary-JSON mode would suppress the
-            // interval rows the user asked to stream.
-            let json_output = cli.json
-                || (!cli.json_stream
-                    && !cli.csv
-                    && file_config.client.json_output.unwrap_or(false));
-            let no_tui = cli.no_tui || file_config.client.no_tui.unwrap_or(false) || !terminal;
+            let json_output = client_json_output(&cli, &file_config);
 
             // Determine timestamp format (CLI > config > default)
             let timestamp_format = cli
@@ -1836,10 +1849,7 @@ async fn main() -> Result<()> {
                 timestamp_format,
             };
 
-            // Probe mode always uses plain output: there is no live
-            // throughput to graph, the run lasts seconds, and the
-            // deliverable is the per-size table.
-            if no_tui || json_output || cli.json_stream || cli.csv || cli.quiet || cli.probe_mtu {
+            if !tui_enabled {
                 // Plain/JSON/CSV mode
                 run_client_plain(config, output_opts, cli.output).await?;
             } else {

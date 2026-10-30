@@ -397,12 +397,18 @@ xfr reads defaults from the first of these files that exists:
    - **Windows:** `%APPDATA%\xfr\config.toml`
 2. **Linux, macOS and other Unix (v0.14.0+):** `/etc/xfr/config.toml`
 
+When xfr cannot find a user config directory (no home directory, as in some
+containers), it skips step 1 and searches only `/etc/xfr/config.toml`.
+
 - **One file only.** xfr reads the first file that exists and ignores the rest.
   A user config file hides `/etc/xfr/config.toml` completely; the two are not merged.
 - **Pick a file (v0.14.0+).** `--config <PATH>` or `XFR_CONFIG=<PATH>` names the
   file to read, and nothing else is searched. `--config` wins over `XFR_CONFIG`.
   If the named file does not exist, xfr exits with an error that names the path
   and where it came from.
+- **Broken symlinks are errors (v0.14.0+).** A config path that is a symlink to
+  a missing file stops xfr with `config file <path> is a symlink to a missing file`,
+  for a client and a server alike, instead of running with defaults.
 - **Before or after `serve` (v0.14.0+).** `xfr --config x.toml serve` and
   `xfr serve --config x.toml` do the same thing.
 - **See which file was used (v0.14.0+).** xfr logs `Using config <path>` at

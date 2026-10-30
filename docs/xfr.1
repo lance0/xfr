@@ -319,6 +319,8 @@ Color theme (same values as the client option)
 .B xfr
 reads configuration from the first existing file of \fI$XDG_CONFIG_HOME/xfr/config.toml\fR (Linux, defaulting to \fI~/.config/xfr/config.toml\fR), \fI~/Library/Application Support/xfr/config.toml\fR (macOS), or \fI%APPDATA%\\xfr\\config.toml\fR (Windows), then \fI/etc/xfr/config.toml\fR (Unix).
 Only one file is read; files are not merged.
+Without a home directory only \fI/etc/xfr/config.toml\fR is searched.
+A config path that is a symlink to a missing file is an error.
 \fB\-\-config\fR or \fBXFR_CONFIG\fR names the file to read instead, with no search; \fB\-\-config\fR wins, and a missing explicit file is an error.
 The file in use is logged at info level as "Using config \fIPATH\fR".
 CLI arguments override config file values. Environment variables override config file.

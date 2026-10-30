@@ -189,16 +189,30 @@ async fn test_cli_config_flag_sets_server_and_client_port() {
     std::fs::write(&server_config, format!("[server]\nport = {port}\n")).unwrap();
     std::fs::write(&client_config, format!("[client]\nport = {port}\n")).unwrap();
 
-    let _server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
         .arg("serve")
         .arg("--config")
         .arg(&server_config)
+        .env_remove("XFR_CONFIG")
+        .env_remove("XFR_PORT")
+        .env_remove("XFR_LOG_LEVEL")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Listening on the configured port proves the server read --config.
+    timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
+            assert!(server.try_wait().unwrap().is_none(), "server exited");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 
     let output = timeout(
         Duration::from_secs(15),
@@ -208,6 +222,8 @@ async fn test_cli_config_flag_sets_server_and_client_port() {
             .args(["127.0.0.1", "-t", "1sec", "--json"])
             // --config outranks XFR_CONFIG.
             .env("XFR_CONFIG", dir.path().join("missing.toml"))
+            .env_remove("XFR_PORT")
+            .env_remove("XFR_LOG_LEVEL")
             .kill_on_drop(true)
             .output(),
     )

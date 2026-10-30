@@ -2,8 +2,9 @@
 //!
 //! Loads the file named by `--config` or `XFR_CONFIG`. Otherwise the first
 //! existing file of [`Config::search_paths`] wins: `xfr/config.toml` in the
-//! platform configuration directory returned by `dirs::config_dir()`, then
-//! `/etc/xfr/config.toml` on Unix. Files are never merged.
+//! platform configuration directory returned by `dirs::config_dir()` (skipped
+//! when there is none), then `/etc/xfr/config.toml` on Unix. Files are never
+//! merged.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,15 @@ impl Config {
         let mut file = match std::fs::File::open(config_path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A symlink to a missing file is a misconfiguration, not an
+                // absent config: falling back to defaults would drop its
+                // settings without a word.
+                if config_path.symlink_metadata().is_ok() {
+                    anyhow::bail!(
+                        "config file {} is a symlink to a missing file",
+                        config_path.display()
+                    );
+                }
                 return Ok(None);
             }
             Err(error) => {
@@ -280,9 +290,18 @@ impl Config {
     }
 
     /// Config files searched, in order, when none is given explicitly: the
-    /// per-user path, then `/etc/xfr/config.toml` on Unix.
+    /// per-user path, then `/etc/xfr/config.toml` on Unix. Without a platform
+    /// config directory there is no per-user path; unlike
+    /// [`Config::config_path`], the search never falls back to the working
+    /// directory, which would let a file there hide the system config.
     pub fn search_paths() -> Vec<PathBuf> {
-        std::iter::once(Self::config_path())
+        Self::search_paths_from(dirs::config_dir())
+    }
+
+    fn search_paths_from(config_dir: Option<PathBuf>) -> Vec<PathBuf> {
+        config_dir
+            .map(|dir| dir.join("xfr").join("config.toml"))
+            .into_iter()
             .chain(cfg!(unix).then(|| PathBuf::from("/etc/xfr/config.toml")))
             .collect()
     }
@@ -415,6 +434,37 @@ mod tests {
         // An explicit file is never skipped.
         let error = Config::resolve(Some((&unreadable, "--config")), &[], true).unwrap_err();
         assert!(format!("{error:#}").contains("failed to read config file"));
+    }
+
+    #[test]
+    fn search_skips_the_user_path_without_a_config_dir() {
+        let system: Vec<PathBuf> = cfg!(unix)
+            .then(|| PathBuf::from("/etc/xfr/config.toml"))
+            .into_iter()
+            .collect();
+        assert_eq!(Config::search_paths_from(None), system);
+
+        let paths = Config::search_paths_from(Some(PathBuf::from("/home/u/.config")));
+        assert_eq!(paths[0], Path::new("/home/u/.config/xfr/config.toml"));
+        assert_eq!(&paths[1..], system.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_in_search_is_an_error_for_server_and_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("etc-xfr-config.toml");
+        let system = dir.path().join("system.toml");
+        std::os::unix::fs::symlink(dir.path().join("gone.toml"), &broken).unwrap();
+        std::fs::write(&system, "[server]\nport = 2\n").unwrap();
+        let candidates = [broken.clone(), system];
+
+        for skip_unreadable in [false, true] {
+            let error = Config::resolve(None, &candidates, skip_unreadable).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(broken.to_str().unwrap()), "{message}");
+            assert!(message.contains("symlink to a missing file"), "{message}");
+        }
     }
 
     #[test]
