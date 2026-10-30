@@ -897,7 +897,22 @@ Find xfr servers on the local network using mDNS:
 ```bash
 xfr discover                 # Scan for servers
 xfr discover --timeout 10s   # Extended search
+xfr discover -v              # Every address of each server
 ```
+
+```
+Searching for xfr servers...
+
+Found 2 server(s):
+  192.168.1.20:5201 (lab-a.local.) xfr/0.13.0
+  [fe80::2%eth0]:5201 (lab-b.local.) xfr/0.13.0
+```
+
+Each server is listed once, with the address to pass to `xfr`: IPv4 first,
+then global or ULA IPv6, then link-local, then loopback. A link-local address
+is shown only when it is the sole one the server announced on that interface;
+mDNS carries all of a host's link-local addresses on every interface, so with
+several the right zone cannot be told.
 
 Servers automatically register with mDNS when started.
 

@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`xfr discover` brackets IPv6 answers** — `fe80::2%eth0:5201` now prints as `[fe80::2%eth0]:5201`, which can be passed to `xfr` as a target with its port.
 
+### Fixed
+- **`xfr discover` prints one line per server, without wrong link-local zones** — since 0.11.0 every link-local address of a server was printed once per local interface, each with that interface as its zone, so a handful of servers on a host with Docker or VPN interfaces produced hundreds of rows, almost none of which would connect. mdns-sd publishes all of a host's link-local addresses on every interface, so a link-local address is now kept only when it was the sole one received on its interface, and dropped when the interface cannot be told. Each server is listed once with its preferred address (IPv4, then global or ULA IPv6, then link-local, then loopback); `xfr discover -v` lists all of them. The per-address `Found server:` log line on stderr is now debug-level.
+- **Closing xfr's stdout no longer panics** — `xfr discover | head -1`, `xfr diff ... | head -1` and plain client output piped into a reader that exits early ended with `failed printing to stdout: Broken pipe` and exit status 101. xfr now exits quietly with status 0 when stdout is a closed pipe.
+
 ### Library API (pre-1.0 break)
 - Struct-literal constructors must supply the new public field `config::ClientDefaults.port`. The struct implements `Default`, so literals ending in `..Default::default()` are unaffected.
+- `discover::DiscoveredServer` is one server instance: its `ip` and `zone` fields are replaced by `addresses: Vec<DiscoveredAddress>` (preferred first), and `discover()` returns one entry per instance rather than one per address. `Display` shows the preferred address.
 
 ## [0.13.0] - 2026-10-30
 
