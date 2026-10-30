@@ -4836,6 +4836,29 @@ mod byte_budget {
         );
     }
 
+    /// A transfer that completes in under a millisecond still reports a
+    /// duration and a rate, never 0 ms / 0 Mbps.
+    #[tokio::test]
+    async fn tiny_budget_reports_nonzero_duration_and_rate() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for protocol in [Protocol::Tcp, Protocol::Quic] {
+            for direction in [Direction::Upload, Direction::Download] {
+                let mut config = budget_config(port, protocol, direction, 1);
+                config.byte_budget = Some(100 * 1024);
+                let result = run_budget_test(config).await;
+                assert_eq!(result.bytes_total, 100 * 1024, "{protocol:?} {direction:?}");
+                assert!(result.duration_ms >= 1, "{protocol:?} {direction:?}");
+                assert!(
+                    result.throughput_mbps > 0.0,
+                    "{protocol:?} {direction:?}: {result:?}"
+                );
+            }
+        }
+    }
+
     /// Duration runs to the last byte's delivery. A paced sender finishes its
     /// writes while the send buffer still holds megabytes; ending the clock
     /// there overstated download throughput.

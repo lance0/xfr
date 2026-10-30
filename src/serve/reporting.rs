@@ -190,10 +190,17 @@ pub(super) struct Reporting {
 impl Reporting {
     /// Active test duration so far. Read it before `finish`, so terminal
     /// flushing does not count as test time.
+    ///
+    /// A `-n` transfer can finish in under a millisecond on a fast path. Its
+    /// duration rounds up, and is at least 1 ms, so every throughput derived
+    /// from the whole-millisecond wire field is non-zero and never overstated.
     pub(super) fn duration_ms(&self) -> u64 {
-        self.transfer_end
-            .unwrap_or_else(|| active_elapsed(self.start, self.paused_total, self.pause_start))
-            .as_millis() as u64
+        match self.transfer_end {
+            Some(end) => (end.as_micros() as u64).div_ceil(1000).max(1),
+            None => {
+                active_elapsed(self.start, self.paused_total, self.pause_start).as_millis() as u64
+            }
+        }
     }
 
     /// Finish the exact in-flight frame before any terminal messages. A timeout
@@ -861,6 +868,25 @@ mod tests {
                 (expected..expected + 50).contains(&duration_ms),
                 "{direction:?}: {duration_ms} ms"
             );
+        }
+    }
+
+    #[test]
+    fn byte_budget_duration_rounds_up_to_a_whole_millisecond() {
+        let mut reporting = Reporting {
+            start: Instant::now(),
+            paused_total: Duration::ZERO,
+            pause_start: None,
+            transfer_end: None,
+            codec: None,
+            current: None,
+            pending: None,
+            cancelled: None,
+            finish_deadline: tokio::time::Instant::now(),
+        };
+        for (end_us, ms) in [(0, 1), (300, 1), (1_000, 1), (1_200, 2), (2_999, 3)] {
+            reporting.transfer_end = Some(Duration::from_micros(end_us));
+            assert_eq!(reporting.duration_ms(), ms, "{end_us} us");
         }
     }
 
