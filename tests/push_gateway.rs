@@ -816,6 +816,8 @@ async fn stable_backend_fixtures() {
 #[tokio::test]
 async fn invalid_push_options_fail_before_connecting() {
     let config_directory = tempfile::tempdir().unwrap();
+    let empty_config = config_directory.path().join("empty.toml");
+    std::fs::write(&empty_config, "").unwrap();
     for (flags, expected) in [
         (
             vec!["--push-label", "host=home"],
@@ -853,9 +855,9 @@ async fn invalid_push_options_fail_before_connecting() {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args(["127.0.0.1", "-p", "1", "--no-update-check", "--json"])
             .args(flags)
-            .env("XDG_CONFIG_HOME", config_directory.path())
+            .arg("--config")
+            .arg(&empty_config)
             .env_remove("XFR_PUSH_GATEWAY")
-            .env_remove("XFR_CONFIG")
             .output()
             .await
             .unwrap();

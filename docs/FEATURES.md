@@ -406,9 +406,10 @@ containers), it skips step 1 and searches only `/etc/xfr/config.toml`.
   file to read, and nothing else is searched. `--config` wins over `XFR_CONFIG`.
   If the named file does not exist, xfr exits with an error that names the path
   and where it came from.
-- **Broken symlinks are errors (v0.14.0+).** A config path that is a symlink to
-  a missing file stops xfr with `config file <path> is a symlink to a missing file`,
-  for a client and a server alike, instead of running with defaults.
+- **Broken symlinks are errors (v0.14.0+).** When the config file, or a
+  directory on its path such as `/etc/xfr`, is a symlink to a missing path, xfr
+  stops with `config file <path>: <link> is a symlink to a missing path`, for a
+  client and a server alike, instead of running with defaults.
 - **Before or after `serve` (v0.14.0+).** `xfr --config x.toml serve` and
   `xfr serve --config x.toml` do the same thing.
 - **See which file was used (v0.14.0+).** xfr logs `Using config <path>` at

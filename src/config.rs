@@ -237,13 +237,19 @@ impl Config {
         let mut file = match std::fs::File::open(config_path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // A symlink to a missing file is a misconfiguration, not an
+                // A dangling symlink on the path (the file itself or a
+                // directory such as /etc/xfr) is a misconfiguration, not an
                 // absent config: falling back to defaults would drop its
-                // settings without a word.
-                if config_path.symlink_metadata().is_ok() {
+                // settings without a word. A plain missing directory is absent.
+                if let Some(link) = config_path.ancestors().find(|path| {
+                    path.symlink_metadata()
+                        .is_ok_and(|metadata| metadata.is_symlink())
+                        && !path.exists()
+                }) {
                     anyhow::bail!(
-                        "config file {} is a symlink to a missing file",
-                        config_path.display()
+                        "config file {}: {} is a symlink to a missing path",
+                        config_path.display(),
+                        link.display()
                     );
                 }
                 return Ok(None);
@@ -463,8 +469,35 @@ mod tests {
             let error = Config::resolve(None, &candidates, skip_unreadable).unwrap_err();
             let message = format!("{error:#}");
             assert!(message.contains(broken.to_str().unwrap()), "{message}");
-            assert!(message.contains("symlink to a missing file"), "{message}");
+            assert!(message.contains("symlink to a missing path"), "{message}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlinked_directory_in_search_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let etc = root.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let link = etc.join("xfr");
+        std::os::unix::fs::symlink(root.path().join("missing"), &link).unwrap();
+        let config = link.join("config.toml");
+
+        let error = Config::resolve(None, std::slice::from_ref(&config), true).unwrap_err();
+        let message = format!("{error:#}");
+        assert_eq!(
+            message,
+            format!(
+                "config file {}: {} is a symlink to a missing path",
+                config.display(),
+                link.display()
+            )
+        );
+
+        // A plain missing directory just means there is no config.
+        let absent = etc.join("absent").join("config.toml");
+        let (_, loaded, _) = Config::resolve(None, &[absent], false).unwrap();
+        assert!(loaded.is_none());
     }
 
     #[test]
