@@ -49,6 +49,21 @@ fn test_cli_diff_invalid_threshold_cannot_report_ok() {
     }
 }
 
+/// `xfr discover | head -1` used to panic (exit 101) once `head` had exited.
+#[test]
+fn test_cli_discover_closed_stdout_exits_quietly() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["discover", "--timeout", "0"])
+        .stdout(writer)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
 fn get_test_port() -> u16 {
     PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
 }
