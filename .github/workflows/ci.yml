@@ -38,6 +38,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
+        env:
+          RUST_BACKTRACE: '1'
         run: cargo test --locked ${{ matrix.features }}
 
   systemd-credentials:
