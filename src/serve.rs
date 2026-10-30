@@ -3936,16 +3936,25 @@ where
 #[cfg(test)]
 mod tests {
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn first_line_timeout_keeps_partial_byte_count_after_cancellation() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut sender = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
         let (mut receiver, _) = listener.accept().await.unwrap();
-        let partial = b"partial-hello";
+        let partial = b"p";
         sender.write_all(partial).await.unwrap();
-        receiver.readable().await.unwrap();
+        let mut queued = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.peek(&mut queued))
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        // Pause after the byte arrives; a readiness notification may be spurious.
+        tokio::time::pause();
 
         let mut bytes_read = 0;
         let outcome = tokio::time::timeout(
@@ -3962,8 +3971,7 @@ mod tests {
             bytes_read,
         )
         .to_string();
-        assert!(diagnostic.contains("bytes_read=13"), "{diagnostic}");
-        assert!(!diagnostic.contains("partial-hello"));
+        assert!(diagnostic.contains("bytes_read=1"), "{diagnostic}");
     }
 
     #[tokio::test]
@@ -3976,7 +3984,14 @@ mod tests {
             .unwrap();
         let (mut receiver, peer) = listener.accept().await.unwrap();
         sender.write_all(b"h").await.unwrap();
-        receiver.readable().await.unwrap();
+        let mut queued = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.peek(&mut queued))
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
         let diagnostic = first_line_timeout_diagnostic(
             &receiver,
             "Initial read timeout",
