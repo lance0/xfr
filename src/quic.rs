@@ -44,8 +44,8 @@ use std::time::Duration;
 
 use hkdf::Hkdf;
 use quinn::{
-    AsyncUdpSocket, ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream,
-    ServerConfig, TransportConfig, UdpPoller, VarInt, WriteError,
+    AsyncUdpSocket, ClientConfig, Connection, ConnectionError, Endpoint, EndpointConfig,
+    RecvStream, SendStream, ServerConfig, TransportConfig, UdpPoller, VarInt, WriteError,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -87,6 +87,16 @@ pub(crate) const QUIC_CLOSE_SHUTDOWN: VarInt = VarInt::from_u32(1);
 /// of unacknowledged data, so neither side may depend on the peer's close
 /// arriving.
 pub(crate) const QUIC_CLOSE_GRACE: Duration = Duration::from_secs(1);
+/// How long the client waits without hearing anything from the server before
+/// it gives up, both while connecting and mid-test. Quinn's 30 s default kept
+/// a client hanging that long after the server vanished. QUIC negotiates the
+/// smaller of the two peers' values, so this also applies to the server side
+/// of a connection from this client.
+pub(crate) const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Client keep-alive, well inside `QUIC_IDLE_TIMEOUT`, so a paused or idle
+/// test still exchanges packets (the server's 5 s keep-alive alone would race
+/// the idle timeout).
+const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 /// TLS exporter label for binding application PSK authentication to the QUIC
 /// connection. RFC 9266 defines this exact label; it is wire-stable.
 const PSK_CHANNEL_BINDING_EXPORTER_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
@@ -347,6 +357,8 @@ pub fn create_client_endpoint(
     let mut transport = TransportConfig::default();
     transport.max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS + 1));
     transport.max_concurrent_uni_streams(VarInt::from_u32(MAX_CONCURRENT_DATA_STREAMS));
+    transport.max_idle_timeout(Some(QUIC_IDLE_TIMEOUT.try_into()?));
+    transport.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
 
     let quic_crypto = QuicClientConfig::try_from(crypto)?;
     let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
@@ -612,7 +624,14 @@ pub async fn receive_quic_data(
 
 /// Connect to a QUIC server
 pub async fn connect(endpoint: &Endpoint, addr: SocketAddr) -> anyhow::Result<Connection> {
-    let connection = endpoint.connect(addr, "xfr")?.await?;
+    let connection = endpoint.connect(addr, "xfr")?.await.map_err(|e| match e {
+        ConnectionError::TimedOut => anyhow::anyhow!(
+            "could not reach {} over QUIC (no response within {}s)",
+            addr,
+            QUIC_IDLE_TIMEOUT.as_secs()
+        ),
+        e => e.into(),
+    })?;
     debug!("QUIC connected to {}", addr);
     Ok(connection)
 }

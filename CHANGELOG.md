@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`xfr discover` brackets IPv6 answers** — `fe80::2%eth0:5201` now prints as `[fe80::2%eth0]:5201`, which can be passed to `xfr` as a target with its port.
 
+### Fixed
+- **QUIC clients give up on a silent server in seconds** — a QUIC client whose server died mid-test (crash, power loss, `kill -9`) printed nothing for about 30 seconds and then failed with `connection lost: timed out`, and connecting to a port with no QUIC server waited 30 seconds for `timed out`. The client now sends a keep-alive every second and gives up after 5 seconds with nothing from the server, printing `connection lost: the server stopped responding` or `could not reach <addr> over QUIC (no response within 5s)`. QUIC uses the smaller of the two peers' idle timeouts, so the server also drops a vanished new client after 5 seconds; older clients still get 30. Paused tests are unaffected, since keep-alives and interval reports keep flowing. `--connect-timeout` still bounds the handshake when set lower.
+
 ### Library API (pre-1.0 break)
 - Struct-literal constructors must supply the new public field `config::ClientDefaults.port`. The struct implements `Default`, so literals ending in `..Default::default()` are unaffected.
 
