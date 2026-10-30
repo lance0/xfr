@@ -668,9 +668,26 @@ For delivered UDP throughput, graph the final client push (`role="client"`).
 Server pushes use the server's local counters: reverse UDP includes packets
 sent even when the client never received them, and bidirectional totals combine
 server sends and receives. Those totals can differ substantially on a lossy
-path. In bidirectional UDP, the current `xfr_udp_*` loss/jitter metrics describe
-the upload direction only; the JSON result also contains download measurements
-in `udp_stats_recv`. A reverse-only server has no receiver loss/jitter to export.
+path. The legacy `xfr_udp_*` loss/jitter metrics describe upload only in a
+bidirectional test. Use the additive directional gauges for separate graphs:
+
+- `xfr_udp_direction_bytes` and `xfr_udp_direction_throughput_mbps` carry
+  `direction="upload|download"` and `view="receiver|sender"`. Directions are
+  always relative to the client, including on server pushes. Client pushes use
+  receiver-verified results in both directions. Server pushes report received
+  upload traffic and sent download traffic.
+- `xfr_udp_direction_packets_expected`, `packets_received`, `packets_lost`,
+  `lost_percent` and `jitter_ms` use the same `xfr_udp_direction_` prefix and a
+  `direction` label. They describe receiver observations only. Expected packets
+  are inferred from sequence numbers, not an actual sender packet counter.
+  Bidirectional client pushes include both receivers' loss/jitter snapshots;
+  server pushes only know upload receiver quality.
+
+Unavailable directional fields are omitted, including quality when no packets
+were observed or inferred lost. Jitter needs at least one received packet.
+A known zero byte count is still exported.
+A reverse-only server has no receiver loss/jitter to export. All new families
+are completed-test gauges; the legacy metric names and values are unchanged.
 
 For a peer with a local vmagent forwarding to VictoriaMetrics:
 
@@ -726,9 +743,11 @@ VictoriaMetrics has stored the sample yet. The gateway URL may contain basic
 authentication or query parameters; xfr does not include it in delivery logs.
 
 Library callers can export explicitly after consuming or persisting the result
-with `PushGatewayClient::new(url)?.with_server(host, port)` and
-`push_test_result(&result).await`, which returns the delivery result. Network
-measurement in `Client::run` remains independent of metric delivery.
+with `PushGatewayClient::new(url)?.with_server(host, port).with_test(protocol, direction)`
+and `push_test_result(&result).await`, which returns the delivery result. Network
+measurement in `Client::run` remains independent of metric delivery. The optional
+`with_test` context enables directional UDP metrics; context-free library calls
+keep their legacy payload instead of guessing a direction from the result.
 
 The existing `xfr_test_<test_id>` jobs and per-stream `test_id` labels are
 retained. Each test creates new series; a real Pushgateway retains jobs until

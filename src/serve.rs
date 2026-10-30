@@ -2291,6 +2291,7 @@ async fn run_quic_test(
                 push_gateway_url,
                 &stats,
                 Some(peer_addr.ip()),
+                Some((Protocol::Quic, direction)),
             )
             .await;
 
@@ -2841,6 +2842,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
                 push_gateway_url,
                 &stats,
                 Some(peer_addr.ip()),
+                Some((protocol, direction)),
             )
             .await;
 
