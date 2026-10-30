@@ -1473,8 +1473,25 @@ async fn main() -> Result<()> {
                 print_stdout(format_args!("No xfr servers found.\n"));
             } else {
                 print_stdout(format_args!("Found {} server(s):\n", servers.len()));
+                let link_local =
+                    |ip: IpAddr| matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local());
                 for server in servers {
-                    print_stdout(format_args!("  {}\n", server));
+                    // Only link-local candidates: the first may not be the one
+                    // on this link, so say how many others -v would show.
+                    let more = match server.addresses.split_first() {
+                        Some((first, rest)) if link_local(first.ip) && !verbose => {
+                            rest.iter().filter(|a| link_local(a.ip)).count()
+                        }
+                        _ => 0,
+                    };
+                    if more > 0 {
+                        print_stdout(format_args!(
+                            "  {} (+{} more link-local, see -v)\n",
+                            server, more
+                        ));
+                    } else {
+                        print_stdout(format_args!("  {}\n", server));
+                    }
                     if verbose {
                         for addr in &server.addresses {
                             print_stdout(format_args!("      {}:{}\n", addr, server.port));

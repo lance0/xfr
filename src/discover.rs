@@ -23,28 +23,32 @@ pub struct DiscoveredAddress {
     pub zone: Option<String>,
 }
 
+#[cfg(any(feature = "discovery", test))]
+fn is_link_local_v6(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local())
+}
+
 /// Turn one instance's answers, each link-local one paired with the zone it
-/// was received on, into its usable addresses, preferred first.
+/// was received on, into its usable addresses, preferred first. `own` is this
+/// host's link-local addresses with their zones.
 ///
 /// mdns-sd 0.21 publishes every link-local address of a host on every
-/// interface that has one, because they all share fe80::/64. An interface that
-/// carried a single link-local address carried the sender's own address on
-/// that link. When it carried several, the right one cannot be told apart, so
-/// none is kept rather than printing addresses that will not connect.
+/// interface that has one, because they all share fe80::/64, and does not
+/// report the packet's source address. So an interface carrying several
+/// link-local addresses keeps all of them as candidates with its own zone; one
+/// of them is the sender's address on that link. A server on this host is the
+/// exception: its link-local addresses are ours, and only the pairing with the
+/// interface that owns each one is kept.
 #[cfg(any(feature = "discovery", test))]
-fn usable_addresses(answers: &[DiscoveredAddress]) -> Vec<DiscoveredAddress> {
-    let link_local =
-        |a: &DiscoveredAddress| matches!(a.ip, IpAddr::V6(v6) if v6.is_unicast_link_local());
+fn usable_addresses(
+    answers: &[DiscoveredAddress],
+    own: &[DiscoveredAddress],
+) -> Vec<DiscoveredAddress> {
     let mut out: Vec<DiscoveredAddress> = answers
         .iter()
         .filter(|a| {
-            !link_local(a)
-                || a.zone.is_some()
-                    && answers
-                        .iter()
-                        .filter(|b| link_local(b) && b.zone == a.zone && b.ip != a.ip)
-                        .count()
-                        == 0
+            !is_link_local_v6(a.ip)
+                || a.zone.is_some() && (own.contains(a) || !own.iter().any(|o| o.ip == a.ip))
         })
         .cloned()
         .collect();
@@ -56,11 +60,14 @@ fn usable_addresses(answers: &[DiscoveredAddress]) -> Vec<DiscoveredAddress> {
 #[cfg(any(feature = "discovery", test))]
 fn preference(ip: IpAddr) -> u8 {
     match ip {
-        ip if ip.is_loopback() => 3,
-        IpAddr::V4(v4) if v4.is_link_local() => 2,
+        ip if ip.is_loopback() => 4,
+        IpAddr::V4(v4) if v4.is_link_local() => 3,
+        // Docker and many VPN bridges sit in 172.16/12; a host's LAN address
+        // is more often 192.168/16 or 10/8.
+        IpAddr::V4(v4) if v4.octets()[0] == 172 && v4.octets()[1] & 0xf0 == 16 => 1,
         IpAddr::V4(_) => 0,
-        IpAddr::V6(v6) if v6.is_unicast_link_local() => 2,
-        IpAddr::V6(_) => 1,
+        IpAddr::V6(v6) if v6.is_unicast_link_local() => 3,
+        IpAddr::V6(_) => 2,
     }
 }
 
@@ -112,27 +119,31 @@ fn fnv1a_16(bytes: &[u8]) -> u16 {
 #[cfg(feature = "discovery")]
 mod mdns_impl {
     use super::*;
-    use mdns_sd::{ServiceDaemon, ServiceEvent};
+    use mdns_sd::{InterfaceId, ServiceDaemon, ServiceEvent};
     use tracing::{debug, info, warn};
 
     const SERVICE_TYPE: &str = "_xfr._tcp.local.";
 
     /// The interface a link-local IPv6 answer arrived on: without it the
-    /// printed address cannot be connected to. Names need `if_nametoindex`,
-    /// which xfr only uses on unix, so other platforms get the index.
+    /// printed address cannot be connected to.
     fn link_local_zone(addr: &mdns_sd::ScopedIp) -> Option<String> {
         match addr {
             mdns_sd::ScopedIp::V6(v6)
                 if v6.addr().is_unicast_link_local() && v6.scope_id().index != 0 =>
             {
-                let id = v6.scope_id();
-                Some(if cfg!(unix) && !id.name.is_empty() {
-                    id.name.clone()
-                } else {
-                    id.index.to_string()
-                })
+                Some(zone_name(v6.scope_id()))
             }
             _ => None,
+        }
+    }
+
+    /// Names need `if_nametoindex`, which xfr only uses on unix, so other
+    /// platforms get the index.
+    fn zone_name(id: &InterfaceId) -> String {
+        if cfg!(unix) && !id.name.is_empty() {
+            id.name.clone()
+        } else {
+            id.index.to_string()
         }
     }
 
@@ -142,9 +153,9 @@ mod mdns_impl {
 
         // One entry per host and port: servers on one host share an instance
         // name, so a name can resolve to several ports. Answers accumulate
-        // across resolutions so the link-local filter sees every address an
-        // interface carried.
+        // across resolutions.
         let mut found: Vec<(Vec<DiscoveredAddress>, DiscoveredServer)> = Vec::new();
+        let mut receiving: Vec<InterfaceId> = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
 
         debug!("Searching for xfr servers...");
@@ -173,6 +184,13 @@ mod mdns_impl {
                             .get("version")
                             .map(|v| v.val_str().to_string()),
                     };
+                    for addr in info.get_addresses() {
+                        if let mdns_sd::ScopedIp::V6(v6) = addr
+                            && !receiving.contains(v6.scope_id())
+                        {
+                            receiving.push(v6.scope_id().clone());
+                        }
+                    }
                     let answers = info.get_addresses().iter().map(|addr| DiscoveredAddress {
                         ip: addr.to_ip_addr(),
                         zone: link_local_zone(addr),
@@ -210,10 +228,22 @@ mod mdns_impl {
         if let Err(e) = mdns.shutdown() {
             debug!("mDNS shutdown error: {e}");
         }
+        let own: Vec<DiscoveredAddress> = receiving
+            .iter()
+            .flat_map(|id| {
+                id.get_addrs()
+                    .into_iter()
+                    .filter(|ip| is_link_local_v6(*ip))
+                    .map(|ip| DiscoveredAddress {
+                        ip,
+                        zone: Some(zone_name(id)),
+                    })
+            })
+            .collect();
         let mut servers: Vec<DiscoveredServer> = found
             .into_iter()
             .filter_map(|(answers, mut server)| {
-                server.addresses = usable_addresses(&answers);
+                server.addresses = usable_addresses(&answers, &own);
                 debug!("Found server: {}", server);
                 (!server.addresses.is_empty()).then_some(server)
             })
@@ -333,11 +363,15 @@ mod tests {
     #[test]
     fn display_shows_preferred_address_with_hostname_and_version() {
         let server = DiscoveredServer {
-            addresses: usable_addresses(&[
-                addr("fe80::2", Some("eth0")),
-                addr("2001:db8::2", None),
-                addr("192.168.1.20", None),
-            ]),
+            addresses: usable_addresses(
+                &[
+                    addr("fe80::2", Some("eth0")),
+                    addr("2001:db8::2", None),
+                    addr("172.17.0.1", None),
+                    addr("192.168.1.20", None),
+                ],
+                &[],
+            ),
             port: 5201,
             hostname: Some("box.local.".to_string()),
             version: Some("0.13.0".to_string()),
@@ -350,21 +384,26 @@ mod tests {
 
     #[test]
     fn addresses_are_ordered_ipv4_global_v6_link_local_loopback() {
-        let got = usable_addresses(&[
-            addr("127.0.0.1", None),
-            addr("fe80::2", Some("eth0")),
-            addr("fd00::2", None),
-            addr("::1", None),
-            addr("2001:db8::2", None),
-            addr("10.0.0.2", None),
-            addr("192.168.1.20", None),
-        ]);
+        let got = usable_addresses(
+            &[
+                addr("127.0.0.1", None),
+                addr("fe80::2", Some("eth0")),
+                addr("fd00::2", None),
+                addr("::1", None),
+                addr("2001:db8::2", None),
+                addr("10.0.0.2", None),
+                addr("172.17.0.1", None),
+                addr("192.168.1.20", None),
+            ],
+            &[],
+        );
         let got: Vec<String> = got.iter().map(ToString::to_string).collect();
         assert_eq!(
             got,
             [
                 "10.0.0.2",
                 "192.168.1.20",
+                "172.17.0.1",
                 "[2001:db8::2]",
                 "[fd00::2]",
                 "[fe80::2%eth0]",
@@ -375,39 +414,70 @@ mod tests {
     }
 
     /// mdns-sd publishes every link-local address of the sender on every
-    /// interface. Only an interface that carried exactly one link-local
-    /// address says which one belongs to it.
+    /// interface, so each one received on an interface is a candidate for it.
     #[test]
-    fn link_local_keeps_only_unambiguous_zones() {
-        let got = usable_addresses(&[
-            // eth0 carried both of the sender's link-local addresses.
-            addr("fe80::a", Some("eth0")),
-            addr("fe80::b", Some("eth0")),
-            // wlan0 carried one, twice (two resolutions of the same answer).
-            addr("fe80::c", Some("wlan0")),
-            addr("fe80::c", Some("wlan0")),
-            // No receiving interface known.
-            addr("fe80::d", None),
-            addr("192.168.1.20", None),
-        ]);
+    fn link_local_candidates_keep_the_receiving_zone() {
+        let got = usable_addresses(
+            &[
+                addr("fe80::a", Some("eth0")),
+                addr("fe80::b", Some("eth0")),
+                // Two resolutions of the same answer.
+                addr("fe80::c", Some("wlan0")),
+                addr("fe80::c", Some("wlan0")),
+                // No receiving interface known.
+                addr("fe80::d", None),
+                addr("192.168.1.20", None),
+            ],
+            &[],
+        );
         assert_eq!(
             got,
-            [addr("192.168.1.20", None), addr("fe80::c", Some("wlan0"))]
+            [
+                addr("192.168.1.20", None),
+                addr("fe80::a", Some("eth0")),
+                addr("fe80::b", Some("eth0")),
+                addr("fe80::c", Some("wlan0")),
+            ]
         );
     }
 
     #[test]
-    fn every_link_local_on_every_interface_yields_no_link_local() {
-        // The repro: a host with N link-local addresses seen on N interfaces
-        // printed N x N rows, almost all with the wrong zone.
+    fn direct_cable_peer_with_only_link_locals_is_still_found() {
+        // A peer with Docker or a VPN announces all three of its link-local
+        // addresses on the cable, and has no IPv4 there.
+        let got = usable_addresses(
+            &[
+                addr("fe80::1", Some("enp3s0")),
+                addr("fe80::2", Some("enp3s0")),
+                addr("fe80::3", Some("enp3s0")),
+            ],
+            &[addr("fe80::99", Some("enp3s0"))],
+        );
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(|a| a.zone.as_deref() == Some("enp3s0")));
+    }
+
+    #[test]
+    fn same_host_link_locals_keep_only_their_own_interface() {
+        // The repro: a server on this host with N link-local addresses was
+        // heard on N interfaces and printed N x N rows, almost all with the
+        // wrong zone.
         let zones = ["eth0", "docker0", "veth1"];
         let ips = ["fe80::1", "fe80::2", "fe80::3"];
         let answers: Vec<_> = zones
             .iter()
             .flat_map(|z| ips.iter().map(move |ip| addr(ip, Some(z))))
-            .chain([addr("192.168.1.20", None), addr("192.168.1.20", None)])
+            .chain([addr("192.168.1.20", None)])
             .collect();
-        assert_eq!(usable_addresses(&answers), [addr("192.168.1.20", None)]);
+        let own: Vec<_> = zones
+            .iter()
+            .zip(ips)
+            .map(|(z, ip)| addr(ip, Some(z)))
+            .collect();
+        let mut want = vec![addr("192.168.1.20", None)];
+        want.extend(own.iter().cloned());
+        want[1..].sort();
+        assert_eq!(usable_addresses(&answers, &own), want);
     }
 
     #[test]
