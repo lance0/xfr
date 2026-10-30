@@ -1267,12 +1267,16 @@ async fn main() -> Result<()> {
             let prom_port = prometheus.or(file_config.server.prometheus_port);
 
             let push_gateway_url = push_gateway.or_else(|| file_config.server.push_gateway.clone());
-            let push_labels =
-                merge_push_labels(file_config.server.push_labels.clone(), &push_labels)?;
+            // Config labels are inert without a gateway; CLI labels are a mistake.
             anyhow::ensure!(
                 push_labels.is_empty() || push_gateway_url.is_some(),
-                "push labels require a push gateway"
+                "--push-label requires a push gateway (--push-gateway or push_gateway in config)"
             );
+            let push_labels = if push_gateway_url.is_some() {
+                merge_push_labels(file_config.server.push_labels.clone(), &push_labels)?
+            } else {
+                Default::default()
+            };
             if let Some(url) = &push_gateway_url {
                 PushGatewayClient::new(url.clone())?;
             }
@@ -1660,15 +1664,23 @@ async fn main() -> Result<()> {
             let gateway_url = cli
                 .push_gateway
                 .or_else(|| file_config.client.push_gateway.clone());
-            let push_labels =
-                merge_push_labels(file_config.client.push_labels.clone(), &cli.push_labels)?;
-            let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
-            anyhow::ensure!(
-                gateway_url.is_some() || (push_labels.is_empty() && push_job.is_none()),
-                "push labels and job require a push gateway"
-            );
+            // Config labels/job are inert without a gateway; CLI ones are a mistake.
+            for (flag, given) in [
+                ("--push-label", !cli.push_labels.is_empty()),
+                ("--push-job", cli.push_job.is_some()),
+            ] {
+                anyhow::ensure!(
+                    !given || gateway_url.is_some(),
+                    "{flag} requires a push gateway (--push-gateway or push_gateway in config)"
+                );
+            }
             let gateway = gateway_url
                 .map(|url| -> Result<PushGatewayClient> {
+                    let push_labels = merge_push_labels(
+                        file_config.client.push_labels.clone(),
+                        &cli.push_labels,
+                    )?;
+                    let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
                     let mut client = PushGatewayClient::new(url)?
                         .with_server(host, cli.port)
                         .with_test(config.protocol, config.direction)

@@ -816,11 +816,11 @@ async fn invalid_push_options_fail_before_connecting() {
     for (flags, expected) in [
         (
             vec!["--push-label", "host=home"],
-            "push labels and job require a push gateway",
+            "--push-label requires a push gateway",
         ),
         (
             vec!["--push-job", "mesh"],
-            "push labels and job require a push gateway",
+            "--push-job requires a push gateway",
         ),
         (
             vec!["--push-gateway", "http://127.0.0.1:1", "--push-job", "mesh"],
@@ -861,6 +861,66 @@ async fn invalid_push_options_fail_before_connecting() {
         assert!(stderr.contains(expected), "{stderr}");
         assert!(!stderr.contains("Connection refused"), "{stderr}");
     }
+}
+
+#[tokio::test]
+async fn config_push_options_without_gateway_are_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join("xfr");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[client]\npush_job = \"mesh\"\npush_labels = { site = \"lab\" }\n[server]\npush_labels = { site = \"lab\" }\n",
+    )
+    .unwrap();
+    let (port, running) = server(None).await;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1", "-b", "1M"])
+        .args(["--json", "--no-update-check"])
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env_remove("XFR_PUSH_GATEWAY")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    running.abort();
+
+    let port = SERVER_PORT.fetch_add(1, Ordering::SeqCst);
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "-p", &port.to_string(), "--no-mdns"])
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env_remove("XFR_PUSH_GATEWAY")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            assert!(child.try_wait().unwrap().is_none(), "server exited");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "--push-label", "site=lab"])
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env_remove("XFR_PUSH_GATEWAY")
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--push-label requires a push gateway"),
+        "{stderr}"
+    );
 }
 
 #[cfg(target_os = "linux")]
