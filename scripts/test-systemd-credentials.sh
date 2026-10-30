@@ -70,6 +70,15 @@ cat > "$work/run-server" <<'SERVER'
 set -eu
 stat -c 'credential owner=%u mode=%a' "$CREDENTIALS_DIRECTORY/psk"
 getfacl -n -c "$CREDENTIALS_DIRECTORY/psk"
+# Require the root-owned ACL layout so the ACL acceptance path stays covered.
+if [ "$(stat -c '%u:%a' "$CREDENTIALS_DIRECTORY/psk")" != 0:440 ]; then
+    echo 'credential is not root-owned mode 440; ACL path not exercised' >&2
+    exit 1
+fi
+if ! getfacl -n -c "$CREDENTIALS_DIRECTORY/psk" | grep -q "^user:$(id -u):r--"; then
+    echo "credential ACL does not grant service uid $(id -u) read" >&2
+    exit 1
+fi
 exec "$1" serve --bind 127.0.0.1 -p "$2" --one-off --no-mdns \
     --psk-file "$CREDENTIALS_DIRECTORY/psk"
 SERVER
