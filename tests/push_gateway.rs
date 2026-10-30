@@ -416,7 +416,9 @@ async fn failed_pushes_retry_without_failing_the_test() {
     let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout).unwrap();
     assert!(result.bytes_total > 0);
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not confirmed"));
+    // One final warning; intermediate attempts log at debug level.
+    assert_eq!(stderr.matches("not confirmed").count(), 1, "{stderr}");
+    assert!(!stderr.contains("Retrying"), "{stderr}");
     assert!(
         !stderr.contains("mesh-user") && !stderr.contains("gateway-secret"),
         "{stderr}"

@@ -48,6 +48,20 @@ fn auth_rejected_error(message: &str) -> anyhow::Error {
     }
 }
 
+/// The server's hello carried an auth challenge but this client has no PSK.
+fn psk_required_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "authentication failed: the server requires a pre-shared key (set --psk/--psk-file)"
+    )
+}
+
+/// This client has a PSK but the server's hello carried no auth challenge.
+fn psk_not_used_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "the server does not use a pre-shared key; remove --psk/--psk-file or configure the server with one"
+    )
+}
+
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
         Duration::from_millis(u64::from(streams).saturating_mul(STREAM_JOIN_TIMEOUT_PER_STREAM_MS));
@@ -899,9 +913,7 @@ impl Client {
                     server_nonce_var = Some(challenge.nonce.clone());
                     debug!("Server requires {} authentication", challenge.method);
 
-                    let psk = self.config.psk.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("Server requires authentication but no PSK configured")
-                    })?;
+                    let psk = self.config.psk.as_ref().ok_or_else(psk_required_error)?;
 
                     // PSK sessions require protected_control_v1 — refuse to
                     // continue if the server doesn't advertise it.
@@ -961,6 +973,8 @@ impl Client {
                             return Err(anyhow::anyhow!("Unexpected auth response"));
                         }
                     }
+                } else if has_psk {
+                    return Err(psk_not_used_error());
                 }
             }
             ControlMessage::Error { message } => {
@@ -2429,9 +2443,7 @@ impl Client {
                     server_nonce_var = Some(challenge.nonce.clone());
                     debug!("Server requires {} authentication", challenge.method);
 
-                    let psk = self.config.psk.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("Server requires authentication but no PSK configured")
-                    })?;
+                    let psk = self.config.psk.as_ref().ok_or_else(psk_required_error)?;
 
                     // PSK sessions require protected_control_v1 — refuse if
                     // the server doesn't advertise it.
@@ -2503,6 +2515,8 @@ impl Client {
                         }
                     }
                     quic_session_psk = Some(session_psk);
+                } else if has_psk {
+                    return Err(psk_not_used_error());
                 }
             }
             ControlMessage::Error { message } => {
