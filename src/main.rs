@@ -179,7 +179,7 @@ struct Cli {
     host: Option<String>,
 
     /// Push the final result to a Prometheus Pushgateway URL
-    #[arg(long, env = "XFR_PUSH_GATEWAY")]
+    #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
     #[arg(help_heading = "Output Options")]
     push_gateway: Option<String>,
 
@@ -343,7 +343,7 @@ struct Cli {
     /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
     /// variable are visible to other users through process metadata such as
     /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
-    #[arg(long, env = "XFR_PSK")]
+    #[arg(long, env = "XFR_PSK", hide_env_values = true)]
     #[arg(help_heading = "Authentication")]
     psk: Option<String>,
 
@@ -458,7 +458,7 @@ enum Commands {
         prometheus: Option<u16>,
 
         /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
-        #[arg(long, env = "XFR_PUSH_GATEWAY")]
+        #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
         #[arg(help_heading = "Server Options")]
         push_gateway: Option<String>,
 
@@ -525,7 +525,7 @@ enum Commands {
         /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
         /// variable are visible to other users through process metadata such as
         /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
-        #[arg(long, env = "XFR_PSK")]
+        #[arg(long, env = "XFR_PSK", hide_env_values = true)]
         #[arg(help_heading = "Authentication")]
         psk: Option<String>,
 

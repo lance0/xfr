@@ -3516,6 +3516,12 @@ fn test_cli_client_options_rejected_with_subcommands() {
             client_only,
         ),
         (&["-t", "5", "serve"][..], "serve", client_only),
+        (&["--push-job", "mesh", "serve"][..], "serve", client_only),
+        (
+            &["--push-label", "site=lab", "serve"][..],
+            "serve",
+            "tip: put serve options after the subcommand: xfr serve --push-label site=lab",
+        ),
         (
             &["--push-gateway", "http://localhost:9091", "serve"][..],
             "serve",
@@ -3558,6 +3564,22 @@ fn test_cli_client_options_rejected_with_subcommands() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn test_cli_help_hides_secret_env_values() {
+    for args in [&["--help"][..], &["serve", "--help"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(args)
+            .env("XFR_PSK", "psk-s3cret")
+            .env("XFR_PUSH_GATEWAY", "http://user:s3cret@gw:9091")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("[env: XFR_PSK]"), "{args:?}: {stdout}");
+        assert!(!stdout.contains("s3cret"), "{args:?}: {stdout}");
+    }
 }
 
 #[test]
