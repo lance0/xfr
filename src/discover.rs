@@ -39,17 +39,26 @@ fn is_link_local_v6(ip: IpAddr) -> bool {
 /// of them is the sender's address on that link. A server on this host is the
 /// exception: its link-local addresses are ours, and only the pairing with the
 /// interface that owns each one is kept.
+///
+/// A link-local address is unique only on its link, so an answer holding one
+/// of our addresses from another interface proves nothing. A server counts as
+/// ours only when an answer is our address on the interface it arrived on, so
+/// `own` needs no more than the receiving interfaces.
 #[cfg(any(feature = "discovery", test))]
 fn usable_addresses(
     answers: &[DiscoveredAddress],
     own: &[DiscoveredAddress],
 ) -> Vec<DiscoveredAddress> {
+    // ponytail: a remote host whose link-local on another interface equals
+    // ours on the shared link is mistaken for this one; also require one of
+    // our global addresses if that ever turns up. Hostnames can't decide it: a
+    // second server on this host may advertise a conflict-renamed one.
+    let ours = answers
+        .iter()
+        .any(|a| is_link_local_v6(a.ip) && own.contains(a));
     let mut out: Vec<DiscoveredAddress> = answers
         .iter()
-        .filter(|a| {
-            !is_link_local_v6(a.ip)
-                || a.zone.is_some() && (own.contains(a) || !own.iter().any(|o| o.ip == a.ip))
-        })
+        .filter(|a| !is_link_local_v6(a.ip) || a.zone.is_some() && (!ours || own.contains(a)))
         .cloned()
         .collect();
     out.sort_by_key(|a| (preference(a.ip), a.clone()));
@@ -228,6 +237,8 @@ mod mdns_impl {
         if let Err(e) = mdns.shutdown() {
             debug!("mDNS shutdown error: {e}");
         }
+        // Interfaces nothing arrived on can't matter: an answer only proves a
+        // server is ours by matching our address on its receiving interface.
         let own: Vec<DiscoveredAddress> = receiving
             .iter()
             .flat_map(|id| {
@@ -478,6 +489,38 @@ mod tests {
         want.extend(own.iter().cloned());
         want[1..].sort();
         assert_eq!(usable_addresses(&answers, &own), want);
+    }
+
+    #[test]
+    fn remote_peer_reusing_our_link_local_from_another_link_is_kept() {
+        // fe80::1 is ours on docker0; a peer heard on eth0 with the same
+        // address is someone else, since link-locals are unique per link.
+        let got = usable_addresses(
+            &[addr("fe80::1", Some("eth0"))],
+            &[
+                addr("fe80::1", Some("docker0")),
+                addr("fe80::99", Some("eth0")),
+            ],
+        );
+        assert_eq!(got, [addr("fe80::1", Some("eth0"))]);
+    }
+
+    #[test]
+    fn same_host_server_heard_on_one_interface_drops_our_other_link_locals() {
+        // Only eth0 answered. fe80::2 is ours on docker0, so pairing it with
+        // eth0 would print an address that doesn't reach this server.
+        let got = usable_addresses(
+            &[
+                addr("fe80::1", Some("eth0")),
+                addr("fe80::2", Some("eth0")),
+                addr("192.168.1.20", None),
+            ],
+            &[addr("fe80::1", Some("eth0"))],
+        );
+        assert_eq!(
+            got,
+            [addr("192.168.1.20", None), addr("fe80::1", Some("eth0"))]
+        );
     }
 
     #[test]
