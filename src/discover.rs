@@ -217,9 +217,11 @@ pub use fallback::discover;
 
 impl std::fmt::Display for DiscoveredServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.ip)?;
-        if let Some(ref zone) = self.zone {
-            write!(f, "%{}", zone)?;
+        // Bracket IPv6 so the printed ip:port pastes back as `xfr <target>`.
+        match (self.ip, &self.zone) {
+            (IpAddr::V6(ip), Some(zone)) => write!(f, "[{}%{}]", ip, zone)?,
+            (IpAddr::V6(ip), None) => write!(f, "[{}]", ip)?,
+            (ip, _) => write!(f, "{}", ip)?,
         }
         write!(f, ":{}", self.port)?;
         if let Some(ref hostname) = self.hostname {
@@ -245,7 +247,7 @@ mod tests {
             hostname: None,
             version: None,
         };
-        assert_eq!(server.to_string(), "fe80::2%eth0:5201");
+        assert_eq!(server.to_string(), "[fe80::2%eth0]:5201");
     }
 
     #[test]
