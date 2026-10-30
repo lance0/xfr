@@ -174,7 +174,7 @@ struct Cli {
     #[arg(long, value_name = "SHELL", value_parser = ["bash", "zsh", "fish", "powershell", "elvish"])]
     completions: Option<String>,
 
-    /// Target host for client mode
+    /// Target host for client mode, optionally as host:port or [IPv6]:port
     #[arg(value_name = "HOST")]
     host: Option<String>,
 
@@ -296,10 +296,14 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     omit: Option<u64>,
 
-    /// Server/client port
-    #[arg(short, long, default_value_t = DEFAULT_PORT, env = "XFR_PORT")]
+    /// Server port [default: 5201]. Also set by a host:port target, XFR_PORT, or [client] port
+    #[arg(short, long, env = "XFR_PORT")]
     #[arg(help_heading = "Connection Options")]
-    port: u16,
+    port: Option<u16>,
+
+    /// Whether `port` was typed as `-p`/`--port` rather than read from XFR_PORT.
+    #[arg(skip)]
+    port_on_command_line: bool,
 
     /// Disable Nagle algorithm
     #[arg(long)]
@@ -696,6 +700,37 @@ fn resolve_parallel_streams(cli_parallel: Option<u8>, config_parallel: Option<u8
     Ok(streams)
 }
 
+/// Precedence: a `host:port` target, then a command-line `-p` (even when it
+/// equals DEFAULT_PORT), then `XFR_PORT`, then `[client] port`. A target port
+/// that disagrees with a command-line `-p` is an error rather than a silent pick.
+fn resolve_client_port(
+    target_port: Option<u16>,
+    cli_port: Option<u16>,
+    env_port: Option<u16>,
+    config_port: Option<u16>,
+) -> Result<u16> {
+    if let (Some(target), Some(cli)) = (target_port, cli_port) {
+        anyhow::ensure!(
+            target == cli,
+            "target port {target} conflicts with -p/--port {cli}"
+        );
+    }
+    let (port, source) = [
+        (target_port, "the target"),
+        (cli_port, "-p/--port"),
+        (env_port, "XFR_PORT"),
+        (config_port, "client.port"),
+    ]
+    .into_iter()
+    .find_map(|(port, source)| Some((port?, source)))
+    .unwrap_or((DEFAULT_PORT, "the default"));
+    anyhow::ensure!(
+        port != 0,
+        "port must be between 1 and 65535 (got 0 from {source})"
+    );
+    Ok(port)
+}
+
 fn resolve_window_size(
     cli_window: Option<usize>,
     config_window: Option<&str>,
@@ -912,26 +947,32 @@ fn resolve_server_address_family(
     resolve_address_family(ipv4_only, ipv6_only, config_value, "server.address_family")
 }
 
+/// Split `host:port` or `[host]:port` into host and port, and unbracket
+/// `[host]`. Anything else, including a bare IPv6 address (`::1`,
+/// `fe80::1%eth0`), is all host with no port.
+fn split_host_port(s: &str) -> anyhow::Result<(&str, Option<u16>)> {
+    if let Some(host) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return Ok((host, None));
+    }
+    let (host, port) = match s.strip_prefix('[').and_then(|r| r.split_once("]:")) {
+        Some(split) => split,
+        None => match s.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, port),
+            _ => return Ok((s, None)),
+        },
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("Invalid port {port:?} in {s}"))?;
+    Ok((host, Some(port)))
+}
+
 /// Parse a bind address string (can be "IP" or "IP:port")
 fn parse_bind_address(s: &str) -> anyhow::Result<std::net::SocketAddr> {
-    use std::net::SocketAddr;
-
-    // Try parsing as full socket address first (IP:port or [IPv6]:port)
-    if let Ok(addr) = s.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-
-    // IP only (port 0 = auto-assign), [IPv6]:port with a zone name, or an
-    // IPv6 zone on a link-local address (fe80::1%eth0).
-    let (host, port) = match s.strip_prefix('[').and_then(|r| r.split_once("]:")) {
-        Some((host, port)) => (
-            host,
-            port.parse::<u16>()
-                .map_err(|_| anyhow::anyhow!("Invalid bind port in {}", s))?,
-        ),
-        None => (s, 0),
-    };
-    if let Some(addr) = xfr::net::parse_ip_literal(host, port)? {
+    // IP only (port 0 = auto-assign), IP:port, [IPv6]:port with a zone name,
+    // or an IPv6 zone on a link-local address (fe80::1%eth0).
+    let (host, port) = split_host_port(s)?;
+    if let Some(addr) = xfr::net::parse_ip_literal(host, port.unwrap_or(0))? {
         return Ok(addr);
     }
 
@@ -1159,7 +1200,9 @@ fn parse_cli() -> Cli {
                 .exit();
         }
     }
-    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
+    cli
 }
 
 #[tokio::main]
@@ -1632,9 +1675,18 @@ async fn main() -> Result<()> {
             // Validate bind address compatibility with protocol and stream count
             validate_bind_address(bind_addr, protocol, streams, cport.is_some())?;
 
+            let (host, target_port) = split_host_port(host)?;
+            let (cli_port, env_port) = if cli.port_on_command_line {
+                (cli.port, None)
+            } else {
+                (None, cli.port)
+            };
+            let port =
+                resolve_client_port(target_port, cli_port, env_port, file_config.client.port)?;
+
             let config = ClientConfig {
-                host: host.clone(),
-                port: cli.port,
+                host: host.to_string(),
+                port,
                 protocol,
                 streams,
                 duration,
@@ -1682,7 +1734,7 @@ async fn main() -> Result<()> {
                     )?;
                     let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
                     let mut client = PushGatewayClient::new(url)?
-                        .with_server(host, cli.port)
+                        .with_server(host, port)
                         .with_test(config.protocol, config.direction)
                         .with_labels(push_labels)?;
                     if let Some(job) = push_job {
@@ -3895,6 +3947,76 @@ mod tests {
             );
             let error = resolve_parallel_streams(None, Some(invalid)).unwrap_err();
             assert!(error.to_string().contains("client.parallel_streams"));
+        }
+    }
+
+    #[test]
+    fn client_port_resolves_target_cli_env_config_then_default() {
+        let explicit = Cli::try_parse_from(["xfr", "host", "-p", "5201"]).unwrap();
+        assert_eq!(
+            resolve_client_port(None, explicit.port, None, Some(5202)).unwrap(),
+            DEFAULT_PORT
+        );
+        assert_eq!(
+            resolve_client_port(None, None, None, Some(5202)).unwrap(),
+            5202
+        );
+        assert_eq!(
+            resolve_client_port(None, None, None, None).unwrap(),
+            DEFAULT_PORT
+        );
+        // XFR_PORT beats config and yields to a host:port target without conflict.
+        assert_eq!(
+            resolve_client_port(None, None, Some(5203), Some(5202)).unwrap(),
+            5203
+        );
+        assert_eq!(
+            resolve_client_port(Some(6000), None, Some(5201), Some(5202)).unwrap(),
+            6000
+        );
+        // A target port beats config and must agree with a command-line -p.
+        assert_eq!(
+            resolve_client_port(Some(6000), Some(6000), None, Some(5202)).unwrap(),
+            6000
+        );
+        let error = resolve_client_port(Some(6000), Some(6001), None, None).unwrap_err();
+        assert!(error.to_string().contains("6000") && error.to_string().contains("6001"));
+        // Port 0 is rejected from whichever source supplied it.
+        for (ports, source) in [
+            ([Some(0), None, None, None], "the target"),
+            ([None, Some(0), None, None], "-p/--port"),
+            ([None, None, Some(0), None], "XFR_PORT"),
+            ([None, None, None, Some(0)], "client.port"),
+        ] {
+            let [target, cli, env, config] = ports;
+            let error = resolve_client_port(target, cli, env, config).unwrap_err();
+            assert!(error.to_string().contains(source), "{error}");
+        }
+        assert_eq!(
+            resolve_client_port(None, Some(5202), None, Some(0)).unwrap(),
+            5202
+        );
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv4_names_and_ipv6() {
+        for (target, host, port) in [
+            ("10.0.0.5", "10.0.0.5", None),
+            ("10.0.0.5:5202", "10.0.0.5", Some(5202)),
+            ("example.com", "example.com", None),
+            ("example.com:5202", "example.com", Some(5202)),
+            ("[::1]:5202", "::1", Some(5202)),
+            ("[fe80::1%eth0]:5202", "fe80::1%eth0", Some(5202)),
+            ("[::1]", "::1", None),
+            ("[fe80::1%eth0]", "fe80::1%eth0", None),
+            ("::1", "::1", None),
+            ("2001:db8::1", "2001:db8::1", None),
+            ("fe80::1%eth0", "fe80::1%eth0", None),
+        ] {
+            assert_eq!(split_host_port(target).unwrap(), (host, port), "{target}");
+        }
+        for invalid in ["host:abc", "host:70000", "host:", "[::1]:x"] {
+            assert!(split_host_port(invalid).is_err(), "{invalid}");
         }
     }
 

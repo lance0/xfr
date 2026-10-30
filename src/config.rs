@@ -43,6 +43,9 @@ pub struct ClientDefaults {
     /// Default number of parallel streams
     pub parallel_streams: Option<u8>,
 
+    /// Default server port to connect to
+    pub port: Option<u16>,
+
     /// Enable TCP_NODELAY by default
     pub tcp_nodelay: Option<bool>,
 
@@ -332,6 +335,7 @@ mod tests {
 [client]
 duration_secs = 30
 parallel_streams = 4
+port = 5202
 tcp_nodelay = true
 push_gateway = "http://localhost:8429/api/v1/import/prometheus"
 
@@ -353,6 +357,7 @@ allowed_clients = ["192.168.1.0/24"]
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.client.duration_secs, Some(30));
         assert_eq!(config.client.parallel_streams, Some(4));
+        assert_eq!(config.client.port, Some(5202));
         assert_eq!(
             config.client.push_gateway.as_deref(),
             Some("http://localhost:8429/api/v1/import/prometheus")

@@ -139,6 +139,33 @@ async fn test_cli_json_output_is_parseable_without_quiet() {
 }
 
 #[tokio::test]
+async fn test_cli_host_port_target() {
+    let port = get_test_port();
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args([&format!("127.0.0.1:{port}"), "-t", "1sec", "--json"])
+            // XFR_PORT yields to the target's port instead of conflicting.
+            .env("XFR_PORT", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result.bytes_total > 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_tcp_single_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;

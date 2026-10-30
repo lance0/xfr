@@ -320,7 +320,7 @@ xfr <host> -6                  # Client: force IPv6
 xfr ::1 -6                     # IPv6 localhost
 ```
 
-IPv6 link-local addresses need a zone naming the interface, as in `xfr fe80::2%eth0` or `xfr [fe80::2%eth0]`; a numeric interface index (`%3`) also works, and is the only form accepted on non-Unix platforms. The zone is carried through to every control, data and QUIC socket, which makes a direct cable between two machines testable with no IP configuration at all. `xfr discover` prints link-local answers with their zone. `xfr serve --bind` takes a plain IP, so serve link-local clients from the default wildcard listener.
+IPv6 link-local addresses need a zone naming the interface, as in `xfr fe80::2%eth0` or `xfr [fe80::2%eth0]`; a numeric interface index (`%3`) also works, and is the only form accepted on non-Unix platforms. The zone is carried through to every control, data and QUIC socket, which makes a direct cable between two machines testable with no IP configuration at all. `xfr discover` prints link-local answers with their zone, bracketed with the port (`[fe80::2%eth0]:5201`) so the address can be passed straight to `xfr`. `xfr serve --bind` takes a plain IP, so serve link-local clients from the default wildcard listener.
 
 IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are automatically normalized to their IPv4 form when comparing peer IPs. This ensures consistent behavior in dual-stack environments, such as when validating that a DataHello connection comes from the same client as the control connection.
 
@@ -399,6 +399,7 @@ xfr reads defaults from:
 [client]
 duration_secs = 10
 parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
+# port = 5201                 # server port; a host:port target, -p or XFR_PORT overrides it
 tcp_nodelay = false
 window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
 # bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
@@ -474,6 +475,13 @@ export XFR_DURATION=30s
 For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes precedence over
 `server.port` in the config file. If none is set, the server uses port 5201. An explicit
 port of 5201 also overrides the config file.
+
+For a client, the port comes from a `host:port` target, then `-p`/`--port`, then
+`XFR_PORT`, then `[client] port`, then 5201. Targets take the forms `10.0.0.5:5202`,
+`example.com:5202`, `[::1]:5202` and `[fe80::1%eth0]:5202`. `[::1]`, `[fe80::1%eth0]`
+and a bare IPv6 address such as `::1` or `fe80::1%eth0` have no port; bracket the
+address to add one. A target port that disagrees with `-p`/`--port` is an error;
+`XFR_PORT` yields to the target. Port 0 is rejected from every source.
 
 ### Environment Variables
 
@@ -949,7 +957,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--port` | `-p` | 5201 | Server/client port |
+| `--port` | `-p` | 5201 | Server port. Client precedence: a `host:port` target, then `-p`/`--port`, then `XFR_PORT`, then `[client] port`, then 5201 |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |
