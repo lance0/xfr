@@ -395,21 +395,67 @@ xfr reads defaults from the first of these files that exists:
    - **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
    - **macOS:** `~/Library/Application Support/xfr/config.toml`
    - **Windows:** `%APPDATA%\xfr\config.toml`
-2. **Linux, macOS and other Unix:** `/etc/xfr/config.toml`
+2. **Linux, macOS and other Unix (v0.14.0+):** `/etc/xfr/config.toml`
 
-Only one file is read; a user config shadows `/etc/xfr/config.toml` entirely
-rather than merging with it. `--config <PATH>` or `XFR_CONFIG=<PATH>` names the
-file to read instead, with no search (`--config` wins over `XFR_CONFIG`); a
-missing explicit file is an error. `--config` works before or after `serve`
-(`xfr --config x.toml serve` or `xfr serve --config x.toml`). The file in use
-is logged at info level as `Using config <path>` (stderr, or only the log file
-while a TUI is up); with `--log-level debug`, a run with no config lists the
-paths it searched.
+- **One file only.** xfr reads the first file that exists and ignores the rest.
+  A user config file hides `/etc/xfr/config.toml` completely; the two are not merged.
+- **Pick a file (v0.14.0+).** `--config <PATH>` or `XFR_CONFIG=<PATH>` names the
+  file to read, and nothing else is searched. `--config` wins over `XFR_CONFIG`.
+  If the named file does not exist, xfr exits with an error that names the path
+  and where it came from.
+- **Before or after `serve` (v0.14.0+).** `xfr --config x.toml serve` and
+  `xfr serve --config x.toml` do the same thing.
+- **See which file was used (v0.14.0+).** xfr logs `Using config <path>` at
+  startup (to stderr, or only to the log file while a TUI is up). With
+  `--log-level debug`, a run that found no file lists the paths it searched.
 
-For a service, a container, or a root shell whose `$HOME` is not where you
-expect, use `/etc/xfr/config.toml` or point at the file explicitly, e.g.
-`Environment=XFR_CONFIG=/etc/xfr/server.toml` in a systemd unit or
-`-e XFR_CONFIG=/config/xfr.toml` for a container.
+### Running next to iperf3 (moving off port 5201)
+
+iperf3 and xfr both use port 5201 by default. xfr runs TCP, UDP and QUIC on
+that one port, so when you move xfr to another port, open the new port for
+both TCP and UDP in any firewall.
+
+**Server.** Set the port in a config file:
+
+```toml
+[server]
+port = 5202
+```
+
+Put it in `/etc/xfr/config.toml` (v0.14.0+), which works for services and
+containers no matter what `$HOME` is, or in the user config file listed above
+(all versions). Then start `xfr serve` and check the startup lines:
+
+```text
+INFO Using config /etc/xfr/config.toml
+INFO MPTCP listening on [::]:5202 (dual-stack)
+INFO QUIC server listening on [::]:5202 (dual-stack)
+```
+
+The `Using config` line appears in v0.14.0+. The first listening line starts
+with `TCP` instead of `MPTCP` on systems without MPTCP.
+
+**Clients.** Any of these reach the moved server:
+
+```bash
+xfr <host> -p 5202          # all versions
+xfr <host>:5202             # v0.14.0+
+```
+
+or, in the client's config file (v0.14.0+), `[client]` then `port = 5202`,
+after which a plain `xfr <host>` connects to 5202.
+
+**Containers and systemd.** Inside a container, put the file at
+`/etc/xfr/config.toml` in the container. To keep it somewhere else, pass
+`--config <PATH>` or set `XFR_CONFIG` (v0.14.0+). In a systemd unit:
+
+```ini
+[Service]
+Environment=XFR_CONFIG=/etc/xfr/server.toml
+ExecStart=/usr/local/bin/xfr serve
+```
+
+### Config Settings
 
 ```toml
 [client]
@@ -474,6 +520,13 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/xfr/config.toml"
 # macOS
 chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
+
+The file must also be readable by the account xfr runs as. A root-owned
+`/etc/xfr/config.toml` with mode 600 only works for a server running as root;
+any other account that reaches it in the search stops with
+`failed to read config file` (Permission denied). For a service user, give the file to that user (for a user named `xfr`:
+`chown xfr: /etc/xfr/config.toml`), or keep the key out of the config and use
+`--psk-file` or systemd credentials (see [PSK Authentication](#psk-authentication)).
 
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
