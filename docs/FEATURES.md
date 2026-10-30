@@ -442,12 +442,19 @@ xfr <host> -p 5202          # all versions
 xfr <host>:5202             # v0.14.0+
 ```
 
-or, in the client's config file (v0.14.0+), `[client]` then `port = 5202`,
-after which a plain `xfr <host>` connects to 5202.
+Or set it once in the client's config file (v0.14.0+), and a plain
+`xfr <host>` connects to 5202:
 
-**Containers and systemd.** Inside a container, put the file at
-`/etc/xfr/config.toml` in the container. To keep it somewhere else, pass
-`--config <PATH>` or set `XFR_CONFIG` (v0.14.0+). In a systemd unit:
+```toml
+[client]
+port = 5202
+```
+
+**Containers and systemd.** `/etc/xfr/config.toml` inside the container works
+whatever `$HOME` is (v0.14.0+). On earlier versions, use the user config file
+of the account xfr runs as; for root that's `/root/.config/xfr/config.toml`.
+To keep the file elsewhere, pass `--config <PATH>` or set `XFR_CONFIG`
+(v0.14.0+). In a systemd unit:
 
 ```ini
 [Service]
