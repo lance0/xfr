@@ -1244,14 +1244,25 @@ async fn main() -> Result<()> {
     }
 
     // A missing config is fine, but an existing config must be usable. Silently
-    // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
+    // dropping settings such as PSKs, ACLs, or rate limits is unsafe for a
+    // server; a client may pass over a search-path file it cannot open (say,
+    // a root-only /etc/xfr/config.toml) with a warning.
     let config_source = if cli.config_from_env {
         "XFR_CONFIG"
     } else {
         "--config"
     };
-    let (file_config, config_file) =
-        Config::load_with(cli.config.as_deref().map(|path| (path, config_source)))?;
+    let is_server = matches!(cli.command, Some(Commands::Serve { .. }));
+    let (file_config, config_file, unreadable) = Config::load_with(
+        cli.config.as_deref().map(|path| (path, config_source)),
+        !is_server,
+    )?;
+    for path in unreadable {
+        eprintln!(
+            "Warning: cannot read {} (permission denied); ignoring it",
+            path.display()
+        );
+    }
 
     // The TUIs draw on stdout and read keys from stdin. Without a terminal on
     // both, fall back to plain output as --no-tui does.

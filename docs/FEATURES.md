@@ -522,11 +522,20 @@ chmod 600 "$HOME/Library/Application Support/xfr/config.toml"
 ```
 
 The file must also be readable by the account xfr runs as. A root-owned
-`/etc/xfr/config.toml` with mode 600 only works for a server running as root;
-any other account that reaches it in the search stops with
-`failed to read config file` (Permission denied). For a service user, give the file to that user (for a user named `xfr`:
-`chown xfr: /etc/xfr/config.toml`), or keep the key out of the config and use
-`--psk-file` or systemd credentials (see [PSK Authentication](#psk-authentication)).
+`/etc/xfr/config.toml` with mode 600 is only read by root. When another account
+finds a config file in the search that it is not allowed to open:
+
+- a client prints `Warning: cannot read <path> (permission denied); ignoring it`
+  and continues with its defaults;
+- `xfr serve` refuses to start with
+  `failed to read config file <path>: Permission denied (run as a user that can read it, or pass --config)`,
+  so a server never runs without the PSK or ACL settings it was given.
+
+A file named with `--config` or `XFR_CONFIG` that cannot be read is an error
+for both. For a server running as a service user, give the file to that user
+(for a user named `xfr`: `chown xfr: /etc/xfr/config.toml`), or keep the key
+out of the config and use `--psk-file` or systemd credentials (see
+[PSK Authentication](#psk-authentication)).
 
 The value-taking transport and output settings under `[client]` are defaults: an explicit CLI value takes precedence. This includes `parallel_streams`, `omit_secs`, and `interval_secs`, so `-P 1`, `--omit 0`, and `--interval 1.0` override the config file. `parallel_streams` must be between 1 and 128. `window_size` uses the same bytes or `K`/`M`/`G` suffixes as `--window` (for example `512K` or `1M`); invalid effective values are rejected instead of silently using kernel defaults. `bitrate` accepts the same `100M`/`1G` syntax as `--bitrate`; `dscp` accepts the same DSCP names and numeric values as `--dscp`.
 
