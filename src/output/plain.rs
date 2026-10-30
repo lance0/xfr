@@ -23,9 +23,13 @@ pub fn output_plain(result: &TestResult, mptcp: bool) -> String {
     output.push('\n');
     output.push('\n');
 
+    // Millisecond precision below a second, where a fast `-n` transfer of a
+    // few milliseconds would otherwise print as 0.00s.
+    let decimals = if result.duration_ms < 1000 { 3 } else { 2 };
     writeln!(
         output,
-        "  Duration:    {:.2}s",
+        "  Duration:    {:.*}s",
+        decimals,
         result.duration_ms as f64 / 1000.0
     )
     .expect("writing to String cannot fail");
@@ -666,6 +670,15 @@ mod tests {
     fn test_output_plain_sender_tcp_label_mptcp() {
         let output = output_plain(&make_result_with_tcp_info(), true);
         assert_eq!(output, include_str!("testdata/plain-mptcp.txt"));
+    }
+
+    #[test]
+    fn test_output_plain_subsecond_duration_keeps_milliseconds() {
+        let mut result = make_result_with_tcp_info();
+        result.duration_ms = 1;
+        assert!(output_plain(&result, false).contains("  Duration:    0.001s\n"));
+        result.duration_ms = 10_000;
+        assert!(output_plain(&result, false).contains("  Duration:    10.00s\n"));
     }
 
     #[test]
