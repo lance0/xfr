@@ -39,6 +39,10 @@ pub fn validate_payload_size(size: usize) -> anyhow::Result<()> {
 }
 pub const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
 const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
+/// How long a receiver keeps listening once the test ends for datagrams that
+/// jitter reordered behind the newest one it saw. Ends as soon as every gap
+/// fills, so only a test with real loss waits it out.
+const UDP_TAIL_DRAIN: Duration = Duration::from_millis(200);
 
 /// On-wire size of a v1 receiver-progress feedback packet
 /// (`UdpFeedbackPacket`). Length is the primary discriminator between data
@@ -543,6 +547,13 @@ impl PacketTracker {
             return false;
         }
         self.record_tracked(sequence)
+    }
+
+    /// Record a datagram that arrived after the test ended. It may only fill
+    /// a gap below the high-water mark: anything newer was sent after the
+    /// receiver stopped and must not open fresh gaps at the tail.
+    fn record_straggler(&mut self, sequence: u64) -> bool {
+        self.highest_seen.is_some_and(|highest| sequence < highest) && self.record_tracked(sequence)
     }
 
     /// Accept a far jump only when it agrees with the previously held one.
@@ -1237,6 +1248,28 @@ pub async fn receive_udp(
                     }
                 }
             }
+        }
+    }
+
+    // Datagrams sent before the newest one seen may still be in flight: on a
+    // path with jitter they land after it, and finalizing now would count
+    // their gaps as loss. Give them a short window; whatever is still
+    // missing afterwards is real loss. Feedback and hello datagrams decode
+    // to sequences far above any real high-water mark, so they are ignored.
+    let drain_deadline = tokio::time::Instant::now() + UDP_TAIL_DRAIN;
+    while packet_tracker.lost > 0 {
+        let Ok(result) =
+            tokio::time::timeout_at(drain_deadline, socket.recv_from(&mut buffer)).await
+        else {
+            break;
+        };
+        if let Ok((n, _)) = result
+            && let Some(header) = UdpPacketHeader::decode(&buffer[..n])
+            && packet_tracker.record_straggler(header.sequence)
+        {
+            stats.add_bytes_received(n as u64);
+            stats.set_udp_progress(packet_tracker.received, packet_tracker.lost);
+            jitter_calc.update(header.timestamp_us, Instant::now());
         }
     }
 
@@ -2115,6 +2148,21 @@ mod tests {
         assert_eq!(tracker.stats(3), (0, 1, 0.0));
         assert!(!tracker.record_unique(1));
         assert_eq!(tracker.out_of_order, 1);
+    }
+
+    #[test]
+    fn packet_tracker_stragglers_only_fill_gaps_below_the_high_water_mark() {
+        let mut tracker = PacketTracker::new();
+        assert!(!tracker.record_straggler(0), "nothing seen yet");
+        for sequence in [0, 2, 4] {
+            tracker.record(sequence);
+        }
+        assert!(tracker.record_straggler(1));
+        assert!(!tracker.record_straggler(1), "duplicate");
+        assert!(!tracker.record_straggler(4), "already seen");
+        assert!(!tracker.record_straggler(5), "newer than the test end");
+        assert_eq!((tracker.received, tracker.lost), (4, 1));
+        assert_eq!(tracker.highest_seen, Some(4));
     }
 
     #[test]

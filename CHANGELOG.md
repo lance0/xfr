@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`xfr discover` brackets IPv6 answers** — `fe80::2%eth0:5201` now prints as `[fe80::2%eth0]:5201`, which can be passed to `xfr` as a target with its port.
 
+### Fixed
+- **UDP no longer counts packets still in flight at the end of a test as lost** — on a path with jitter, the receiver stopped having already seen packets that overtook earlier ones still on the wire, and those gaps were finalized as loss. A netem `delay 20ms 10ms` path with no drops reported a fixed 25–47 lost packets per test at 50 Mbps (0.3% of a 2 s test) in every direction. Each receiver (the server for uploads, the client for `-R`, both for `--bidir`) now waits up to 200 ms for those packets before it finalizes loss, ending as soon as every gap fills, so the same path reports 0. Packets sent after the receiver stopped are ignored rather than opening new gaps, and real loss still counts in full. The server's test duration no longer includes that wait. A receiver still running v0.13.0 or earlier keeps the old behavior.
+
 ### Library API (pre-1.0 break)
 - Struct-literal constructors must supply the new public field `config::ClientDefaults.port`. The struct implements `Default`, so literals ending in `..Default::default()` are unaffected.
 

@@ -229,8 +229,10 @@ scripts. Stream intervals and final rows include the same client-relative
 byte/rate splits as the aggregate. Against older servers, missing per-stream
 upload splits remain absent; download splits still use local receive counters.
 
-UDP loss counts sequence gaps observed by each receiver. Completely unseen
-trailing packets cannot be inferred from these measurements.
+UDP loss counts sequence gaps observed by each receiver. When a test ends,
+each receiver waits up to 200 ms for reordered packets still in flight to
+fill their gaps before it finalizes loss. Completely unseen trailing packets
+cannot be inferred from these measurements.
 
 ## Direction Control
 
