@@ -388,7 +388,7 @@ impl PushGatewayClient {
                 }
                 Err(e) => {
                     if attempt < 3 {
-                        warn!(
+                        debug!(
                             "Failed to push metrics (attempt {}): {}. Retrying...",
                             attempt, e
                         );

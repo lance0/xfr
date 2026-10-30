@@ -1067,6 +1067,33 @@ async fn test_psk_auth_failure() {
     }
 }
 
+fn psk_mismatch_config(port: u16, protocol: Protocol, psk: Option<String>) -> ClientConfig {
+    ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+        udp_payload_size: None,
+    }
+}
+
 #[tokio::test]
 async fn test_psk_auth_missing_client_key() {
     let port = get_test_port();
@@ -1081,40 +1108,44 @@ async fn test_psk_auth_missing_client_key() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let config = ClientConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        protocol: Protocol::Tcp,
-        streams: 1,
-        duration: Duration::from_secs(2),
-        direction: Direction::Upload,
-        bitrate: None,
-        tcp_nodelay: false,
-        window_size: None,
-        tcp_congestion: None,
-        psk: None, // No PSK provided
-        address_family: xfr::net::AddressFamily::default(),
-        bind_addr: None,
-        sequential_ports: false,
-        mptcp: false,
-        random_payload: false,
-        zerocopy: ZerocopyMode::Off,
-        dscp: None,
-        mtu_probe: false,
-        connect_timeout: None,
-        byte_budget: None,
-        udp_payload_size: None,
-    };
+    for protocol in [Protocol::Tcp, Protocol::Quic] {
+        let client = Client::new(psk_mismatch_config(port, protocol, None));
+        let result = timeout(Duration::from_secs(10), client.run(None)).await;
+        let error = result
+            .expect("should complete (not timeout)")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "authentication failed: the server requires a pre-shared key (set --psk/--psk-file)",
+            "{protocol:?}"
+        );
+    }
+}
 
-    let client = Client::new(config);
-    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+#[tokio::test]
+async fn test_psk_client_key_against_server_without_psk() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert!(result.is_ok(), "Test should complete (not timeout)");
-    let result = result.unwrap();
-    assert!(
-        result.is_err(),
-        "Should fail when server requires auth but client has no PSK"
-    );
+    for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+        let client = Client::new(psk_mismatch_config(
+            port,
+            protocol,
+            Some("client-secret".to_string()),
+        ));
+        let result = timeout(Duration::from_secs(10), client.run(None)).await;
+        let error = result
+            .expect("should complete (not timeout)")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "the server does not use a pre-shared key; remove --psk/--psk-file or configure the server with one",
+            "{protocol:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4818,6 +4849,55 @@ mod byte_budget {
             "test should end near its 2s cap, took {}ms",
             result.duration_ms
         );
+    }
+
+    /// A transfer that completes in under a millisecond still reports a
+    /// duration and a rate, never 0 ms / 0 Mbps.
+    #[tokio::test]
+    async fn tiny_budget_reports_nonzero_duration_and_rate() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for protocol in [Protocol::Tcp, Protocol::Quic] {
+            for direction in [Direction::Upload, Direction::Download] {
+                let mut config = budget_config(port, protocol, direction, 1);
+                config.byte_budget = Some(100 * 1024);
+                let result = run_budget_test(config).await;
+                assert_eq!(result.bytes_total, 100 * 1024, "{protocol:?} {direction:?}");
+                assert!(result.duration_ms >= 1, "{protocol:?} {direction:?}");
+                assert!(
+                    result.throughput_mbps > 0.0,
+                    "{protocol:?} {direction:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// Duration runs to the last byte's delivery. A paced sender finishes its
+    /// writes while the send buffer still holds megabytes; ending the clock
+    /// there overstated download throughput.
+    #[tokio::test]
+    async fn paced_duration_covers_delivery() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        const BITRATE: u64 = 32_000_000;
+        let expected_ms = BUDGET * 8 * 1000 / BITRATE; // ~1048 ms
+        for protocol in [Protocol::Tcp, Protocol::Quic] {
+            for direction in [Direction::Upload, Direction::Download] {
+                let mut config = budget_config(port, protocol, direction, 1);
+                config.bitrate = Some(BITRATE);
+                let result = run_budget_test(config).await;
+                assert_eq!(result.bytes_total, BUDGET, "{protocol:?} {direction:?}");
+                assert!(
+                    (expected_ms * 9 / 10..expected_ms * 2).contains(&result.duration_ms),
+                    "{protocol:?} {direction:?}: {} ms for {expected_ms} ms of paced data",
+                    result.duration_ms
+                );
+            }
+        }
     }
 }
 

@@ -15,6 +15,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Longest a byte-budget sender waits, after its last write, for the peer to
+/// acknowledge delivery. A peer that stops reading or ACKing without closing
+/// must not hold the test open past this.
+pub(crate) const ACK_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// Remaining bytes for a byte-budget test, shared across every send loop.
 #[derive(Debug)]
