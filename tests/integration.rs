@@ -181,6 +181,136 @@ async fn test_cli_host_port_target() {
 }
 
 #[tokio::test]
+async fn test_cli_config_flag_sets_server_and_client_port() {
+    let port = get_test_port();
+    let dir = tempfile::tempdir().unwrap();
+    let server_config = dir.path().join("server.toml");
+    let client_config = dir.path().join("client.toml");
+    std::fs::write(&server_config, format!("[server]\nport = {port}\n")).unwrap();
+    std::fs::write(&client_config, format!("[client]\nport = {port}\n")).unwrap();
+
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&server_config)
+        .env_remove("XFR_CONFIG")
+        .env_remove("XFR_PORT")
+        .env_remove("XFR_LOG_LEVEL")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    // Listening on the configured port proves the server read --config.
+    timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
+            assert!(server.try_wait().unwrap().is_none(), "server exited");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("--config")
+            .arg(&client_config)
+            .args(["127.0.0.1", "-t", "1sec", "--json"])
+            // --config outranks XFR_CONFIG.
+            .env("XFR_CONFIG", dir.path().join("missing.toml"))
+            .env_remove("XFR_PORT")
+            .env_remove("XFR_LOG_LEVEL")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Using config {}", client_config.display())),
+        "{stderr}"
+    );
+    // The log line goes to stderr, so --json stays parseable.
+    let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result.bytes_total > 0);
+}
+
+/// A search-path config the user cannot open: clients warn and use defaults,
+/// servers refuse to start. Linux only: elsewhere `XDG_CONFIG_HOME` does not
+/// move the user config file.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_cli_unreadable_search_path_config() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let port = get_test_port();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("xfr").join("config.toml");
+    std::fs::create_dir(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[client]\nport = 1\n").unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&config).is_ok() {
+        return; // root reads mode-000 files
+    }
+
+    let server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let run = |args: Vec<String>| {
+        timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+                .args(args)
+                .env("XDG_CONFIG_HOME", dir.path())
+                .env_remove("XFR_CONFIG")
+                .kill_on_drop(true)
+                .output(),
+        )
+    };
+
+    let output = run(vec![
+        "127.0.0.1".into(),
+        "-p".into(),
+        port.to_string(),
+        "-t".into(),
+        "1sec".into(),
+        "--json".into(),
+    ])
+    .await
+    .unwrap()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "Warning: cannot read {} (permission denied); ignoring it",
+            config.display()
+        )),
+        "{stderr}"
+    );
+    server.abort();
+
+    let output = run(vec!["serve".into(), "-p".into(), (port + 1).to_string()])
+        .await
+        .unwrap()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "failed to read config file {}: Permission denied (run as a user that can read it, or pass --config)",
+            config.display()
+        )),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
 async fn test_tcp_single_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;

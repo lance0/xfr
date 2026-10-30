@@ -1,7 +1,10 @@
 //! Configuration file support
 //!
-//! Loads `xfr/config.toml` from the platform configuration directory returned
-//! by `dirs::config_dir()`.
+//! Loads the file named by `--config` or `XFR_CONFIG`. Otherwise the first
+//! existing file of [`Config::search_paths`] wins: `xfr/config.toml` in the
+//! platform configuration directory returned by `dirs::config_dir()` (skipped
+//! when there is none), then `/etc/xfr/config.toml` on Unix. Files are never
+//! merged.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -170,17 +173,86 @@ pub struct ServerPreset {
 }
 
 impl Config {
-    /// Load configuration from the default path.
-    /// Returns default config if file doesn't exist.
+    /// Load configuration from the first existing file of
+    /// [`Config::search_paths`]. Returns default config if none exists.
     pub fn load() -> anyhow::Result<Self> {
-        Self::load_from(&Self::config_path())
+        Ok(Self::load_with(None, false)?.0)
     }
 
-    fn load_from(config_path: &Path) -> anyhow::Result<Self> {
+    /// Load the explicitly requested `(path, source)`, where `source` names
+    /// where the path came from (e.g. `--config`) for the missing-file error.
+    /// Without one, load the first existing file of [`Config::search_paths`].
+    ///
+    /// A search-path file that exists but cannot be opened for lack of
+    /// permission is an error, unless `skip_unreadable` is set: then it is
+    /// passed over and returned in the third element so the caller can warn.
+    /// Also returns the file that was loaded, if any.
+    pub fn load_with(
+        explicit: Option<(&Path, &str)>,
+        skip_unreadable: bool,
+    ) -> anyhow::Result<(Self, Option<PathBuf>, Vec<PathBuf>)> {
+        Self::resolve(explicit, &Self::search_paths(), skip_unreadable)
+    }
+
+    fn resolve(
+        explicit: Option<(&Path, &str)>,
+        candidates: &[PathBuf],
+        skip_unreadable: bool,
+    ) -> anyhow::Result<(Self, Option<PathBuf>, Vec<PathBuf>)> {
+        if let Some((path, source)) = explicit {
+            let config = Self::load_from(path)?.with_context(|| {
+                format!(
+                    "config file {} (from {source}) does not exist",
+                    path.display()
+                )
+            })?;
+            return Ok((config, Some(path.to_path_buf()), Vec::new()));
+        }
+        let mut skipped = Vec::new();
+        for path in candidates {
+            match Self::load_from(path) {
+                Ok(Some(config)) => return Ok((config, Some(path.clone()), skipped)),
+                Ok(None) => {}
+                Err(error)
+                    if error.downcast_ref::<std::io::Error>().map(|e| e.kind())
+                        == Some(std::io::ErrorKind::PermissionDenied) =>
+                {
+                    if !skip_unreadable {
+                        anyhow::bail!(
+                            "failed to read config file {}: Permission denied \
+                             (run as a user that can read it, or pass --config)",
+                            path.display()
+                        );
+                    }
+                    skipped.push(path.clone());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((Self::default(), None, skipped))
+    }
+
+    /// Returns `None` when the file does not exist.
+    fn load_from(config_path: &Path) -> anyhow::Result<Option<Self>> {
         let mut file = match std::fs::File::open(config_path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
+                // A dangling symlink on the path (the file itself or a
+                // directory such as /etc/xfr) is a misconfiguration, not an
+                // absent config: falling back to defaults would drop its
+                // settings without a word. A plain missing directory is absent.
+                if let Some(link) = config_path.ancestors().find(|path| {
+                    path.symlink_metadata()
+                        .is_ok_and(|metadata| metadata.is_symlink())
+                        && !path.exists()
+                }) {
+                    anyhow::bail!(
+                        "config file {}: {} is a symlink to a missing path",
+                        config_path.display(),
+                        link.display()
+                    );
+                }
+                return Ok(None);
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -212,15 +284,32 @@ impl Config {
             )?;
         }
 
-        Ok(config)
+        Ok(Some(config))
     }
 
-    /// Get the default config file path
+    /// Get the per-user config file path
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("xfr")
             .join("config.toml")
+    }
+
+    /// Config files searched, in order, when none is given explicitly: the
+    /// per-user path, then `/etc/xfr/config.toml` on Unix. Without a platform
+    /// config directory there is no per-user path; unlike
+    /// [`Config::config_path`], the search never falls back to the working
+    /// directory, which would let a file there hide the system config.
+    pub fn search_paths() -> Vec<PathBuf> {
+        Self::search_paths_from(dirs::config_dir())
+    }
+
+    fn search_paths_from(config_dir: Option<PathBuf>) -> Vec<PathBuf> {
+        config_dir
+            .map(|dir| dir.join("xfr").join("config.toml"))
+            .into_iter()
+            .chain(cfg!(unix).then(|| PathBuf::from("/etc/xfr/config.toml")))
+            .collect()
     }
 
     /// Get a preset by name
@@ -245,11 +334,170 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("missing").join("config.toml");
 
-        let config = Config::load_from(&config_path).unwrap();
+        assert!(Config::load_from(&config_path).unwrap().is_none());
+        let (config, loaded, _) = Config::resolve(None, &[config_path], false).unwrap();
 
+        assert!(loaded.is_none());
         assert!(config.presets.is_empty());
         assert!(config.client.duration_secs.is_none());
         assert!(config.server.psk.is_none());
+    }
+
+    #[test]
+    fn explicit_config_wins_and_first_existing_search_path_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let user = dir.path().join("user.toml");
+        let system = dir.path().join("system.toml");
+        let explicit = dir.path().join("explicit.toml");
+        std::fs::write(&system, "[server]\nport = 1\n").unwrap();
+        std::fs::write(&explicit, "[server]\nport = 3\n").unwrap();
+        let candidates = [missing, user.clone(), system.clone()];
+
+        // The user file is missing, so the system file is used.
+        let (config, loaded, _) = Config::resolve(None, &candidates, false).unwrap();
+        assert_eq!(config.server.port, Some(1));
+        assert_eq!(loaded.as_deref(), Some(system.as_path()));
+
+        // An existing user file shadows the system file entirely.
+        std::fs::write(&user, "[client]\nport = 2\n").unwrap();
+        let (config, loaded, _) = Config::resolve(None, &candidates, false).unwrap();
+        assert_eq!(config.client.port, Some(2));
+        assert_eq!(config.server.port, None);
+        assert_eq!(loaded.as_deref(), Some(user.as_path()));
+
+        // An explicit file is used even when search paths exist.
+        let (config, loaded, _) =
+            Config::resolve(Some((&explicit, "--config")), &candidates, false).unwrap();
+        assert_eq!(config.server.port, Some(3));
+        assert_eq!(loaded.as_deref(), Some(explicit.as_path()));
+    }
+
+    #[test]
+    fn missing_explicit_config_is_an_error_naming_path_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let fallback = dir.path().join("config.toml");
+        std::fs::write(&fallback, "[server]\nport = 1\n").unwrap();
+        let missing = dir.path().join("missing.toml");
+
+        for source in ["--config", "XFR_CONFIG"] {
+            let error = Config::resolve(
+                Some((&missing, source)),
+                std::slice::from_ref(&fallback),
+                false,
+            )
+            .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(missing.to_str().unwrap()), "{message}");
+            assert!(message.contains(&format!("(from {source})")), "{message}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_config_with_psk_requires_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("xfr.toml");
+        std::fs::write(&config_path, "[client]\npsk = \"secret\"\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = Config::resolve(Some((&config_path, "--config")), &[], false).unwrap_err();
+        assert!(format!("{error:#}").contains("overly broad permissions (644)"));
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (config, _, _) = Config::resolve(Some((&config_path, "--config")), &[], false).unwrap();
+        assert_eq!(config.client.psk.as_deref(), Some("secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_search_path_is_skipped_only_on_request() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("user.toml");
+        let system = dir.path().join("system.toml");
+        std::fs::write(&unreadable, "[server]\nport = 1\n").unwrap();
+        std::fs::write(&system, "[server]\nport = 2\n").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&unreadable).is_ok() {
+            return; // root reads mode-000 files
+        }
+        let candidates = [unreadable.clone(), system.clone()];
+
+        let error = Config::resolve(None, &candidates, false).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(unreadable.to_str().unwrap()), "{message}");
+        assert!(message.contains("or pass --config"), "{message}");
+
+        let (config, loaded, skipped) = Config::resolve(None, &candidates, true).unwrap();
+        assert_eq!(config.server.port, Some(2));
+        assert_eq!(loaded.as_deref(), Some(system.as_path()));
+        assert_eq!(skipped, std::slice::from_ref(&unreadable));
+
+        // An explicit file is never skipped.
+        let error = Config::resolve(Some((&unreadable, "--config")), &[], true).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read config file"));
+    }
+
+    #[test]
+    fn search_skips_the_user_path_without_a_config_dir() {
+        let system: Vec<PathBuf> = cfg!(unix)
+            .then(|| PathBuf::from("/etc/xfr/config.toml"))
+            .into_iter()
+            .collect();
+        assert_eq!(Config::search_paths_from(None), system);
+
+        let paths = Config::search_paths_from(Some(PathBuf::from("/home/u/.config")));
+        assert_eq!(paths[0], Path::new("/home/u/.config/xfr/config.toml"));
+        assert_eq!(&paths[1..], system.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_in_search_is_an_error_for_server_and_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("etc-xfr-config.toml");
+        let system = dir.path().join("system.toml");
+        std::os::unix::fs::symlink(dir.path().join("gone.toml"), &broken).unwrap();
+        std::fs::write(&system, "[server]\nport = 2\n").unwrap();
+        let candidates = [broken.clone(), system];
+
+        for skip_unreadable in [false, true] {
+            let error = Config::resolve(None, &candidates, skip_unreadable).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(broken.to_str().unwrap()), "{message}");
+            assert!(message.contains("symlink to a missing path"), "{message}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlinked_directory_in_search_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let etc = root.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let link = etc.join("xfr");
+        std::os::unix::fs::symlink(root.path().join("missing"), &link).unwrap();
+        let config = link.join("config.toml");
+
+        let error = Config::resolve(None, std::slice::from_ref(&config), true).unwrap_err();
+        let message = format!("{error:#}");
+        assert_eq!(
+            message,
+            format!(
+                "config file {}: {} is a symlink to a missing path",
+                config.display(),
+                link.display()
+            )
+        );
+
+        // A plain missing directory just means there is no config.
+        let absent = etc.join("absent").join("config.toml");
+        let (_, loaded, _) = Config::resolve(None, &[absent], false).unwrap();
+        assert!(loaded.is_none());
     }
 
     #[test]
@@ -289,7 +537,7 @@ mod tests {
             std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let config = Config::load_from(&config_path).unwrap();
+        let config = Config::load_from(&config_path).unwrap().unwrap();
 
         assert_eq!(config.server.psk.as_deref(), Some("secret"));
         assert_eq!(config.server.rate_limit, Some(3));
@@ -323,7 +571,7 @@ mod tests {
         std::fs::write(&config_path, "[server]\nport = 9000\n").unwrap();
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let config = Config::load_from(&config_path).unwrap();
+        let config = Config::load_from(&config_path).unwrap().unwrap();
 
         assert_eq!(config.server.port, Some(9000));
         assert!(config.server.psk.is_none());

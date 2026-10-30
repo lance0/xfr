@@ -130,7 +130,8 @@ themes, and `p` to pause/resume traffic. See [client keys](docs/FEATURES.md#keyb
 <a id="prometheus-metrics"></a>
 <a id="cli-reference"></a>
 
-Set defaults in the platform configuration directory; CLI values override them.
+Set defaults in `~/.config/xfr/config.toml`, in `/etc/xfr/config.toml` for the whole system, or in any file passed with `--config`; CLI values override them.
+Sharing a host with iperf3? See [running next to iperf3](docs/FEATURES.md#running-next-to-iperf3-moving-off-port-5201).
 See [configuration and precedence](docs/FEATURES.md#configuration),
 [metrics](docs/FEATURES.md#prometheus-metrics), and the [CLI reference](docs/FEATURES.md#cli-reference).
 
