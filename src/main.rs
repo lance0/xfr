@@ -24,7 +24,7 @@ use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
 use xfr::config::Config;
 use xfr::diff::{DEFAULT_DIFF_THRESHOLD_PERCENT, DiffConfig, run_diff};
 use xfr::net::AddressFamily;
-use xfr::output::push_gateway::PushGatewayClient;
+use xfr::output::push_gateway::{PushGatewayClient, merge_push_labels};
 use xfr::output::{output_csv, output_json, output_plain};
 
 /// Output format options
@@ -182,6 +182,18 @@ struct Cli {
     #[arg(long, env = "XFR_PUSH_GATEWAY")]
     #[arg(help_heading = "Output Options")]
     push_gateway: Option<String>,
+
+    /// Attach an operator label (repeatable; CLI overrides config by key)
+    #[arg(
+        long = "push-label",
+        value_name = "KEY=VALUE",
+        help_heading = "Output Options"
+    )]
+    push_labels: Vec<String>,
+
+    /// Reuse a bounded aggregate snapshot job (requires an instance label)
+    #[arg(long, help_heading = "Output Options")]
+    push_job: Option<String>,
 
     /// Test duration. Bare integers are seconds (`-t 10`), or use unit suffixes (`10s`, `1min`, `500ms`). Use 0 for infinite.
     /// Defaults to 10s unless `--probe-mtu` is used without `-t`, in which case it defaults to 60s.
@@ -449,6 +461,14 @@ enum Commands {
         #[arg(long, env = "XFR_PUSH_GATEWAY")]
         #[arg(help_heading = "Server Options")]
         push_gateway: Option<String>,
+
+        /// Attach an operator label (repeatable; CLI overrides config by key)
+        #[arg(
+            long = "push-label",
+            value_name = "KEY=VALUE",
+            help_heading = "Server Options"
+        )]
+        push_labels: Vec<String>,
 
         /// Disable mDNS service registration
         #[arg(long)]
@@ -1222,6 +1242,7 @@ async fn main() -> Result<()> {
             #[cfg(feature = "prometheus")]
             prometheus,
             push_gateway,
+            push_labels,
             log_file: _serve_log_file,
             log_level: _serve_log_level,
             psk,
@@ -1246,6 +1267,15 @@ async fn main() -> Result<()> {
             let prom_port = prometheus.or(file_config.server.prometheus_port);
 
             let push_gateway_url = push_gateway.or_else(|| file_config.server.push_gateway.clone());
+            let push_labels =
+                merge_push_labels(file_config.server.push_labels.clone(), &push_labels)?;
+            anyhow::ensure!(
+                push_labels.is_empty() || push_gateway_url.is_some(),
+                "push labels require a push gateway"
+            );
+            if let Some(url) = &push_gateway_url {
+                PushGatewayClient::new(url.clone())?;
+            }
 
             // Build PSK (CLI > file > config)
             let effective_psk = if let Some(psk_path) = psk_file {
@@ -1347,9 +1377,9 @@ async fn main() -> Result<()> {
                 // theme in config.toml, so the saved pref carries a user's
                 // choice across from the client.
                 let prefs = xfr::prefs::Prefs::load().with_overrides(cli.theme.as_deref(), None);
-                run_server_tui(config, prefs.theme_name()).await?;
+                run_server_tui(config, prefs.theme_name(), push_labels).await?;
             } else {
-                let server = Server::new(config);
+                let server = Server::new(config).with_push_labels(push_labels)?;
                 server.run_until(shutdown_signal()).await?;
             }
         }
@@ -1627,15 +1657,32 @@ async fn main() -> Result<()> {
                     .transpose()?,
             };
 
+            let gateway_url = cli
+                .push_gateway
+                .or_else(|| file_config.client.push_gateway.clone());
+            let push_labels =
+                merge_push_labels(file_config.client.push_labels.clone(), &cli.push_labels)?;
+            let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
+            anyhow::ensure!(
+                gateway_url.is_some() || (push_labels.is_empty() && push_job.is_none()),
+                "push labels and job require a push gateway"
+            );
+            let gateway = gateway_url
+                .map(|url| -> Result<PushGatewayClient> {
+                    let mut client = PushGatewayClient::new(url)?
+                        .with_server(host, cli.port)
+                        .with_test(config.protocol, config.direction)
+                        .with_labels(push_labels)?;
+                    if let Some(job) = push_job {
+                        client = client.with_job(job)?;
+                    }
+                    client.validate()?;
+                    Ok(client)
+                })
+                .transpose()?;
             // Determine output format
             let output_opts = OutputOptions {
-                push_gateway: cli
-                    .push_gateway
-                    .or_else(|| file_config.client.push_gateway.clone())
-                    .map(|url| {
-                        PushGatewayClient::new(url).map(|client| client.with_server(host, cli.port))
-                    })
-                    .transpose()?,
+                push_gateway: gateway,
                 json: json_output,
                 json_stream: cli.json_stream,
                 csv: cli.csv,
@@ -2852,7 +2899,11 @@ async fn run_tui_loop(
     }
 }
 
-async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()> {
+async fn run_server_tui(
+    mut config: ServerConfig,
+    theme_name: &str,
+    push_labels: std::collections::BTreeMap<String, String>,
+) -> Result<()> {
     // Create channel for server events
     let (tx, mut rx) = mpsc::channel::<ServerEvent>(100);
     config.tui_tx = Some(tx);
@@ -2872,7 +2923,7 @@ async fn run_server_tui(mut config: ServerConfig, theme_name: &str) -> Result<()
     let mut terminal = Terminal::new(backend)?;
     let mut status = StatusReporter::new(io::stdout().is_terminal());
 
-    let server = Server::new(config);
+    let server = Server::new(config).with_push_labels(push_labels)?;
     let server_handle = tokio::spawn(async move { server.run().await });
 
     let mut app = ServerApp::new();

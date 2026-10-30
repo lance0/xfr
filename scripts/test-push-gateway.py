@@ -12,7 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 class MissingMetric(Exception):
@@ -60,11 +60,14 @@ def read_samples(url, job, victoria):
     with urlopen(url + "/metrics", timeout=5) as response:
         text = response.read().decode()
     rows = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         match = re.fullmatch(r"(\w+)\{(.*)\} (\S+)", line)
         if match:
             name, labels, value = match.groups()
-            labels = dict(re.findall(r'(\w+)="([^"]*)"', labels))
+            labels = {
+                key: json.loads('"' + value + '"', strict=False)
+                for key, value in re.findall(r'(\w+)="((?:\\.|[^"\\])*)"', labels)
+            }
             if labels.get("job") == job:
                 rows.append((name, labels, float(value)))
     return rows
@@ -299,6 +302,179 @@ def run(binary, gateway, storage, victoria, flags):
                     server.wait()
 
 
+def stable_backend_fixtures():
+    with tempfile.TemporaryDirectory() as directory:
+        output = str(Path(directory) / "fixtures.json")
+        subprocess.run(
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "--test",
+                "push_gateway",
+                "stable_backend_fixtures",
+                "--",
+                "--ignored",
+                "--exact",
+            ],
+            env=dict(os.environ, XFR_STABLE_FIXTURES=output),
+            check=True,
+        )
+        return json.loads(Path(output).read_text())
+
+
+def run_stable(gateway, storage, victoria, fixtures):
+    previous = {}
+    repeated_keys = None
+    identities = set()
+    for index, fixture in enumerate(fixtures):
+        job = fixture["job"]
+        method, path, _ = fixture["request"].split()
+        path = path.removeprefix("/api/v1/import/prometheus")
+        assert method == ("POST" if fixture["tag"] == "legacy" else "PUT")
+        body = fixture["body"]
+        if fixture["tag"] != "legacy":
+            assert "test_id" not in body and "stream_id" not in body
+            assert fixture["result"]["id"] not in body
+        with urlopen(
+            Request(
+                gateway.rstrip("/") + path,
+                data=body.encode(),
+                method=method,
+                headers={"Content-Type": "text/plain; version=0.0.4"},
+            ),
+            timeout=5,
+        ):
+            pass
+        if fixture["tag"] == "legacy":
+            wait_for(
+                lambda job=job: bool(read_samples(storage, job, victoria)),
+                "legacy/stable coexistence",
+            )
+            continue
+        expected = {}
+        for line in body.splitlines():
+            if line.startswith("#"):
+                continue
+            name_labels, value = line.rsplit(" ", 1)
+            match = re.fullmatch(r"(\w+)(?:\{(.*)\})?", name_labels)
+            name, labels = match.groups()
+            labels = dict(re.findall(r'(\w+)="([^"]*)"', labels or ""))
+            expected[(name, tuple(sorted(labels.items())))] = float(value)
+        # Check the exporter against finalized result fields, not its own payload.
+        result = fixture["result"]
+        for metric, value in {
+            "bytes": result["bytes_total"],
+            "throughput_mbps": result["throughput_mbps"],
+            "duration_seconds": result["duration_ms"] / 1000,
+            "streams": len(result["streams"]),
+        }.items():
+            assert expected[("xfr_last_test_" + metric, ())] == value, (metric, value)
+        identity = tuple(
+            fixture[k]
+            for k in ("instance", "server", "protocol", "test_direction", "path")
+        )
+        identities.add(identity)
+
+        def delivered(identity=identity, expected=expected, job=job):
+            rows = read_samples(storage, job, victoria)
+            selected = []
+            for name, labels, value in rows:
+                if (
+                    tuple(
+                        labels.get(k)
+                        for k in (
+                            "instance",
+                            "server",
+                            "protocol",
+                            "test_direction",
+                            "path",
+                        )
+                    )
+                    != identity
+                ):
+                    continue
+                assert labels.get("role") == "client", labels
+                assert labels.get("empty", "") == "", labels
+                assert "test_id" not in labels and "stream_id" not in labels
+                if name.startswith("xfr_last_test_"):
+                    extra = tuple(
+                        sorted(
+                            (k, v)
+                            for k, v in labels.items()
+                            if k in ("direction", "view")
+                        )
+                    )
+                    selected.append(((name, extra), value))
+            actual = {}
+            for key, value in selected:
+                assert key not in actual, key
+                actual[key] = value
+            for key, value in expected.items():
+                if key not in actual:
+                    raise MissingMetric
+                floating = key[0].endswith(
+                    ("throughput_mbps", "duration_seconds", "lost_percent", "jitter_ms")
+                )
+                matches = (
+                    float_matches_storage(actual[key], value, victoria)
+                    if floating
+                    else actual[key] == value
+                )
+                if not matches:
+                    # Reused groups may still expose the preceding snapshot while forwarding.
+                    if previous.get((identity, key)) == actual[key]:
+                        return False
+                    raise AssertionError((key, actual[key], value))
+            if not victoria:
+                assert actual.keys() == expected.keys(), (
+                    actual.keys(),
+                    expected.keys(),
+                )
+            for key, value in actual.items():
+                previous[(identity, key)] = value
+            return True
+
+        wait_for(delivered, f"stable snapshot {fixture['tag']}")
+        rows = read_samples(storage, job, victoria)
+        keys = {(name, tuple(sorted(labels.items()))) for name, labels, _ in rows}
+        if fixture["tag"] == "repeat":
+            if repeated_keys is None:
+                repeated_keys = keys
+            assert keys == repeated_keys, (
+                "UUIDs or changing stream count created series"
+            )
+        if victoria and fixture["tag"] in (
+            "missing-tcp",
+            "udp-missing",
+            "udp-all-lost",
+        ):
+            if fixture["tag"] == "missing-tcp":
+                selector = f'job={json.dumps(job)},protocol="tcp"'
+                query = f"xfr_last_test_tcp_rtt_microseconds{{{selector}}} and (xfr_last_test_tcp_info_available{{{selector}}} == 1)"
+            elif fixture["tag"] == "udp-all-lost":
+                selector = f'job={json.dumps(job)},test_direction="bidir"'
+                query = f"xfr_last_test_udp_direction_jitter_ms{{{selector}}} and (xfr_last_test_udp_direction_jitter_available{{{selector}}} == 1)"
+            else:
+                selector = f'job={json.dumps(job)},test_direction="bidir"'
+                query = f"xfr_last_test_udp_direction_lost_percent{{{selector}}} and (xfr_last_test_udp_direction_quality_available{{{selector}}} == 1)"
+
+            def masked(query=query):
+                with urlopen(
+                    storage
+                    + "/api/v1/query?"
+                    + urlencode({"query": query, "nocache": "1"}),
+                    timeout=5,
+                ) as response:
+                    return not json.load(response)["data"]["result"]
+
+            wait_for(masked, "availability mask excludes retained optional values")
+    assert len(identities) == 9, identities
+    print(
+        f"PASS {'vmagent -> VictoriaMetrics' if victoria else 'Pushgateway'} stable repeated snapshots, identities and availability"
+    )
+
+
 def self_check_delivery():
     result = {
         "bytes_total": 8,
@@ -384,9 +560,11 @@ if __name__ == "__main__":
     assert not float_matches_storage(1.9975544455, expected, True)
     binary, pushgateway, victoria, vmagent = sys.argv[1:]
     binary = str(Path(binary).resolve())
+    fixtures = stable_backend_fixtures()
     for gateway, storage, is_victoria in [
         (pushgateway, pushgateway, False),
         (vmagent, victoria, True),
     ]:
         for flags in [[], ["-u", "-R"], ["-u", "--bidir"], ["-Q"]]:
             run(binary, gateway, storage, is_victoria, flags)
+        run_stable(gateway, storage, is_victoria, fixtures)

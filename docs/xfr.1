@@ -206,6 +206,12 @@ has a five-second total deadline including retries. Ctrl-C skips delivery
 without losing the completed result. TUI delivery runs in the background and
 finishes after the summary is printed on exit. Invalid URLs fail before the test
 .TP
+.BI \-\-push\-label " KEY=VALUE"
+Attach an operator label; repeat for multiple labels. CLI values override [client] push_labels by key. Duplicate CLI keys and exporter-owned names are rejected.
+.TP
+.BI \-\-push\-job " NAME"
+Use bounded aggregate client snapshots under a stable job. Requires an explicit nonempty instance push label. Exports xfr_last_test_* gauges without per-stream or UUID labels; use availability gauges when querying optional values. Server pushes remain per-test.
+.TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
 .SH SERVER OPTIONS
@@ -227,6 +233,9 @@ Prometheus push gateway URL (e.g., http://pushgateway:9091). Adds role="server"
 and client="peer IP" grouping labels. Environment: XFR_PUSH_GATEWAY;
 config: [server] push_gateway. Jobs remain named xfr_test_<test_id> and are not
 automatically deleted. Server pushes retain up to three 30-second attempts
+.TP
+.BI \-\-push\-label " KEY=VALUE"
+Attach an operator label; repeat for multiple labels. CLI values override [server] push_labels by key. Server jobs remain per-test.
 .TP
 .BI \-\-prometheus " PORT"
 Prometheus metrics endpoint port (requires the prometheus build feature). Each

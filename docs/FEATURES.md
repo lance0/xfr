@@ -773,11 +773,98 @@ measurement in `Client::run` remains independent of metric delivery. The optiona
 `with_test` context enables directional UDP metrics; context-free library calls
 keep their legacy payload instead of guessing a direction from the result.
 
+### Operator labels and bounded scheduled snapshots
+
+Both client and server pushes accept repeatable `--push-label key=value` values.
+Configure defaults in their respective section:
+
+```toml
+[client]
+push_gateway = "http://127.0.0.1:8429/api/v1/import/prometheus"
+push_labels = { instance = "home", site = "lab" }
+push_job = "mesh"
+
+[server]
+push_gateway = "http://127.0.0.1:8428/api/v1/import/prometheus"
+push_labels = { instance = "central", site = "lab" }
+```
+
+CLI labels override config values by key, preserving other config labels. A
+repeated key in the CLI is an error. Split values on the first `=`; empty values,
+Unicode, slashes, quotes and newlines are supported. Names must use ASCII letters,
+digits and underscores, starting with a letter or underscore. `__*`, `U__*` and
+exporter-owned names (`job`, `role`, `server`, `client`, `protocol`,
+`test_direction`, `direction`, `view`, `test_id`, `stream_id`) are reserved.
+Labels or a job without a gateway are rejected before networking.
+
+Client-only `--push-job NAME` (or `[client] push_job`) selects a bounded,
+aggregate-only snapshot instead of per-test jobs. It requires an explicit,
+nonempty `instance` operator label; the exporter does not infer identity from a
+hostname, interface address or backend `extra_label`. Choose a distinct instance
+for each source peer, including peers behind the same NAT. For example:
+
+```bash
+xfr mesh-server -t 10 -u -b 10M -l 1368 --json --output latest.json \
+  --push-gateway http://127.0.0.1:8429/api/v1/import/prometheus \
+  --push-job mesh --push-label instance=home --push-label path=direct
+```
+
+The stable grouping contains the job, `role="client"`, typed `server`, lowercase
+`protocol`, `test_direction="upload|download|bidir"`, and operator labels. Target
+names remain as given. Different peers, protocols, requested directions and path
+labels stay separate. A TUI restart retains the finished run's protocol/direction
+when choosing its group.
+
+Stable groups reflect the snapshots accepted by the ingestion endpoint, rather
+than guaranteeing measurement completion order. Pending deliveries or overlapping
+processes can arrive out of order. When chronological ordering matters, serialize
+runs for each grouping identity and wait for confirmed delivery before starting
+the next. An unconfirmed delivery can still reach the backend.
+
+Snapshots use only `xfr_last_test_*` gauges: `bytes`, `throughput_mbps`,
+`duration_seconds`, `streams`, TCP RTT/retransmits/window, and the directional UDP
+families described above. They contain no per-stream rows, test UUID labels or
+UUID info metrics. The legacy metric names/types remain unchanged, so both modes
+can coexist in one Pushgateway. A stable push uses `PUT`, replacing the complete
+Pushgateway group and removing optional fields omitted by the new snapshot.
+
+VictoriaMetrics import stores historical samples instead of replacing a cached
+group. Use the availability gauges to exclude old optional values:
+
+```promql
+xfr_last_test_tcp_rtt_microseconds and (xfr_last_test_tcp_info_available == 1)
+xfr_last_test_udp_direction_lost_percent and (xfr_last_test_udp_direction_quality_available == 1)
+xfr_last_test_udp_direction_jitter_ms and (xfr_last_test_udp_direction_jitter_available == 1)
+xfr_last_test_udp_direction_bytes and (xfr_last_test_udp_direction_available == 1)
+```
+
+Availability is emitted on every applicable snapshot. TCP info availability is
+zero when missing. For each requested UDP direction, `available` means both bytes
+and throughput are known (labels include `direction` and `view="receiver"`),
+`quality_available` means received or inferred-lost packets were observed, and
+`jitter_available` requires received packets (quality/jitter labels contain
+`direction`). Unknown quality stays absent rather than becoming measured zero.
+Repeated runs reuse series for the same fixed dimensions; changing a dimension
+creates another group. Stored history still follows backend retention.
+
+For fully bounded scheduled ingestion, use these authoritative client snapshots
+and disable server per-test pushes. Server pushes retain per-test jobs: an
+observed peer IP cannot identify distinct clients behind NAT, and static server
+labels cannot supply a remote logical identity. That separate server capability
+is tracked in LAN-2664. Use legacy mode when per-stream debugging is needed.
+
+Library callers can use `with_labels`, `with_job`, `with_server`, `with_test` and
+`validate` before starting a client measurement, then `push_test_result` after
+saving it. Stable jobs reject context-free or server-local export; the original
+public server configuration remains compatible through `Server::with_push_labels`.
+
+### Legacy per-test retention
+
 The existing `xfr_test_<test_id>` jobs and per-stream `test_id` labels are
 retained. Each test creates new series; a real Pushgateway retains jobs until
 they are deleted. A stable job name alone would not remove the series churn
-from `test_id` labels. Periodic users must manage retention. Arbitrary
-`--push-label` labels are not supported.
+from `test_id` labels. Periodic users in legacy mode must manage retention. Existing retained groups
+need cleanup when migrating to snapshots; a new stable job does not delete them.
 
 With a classic Pushgateway, delete a finished job only after Prometheus has
 scraped it. Use the exact grouping keys from the push; deleting only the job

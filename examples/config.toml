@@ -51,6 +51,11 @@ no_tui = false
 # Client source port for firewall traversal
 # cport = 5202
 
+# Portable push labels; requires push_gateway above or --push-gateway.
+# push_labels = { instance = "home", site = "lab" }
+# Optional bounded client snapshots instead of per-test jobs; needs instance.
+# push_job = "mesh"
+
 [server]
 # Default port
 port = 5201
@@ -66,6 +71,8 @@ no_mdns = false
 
 # Push completed server measurements
 # push_gateway = "http://pushgateway:9091"
+# Portable server labels (server jobs remain per-test).
+# push_labels = { instance = "central" }
 
 # Server presets - use with: xfr serve --preset limited
 [[presets]]

@@ -138,6 +138,7 @@ async fn stalled_control_test(protected: bool, duration: Duration) -> StalledCon
             peer,
             Some(events_tx),
             &None,
+            &std::collections::BTreeMap::new(),
             true,
             false,
             None,
