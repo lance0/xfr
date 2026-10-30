@@ -178,8 +178,8 @@ struct Cli {
     #[arg(value_name = "HOST")]
     host: Option<String>,
 
-    /// Push the final result to a Prometheus Pushgateway URL
-    #[arg(long, env = "XFR_PUSH_GATEWAY")]
+    /// Push the final result to a Prometheus Pushgateway or vmagent import URL
+    #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
     #[arg(help_heading = "Output Options")]
     push_gateway: Option<String>,
 
@@ -343,7 +343,7 @@ struct Cli {
     /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
     /// variable are visible to other users through process metadata such as
     /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
-    #[arg(long, env = "XFR_PSK")]
+    #[arg(long, env = "XFR_PSK", hide_env_values = true)]
     #[arg(help_heading = "Authentication")]
     psk: Option<String>,
 
@@ -457,8 +457,8 @@ enum Commands {
         #[arg(help_heading = "Server Options")]
         prometheus: Option<u16>,
 
-        /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
-        #[arg(long, env = "XFR_PUSH_GATEWAY")]
+        /// Prometheus Pushgateway or vmagent import URL (e.g., http://pushgateway:9091)
+        #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
         #[arg(help_heading = "Server Options")]
         push_gateway: Option<String>,
 
@@ -525,7 +525,7 @@ enum Commands {
         /// WARNING: values supplied via `--psk` or the `XFR_PSK` environment
         /// variable are visible to other users through process metadata such as
         /// `ps`, shell history, and `/proc/<pid>/environ`. Prefer `--psk-file`.
-        #[arg(long, env = "XFR_PSK")]
+        #[arg(long, env = "XFR_PSK", hide_env_values = true)]
         #[arg(help_heading = "Authentication")]
         psk: Option<String>,
 
@@ -1267,12 +1267,16 @@ async fn main() -> Result<()> {
             let prom_port = prometheus.or(file_config.server.prometheus_port);
 
             let push_gateway_url = push_gateway.or_else(|| file_config.server.push_gateway.clone());
-            let push_labels =
-                merge_push_labels(file_config.server.push_labels.clone(), &push_labels)?;
+            // Config labels are inert without a gateway; CLI labels are a mistake.
             anyhow::ensure!(
                 push_labels.is_empty() || push_gateway_url.is_some(),
-                "push labels require a push gateway"
+                "--push-label requires a push gateway (--push-gateway or push_gateway in config)"
             );
+            let push_labels = if push_gateway_url.is_some() {
+                merge_push_labels(file_config.server.push_labels.clone(), &push_labels)?
+            } else {
+                Default::default()
+            };
             if let Some(url) = &push_gateway_url {
                 PushGatewayClient::new(url.clone())?;
             }
@@ -1660,15 +1664,23 @@ async fn main() -> Result<()> {
             let gateway_url = cli
                 .push_gateway
                 .or_else(|| file_config.client.push_gateway.clone());
-            let push_labels =
-                merge_push_labels(file_config.client.push_labels.clone(), &cli.push_labels)?;
-            let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
-            anyhow::ensure!(
-                gateway_url.is_some() || (push_labels.is_empty() && push_job.is_none()),
-                "push labels and job require a push gateway"
-            );
+            // Config labels/job are inert without a gateway; CLI ones are a mistake.
+            for (flag, given) in [
+                ("--push-label", !cli.push_labels.is_empty()),
+                ("--push-job", cli.push_job.is_some()),
+            ] {
+                anyhow::ensure!(
+                    !given || gateway_url.is_some(),
+                    "{flag} requires a push gateway (--push-gateway or push_gateway in config)"
+                );
+            }
             let gateway = gateway_url
                 .map(|url| -> Result<PushGatewayClient> {
+                    let push_labels = merge_push_labels(
+                        file_config.client.push_labels.clone(),
+                        &cli.push_labels,
+                    )?;
+                    let push_job = cli.push_job.or_else(|| file_config.client.push_job.clone());
                     let mut client = PushGatewayClient::new(url)?
                         .with_server(host, cli.port)
                         .with_test(config.protocol, config.direction)
@@ -2555,16 +2567,15 @@ async fn restart_tui_run(
     app: &mut App,
     run: &mut Option<TuiRun>,
     config: &ClientConfig,
-    metrics: &mut ClientMetrics,
 ) -> Result<()> {
     if let Some(current) = run.take() {
         app.log("Restarting, waiting for current test to stop...");
         terminal.draw(|f| draw(f, app))?;
-        let test = current.test;
+        // A run that finished on its own was already taken and pushed. This
+        // one was cut short by the restart, so its result is not pushed:
+        // it would replace the last full measurement with a truncated one.
         match cancel_tui_run(current, Duration::from_secs(3)).await {
-            Some(Ok(result)) => {
-                metrics.queue(&result, test);
-            }
+            Some(Ok(_)) => {}
             Some(Err(e)) => {
                 app.log(format!("Previous test ended while restarting: {}", e));
             }
@@ -2715,7 +2726,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     // `restart_tui_run` may draw a transient "restarting"
                     // frame directly. Its replacement must not be skipped
                     // against the fingerprint from before that draw.
@@ -2807,7 +2818,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     last_drawn = None;
                 }
                 KeyCode::Char('t') => {

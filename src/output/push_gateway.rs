@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::protocol::{Direction, Protocol, TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
@@ -276,32 +276,33 @@ impl PushGatewayClient {
         }
         if let Some((Protocol::Udp, direction)) = self.test {
             let mut samples = Self::result_directions(result, direction);
-            for sample in &mut samples {
-                let available = sample.bytes.is_some() && sample.throughput_mbps.is_some();
-                let quality = sample
-                    .quality
-                    .is_some_and(|q| q.packets_received > 0 || q.lost > 0);
-                let jitter = sample.quality.is_some_and(|q| q.packets_received > 0);
-                let labels = format!("{{direction=\"{}\",view=\"receiver\"}}", sample.direction);
-                snapshot_gauge(
-                    &mut output,
-                    "udp_direction_available",
-                    &labels,
-                    u8::from(available),
-                );
-                let labels = format!("{{direction=\"{}\"}}", sample.direction);
-                snapshot_gauge(
-                    &mut output,
-                    "udp_direction_quality_available",
-                    &labels,
-                    u8::from(quality),
-                );
-                snapshot_gauge(
-                    &mut output,
-                    "udp_direction_jitter_available",
-                    &labels,
-                    u8::from(jitter),
-                );
+            let flags: Vec<[bool; 3]> = samples
+                .iter()
+                .map(|sample| {
+                    [
+                        sample.bytes.is_some() && sample.throughput_mbps.is_some(),
+                        sample
+                            .quality
+                            .is_some_and(|q| q.packets_received > 0 || q.lost > 0),
+                        sample.quality.is_some_and(|q| q.packets_received > 0),
+                    ]
+                })
+                .collect();
+            // One family at a time: a family's samples must follow its header.
+            for (i, (metric, view)) in [
+                ("udp_direction_available", ",view=\"receiver\""),
+                ("udp_direction_quality_available", ""),
+                ("udp_direction_jitter_available", ""),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (sample, flags) in samples.iter().zip(&flags) {
+                    let labels = format!("{{direction=\"{}\"{view}}}", sample.direction);
+                    snapshot_gauge(&mut output, metric, &labels, u8::from(flags[i]));
+                }
+            }
+            for (sample, [available, ..]) in samples.iter_mut().zip(flags) {
                 if !available {
                     sample.bytes = None;
                     sample.throughput_mbps = None;
@@ -363,7 +364,7 @@ impl PushGatewayClient {
         for attempt in 1..=3 {
             match self.push_with_retry(url.as_str(), metrics).await {
                 Ok(_) => {
-                    info!("Pushed metrics (attempt {})", attempt);
+                    debug!("Pushed metrics (attempt {})", attempt);
                     return Ok(());
                 }
                 Err(e) => {
@@ -885,6 +886,15 @@ mod tests {
         assert!(
             full.contains("xfr_last_test_udp_direction_packets_lost{direction=\"download\"} 8")
         );
+        // Each family's samples directly follow its HELP/TYPE header.
+        let mut seen = Vec::new();
+        for line in full.lines().filter(|line| !line.starts_with('#')) {
+            let family = line.split(['{', ' ']).next().unwrap();
+            if seen.last() != Some(&family) {
+                assert!(!seen.contains(&family), "{family} split:\n{full}");
+                seen.push(family);
+            }
+        }
         assert!(!full.contains("test_id"));
         assert!(!full.contains("stream_id"));
         assert!(!full.contains(&result.id));

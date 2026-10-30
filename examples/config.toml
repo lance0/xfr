@@ -51,7 +51,7 @@ no_tui = false
 # Client source port for firewall traversal
 # cport = 5202
 
-# Portable push labels; requires push_gateway above or --push-gateway.
+# Portable push labels; ignored unless push_gateway above or --push-gateway is set.
 # push_labels = { instance = "home", site = "lab" }
 # Optional bounded client snapshots instead of per-test jobs; needs instance.
 # push_job = "mesh"
