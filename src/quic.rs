@@ -782,6 +782,47 @@ mod tests {
         Ok(())
     }
 
+    /// The short client idle timeout must not end a healthy connection that
+    /// simply has nothing to send: the client keep-alive carries it. Real
+    /// time, because quinn reads the std clock rather than tokio's.
+    #[tokio::test]
+    async fn idle_connection_outlives_the_idle_timeout() -> anyhow::Result<()> {
+        let (cert, key) = generate_self_signed_cert()?;
+        let server = create_server_endpoint(
+            "127.0.0.1:0".parse()?,
+            AddressFamily::V4Only,
+            cert,
+            key,
+            None,
+        )?;
+        let server_addr = server.local_addr()?;
+        let client = create_client_endpoint(server_addr, None)?;
+        let accept = async {
+            let incoming = server
+                .accept()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("server endpoint closed before accept"))?;
+            Ok::<_, anyhow::Error>(incoming.await?)
+        };
+        let (client_connection, server_connection) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(connect(&client, server_addr), accept)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("QUIC loopback handshake timed out"))??;
+
+        tokio::time::sleep(QUIC_IDLE_TIMEOUT + Duration::from_millis(1500)).await;
+
+        let mut send = client_connection.open_uni().await?;
+        send.write_all(b"still here").await?;
+        send.finish()?;
+        let mut recv = tokio::time::timeout(Duration::from_secs(2), server_connection.accept_uni())
+            .await
+            .map_err(|_| anyhow::anyhow!("server never saw the stream"))??;
+        assert_eq!(recv.read_to_end(64).await?, b"still here");
+        Ok(())
+    }
+
     /// Regression for LAN-170 #33: `handle_cancel_change` must return
     /// `Stop` when the cancel sender drops (RecvError), preventing the
     /// busy-loop that the old `_ = cancel.changed()` pattern caused.
