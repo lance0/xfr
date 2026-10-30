@@ -8,15 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Portable push labels and bounded client snapshots** — client/server `--push-label` and TOML `push_labels` merge by key; client-only `--push-job` reuses aggregate `xfr_last_test_*` gauges without UUID or stream labels. An explicit `instance` distinguishes source peers, complete-group replacement removes omitted Pushgateway samples, and availability gauges mask old optional values in VictoriaMetrics. Legacy exports remain the default; server bounded grouping is separate.
-- **Directional UDP push metrics** — new `xfr_udp_direction_*` gauges export upload/download bytes, throughput, and each receiver's loss/jitter. Directions are client-relative; server download traffic is labeled as a sender view. Missing observations stay absent, legacy metrics are unchanged, and TUI restarts retain the completed run's protocol/direction. Library callers opt in with `PushGatewayClient::with_test`.
+- **Portable push labels and bounded client snapshots** — client/server `--push-label` and TOML `push_labels` merge by key; client-only `--push-job` reuses aggregate `xfr_last_test_*` gauges without UUID or stream labels. An explicit `instance` distinguishes source peers, complete-group replacement removes omitted Pushgateway samples, and availability gauges mask old optional values in VictoriaMetrics. Config labels and job are ignored until a gateway is configured; `--push-label`/`--push-job` without one is an error, as is either flag before `serve` (`xfr --push-label k=v serve`). Legacy exports remain the default; server bounded grouping is separate.
+- **Directional UDP push metrics** — new `xfr_udp_direction_*` gauges export upload/download bytes, throughput, and each receiver's loss/jitter. Directions are client-relative; server download traffic is labeled as a sender view. Missing observations stay absent, legacy metrics are unchanged, and TUI restarts retain the completed run's protocol/direction. A run cut short by a TUI restart is not pushed, so it cannot replace the last full snapshot. Library callers opt in with `PushGatewayClient::with_test`.
 - **Read systemd PSK credentials on Linux** — `--psk-file` accepts root-owned read-only credential files whose ACL grants read access only to the service's effective UID and root. Ordinary group-readable keys and PSK-bearing config files keep their existing permission checks; `CREDENTIALS_DIRECTORY` does not bypass validation.
 - **Push final client results to Prometheus or vmagent** — `xfr <host> --push-gateway <url>`, `XFR_PUSH_GATEWAY`, and `[client] push_gateway` reuse the existing exporter after local result corrections. Client pushes carry `role="client"` and `server="host:port"`; server pushes carry `role="server"` and `client="peer IP"`. Existing job names and metric names are preserved. HTTP failures remain best effort and do not fail a completed test (#276).
 - **Completed results survive a stalled metrics gateway** — client stdout and result files are written before delivery, the TUI shows completion immediately, and delivery has a five-second total deadline. Ctrl-C skips delivery while preserving the successful measurement. Delivery status appears on stderr or in TUI history; invalid URLs fail before testing and gateway credentials are omitted from delivery logs.
 - **Library API:** `PushGatewayClient::with_server` and fallible `push_test_result` export finalized client results explicitly after they have been consumed or saved. `ClientConfig` and `Client::run` keep their existing measurement-only behavior; the existing `TestStats` exporter API is preserved.
 
 ### Changed
+- **Clients also read `XFR_PUSH_GATEWAY`** — the variable was server-only; an environment that exports it for `xfr serve` now makes `xfr <host>` push its results too. Unset it for clients that should not push.
 - **Second Ctrl-C only forces exit while stopping a measurement** — after a real result is finalized, Ctrl-C skips outstanding metric delivery and preserves the successful exit status and saved result.
+
+### Fixed
+- **`--help` no longer prints `XFR_PSK` or `XFR_PUSH_GATEWAY` values** — help output showed the current environment value beside each option, exposing the pre-shared key or gateway credentials in scrollback and pasted help text.
 
 ## [0.12.1] - 2026-10-21
 
