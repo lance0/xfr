@@ -589,6 +589,30 @@ the RFC 9266 exporter; both peers must support `quic_channel_binding_v1`.
 > variable are visible through process metadata (`ps`, `/proc/<pid>/environ`,
 > shell history). Prefer `--psk-file` with a file readable only by the owner.
 
+On Unix, ordinary PSK files must grant no group/other access (`0600` or `0400`
+are suitable). On Linux, xfr also accepts the read-only ACL pattern used by
+systemd credentials: a regular root-owned file with mode `0440`, where a named
+ACL grants read access only to the service's effective UID, the owning group
+and other users have no access, and root retains read access. The apparent group
+read bit is the ACL mask, not a grant to the owning group.
+
+For a service managed by systemd:
+
+```ini
+[Service]
+DynamicUser=yes
+LoadCredential=psk:/etc/xfr/psk.txt
+ExecStart=/usr/local/bin/xfr serve --psk-file ${CREDENTIALS_DIRECTORY}/psk
+```
+
+`LoadCredentialEncrypted=psk:/etc/credstore.encrypted/xfr-psk` works the same
+way after systemd decrypts the credential. Credential filesystems that use
+service-owned `0400` files already satisfy the ordinary policy. See [systemd
+credentials](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials).
+No directory or environment variable bypasses validation: xfr checks the opened
+file's ownership, permissions and ACL before reading its key. PSK-bearing TOML
+config files retain the owner-only policy.
+
 ### Duration Limits
 
 Limit maximum test duration server-side:
