@@ -29,14 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - **Homebrew installs lead with the core formula** — xfr is in Homebrew core, so the README and `docs/INSTALL.md` now give `brew install xfr`; the `lance0/tap` tap remains available (#272).
 
-### Library API (pre-1.0 break)
-- Struct-literal constructors must supply new public fields: `config::ClientDefaults.{push_gateway, push_labels, push_job}` and `config::ServerDefaults.push_labels`. Both structs implement `Default`, so literals ending in `..Default::default()` are unaffected.
-
 ### Fixed
 - **`--help` no longer prints `XFR_PSK` or `XFR_PUSH_GATEWAY` values** — help output showed the current environment value beside each option, exposing the pre-shared key or gateway credentials in scrollback and pasted help text.
-
-### Fixed
 - **`xfr serve` names the port when it is already taken** — a server whose TCP or QUIC port was held by another process (for example an iperf3 server on the shared default port 5201) failed with only `Address already in use (os error 98)`. The error now names the port and address and suggests another port with `-p`, and `xfr serve --tui` reports startup failures after restoring the terminal instead of exiting silently with status 0 (#273).
+
+### Library API (pre-1.0 break)
+- Struct-literal constructors must supply new public fields: `config::ClientDefaults.{push_gateway, push_labels, push_job}` and `config::ServerDefaults.push_labels`. Both structs implement `Default`, so literals ending in `..Default::default()` are unaffected.
 
 ## [0.12.1] - 2026-10-21
 
