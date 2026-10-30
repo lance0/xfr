@@ -981,39 +981,48 @@ async fn test_psk_auth_failure() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let config = ClientConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        protocol: Protocol::Tcp,
-        streams: 1,
-        duration: Duration::from_secs(2),
-        direction: Direction::Upload,
-        bitrate: None,
-        tcp_nodelay: false,
-        window_size: None,
-        tcp_congestion: None,
-        psk: Some("wrong-secret".to_string()),
-        address_family: xfr::net::AddressFamily::default(),
-        bind_addr: None,
-        sequential_ports: false,
-        mptcp: false,
-        random_payload: false,
-        zerocopy: ZerocopyMode::Off,
-        dscp: None,
-        mtu_probe: false,
-        connect_timeout: None,
-        byte_budget: None,
-        udp_payload_size: None,
-    };
+    for protocol in [Protocol::Tcp, Protocol::Quic] {
+        let config = ClientConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            protocol,
+            streams: 1,
+            duration: Duration::from_secs(2),
+            direction: Direction::Upload,
+            bitrate: None,
+            tcp_nodelay: false,
+            window_size: None,
+            tcp_congestion: None,
+            psk: Some("wrong-secret".to_string()),
+            address_family: xfr::net::AddressFamily::default(),
+            bind_addr: None,
+            sequential_ports: false,
+            mptcp: false,
+            random_payload: false,
+            zerocopy: ZerocopyMode::Off,
+            dscp: None,
+            mtu_probe: false,
+            connect_timeout: None,
+            byte_budget: None,
+            udp_payload_size: None,
+        };
 
-    let client = Client::new(config);
-    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+        let client = Client::new(config);
+        let result = timeout(Duration::from_secs(10), client.run(None)).await;
 
-    assert!(result.is_ok(), "Test should complete (not timeout)");
-    let result = result.unwrap();
-    assert!(result.is_err(), "PSK auth should fail with wrong key");
+        assert!(
+            result.is_ok(),
+            "{protocol:?}: should complete (not timeout)"
+        );
+        let error = result.unwrap().unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "authentication failed: the server rejected the pre-shared key (check --psk/--psk-file)",
+            "{protocol:?}"
+        );
+    }
 }
 
 #[tokio::test]

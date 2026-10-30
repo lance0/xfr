@@ -36,6 +36,18 @@ impl Drop for ClientRunCleanup {
     }
 }
 
+/// The server's reply to an `AuthResponse` it rejected. Servers send exactly
+/// "Authentication failed" when the PSK response does not verify.
+fn auth_rejected_error(message: &str) -> anyhow::Error {
+    if message == "Authentication failed" {
+        anyhow::anyhow!(
+            "authentication failed: the server rejected the pre-shared key (check --psk/--psk-file)"
+        )
+    } else {
+        anyhow::anyhow!("authentication failed: {message}")
+    }
+}
+
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
         Duration::from_millis(u64::from(streams).saturating_mul(STREAM_JOIN_TIMEOUT_PER_STREAM_MS));
@@ -943,7 +955,7 @@ impl Client {
                             }
                         }
                         ControlMessage::Error { message } => {
-                            return Err(anyhow::anyhow!("Authentication failed: {}", message));
+                            return Err(auth_rejected_error(&message));
                         }
                         _ => {
                             return Err(anyhow::anyhow!("Unexpected auth response"));
@@ -2484,7 +2496,7 @@ impl Client {
                             }
                         }
                         ControlMessage::Error { message } => {
-                            return Err(anyhow::anyhow!("Authentication failed: {}", message));
+                            return Err(auth_rejected_error(&message));
                         }
                         _ => {
                             return Err(anyhow::anyhow!("Unexpected auth response"));

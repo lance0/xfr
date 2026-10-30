@@ -458,24 +458,39 @@ fn legacy_udp_bind_addr(bind_addr: Option<IpAddr>, control_local: SocketAddr) ->
 
 /// Name the port and the fix when a startup listener's port is taken; a bare
 /// "Address already in use (os error 98)" leaves operators guessing (#273).
-/// Other errors pass through unchanged.
-fn startup_bind_error(e: impl Into<anyhow::Error>, addr: SocketAddr) -> anyhow::Error {
+/// `quic` marks the UDP socket bound for QUIC, which can collide even when
+/// the TCP listener bound fine. Other errors pass through unchanged.
+fn startup_bind_error(
+    e: impl Into<anyhow::Error>,
+    addr: SocketAddr,
+    bind: Option<IpAddr>,
+    quic: bool,
+) -> anyhow::Error {
     let e = e.into();
-    let in_use = e
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
-    if !in_use {
-        return e;
-    }
+    let state = match e.downcast_ref::<std::io::Error>() {
+        Some(io) if io.kind() == std::io::ErrorKind::AddrInUse => "already in use",
+        // Windows reports a port held by another socket, or one inside an
+        // excluded port range, as WSAEACCES (10013) rather than AddrInUse.
+        Some(io) if cfg!(windows) && io.raw_os_error() == Some(10013) => {
+            "already in use or reserved"
+        }
+        _ => return e,
+    };
     let port = addr.port();
     let host = match addr {
         SocketAddr::V4(a) => a.ip().to_string(),
         SocketAddr::V6(a) => format!("[{}]", a.ip()),
     };
+    let (what, quic) = if quic {
+        ("UDP port", " (QUIC)")
+    } else {
+        ("port", "")
+    };
+    let bind = bind.map(|ip| format!("--bind {ip} ")).unwrap_or_default();
     let next = if port == u16::MAX { port - 1 } else { port + 1 };
     anyhow::anyhow!(
-        "port {port} is already in use on {host} (another xfr or iperf3 server?). \
-         Pick another port with -p, e.g. xfr serve -p {next}"
+        "{what} {port} is {state} on {host}{quic} (another xfr or iperf3 server?). \
+         Pick another port with -p, e.g. xfr serve {bind}-p {next}"
     )
 }
 
@@ -589,12 +604,13 @@ impl Server {
             info!("Binding to {}", addr);
             net::create_tcp_listener_on_addr(addr, self.config.address_family)
                 .await
-                .map_err(|e| startup_bind_error(e, addr))?
+                .map_err(|e| startup_bind_error(e, addr, Some(ip), false))?
         } else {
             net::create_tcp_listener_auto_mptcp(self.config.port, self.config.address_family)
                 .await
                 .map_err(|e| {
-                    startup_bind_error(e, self.config.address_family.bind_addr(self.config.port))
+                    let addr = self.config.address_family.bind_addr(self.config.port);
+                    startup_bind_error(e, addr, None, false)
                 })?
         };
 
@@ -629,7 +645,7 @@ impl Server {
                 key,
                 udp_hello_tx.clone(),
             )
-            .map_err(|e| startup_bind_error(e, udp_bind_addr))?;
+            .map_err(|e| startup_bind_error(e, udp_bind_addr, self.config.bind_addr, true))?;
             info!("QUIC endpoint ready on port {}", self.config.port);
             Some(endpoint)
         } else {
@@ -1439,6 +1455,10 @@ async fn handle_quic_client(
                     ctrl_send
                         .write_all(format!("{}\n", error.serialize()?).as_bytes())
                         .await?;
+                    // Dropping the connection discards unacknowledged stream
+                    // data, leaving the client only "closed by peer: 0".
+                    let _ = ctrl_send.finish();
+                    let _ = tokio::time::timeout(quic::QUIC_CLOSE_GRACE, ctrl_send.stopped()).await;
                     return Err(anyhow::anyhow!("Authentication failed"));
                 }
 
@@ -4660,11 +4680,40 @@ mod tests {
 
         let error = Server::new(config).run().await.unwrap_err().to_string();
 
+        // Windows reports this as WSAEACCES and adds "or reserved".
         assert!(
-            error.contains(&format!("port {port} is already in use")),
+            error.starts_with(&format!("port {port} is already in use")),
             "{error}"
         );
-        assert!(error.contains("-p"), "{error}");
+        assert!(error.contains(" on 127.0.0.1 ("), "{error}");
+        assert!(
+            error.ends_with(&format!("xfr serve --bind 127.0.0.1 -p {}", port + 1)),
+            "{error}"
+        );
+    }
+
+    // Windows SO_REUSEADDR lets the QUIC socket share a plain UDP socket's
+    // port, so the conflict only reproduces on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_names_occupied_quic_port() {
+        let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let config = ServerConfig {
+            port,
+            bind_addr: Some("127.0.0.1".parse().unwrap()),
+            address_family: AddressFamily::V4Only,
+            ..Default::default()
+        };
+
+        let error = Server::new(config).run().await.unwrap_err().to_string();
+
+        assert!(
+            error.starts_with(&format!(
+                "UDP port {port} is already in use on 127.0.0.1 (QUIC)"
+            )),
+            "{error}"
+        );
     }
 
     #[tokio::test]
