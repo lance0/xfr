@@ -39,22 +39,42 @@ fn is_link_local_v6(ip: IpAddr) -> bool {
 /// of them is the sender's address on that link. A server on this host is the
 /// exception: its link-local addresses are ours, and only the pairing with the
 /// interface that owns each one is kept.
+///
+/// Neither signal alone proves a server is ours. A link-local address is
+/// unique only on its link, and a peer's off-link addresses arrive on the
+/// shared interface too, so even our address on the receiving interface may be
+/// a peer's Docker bridge. Hostnames repeat across machines. A server counts
+/// as ours only with both `our_hostname` and an answer that is our address on
+/// the interface it arrived on, so `own` needs no more than the receiving
+/// interfaces. Otherwise every candidate is kept: at worst an extra `-v` row.
 #[cfg(any(feature = "discovery", test))]
 fn usable_addresses(
     answers: &[DiscoveredAddress],
     own: &[DiscoveredAddress],
+    our_hostname: bool,
 ) -> Vec<DiscoveredAddress> {
+    let ours = our_hostname
+        && answers
+            .iter()
+            .any(|a| is_link_local_v6(a.ip) && own.contains(a));
     let mut out: Vec<DiscoveredAddress> = answers
         .iter()
-        .filter(|a| {
-            !is_link_local_v6(a.ip)
-                || a.zone.is_some() && (own.contains(a) || !own.iter().any(|o| o.ip == a.ip))
-        })
+        .filter(|a| !is_link_local_v6(a.ip) || a.zone.is_some() && (!ours || own.contains(a)))
         .cloned()
         .collect();
     out.sort_by_key(|a| (preference(a.ip), a.clone()));
     out.dedup();
     out
+}
+
+/// Whether an advertised mDNS hostname is exactly `ours`, the label
+/// `register_server` advertises. mdns-sd's conflict renames (`box-2`) are
+/// deliberately not matched: another host may carry that name, and a miss
+/// only costs this host's renamed servers some extra `-v` rows.
+#[cfg(any(feature = "discovery", test))]
+fn is_our_hostname(advertised: &str, ours: &str) -> bool {
+    let label = advertised.trim_end_matches('.');
+    label.eq_ignore_ascii_case(ours) || label.eq_ignore_ascii_case(&format!("{ours}.local"))
 }
 
 #[cfg(any(feature = "discovery", test))]
@@ -228,6 +248,8 @@ mod mdns_impl {
         if let Err(e) = mdns.shutdown() {
             debug!("mDNS shutdown error: {e}");
         }
+        // Interfaces nothing arrived on can't matter: an answer only proves a
+        // server is ours by matching our address on its receiving interface.
         let own: Vec<DiscoveredAddress> = receiving
             .iter()
             .flat_map(|id| {
@@ -240,10 +262,15 @@ mod mdns_impl {
                     })
             })
             .collect();
+        let our_label = dns_label(&system_hostname());
         let mut servers: Vec<DiscoveredServer> = found
             .into_iter()
             .filter_map(|(answers, mut server)| {
-                server.addresses = usable_addresses(&answers, &own);
+                let our_hostname = server
+                    .hostname
+                    .as_deref()
+                    .is_some_and(|h| is_our_hostname(h, &our_label));
+                server.addresses = usable_addresses(&answers, &own, our_hostname);
                 debug!("Found server: {}", server);
                 (!server.addresses.is_empty()).then_some(server)
             })
@@ -252,14 +279,19 @@ mod mdns_impl {
         Ok(servers)
     }
 
+    /// The system hostname `register_server` advertises, before `dns_label`.
+    fn system_hostname() -> String {
+        hostname::get()
+            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "xfr-server".to_string())
+    }
+
     pub fn register_server(port: u16) -> anyhow::Result<ServiceDaemon> {
         use mdns_sd::ServiceInfo;
 
         let mdns = ServiceDaemon::new()?;
 
-        let raw_hostname = hostname::get()
-            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "xfr-server".to_string());
+        let raw_hostname = system_hostname();
         let hostname = dns_label(&raw_hostname);
         if raw_hostname.trim().len() > DNS_LABEL_MAX {
             warn!(
@@ -340,7 +372,10 @@ impl std::fmt::Display for DiscoveredServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{DNS_LABEL_MAX, DiscoveredAddress, DiscoveredServer, dns_label, usable_addresses};
+    use super::{
+        DNS_LABEL_MAX, DiscoveredAddress, DiscoveredServer, dns_label, is_our_hostname,
+        usable_addresses,
+    };
 
     fn addr(ip: &str, zone: Option<&str>) -> DiscoveredAddress {
         DiscoveredAddress {
@@ -371,6 +406,7 @@ mod tests {
                     addr("192.168.1.20", None),
                 ],
                 &[],
+                false,
             ),
             port: 5201,
             hostname: Some("box.local.".to_string()),
@@ -396,6 +432,7 @@ mod tests {
                 addr("192.168.1.20", None),
             ],
             &[],
+            false,
         );
         let got: Vec<String> = got.iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -429,6 +466,7 @@ mod tests {
                 addr("192.168.1.20", None),
             ],
             &[],
+            false,
         );
         assert_eq!(
             got,
@@ -452,6 +490,7 @@ mod tests {
                 addr("fe80::3", Some("enp3s0")),
             ],
             &[addr("fe80::99", Some("enp3s0"))],
+            false,
         );
         assert_eq!(got.len(), 3);
         assert!(got.iter().all(|a| a.zone.as_deref() == Some("enp3s0")));
@@ -477,7 +516,87 @@ mod tests {
         let mut want = vec![addr("192.168.1.20", None)];
         want.extend(own.iter().cloned());
         want[1..].sort();
-        assert_eq!(usable_addresses(&answers, &own), want);
+        assert_eq!(usable_addresses(&answers, &own, true), want);
+    }
+
+    #[test]
+    fn remote_peer_reusing_our_link_local_from_another_link_is_kept() {
+        // fe80::1 is ours on docker0; a peer heard on eth0 with the same
+        // address is someone else, since link-locals are unique per link.
+        let got = usable_addresses(
+            &[addr("fe80::1", Some("eth0"))],
+            &[
+                addr("fe80::1", Some("docker0")),
+                addr("fe80::99", Some("eth0")),
+            ],
+            false,
+        );
+        assert_eq!(got, [addr("fe80::1", Some("eth0"))]);
+    }
+
+    #[test]
+    fn same_host_server_heard_on_one_interface_drops_our_other_link_locals() {
+        // Only eth0 answered. fe80::2 is ours on docker0, so pairing it with
+        // eth0 would print an address that doesn't reach this server.
+        let got = usable_addresses(
+            &[
+                addr("fe80::1", Some("eth0")),
+                addr("fe80::2", Some("eth0")),
+                addr("192.168.1.20", None),
+            ],
+            &[addr("fe80::1", Some("eth0"))],
+            true,
+        );
+        assert_eq!(
+            got,
+            [addr("192.168.1.20", None), addr("fe80::1", Some("eth0"))]
+        );
+    }
+
+    /// mdns-sd announces a peer's off-link addresses on the shared link too,
+    /// so its Docker bridge address can equal ours on that link.
+    fn colliding_peer_answers() -> (Vec<DiscoveredAddress>, Vec<DiscoveredAddress>) {
+        (
+            vec![addr("fe80::2", Some("eth0")), addr("fe80::1", Some("eth0"))],
+            vec![addr("fe80::1", Some("eth0"))],
+        )
+    }
+
+    #[test]
+    fn peer_whose_bridge_address_matches_ours_keeps_its_reachable_link_local() {
+        let (answers, own) = colliding_peer_answers();
+        let got = usable_addresses(&answers, &own, false);
+        assert!(got.contains(&addr("fe80::2", Some("eth0"))), "{got:?}");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn own_host_with_our_hostname_is_still_pruned() {
+        let (answers, own) = colliding_peer_answers();
+        assert_eq!(
+            usable_addresses(&answers, &own, true),
+            [addr("fe80::1", Some("eth0"))]
+        );
+    }
+
+    #[test]
+    fn rename_looking_peer_with_colliding_address_keeps_its_link_local() {
+        // Ours is box-2; a peer named box-3 looks like our conflict rename.
+        let (answers, own) = colliding_peer_answers();
+        let got = usable_addresses(&answers, &own, is_our_hostname("box-3.local.", "box-2"));
+        assert!(got.contains(&addr("fe80::2", Some("eth0"))), "{got:?}");
+    }
+
+    #[test]
+    fn our_hostname_is_an_exact_match() {
+        assert!(is_our_hostname("lancebox.local.", "lancebox"));
+        assert!(is_our_hostname("LanceBox.LOCAL.", "lancebox"));
+        assert!(is_our_hostname("lancebox.", "lancebox"));
+        assert!(is_our_hostname("lancebox", "lancebox"));
+        assert!(!is_our_hostname("lancebox-2.local.", "lancebox"));
+        assert!(!is_our_hostname("box-3.local.", "box-2"));
+        assert!(!is_our_hostname("lancebox2.local.", "lancebox"));
+        assert!(!is_our_hostname("other.local.", "lancebox"));
     }
 
     #[test]
