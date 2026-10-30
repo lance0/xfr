@@ -170,3 +170,40 @@ async fn duplicates_do_not_hide_a_genuinely_missing_packet() {
     assert_eq!(result.out_of_order, 0);
     assert_eq!(stats.bytes_received.load(Ordering::Relaxed), 5 * 64);
 }
+
+#[tokio::test]
+async fn tail_gaps_repaired_after_the_end_are_not_loss_but_unfilled_ones_are() {
+    let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sender
+        .connect(receiver.local_addr().unwrap())
+        .await
+        .unwrap();
+    let stats = Arc::new(StreamStats::new(0));
+    let (cancel_tx, cancel) = watch::channel(false);
+    let (_pause_tx, pause) = watch::channel(false);
+    let task = tokio::spawn(receive_udp(
+        receiver,
+        stats.clone(),
+        cancel,
+        pause,
+        false,
+        None,
+    ));
+    for sequence in [0, 1, 3, 5] {
+        send_packet(&sender, sequence).await;
+    }
+    await_counts(&stats, 4, 2).await;
+    // The test ends with 2 and 4 outstanding. 2 was only reordered and lands
+    // after the end; 4 never arrives; 6 was sent after the receiver stopped
+    // and must not open a fresh gap at the tail.
+    cancel_tx.send(true).unwrap();
+    send_packet(&sender, 2).await;
+    send_packet(&sender, 6).await;
+    let (result, inferred_sent) = task.await.unwrap().unwrap();
+    assert_eq!(inferred_sent, 6);
+    assert_eq!(result.packets_received, 5);
+    assert_eq!(result.lost, 1);
+    assert_eq!(result.out_of_order, 1);
+    assert_eq!(stats.bytes_received.load(Ordering::Relaxed), 5 * 64);
+}

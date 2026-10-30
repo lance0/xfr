@@ -39,6 +39,10 @@ pub fn validate_payload_size(size: usize) -> anyhow::Result<()> {
 }
 pub const UDP_HEADER_SIZE: usize = 16; // sequence (8) + timestamp_us (8)
 const UDP_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30); // Cleanup stale sessions
+/// How long a receiver keeps listening once the test ends for datagrams that
+/// jitter reordered behind the newest one it saw. Ends as soon as every gap
+/// fills, so only a test with real loss waits it out.
+const UDP_TAIL_DRAIN: Duration = Duration::from_millis(200);
 
 /// On-wire size of a v1 receiver-progress feedback packet
 /// (`UdpFeedbackPacket`). Length is the primary discriminator between data
@@ -543,6 +547,13 @@ impl PacketTracker {
             return false;
         }
         self.record_tracked(sequence)
+    }
+
+    /// Record a datagram that arrived after the test ended. It may only fill
+    /// a gap below the high-water mark: anything newer was sent after the
+    /// receiver stopped and must not open fresh gaps at the tail.
+    fn record_straggler(&mut self, sequence: u64) -> bool {
+        self.highest_seen.is_some_and(|highest| sequence < highest) && self.record_tracked(sequence)
     }
 
     /// Accept a far jump only when it agrees with the previously held one.
@@ -1142,6 +1153,8 @@ pub async fn receive_udp(
                         stats.add_bytes_received(n as u64);
 
                         if let Some(header) = UdpPacketHeader::decode(&buffer[..n]) {
+                            // Before the tracker check: a far jump is held
+                            // unaccepted until the next packet confirms it.
                             packet_size = Some(packet_size.unwrap_or(0).max(n as u32));
                             // Only count valid xfr packets toward UDP loss
                             // accounting (both live and final). A short or
@@ -1153,15 +1166,13 @@ pub async fn receive_udp(
                             if !packet_tracker.record_unique(header.sequence) {
                                 continue;
                             }
-                            stats.set_udp_progress(
-                                packet_tracker.received,
-                                packet_tracker.lost,
+                            record_accepted_packet(
+                                &stats,
+                                &packet_tracker,
+                                &mut jitter_calc,
+                                header.timestamp_us,
+                                recv_time,
                             );
-
-                            // Update live stats for interval reporting
-                            let jitter_us = jitter_calc.update(header.timestamp_us, recv_time);
-                            stats.set_udp_jitter_us(jitter_us as u64);
-
                         }
                     }
                     Err(e) => {
@@ -1240,6 +1251,36 @@ pub async fn receive_udp(
         }
     }
 
+    // Datagrams sent before the newest one seen may still be in flight: on a
+    // path with jitter they land after it, and finalizing now would count
+    // their gaps as loss. Give them a short window; whatever is still
+    // missing afterwards is real loss. Feedback and hello datagrams decode
+    // to sequences far above any real high-water mark, so they are ignored.
+    let drain_deadline = tokio::time::Instant::now() + UDP_TAIL_DRAIN;
+    while packet_tracker.lost > 0 {
+        let Ok(result) =
+            tokio::time::timeout_at(drain_deadline, socket.recv_from(&mut buffer)).await
+        else {
+            break;
+        };
+        if let Ok((n, _)) = result
+            && let Some(header) = UdpPacketHeader::decode(&buffer[..n])
+            && packet_tracker.record_straggler(header.sequence)
+        {
+            // Only accepted stragglers count toward bytes: once the test is
+            // over, duplicates and foreign datagrams are not test traffic.
+            stats.add_bytes_received(n as u64);
+            packet_size = Some(packet_size.unwrap_or(0).max(n as u32));
+            record_accepted_packet(
+                &stats,
+                &packet_tracker,
+                &mut jitter_calc,
+                header.timestamp_us,
+                Instant::now(),
+            );
+        }
+    }
+
     let packets_received = packet_tracker.received;
     let (lost, out_of_order, _) =
         packet_tracker.stats(packets_received.saturating_add(packet_tracker.lost));
@@ -1263,6 +1304,21 @@ pub async fn receive_udp(
         },
         packets_sent,
     ))
+}
+
+/// Account for a data datagram the sequence tracker accepted, live or as a
+/// tail-drain straggler. Late packets feed jitter in arrival order in both
+/// paths, as RFC 3550 interarrival jitter does.
+fn record_accepted_packet(
+    stats: &StreamStats,
+    tracker: &PacketTracker,
+    jitter_calc: &mut JitterCalculator,
+    timestamp_us: u64,
+    recv_time: Instant,
+) {
+    stats.set_udp_progress(tracker.received, tracker.lost);
+    let jitter_us = jitter_calc.update(timestamp_us, recv_time);
+    stats.set_udp_jitter_us(jitter_us as u64);
 }
 
 /// Store a feedback snapshot only when it belongs to this socket's stream
@@ -2118,6 +2174,21 @@ mod tests {
     }
 
     #[test]
+    fn packet_tracker_stragglers_only_fill_gaps_below_the_high_water_mark() {
+        let mut tracker = PacketTracker::new();
+        assert!(!tracker.record_straggler(0), "nothing seen yet");
+        for sequence in [0, 2, 4] {
+            tracker.record(sequence);
+        }
+        assert!(tracker.record_straggler(1));
+        assert!(!tracker.record_straggler(1), "duplicate");
+        assert!(!tracker.record_straggler(4), "already seen");
+        assert!(!tracker.record_straggler(5), "newer than the test end");
+        assert_eq!((tracker.received, tracker.lost), (4, 1));
+        assert_eq!(tracker.highest_seen, Some(4));
+    }
+
+    #[test]
     fn packet_tracker_retains_and_repairs_initial_gaps() {
         let mut tracker = PacketTracker::new();
         tracker.record(5);
@@ -2485,6 +2556,90 @@ mod tests {
         })
         .await;
         assert!(overall.is_ok(), "test should complete within 10s");
+    }
+
+    #[tokio::test]
+    async fn tail_drain_straggler_updates_packet_size() {
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .connect(receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        let stats = Arc::new(StreamStats::new(0));
+        let observed = stats.clone();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let recv = tokio::spawn(receive_udp(
+            receiver, stats, cancel_rx, pause_rx, false, None,
+        ));
+
+        let datagram = |sequence: u64, len: usize| {
+            let mut buf = vec![0u8; len];
+            UdpPacketHeader {
+                sequence,
+                timestamp_us: sequence,
+            }
+            .encode(&mut buf);
+            buf
+        };
+        // The short final datagram overtakes the full-sized one before it.
+        sender.send(&datagram(1, 300)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while observed.udp_progress_snapshot().packets_received < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("short datagram arrives");
+        cancel_tx.send(true).unwrap();
+        sender.send(&datagram(0, 1000)).await.unwrap();
+
+        let (received, _) = recv.await.unwrap().unwrap();
+        assert_eq!((received.packets_received, received.lost), (2, 0));
+        assert_eq!(received.packet_size, Some(1000));
+        assert_eq!(observed.bytes_received.load(Ordering::Relaxed), 1300);
+    }
+
+    #[tokio::test]
+    async fn held_far_jump_keeps_its_packet_size() {
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .connect(receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        let stats = Arc::new(StreamStats::new(0));
+        let observed = stats.clone();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let recv = tokio::spawn(receive_udp(
+            receiver, stats, cancel_rx, pause_rx, false, None,
+        ));
+
+        // The first sequence is past the tracker window, so it is held until
+        // the short final datagram confirms the jump.
+        for (sequence, len) in [(70_000u64, 1000), (70_001, 300)] {
+            let mut buf = vec![0u8; len];
+            UdpPacketHeader {
+                sequence,
+                timestamp_us: sequence,
+            }
+            .encode(&mut buf);
+            sender.send(&buf).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while observed.udp_progress_snapshot().packets_received < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both datagrams are accepted");
+        cancel_tx.send(true).unwrap();
+
+        let (received, _) = recv.await.unwrap().unwrap();
+        assert_eq!(received.packets_received, 2);
+        assert_eq!(received.packet_size, Some(1000));
     }
 
     #[tokio::test(flavor = "current_thread")]
