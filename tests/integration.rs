@@ -49,6 +49,21 @@ fn test_cli_diff_invalid_threshold_cannot_report_ok() {
     }
 }
 
+/// `xfr discover | head -1` used to panic (exit 101) once `head` had exited.
+#[test]
+fn test_cli_discover_closed_stdout_exits_quietly() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["discover", "--timeout", "0"])
+        .stdout(writer)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
 fn get_test_port() -> u16 {
     PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
 }
@@ -1692,6 +1707,70 @@ async fn test_quic_bidir() {
 
     let result = result.unwrap();
     assert!(result.duration_ms > 0, "Should have duration");
+}
+
+/// Runs a QUIC CLI client and returns (stderr, elapsed). Before the idle
+/// timeout was lowered, both cases below took 30 s or more.
+async fn run_failing_quic_cli(port: u16) -> (String, Duration) {
+    let started = std::time::Instant::now();
+    let output = timeout(
+        Duration::from_secs(20),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", &port.to_string(), "-Q", "-t", "3sec"])
+            .arg("--no-tui")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("QUIC client must give up well before quinn's 30 s default")
+    .unwrap();
+    assert!(!output.status.success());
+    (
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        started.elapsed(),
+    )
+}
+
+#[tokio::test]
+async fn test_quic_client_gives_up_on_dead_server() {
+    let port = get_test_port();
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args(["serve", "-p", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let client = tokio::spawn(run_failing_quic_cli(port));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // SIGKILL: no CONNECTION_CLOSE, the server just goes silent.
+    server.kill().await.unwrap();
+
+    let (stderr, elapsed) = client.await.unwrap();
+    assert!(
+        stderr.contains("connection lost: the server stopped responding"),
+        "{stderr}"
+    );
+    assert!(elapsed < Duration::from_secs(12), "took {elapsed:?}");
+}
+
+#[tokio::test]
+async fn test_quic_client_gives_up_on_closed_port() {
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let (stderr, elapsed) = run_failing_quic_cli(port).await;
+    assert!(
+        stderr.contains(&format!(
+            "could not reach 127.0.0.1:{port} over QUIC (no response within"
+        )),
+        "{stderr}"
+    );
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
 }
 
 #[tokio::test]

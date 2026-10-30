@@ -419,7 +419,7 @@ struct Cli {
     /// Fail if the control connection (hostname resolution plus TCP connect
     /// or QUIC handshake) takes longer than this (e.g. 5s). Without it, a dead
     /// or filtered server or a stuck DNS lookup is bounded only by OS
-    /// defaults, which can be minutes.
+    /// defaults, which can be minutes; a QUIC handshake gives up after 5s.
     #[arg(long, value_parser = parse_nonzero_duration, value_name = "DURATION")]
     #[arg(help_heading = "Connection Options")]
     connect_timeout: Option<Duration>,
@@ -567,6 +567,10 @@ enum Commands {
         /// Discovery timeout. Bare integers are seconds (`5`); unit suffixes also accepted (`5s`, `500ms`).
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         timeout: Duration,
+
+        /// List every address of each server, not just the preferred one
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -1150,6 +1154,19 @@ fn generate_completions(shell: &str) {
     generate(shell, &mut cmd, "xfr", &mut std::io::stdout());
 }
 
+/// `print!` that ends the process quietly when stdout is a closed pipe
+/// (`xfr discover | head -1`), where `print!` panics. Flushes, so callers
+/// need no flush of their own.
+fn print_stdout(args: std::fmt::Arguments) {
+    let mut stdout = io::stdout().lock();
+    if let Err(e) = stdout.write_fmt(args).and_then(|()| stdout.flush()) {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        panic!("failed printing to stdout: {e}");
+    }
+}
+
 /// Top-level options that still take effect when a subcommand runs. Every
 /// other top-level option configures the client test and would be ignored.
 const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
@@ -1440,24 +1457,46 @@ async fn main() -> Result<()> {
                 threshold_percent: threshold,
             };
             let result = run_diff(&baseline, &current, &config)?;
-            println!("{}", result.format_plain());
+            print_stdout(format_args!("{}\n", result.format_plain()));
 
             if result.is_regression {
                 std::process::exit(1);
             }
         }
 
-        Some(Commands::Discover { timeout }) => {
-            println!("Searching for xfr servers...\n");
+        Some(Commands::Discover { timeout, verbose }) => {
+            print_stdout(format_args!("Searching for xfr servers...\n\n"));
 
             let servers = xfr::discover::discover(timeout).await?;
 
             if servers.is_empty() {
-                println!("No xfr servers found.");
+                print_stdout(format_args!("No xfr servers found.\n"));
             } else {
-                println!("Found {} server(s):", servers.len());
+                print_stdout(format_args!("Found {} server(s):\n", servers.len()));
+                let link_local =
+                    |ip: IpAddr| matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local());
                 for server in servers {
-                    println!("  {}", server);
+                    // Only link-local candidates: the first may not be the one
+                    // on this link, so say how many others -v would show.
+                    let more = match server.addresses.split_first() {
+                        Some((first, rest)) if link_local(first.ip) && !verbose => {
+                            rest.iter().filter(|a| link_local(a.ip)).count()
+                        }
+                        _ => 0,
+                    };
+                    if more > 0 {
+                        print_stdout(format_args!(
+                            "  {} (+{} more link-local, see -v)\n",
+                            server, more
+                        ));
+                    } else {
+                        print_stdout(format_args!("  {}\n", server));
+                    }
+                    if verbose {
+                        for addr in &server.addresses {
+                            print_stdout(format_args!("      {}:{}\n", addr, server.port));
+                        }
+                    }
                 }
             }
         }
@@ -1820,11 +1859,10 @@ async fn run_client_plain(
 
     // Print CSV header if needed
     if opts.csv && !opts.quiet {
-        print!(
+        print_stdout(format_args!(
             "{}",
             xfr::output::csv::csv_interval_header(&opts.timestamp_format)
-        );
-        let _ = io::stdout().flush();
+        ));
     }
 
     let omit_secs = opts.omit_secs;
@@ -1955,8 +1993,7 @@ async fn run_client_plain(
                                 cum.lost_percent(),
                             )
                         };
-                        print!("{}", line);
-                        let _ = io::stdout().flush();
+                        print_stdout(format_args!("{}", line));
                         last_feedback_row_at = now;
                     }
                 }
@@ -2089,8 +2126,7 @@ async fn run_client_plain(
                     progress.udp_recv.as_ref(),
                 )
             };
-            print!("{}", interval_output);
-            let _ = io::stdout().flush();
+            print_stdout(format_args!("{}", interval_output));
             last_row_at = std::time::Instant::now();
         }
     });
@@ -2147,8 +2183,7 @@ async fn run_client_plain(
         output_plain(&result, config.mptcp)
     };
 
-    println!("{}", output_str);
-    io::stdout().flush()?;
+    print_stdout(format_args!("{}\n", output_str));
 
     // Don't save incomplete fallback results to file — only save real server results
     if !interrupted && let Some(path) = output {
