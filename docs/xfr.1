@@ -38,13 +38,13 @@ so server options go after the subcommand
 .RB ( "xfr serve \-p 9000" ,
 not
 .BR "xfr \-p 9000 serve" ).
-Only \fB\-\-theme\fR, \fB\-\-log\-file\fR, \fB\-\-log\-level\fR,
+Only \fB\-\-theme\fR, \fB\-\-config\fR, \fB\-\-log\-file\fR, \fB\-\-log\-level\fR,
 \fB\-\-no\-update\-check\fR and \fB\-\-completions\fR may be combined with a
 subcommand, and they must come before it
 .RB ( "xfr \-\-no\-update\-check serve" ,
 not
 .BR "xfr serve \-\-no\-update\-check" ).
-Only \fB\-\-theme\fR is also accepted after the subcommand;
+Only \fB\-\-theme\fR and \fB\-\-config\fR are also accepted after the subcommand;
 .B serve
 has its own \fB\-\-log\-file\fR and \fB\-\-log\-level\fR, given after it.
 Values from environment variables (XFR_PORT, XFR_DURATION, XFR_PSK, ...)
@@ -153,6 +153,12 @@ Log file path (e.g., ~/.config/xfr/xfr.log)
 .TP
 .BI \-\-log\-level " LEVEL"
 Log level: error, warn, info, debug, trace
+.TP
+.BI \-\-config " PATH"
+Read this config file instead of searching the default locations (see
+CONFIGURATION). A missing file is an error. Also accepted after
+.BR serve .
+Environment: XFR_CONFIG
 .TP
 .BI \-\-psk " KEY"
 Pre-shared key for mutual peer authentication and protected post-auth control messages. Environment: XFR_PSK. Values supplied via \fB\-\-psk\fR or \fBXFR_PSK\fR may be visible through process metadata; prefer \fB\-\-psk\-file\fR.
@@ -311,7 +317,10 @@ List every address of each server. By default each server is printed once, with 
 Color theme (same values as the client option)
 .SH CONFIGURATION
 .B xfr
-reads configuration from \fI$XDG_CONFIG_HOME/xfr/config.toml\fR (Linux, defaulting to \fI~/.config/xfr/config.toml\fR), \fI~/Library/Application Support/xfr/config.toml\fR (macOS), or \fI%APPDATA%\\xfr\\config.toml\fR (Windows) if present.
+reads configuration from the first existing file of \fI$XDG_CONFIG_HOME/xfr/config.toml\fR (Linux, defaulting to \fI~/.config/xfr/config.toml\fR), \fI~/Library/Application Support/xfr/config.toml\fR (macOS), or \fI%APPDATA%\\xfr\\config.toml\fR (Windows), then \fI/etc/xfr/config.toml\fR (Unix).
+Only one file is read; files are not merged.
+\fB\-\-config\fR or \fBXFR_CONFIG\fR names the file to read instead, with no search; \fB\-\-config\fR wins, and a missing explicit file is an error.
+The file in use is logged at info level as "Using config \fIPATH\fR".
 CLI arguments override config file values. Environment variables override config file.
 .PP
 Example config:
@@ -380,6 +389,9 @@ Pre-shared key
 .TP
 .B XFR_PUSH_GATEWAY
 Prometheus push gateway URL (client and server)
+.TP
+.B XFR_CONFIG
+Config file path, used instead of the default search (\fB\-\-config\fR overrides it)
 .TP
 .B XFR_LOG_FILE
 Log file path
@@ -560,6 +572,9 @@ Linux user configuration file (when XDG_CONFIG_HOME is unset)
 .TP
 .I ~/Library/Application\ Support/xfr/config.toml
 macOS user configuration file
+.TP
+.I /etc/xfr/config.toml
+System-wide configuration file (Unix), read when no user configuration file exists
 .TP
 .I ~/.config/xfr/prefs.toml
 Linux user preferences (when XDG_CONFIG_HOME is unset)

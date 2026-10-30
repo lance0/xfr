@@ -390,10 +390,26 @@ xfr <host> --omit 3            # Skip first 3s of intervals (TCP ramp-up)
 
 ### Config File
 
-xfr reads defaults from:
-- **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
-- **macOS:** `~/Library/Application Support/xfr/config.toml`
-- **Windows:** `%APPDATA%\xfr\config.toml`
+xfr reads defaults from the first of these files that exists:
+1. The user config file:
+   - **Linux:** `$XDG_CONFIG_HOME/xfr/config.toml`, or `~/.config/xfr/config.toml` when `XDG_CONFIG_HOME` is unset
+   - **macOS:** `~/Library/Application Support/xfr/config.toml`
+   - **Windows:** `%APPDATA%\xfr\config.toml`
+2. **Linux, macOS and other Unix:** `/etc/xfr/config.toml`
+
+Only one file is read; a user config shadows `/etc/xfr/config.toml` entirely
+rather than merging with it. `--config <PATH>` or `XFR_CONFIG=<PATH>` names the
+file to read instead, with no search (`--config` wins over `XFR_CONFIG`); a
+missing explicit file is an error. `--config` works before or after `serve`
+(`xfr --config x.toml serve` or `xfr serve --config x.toml`). The file in use
+is logged at info level as `Using config <path>` (stderr, or only the log file
+while a TUI is up); with `--log-level debug`, a run with no config lists the
+paths it searched.
+
+For a service, a container, or a root shell whose `$HOME` is not where you
+expect, use `/etc/xfr/config.toml` or point at the file explicitly, e.g.
+`Environment=XFR_CONFIG=/etc/xfr/server.toml` in a systemd unit or
+`-e XFR_CONFIG=/config/xfr.toml` for a container.
 
 ```toml
 [client]
@@ -447,7 +463,9 @@ xfr serve --preset internal  # Apply the [[presets]] entry named "internal"
 Unknown preset names are rejected.
 
 On Unix, a config containing either `psk` must grant no access to group or
-other users, so the shared key is not exposed to another local account:
+other users, so the shared key is not exposed to another local account. This
+applies to whichever file is read, including `/etc/xfr/config.toml` and a
+`--config` file:
 
 ```bash
 # Linux
@@ -493,6 +511,7 @@ Environment variables override config file settings:
 | `XFR_DURATION` | Test duration (e.g., "30s") |
 | `XFR_LOG_LEVEL` | Log level (error, warn, info, debug, trace) |
 | `XFR_LOG_FILE` | Log file path |
+| `XFR_CONFIG` | Config file path (`--config` overrides it) |
 | `XFR_BYTES` | Byte count for a fixed-size transfer (`-n`) |
 | `XFR_PSK` | Pre-shared key (visible in process metadata; prefer `--psk-file`) |
 | `XFR_PUSH_GATEWAY` | Prometheus push gateway URL (client and server) |
@@ -500,8 +519,8 @@ Environment variables override config file settings:
 
 ### User Preferences
 
-Theme preference is saved beside `config.toml` as `xfr/prefs.toml` in the same
-platform configuration directory:
+Theme preference is saved as `xfr/prefs.toml` in the user configuration
+directory, even when the config comes from `/etc` or `--config`:
 
 ```toml
 theme = "dracula"
@@ -1016,6 +1035,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--timestamp-format` | | relative | Timestamp format (relative, iso8601, unix) |
 | `--log-file` | | none | Log file path (e.g., ~/.config/xfr/xfr.log) |
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
+| `--config` | | searched | Config file to use instead of the default search (also `XFR_CONFIG`; before or after `serve`) |
 | `--push-gateway` | | none | Prometheus Push Gateway URL (client and server) |
 | `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
 | `--psk` | | none | Pre-shared key for authentication |

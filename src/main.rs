@@ -17,7 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use xfr::client::{Client, ClientConfig, TestProgress, ZerocopyMode};
@@ -341,6 +341,15 @@ struct Cli {
     #[arg(long, env = "XFR_LOG_LEVEL")]
     #[arg(help_heading = "Output Options")]
     log_level: Option<String>,
+
+    /// Config file to use instead of the first of xfr/config.toml in the user
+    /// config directory, then /etc/xfr/config.toml
+    #[arg(long, value_name = "PATH", env = "XFR_CONFIG", global = true)]
+    config: Option<PathBuf>,
+
+    /// Whether `config` came from XFR_CONFIG rather than `--config`.
+    #[arg(skip)]
+    config_from_env: bool,
 
     /// Pre-shared key for authentication.
     ///
@@ -1171,6 +1180,7 @@ fn print_stdout(args: std::fmt::Arguments) {
 /// other top-level option configures the client test and would be ignored.
 const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
     "completions",
+    "config",
     "theme",
     "log_file",
     "log_level",
@@ -1219,6 +1229,7 @@ fn parse_cli() -> Cli {
     }
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
+    cli.config_from_env = matches.value_source("config") == Some(ValueSource::EnvVariable);
     cli
 }
 
@@ -1234,7 +1245,13 @@ async fn main() -> Result<()> {
 
     // A missing config is fine, but an existing config must be usable. Silently
     // dropping settings such as PSKs, ACLs, or rate limits is unsafe.
-    let file_config = Config::load()?;
+    let config_source = if cli.config_from_env {
+        "XFR_CONFIG"
+    } else {
+        "--config"
+    };
+    let (file_config, config_file) =
+        Config::load_with(cli.config.as_deref().map(|path| (path, config_source)))?;
 
     // The TUIs draw on stdout and read keys from stdin. Without a terminal on
     // both, fall back to plain output as --no-tui does.
@@ -1292,6 +1309,17 @@ async fn main() -> Result<()> {
         effective_log_level.map(|s| s.as_str()),
         tui_enabled,
     )?;
+    match &config_file {
+        Some(path) => info!("Using config {}", path.display()),
+        None => debug!(
+            "No config file found (searched {})",
+            Config::search_paths()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 
     match cli.command {
         Some(Commands::Serve {
@@ -4102,6 +4130,19 @@ mod tests {
         // -P 129 should fail
         let result = Cli::try_parse_from(["xfr", "host", "-P", "129"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_option_parses_before_or_after_the_server_subcommand() {
+        for args in [
+            ["xfr", "--config", "x.toml", "serve"],
+            ["xfr", "serve", "--config", "x.toml"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(Commands::Serve { .. })));
+            assert_eq!(cli.config.as_deref(), Some(std::path::Path::new("x.toml")));
+        }
+        assert!(SUBCOMMAND_COMPATIBLE_ARGS.contains(&"config"));
     }
 
     #[test]

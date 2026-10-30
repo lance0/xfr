@@ -1,5 +1,6 @@
 # xfr configuration file
-# Place at ~/.config/xfr/config.toml
+# Place at ~/.config/xfr/config.toml, or /etc/xfr/config.toml system-wide
+# (used only when no user file exists), or pass --config / XFR_CONFIG.
 
 [client]
 # Default test duration in seconds

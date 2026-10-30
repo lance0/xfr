@@ -181,6 +181,51 @@ async fn test_cli_host_port_target() {
 }
 
 #[tokio::test]
+async fn test_cli_config_flag_sets_server_and_client_port() {
+    let port = get_test_port();
+    let dir = tempfile::tempdir().unwrap();
+    let server_config = dir.path().join("server.toml");
+    let client_config = dir.path().join("client.toml");
+    std::fs::write(&server_config, format!("[server]\nport = {port}\n")).unwrap();
+    std::fs::write(&client_config, format!("[client]\nport = {port}\n")).unwrap();
+
+    let _server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&server_config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let output = timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .arg("--config")
+            .arg(&client_config)
+            .args(["127.0.0.1", "-t", "1sec", "--json"])
+            // --config outranks XFR_CONFIG.
+            .env("XFR_CONFIG", dir.path().join("missing.toml"))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Using config {}", client_config.display())),
+        "{stderr}"
+    );
+    // The log line goes to stderr, so --json stays parseable.
+    let result: xfr::protocol::TestResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result.bytes_total > 0);
+}
+
+#[tokio::test]
 async fn test_tcp_single_stream() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
