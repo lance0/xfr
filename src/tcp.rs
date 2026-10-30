@@ -657,7 +657,7 @@ pub async fn send_data(
     }
 
     // Capture final TCP_INFO for retransmit count and RTT
-    let tcp_info = get_stream_tcp_info(&stream);
+    let mut tcp_info = get_stream_tcp_info(&stream);
     if let Some(info) = &tcp_info {
         stats.add_retransmits(info.retransmits);
         // The clamp corrects for send-buffer bytes that the abortive close
@@ -694,6 +694,7 @@ pub async fn send_data(
     }
     if budget.is_some() {
         wait_for_send_queue_acked(&stream, &mut cancel).await;
+        tcp_info = refresh_after_ack_wait(&stats, tcp_info, get_stream_tcp_info(&stream));
     }
 
     debug!(
@@ -840,6 +841,22 @@ async fn wait_for_send_queue_acked(stream: &TcpStream, cancel: &mut watch::Recei
     }
     #[cfg(not(target_os = "linux"))]
     let _ = (stream, cancel);
+}
+
+/// `-n`: the snapshot taken before [`wait_for_send_queue_acked`] predates the
+/// tail's ACKs and any retransmits while it drained. Keep the later one and add
+/// only the retransmits it saw beyond `before`, which is already counted.
+fn refresh_after_ack_wait(
+    stats: &StreamStats,
+    before: Option<crate::protocol::TcpInfoSnapshot>,
+    after: Option<crate::protocol::TcpInfoSnapshot>,
+) -> Option<crate::protocol::TcpInfoSnapshot> {
+    let Some(after) = after else {
+        return before;
+    };
+    let counted = before.map_or(0, |b| b.retransmits);
+    stats.add_retransmits(after.retransmits.saturating_sub(counted));
+    Some(after)
 }
 
 /// Get TCP stats from the socket
@@ -1059,7 +1076,7 @@ pub async fn send_data_half(
     // bytes_acked before abortive close (see send_data for rationale).
     // Capture the snapshot so the caller can store it directly — a second post-reunite
     // read would see a later, larger bytes_acked that could exceed the clamped bytes_sent.
-    let tcp_info = get_tcp_info(write_half.as_ref()).ok();
+    let mut tcp_info = get_tcp_info(write_half.as_ref()).ok();
     if let Some(info) = &tcp_info {
         stats.add_retransmits(info.retransmits);
         // Skipped for byte-budget tests, which close gracefully — see send_data().
@@ -1081,6 +1098,8 @@ pub async fn send_data_half(
     }
     if budget.is_some() {
         wait_for_send_queue_acked(write_half.as_ref(), &mut cancel).await;
+        let after = get_tcp_info(write_half.as_ref()).ok();
+        tcp_info = refresh_after_ack_wait(&stats, tcp_info, after);
     }
 
     debug!(
@@ -1507,12 +1526,15 @@ mod tests {
         {
             received += n as u64;
         }
-        tokio::time::timeout(Duration::from_secs(5), send)
+        let info = tokio::time::timeout(Duration::from_secs(5), send)
             .await
             .expect("send_data must return once the peer has read everything")
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .expect("TCP_INFO snapshot");
         assert_eq!(received, budget_bytes);
+        // The snapshot is taken after the delivery wait, not before it.
+        assert!(info.bytes_acked >= Some(budget_bytes), "{info:?}");
         assert_eq!(
             stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
             budget_bytes
@@ -1686,6 +1708,37 @@ mod tests {
             stats.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
             800
         );
+    }
+
+    #[test]
+    fn ack_wait_refresh_adds_only_new_retransmits() {
+        let snap = |retransmits, acked| crate::protocol::TcpInfoSnapshot {
+            retransmits,
+            rtt_us: 1000,
+            rtt_var_us: 100,
+            cwnd: 10,
+            bytes_acked: Some(acked),
+        };
+        let stats = StreamStats::new(0);
+        // The pre-wait snapshot's cumulative count is already in the stats.
+        stats.add_retransmits(3);
+        let got = refresh_after_ack_wait(&stats, Some(snap(3, 100)), Some(snap(5, 900)));
+        assert_eq!(
+            got.map(|i| (i.retransmits, i.bytes_acked)),
+            Some((5, Some(900)))
+        );
+        assert_eq!(stats.retransmits(), 5);
+
+        // No earlier snapshot: nothing was counted, so all of them are new.
+        let stats = StreamStats::new(0);
+        refresh_after_ack_wait(&stats, None, Some(snap(2, 900)));
+        assert_eq!(stats.retransmits(), 2);
+
+        // A failed re-read keeps the earlier snapshot and adds nothing.
+        let stats = StreamStats::new(0);
+        let got = refresh_after_ack_wait(&stats, Some(snap(3, 100)), None);
+        assert_eq!(got.map(|i| i.bytes_acked), Some(Some(100)));
+        assert_eq!(stats.retransmits(), 0);
     }
 
     #[test]
