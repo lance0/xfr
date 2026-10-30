@@ -67,22 +67,14 @@ fn usable_addresses(
     out
 }
 
-/// Whether an advertised mDNS hostname is `ours` (the label
-/// `register_server` advertises) or mdns-sd's conflict rename of it, which
-/// turns `box.local.` into `box-2.local.` and `box-2` into `box-3`.
+/// Whether an advertised mDNS hostname is exactly `ours`, the label
+/// `register_server` advertises. mdns-sd's conflict renames (`box-2`) are
+/// deliberately not matched: another host may carry that name, and a miss
+/// only costs this host's renamed servers some extra `-v` rows.
 #[cfg(any(feature = "discovery", test))]
 fn is_our_hostname(advertised: &str, ours: &str) -> bool {
-    // ponytail: also matches another host named `<base>-<n>` when ours is
-    // `<base>-<m>`; the address check still has to agree.
-    fn base(label: &str) -> &str {
-        label
-            .rsplit_once('-')
-            .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-            .map_or(label, |(b, _)| b)
-    }
     let label = advertised.trim_end_matches('.');
-    let label = label.strip_suffix(".local").unwrap_or(label);
-    label.eq_ignore_ascii_case(ours) || base(label).eq_ignore_ascii_case(base(ours))
+    label.eq_ignore_ascii_case(ours) || label.eq_ignore_ascii_case(&format!("{ours}.local"))
 }
 
 #[cfg(any(feature = "discovery", test))]
@@ -588,13 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn our_hostname_includes_mdns_conflict_renames() {
+    fn rename_looking_peer_with_colliding_address_keeps_its_link_local() {
+        // Ours is box-2; a peer named box-3 looks like our conflict rename.
+        let (answers, own) = colliding_peer_answers();
+        let got = usable_addresses(&answers, &own, is_our_hostname("box-3.local.", "box-2"));
+        assert!(got.contains(&addr("fe80::2", Some("eth0"))), "{got:?}");
+    }
+
+    #[test]
+    fn our_hostname_is_an_exact_match() {
         assert!(is_our_hostname("lancebox.local.", "lancebox"));
-        assert!(is_our_hostname("LanceBox.local.", "lancebox"));
-        assert!(is_our_hostname("lancebox-2.local.", "lancebox"));
-        assert!(is_our_hostname("box-3.local.", "box-2"));
+        assert!(is_our_hostname("LanceBox.LOCAL.", "lancebox"));
+        assert!(is_our_hostname("lancebox.", "lancebox"));
+        assert!(is_our_hostname("lancebox", "lancebox"));
+        assert!(!is_our_hostname("lancebox-2.local.", "lancebox"));
+        assert!(!is_our_hostname("box-3.local.", "box-2"));
         assert!(!is_our_hostname("lancebox2.local.", "lancebox"));
-        assert!(!is_our_hostname("lancebox-pi.local.", "lancebox"));
         assert!(!is_our_hostname("other.local.", "lancebox"));
     }
 
