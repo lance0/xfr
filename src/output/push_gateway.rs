@@ -2,6 +2,7 @@
 //!
 //! Pushes test metrics to a Prometheus Push Gateway at test completion.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -13,6 +14,60 @@ use tracing::{debug, error, info, warn};
 use crate::protocol::{Direction, Protocol, TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
 
+/// Validate operator labels without permitting overrides of exporter-owned dimensions.
+pub fn validate_push_labels(labels: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    for name in labels.keys() {
+        anyhow::ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .enumerate()
+                    .all(|(i, c)| c.is_ascii_alphabetic()
+                        || c == b'_'
+                        || (i > 0 && c.is_ascii_digit()))
+                && !name.starts_with("__")
+                && !name.starts_with("U__")
+                && ![
+                    "job",
+                    "role",
+                    "server",
+                    "client",
+                    "protocol",
+                    "test_direction",
+                    "direction",
+                    "view",
+                    "test_id",
+                    "stream_id"
+                ]
+                .contains(&name.as_str()),
+            "invalid or reserved push label name {name:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Merge CLI labels over config values; duplicate CLI keys are errors.
+pub fn merge_push_labels(
+    mut labels: BTreeMap<String, String>,
+    cli: &[String],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut overrides = BTreeMap::new();
+    for label in cli {
+        let (name, value) = label
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("push label must be key=value: {label:?}"))?;
+        anyhow::ensure!(
+            overrides
+                .insert(name.to_string(), value.to_string())
+                .is_none(),
+            "duplicate push label {name:?}"
+        );
+    }
+    labels.extend(overrides);
+    validate_push_labels(&labels)?;
+    Ok(labels)
+}
+
 /// Push Gateway client for sending test metrics
 #[derive(Clone)]
 pub struct PushGatewayClient {
@@ -20,6 +75,8 @@ pub struct PushGatewayClient {
     client: Client,
     grouping_labels: Vec<(String, String)>,
     test: Option<(Protocol, Direction)>,
+    labels: BTreeMap<String, String>,
+    job: Option<String>,
 }
 
 impl PushGatewayClient {
@@ -44,6 +101,8 @@ impl PushGatewayClient {
             client,
             grouping_labels: Vec::new(),
             test: None,
+            labels: BTreeMap::new(),
+            job: None,
         })
     }
 
@@ -54,6 +113,42 @@ impl PushGatewayClient {
     pub fn with_test(mut self, protocol: Protocol, direction: Direction) -> Self {
         self.test = Some((protocol, direction));
         self
+    }
+
+    /// Attach portable operator labels to either export role.
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> anyhow::Result<Self> {
+        validate_push_labels(&labels)?;
+        self.labels = labels;
+        Ok(self)
+    }
+
+    /// Select bounded aggregate client snapshots under a stable job.
+    pub fn with_job(mut self, job: String) -> anyhow::Result<Self> {
+        anyhow::ensure!(!job.trim().is_empty(), "push job must not be empty");
+        self.job = Some(job);
+        Ok(self)
+    }
+
+    /// Validate bounded-client context before starting a measurement.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.job.is_some() {
+            anyhow::ensure!(
+                self.labels
+                    .get("instance")
+                    .is_some_and(|v| !v.trim().is_empty()),
+                "stable push job requires a nonempty instance label"
+            );
+            anyhow::ensure!(
+                self.test.is_some()
+                    && self
+                        .grouping_labels
+                        .iter()
+                        .any(|(k, v)| k == "role" && v == "client")
+                    && self.grouping_labels.iter().any(|(k, _)| k == "server"),
+                "stable push job requires client target and test context"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn with_endpoint(mut self, name: &str, value: &str, role: &str) -> Self {
@@ -78,6 +173,10 @@ impl PushGatewayClient {
     /// # Arguments
     /// * `stats` - Test statistics to push
     pub async fn push_test_metrics(&self, stats: &TestStats) {
+        if self.job.is_some() {
+            error!("Stable push jobs require finalized client results");
+            return;
+        }
         let metrics = self.format_metrics(stats);
         if let Err(error) = self.push_metrics(&stats.test_id, &metrics).await {
             error!("Failed to push metrics: {error:#}");
@@ -87,7 +186,12 @@ impl PushGatewayClient {
     /// Push the finalized result, including any client-side receiver corrections.
     /// Delivery has a five-second total deadline, including retries.
     pub async fn push_test_result(&self, result: &TestResult) -> anyhow::Result<()> {
-        let metrics = self.format_result(result);
+        self.validate()?;
+        let metrics = if self.job.is_some() {
+            self.format_snapshot(result)
+        } else {
+            self.format_result(result)
+        };
         tokio::time::timeout(
             Duration::from_secs(5),
             self.push_metrics(&result.id, &metrics),
@@ -110,38 +214,102 @@ impl PushGatewayClient {
             result.udp_stats.iter(),
         );
         if let Some((Protocol::Udp, direction)) = self.test {
-            let samples = match direction {
-                Direction::Upload | Direction::Download => vec![DirectionalUdp {
-                    direction: if direction == Direction::Upload {
-                        "upload"
-                    } else {
-                        "download"
-                    },
-                    view: "receiver",
-                    bytes: Some(result.bytes_total),
-                    throughput_mbps: Some(result.throughput_mbps),
-                    quality: result.udp_stats.as_ref(),
-                }],
-                Direction::Bidir => vec![
-                    DirectionalUdp {
-                        direction: "upload",
-                        view: "receiver",
-                        bytes: result.bytes_sent,
-                        throughput_mbps: result.throughput_send_mbps,
-                        quality: result.udp_stats_send.as_deref(),
-                    },
-                    DirectionalUdp {
-                        direction: "download",
-                        view: "receiver",
-                        bytes: result.bytes_received,
-                        throughput_mbps: result.throughput_recv_mbps,
-                        quality: result.udp_stats_recv.as_deref(),
-                    },
-                ],
-            };
+            let samples = Self::result_directions(result, direction);
             append_udp_directions(&mut metrics, &samples);
         }
         metrics
+    }
+
+    fn result_directions(result: &TestResult, direction: Direction) -> Vec<DirectionalUdp<'_>> {
+        match direction {
+            Direction::Upload | Direction::Download => vec![DirectionalUdp {
+                direction: if direction == Direction::Upload {
+                    "upload"
+                } else {
+                    "download"
+                },
+                view: "receiver",
+                bytes: Some(result.bytes_total),
+                throughput_mbps: Some(result.throughput_mbps),
+                quality: result.udp_stats.as_ref(),
+            }],
+            Direction::Bidir => vec![
+                DirectionalUdp {
+                    direction: "upload",
+                    view: "receiver",
+                    bytes: result.bytes_sent,
+                    throughput_mbps: result.throughput_send_mbps,
+                    quality: result.udp_stats_send.as_deref(),
+                },
+                DirectionalUdp {
+                    direction: "download",
+                    view: "receiver",
+                    bytes: result.bytes_received,
+                    throughput_mbps: result.throughput_recv_mbps,
+                    quality: result.udp_stats_recv.as_deref(),
+                },
+            ],
+        }
+    }
+
+    fn format_snapshot(&self, result: &TestResult) -> String {
+        let mut output = String::new();
+        snapshot_gauge(&mut output, "bytes", "", result.bytes_total);
+        snapshot_gauge(&mut output, "throughput_mbps", "", result.throughput_mbps);
+        snapshot_gauge(
+            &mut output,
+            "duration_seconds",
+            "",
+            result.duration_ms as f64 / 1000.0,
+        );
+        snapshot_gauge(&mut output, "streams", "", result.streams.len());
+        snapshot_gauge(
+            &mut output,
+            "tcp_info_available",
+            "",
+            u8::from(result.tcp_info.is_some()),
+        );
+        if let Some(tcp) = &result.tcp_info {
+            snapshot_gauge(&mut output, "tcp_rtt_microseconds", "", tcp.rtt_us);
+            snapshot_gauge(&mut output, "tcp_retransmits", "", tcp.retransmits);
+            snapshot_gauge(&mut output, "tcp_cwnd_bytes", "", tcp.cwnd);
+        }
+        if let Some((Protocol::Udp, direction)) = self.test {
+            let mut samples = Self::result_directions(result, direction);
+            for sample in &mut samples {
+                let available = sample.bytes.is_some() && sample.throughput_mbps.is_some();
+                let quality = sample
+                    .quality
+                    .is_some_and(|q| q.packets_received > 0 || q.lost > 0);
+                let jitter = sample.quality.is_some_and(|q| q.packets_received > 0);
+                let labels = format!("{{direction=\"{}\",view=\"receiver\"}}", sample.direction);
+                snapshot_gauge(
+                    &mut output,
+                    "udp_direction_available",
+                    &labels,
+                    u8::from(available),
+                );
+                let labels = format!("{{direction=\"{}\"}}", sample.direction);
+                snapshot_gauge(
+                    &mut output,
+                    "udp_direction_quality_available",
+                    &labels,
+                    u8::from(quality),
+                );
+                snapshot_gauge(
+                    &mut output,
+                    "udp_direction_jitter_available",
+                    &labels,
+                    u8::from(jitter),
+                );
+                if !available {
+                    sample.bytes = None;
+                    sample.throughput_mbps = None;
+                }
+            }
+            append_udp_directions_named(&mut output, &samples, "xfr_last_test_udp_direction");
+        }
+        output
     }
 
     fn push_url(&self, test_id: &str) -> anyhow::Result<reqwest::Url> {
@@ -151,11 +319,28 @@ impl PushGatewayClient {
                 .path_segments_mut()
                 .map_err(|()| anyhow::anyhow!("invalid push gateway URL"))?;
             path.pop_if_empty().push("metrics");
-            for (name, value) in std::iter::once(("job", format!("xfr_test_{test_id}"))).chain(
-                self.grouping_labels
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.clone())),
-            ) {
+            let mut labels = self.grouping_labels.clone();
+            if self.job.is_some() {
+                let (protocol, direction) = self.test.expect("validated snapshot context");
+                labels.push(("protocol".into(), protocol.to_string().to_ascii_lowercase()));
+                labels.push((
+                    "test_direction".into(),
+                    match direction {
+                        Direction::Upload => "upload",
+                        Direction::Download => "download",
+                        Direction::Bidir => "bidir",
+                    }
+                    .into(),
+                ));
+            }
+            labels.extend(self.labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let job = self
+                .job
+                .clone()
+                .unwrap_or_else(|| format!("xfr_test_{test_id}"));
+            for (name, value) in std::iter::once(("job", job))
+                .chain(labels.iter().map(|(k, v)| (k.as_str(), v.clone())))
+            {
                 if value.is_empty() || value.contains('/') {
                     path.push(&format!("{name}@base64"));
                     path.push(&if value.is_empty() {
@@ -202,7 +387,14 @@ impl PushGatewayClient {
     async fn push_with_retry(&self, url: &str, metrics: &str) -> anyhow::Result<()> {
         let response = self
             .client
-            .post(url)
+            .request(
+                if self.job.is_some() {
+                    reqwest::Method::PUT
+                } else {
+                    reqwest::Method::POST
+                },
+                url,
+            )
             .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
             .body(metrics.to_string())
             .send()
@@ -492,7 +684,25 @@ struct DirectionalUdp<'a> {
     quality: Option<&'a UdpStats>,
 }
 
+fn snapshot_gauge(output: &mut String, metric: &str, labels: &str, value: impl std::fmt::Display) {
+    let header = format!("# TYPE xfr_last_test_{metric} gauge\n");
+    if !output.contains(&header) {
+        writeln!(
+            output,
+            "# HELP xfr_last_test_{metric} Last completed test {metric}\n{}",
+            header.trim_end()
+        )
+        .expect("writing to String cannot fail");
+    }
+    writeln!(output, "xfr_last_test_{metric}{labels} {value}")
+        .expect("writing to String cannot fail");
+}
+
 fn append_udp_directions(output: &mut String, samples: &[DirectionalUdp<'_>]) {
+    append_udp_directions_named(output, samples, "xfr_udp_direction");
+}
+
+fn append_udp_directions_named(output: &mut String, samples: &[DirectionalUdp<'_>], prefix: &str) {
     for (metric, help) in [
         ("bytes", "UDP bytes for this direction and measurement view"),
         (
@@ -532,7 +742,7 @@ fn append_udp_directions(output: &mut String, samples: &[DirectionalUdp<'_>]) {
                 _ => unreachable!("fixed metric list"),
             };
             let Some(value) = value else { continue };
-            let name = format!("xfr_udp_direction_{metric}");
+            let name = format!("{prefix}_{metric}");
             if !header {
                 writeln!(output, "# HELP {name} {help}\n# TYPE {name} gauge")
                     .expect("writing to String cannot fail");
@@ -559,7 +769,7 @@ fn append_udp_directions(output: &mut String, samples: &[DirectionalUdp<'_>]) {
 
 /// Push metrics to the gateway if configured
 pub async fn maybe_push_metrics(push_gateway_url: &Option<String>, stats: &TestStats) {
-    maybe_push_metrics_for_peer(push_gateway_url, stats, None, None).await;
+    maybe_push_metrics_for_peer(push_gateway_url, stats, None, None, &BTreeMap::new()).await;
 }
 
 pub(crate) async fn maybe_push_metrics_for_peer(
@@ -567,6 +777,7 @@ pub(crate) async fn maybe_push_metrics_for_peer(
     stats: &TestStats,
     peer: Option<IpAddr>,
     test: Option<(Protocol, Direction)>,
+    labels: &BTreeMap<String, String>,
 ) {
     if let Some(url) = push_gateway_url {
         match PushGatewayClient::new(url.clone()) {
@@ -585,7 +796,10 @@ pub(crate) async fn maybe_push_metrics_for_peer(
                 } else {
                     client
                 };
-                client.push_test_metrics(stats).await;
+                match client.with_labels(labels.clone()) {
+                    Ok(client) => client.push_test_metrics(stats).await,
+                    Err(error) => error!("Invalid push labels: {error}"),
+                }
             }
             Err(e) => {
                 error!("Failed to initialize push gateway client: {}", e);
@@ -605,6 +819,108 @@ mod tests {
     use crate::output::push_gateway::PushGatewayClient;
     use crate::protocol::{TcpInfoSnapshot, UdpStats};
     use crate::stats::TestStats;
+
+    #[test]
+    fn operator_labels_validate_merge_and_preserve_values() {
+        use super::merge_push_labels;
+        use std::collections::BTreeMap;
+        let base = BTreeMap::from([
+            ("instance".into(), "config".into()),
+            ("site".into(), "lab".into()),
+        ]);
+        let labels = merge_push_labels(
+            base,
+            &[
+                "instance=cli=a".into(),
+                "path=é/\"\\\n".into(),
+                "empty=".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(labels["instance"], "cli=a");
+        assert_eq!(labels["site"], "lab");
+        assert_eq!(labels["empty"], "");
+        for key in [
+            "",
+            "1bad",
+            "bad-name",
+            "é",
+            "__name__",
+            "U__foo",
+            "job",
+            "role",
+            "server",
+            "client",
+            "protocol",
+            "test_direction",
+            "direction",
+            "view",
+            "test_id",
+            "stream_id",
+        ] {
+            assert!(
+                merge_push_labels(BTreeMap::new(), &[format!("{key}=x")]).is_err(),
+                "{key}"
+            );
+        }
+        assert!(merge_push_labels(BTreeMap::new(), &["site=x".into(), "site=y".into()]).is_err());
+        assert!(merge_push_labels(BTreeMap::new(), &["missing".into()]).is_err());
+    }
+
+    #[test]
+    fn stable_snapshots_have_no_ids_streams_or_unknown_measurements() {
+        use crate::protocol::{Direction, Protocol};
+        use std::collections::BTreeMap;
+        let client = PushGatewayClient::new("http://localhost".into())
+            .unwrap()
+            .with_labels(BTreeMap::from([("instance".into(), "home".into())]))
+            .unwrap()
+            .with_server("mesh-server", 5201)
+            .with_test(Protocol::Udp, Direction::Bidir)
+            .with_job("mesh".into())
+            .unwrap();
+        client.validate().unwrap();
+        let mut result = directional_result();
+        let full = client.format_snapshot(&result);
+        assert!(
+            full.contains("xfr_last_test_udp_direction_packets_lost{direction=\"download\"} 8")
+        );
+        assert!(!full.contains("test_id"));
+        assert!(!full.contains("stream_id"));
+        assert!(!full.contains(&result.id));
+        result.bytes_sent = None;
+        result.throughput_send_mbps = None;
+        result.udp_stats_send = None;
+        result.udp_stats_recv = None;
+        let missing = client.format_snapshot(&result);
+        assert!(missing.contains(
+            "xfr_last_test_udp_direction_available{direction=\"upload\",view=\"receiver\"} 0"
+        ));
+        assert!(
+            missing.contains(
+                "xfr_last_test_udp_direction_quality_available{direction=\"download\"} 0"
+            )
+        );
+        assert!(!missing.contains("# TYPE xfr_last_test_udp_direction_packets_lost"));
+        assert_eq!(
+            missing
+                .matches("# TYPE xfr_last_test_udp_direction_available gauge")
+                .count(),
+            1
+        );
+        let url = client.push_url("different-id").unwrap();
+        assert!(url.path().contains("/job/mesh/"));
+        assert!(url.path().contains("/test_direction/bidir"));
+        assert!(!url.path().contains("different-id"));
+        assert!(
+            PushGatewayClient::new("http://localhost".into())
+                .unwrap()
+                .with_job("mesh".into())
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
 
     fn directional_result() -> crate::protocol::TestResult {
         serde_json::from_value(serde_json::json!({

@@ -5,6 +5,7 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,13 @@ pub struct Config {
 pub struct ClientDefaults {
     /// Prometheus push gateway URL for completed client results
     pub push_gateway: Option<String>,
+
+    /// Operator labels attached to pushed metrics
+    #[serde(default)]
+    pub push_labels: BTreeMap<String, String>,
+
+    /// Stable aggregate snapshot job (client only)
+    pub push_job: Option<String>,
 
     /// Default test duration in seconds
     pub duration_secs: Option<u64>,
@@ -105,6 +113,10 @@ pub struct ServerDefaults {
 
     /// Prometheus push gateway URL (e.g., "http://pushgateway:9091")
     pub push_gateway: Option<String>,
+
+    /// Operator labels attached to pushed metrics
+    #[serde(default)]
+    pub push_labels: BTreeMap<String, String>,
 
     /// Log file path (e.g., "~/.config/xfr/xfr.log", null to disable)
     pub log_file: Option<String>,

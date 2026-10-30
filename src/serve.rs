@@ -157,6 +157,7 @@ struct SecurityContext {
     bind_addr: Option<IpAddr>,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: Option<String>,
+    push_labels: std::collections::BTreeMap<String, String>,
     /// Runtime capability list for server hellos: the static list minus
     /// `single_port_udp_v1` when the startup self-test failed.
     capabilities: Vec<String>,
@@ -519,6 +520,7 @@ fn initial_read_timeout_for_peer(
 
 pub struct Server {
     config: ServerConfig,
+    push_labels: std::collections::BTreeMap<String, String>,
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
 }
 
@@ -526,8 +528,23 @@ impl Server {
     pub fn new(config: ServerConfig) -> Self {
         Self {
             config,
+            push_labels: std::collections::BTreeMap::new(),
             active_tests: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach validated operator labels without changing public server configuration.
+    pub fn with_push_labels(
+        mut self,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        crate::output::push_gateway::validate_push_labels(&labels)?;
+        anyhow::ensure!(
+            labels.is_empty() || self.config.push_gateway_url.is_some(),
+            "push labels require a push gateway"
+        );
+        self.push_labels = labels;
+        Ok(self)
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -664,6 +681,7 @@ impl Server {
             bind_addr: self.config.bind_addr,
             tui_tx: self.config.tui_tx.clone(),
             push_gateway_url: self.config.push_gateway_url.clone(),
+            push_labels: self.push_labels.clone(),
             capabilities,
             udp_hello_routes,
         });
@@ -1519,6 +1537,7 @@ async fn handle_quic_client(
                 peer_addr,
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
+                &security.push_labels,
                 transport,
             )
             .await?;
@@ -1901,6 +1920,7 @@ async fn handle_test_request(
                 peer_addr,
                 security.tui_tx.clone(),
                 &security.push_gateway_url,
+                &security.push_labels,
                 client_supports_single_port,
                 client_supports_udp_feedback,
                 // Single-port UDP needs both peers on board: the client
@@ -1984,6 +2004,7 @@ async fn run_quic_test(
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
+    push_labels: &std::collections::BTreeMap<String, String>,
     transport: crate::control_crypto::ProtectedControl,
 ) -> anyhow::Result<()> {
     let stats = Arc::new(TestStats::new(id.to_string(), streams));
@@ -2292,6 +2313,7 @@ async fn run_quic_test(
                 &stats,
                 Some(peer_addr.ip()),
                 Some((Protocol::Quic, direction)),
+                push_labels,
             )
             .await;
 
@@ -2344,6 +2366,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
     peer_addr: SocketAddr,
     tui_tx: Option<mpsc::Sender<ServerEvent>>,
     push_gateway_url: &Option<String>,
+    push_labels: &std::collections::BTreeMap<String, String>,
     client_supports_single_port: bool,
     client_supports_udp_feedback: bool,
     udp_single_port_routes: Option<UdpHelloRoutes>,
@@ -2843,6 +2866,7 @@ async fn run_test<W: AsyncWrite + Unpin>(
                 &stats,
                 Some(peer_addr.ip()),
                 Some((protocol, direction)),
+                push_labels,
             )
             .await;
 
@@ -3992,6 +4016,7 @@ mod tests {
                 server_conn.remote_address(),
                 None,
                 &None,
+                &std::collections::BTreeMap::new(),
                 crate::control_crypto::ProtectedControl::plaintext(),
             )
             .await
@@ -4463,6 +4488,7 @@ mod tests {
                 bind_addr: None,
                 tui_tx: None,
                 push_gateway_url: None,
+                push_labels: std::collections::BTreeMap::new(),
                 capabilities: crate::protocol::supported_capabilities(),
                 udp_hello_routes: None,
             };

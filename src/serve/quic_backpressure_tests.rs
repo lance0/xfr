@@ -157,6 +157,7 @@ async fn stalled_test(protected: bool, duration: Duration) -> StalledTest {
             pair.server_connection.remote_address(),
             Some(events_tx),
             &None,
+            &std::collections::BTreeMap::new(),
             pair.server_transport,
         )
         .await

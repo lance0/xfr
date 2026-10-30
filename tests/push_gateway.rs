@@ -27,7 +27,7 @@ async fn gateway(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<(St
             let mut reader = BufReader::new(stream);
             let mut request = String::new();
             reader.read_line(&mut request).await.unwrap();
-            assert!(request.starts_with("POST "));
+            assert!(request.starts_with("POST ") || request.starts_with("PUT "));
             let mut length = None;
             loop {
                 let mut line = String::new();
@@ -606,4 +606,322 @@ async fn stalled_metrics_delivery_has_a_total_deadline_and_keeps_result() {
 #[tokio::test]
 async fn stopping_a_test_then_skipping_metrics_keeps_successful_result() {
     stalled_gateway_preserves_result(true, true).await;
+}
+
+#[tokio::test]
+#[ignore = "fixture generator invoked by the real-backend smoke"]
+async fn stable_backend_fixtures() {
+    use std::collections::BTreeMap;
+    use xfr::output::push_gateway::PushGatewayClient;
+    let output = std::env::var("XFR_STABLE_FIXTURES").expect("fixture output path");
+    let base: xfr::protocol::TestResult = serde_json::from_value(serde_json::json!({
+        "id":"fixture", "bytes_total":900,"duration_ms":1000,"throughput_mbps":0.0072,
+        "streams":[{"id":0,"bytes":900,"throughput_mbps":0.0072}],
+        "tcp_info":{"rtt_us":1250,"rtt_var_us":100,"cwnd":65536,"retransmits":4},
+        "bytes_sent":300,"bytes_received":600,"throughput_send_mbps":0.0024,"throughput_recv_mbps":0.0048,
+        "udp_stats_send":{"packets_sent":10,"packets_received":9,"lost":1,"lost_percent":10.0,"jitter_ms":1.0,"out_of_order":0},
+        "udp_stats_recv":{"packets_sent":20,"packets_received":12,"lost":8,"lost_percent":40.0,"jitter_ms":3.0,"out_of_order":0}
+    })).unwrap();
+    let mut cases = Vec::new();
+    for i in 0..10 {
+        let mut result = base.clone();
+        result.id = format!("different-uuid-{i}");
+        result.bytes_total += i;
+        if i == 9 {
+            result.streams.clear();
+        }
+        cases.push((
+            "repeat",
+            Protocol::Tcp,
+            Direction::Upload,
+            "home",
+            "mesh-server",
+            "relay/a\"x\\z\n\tλ\u{2028}\r",
+            result,
+        ));
+    }
+    let mut missing = base.clone();
+    missing.tcp_info = None;
+    cases.push((
+        "missing-tcp",
+        Protocol::Tcp,
+        Direction::Upload,
+        "home",
+        "mesh-server",
+        "relay/a\"x\\z\n\tλ\u{2028}\r",
+        missing,
+    ));
+    cases.push((
+        "udp-full",
+        Protocol::Udp,
+        Direction::Bidir,
+        "home",
+        "mesh-server",
+        "relay/a\"x\\z\n\tλ\u{2028}\r",
+        base.clone(),
+    ));
+    let mut missing = base.clone();
+    missing.bytes_sent = None;
+    missing.throughput_send_mbps = None;
+    missing.udp_stats_send = None;
+    missing.udp_stats_recv = None;
+    cases.push((
+        "udp-missing",
+        Protocol::Udp,
+        Direction::Bidir,
+        "home",
+        "mesh-server",
+        "relay/a\"x\\z\n\tλ\u{2028}\r",
+        missing,
+    ));
+    let mut all_lost = base.clone();
+    all_lost.bytes_sent = None;
+    all_lost.throughput_send_mbps = None;
+    all_lost.udp_stats_send = None;
+    all_lost.bytes_received = Some(0);
+    all_lost.throughput_recv_mbps = Some(0.0);
+    let quality = all_lost.udp_stats_recv.as_mut().unwrap();
+    quality.packets_sent = 5;
+    quality.packets_received = 0;
+    quality.lost = 5;
+    quality.lost_percent = 100.0;
+    cases.push((
+        "udp-all-lost",
+        Protocol::Udp,
+        Direction::Bidir,
+        "home",
+        "mesh-server",
+        "relay/a\"x\\z\n\tλ\u{2028}\r",
+        all_lost,
+    ));
+    for (tag, protocol, direction, instance, server, path) in [
+        (
+            "instance",
+            Protocol::Tcp,
+            Direction::Upload,
+            "other",
+            "mesh-server",
+            "relay/a\"x\\z\n\tλ\u{2028}\r",
+        ),
+        (
+            "target",
+            Protocol::Tcp,
+            Direction::Upload,
+            "home",
+            "other-server",
+            "relay/a\"x\\z\n\tλ\u{2028}\r",
+        ),
+        (
+            "path",
+            Protocol::Tcp,
+            Direction::Upload,
+            "home",
+            "mesh-server",
+            "direct",
+        ),
+        (
+            "direction",
+            Protocol::Udp,
+            Direction::Download,
+            "home",
+            "mesh-server",
+            "relay/a\"x\\z\n\tλ\u{2028}\r",
+        ),
+        (
+            "protocol",
+            Protocol::Quic,
+            Direction::Upload,
+            "home",
+            "mesh-server",
+            "relay/a\"x\\z\n\tλ\u{2028}\r",
+        ),
+    ] {
+        cases.push((
+            tag,
+            protocol,
+            direction,
+            instance,
+            server,
+            path,
+            base.clone(),
+        ));
+    }
+    cases.push((
+        "legacy",
+        Protocol::Tcp,
+        Direction::Upload,
+        "home",
+        "mesh-server",
+        "direct",
+        base,
+    ));
+    let (url, pushes) = gateway(vec![202; cases.len()]).await;
+    let mut metadata = Vec::new();
+    for (tag, protocol, direction, instance, server, path, result) in cases {
+        let mut client = PushGatewayClient::new(url.clone())
+            .unwrap()
+            .with_labels(BTreeMap::from([
+                ("instance".into(), instance.into()),
+                ("path".into(), path.into()),
+                ("empty".into(), "".into()),
+            ]))
+            .unwrap()
+            .with_server(server, 5201)
+            .with_test(protocol, direction);
+        if tag != "legacy" {
+            client = client.with_job("xfr-stable-smoke".into()).unwrap();
+        }
+        client.push_test_result(&result).await.unwrap();
+        metadata.push(serde_json::json!({"tag":tag,"protocol":protocol,"test_direction":direction,"instance":instance,"server":format!("{server}:5201"),"path":path,"result":result}));
+    }
+    let pushes = pushes.await.unwrap();
+    let fixtures: Vec<_> = metadata
+        .into_iter()
+        .zip(pushes)
+        .map(|(mut meta, (request, body))| {
+            meta["request"] = request.into();
+            meta["body"] = body.into();
+            meta
+        })
+        .collect();
+    std::fs::write(output, serde_json::to_string(&fixtures).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn invalid_push_options_fail_before_connecting() {
+    for flags in [
+        vec!["--push-label", "host=home"],
+        vec!["--push-job", "mesh"],
+        vec!["--push-gateway", "http://127.0.0.1:1", "--push-job", "mesh"],
+        vec![
+            "--push-gateway",
+            "http://127.0.0.1:1",
+            "--push-label",
+            "role=wrong",
+        ],
+        vec![
+            "--push-gateway",
+            "http://127.0.0.1:1",
+            "--push-label",
+            "host=a",
+            "--push-label",
+            "host=b",
+        ],
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args(["127.0.0.1", "-p", "1", "--no-update-check", "--json"])
+            .args(flags)
+            .env_remove("XFR_PUSH_GATEWAY")
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("push"), "{stderr}");
+        assert!(!stderr.contains("Connection refused"), "{stderr}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stable_client_labels_merge_cli_over_config() {
+    let (url, pushes) = gateway(vec![202; 2]).await;
+    let (port, running) = server(None).await;
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join("xfr");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), format!(
+        "[client]\npush_gateway = {url:?}\npush_job = \"config-job\"\npush_labels = {{ instance = \"config\", site = \"lab\" }}\n"
+    )).unwrap();
+    for extra in [vec![], vec!["--push-job", "cli-job"]] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args([
+                "127.0.0.1",
+                "-p",
+                &port.to_string(),
+                "-t",
+                "1",
+                "-b",
+                "2M",
+                "--json",
+                "--no-update-check",
+                "--push-label",
+                "instance=cli=a",
+            ])
+            .args(extra)
+            .env("XDG_CONFIG_HOME", directory.path())
+            .env_remove("XFR_PUSH_GATEWAY")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let pushes = pushes.await.unwrap();
+    for ((request, body), job) in pushes.iter().zip(["config-job", "cli-job"]) {
+        assert!(request.starts_with("PUT "));
+        assert!(request.contains(&format!("/job/{job}/")), "{request}");
+        assert!(request.contains("/instance/cli=a"), "{request}");
+        assert!(request.contains("/site/lab"), "{request}");
+        assert!(body.contains("xfr_last_test_bytes"));
+        assert!(!body.contains("test_id"));
+    }
+    running.abort();
+}
+
+#[tokio::test]
+async fn server_cli_push_labels_are_portable() {
+    let (url, pushes) = gateway(vec![202]).await;
+    let port = SERVER_PORT.fetch_add(1, Ordering::SeqCst);
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        .args([
+            "serve",
+            "-p",
+            &port.to_string(),
+            "--one-off",
+            "--no-mdns",
+            "--push-gateway",
+            &url,
+            "--push-label",
+            "instance=central",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let result = xfr::client::Client::new(xfr::client::ClientConfig {
+        host: "127.0.0.1".into(),
+        port,
+        duration: Duration::from_secs(1),
+        bitrate: Some(2_000_000),
+        ..Default::default()
+    })
+    .run(None)
+    .await
+    .unwrap();
+    assert!(result.bytes_total > 0);
+    let output = timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pushes = pushes.await.unwrap();
+    assert!(pushes[0].0.starts_with("POST "));
+    assert!(pushes[0].0.contains("/role/server/"));
+    assert!(pushes[0].0.contains("/instance/central"));
 }
