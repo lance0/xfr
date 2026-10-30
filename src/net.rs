@@ -673,6 +673,11 @@ pub fn parse_ip_literal(host: &str, port: u16) -> io::Result<Option<SocketAddr>>
         None => (host, None),
     };
     match (ip.parse::<IpAddr>(), zone) {
+        // The kernel rejects a zoneless link-local address with a bare EINVAL.
+        (Ok(IpAddr::V6(ip)), None) if ip.is_unicast_link_local() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("link-local address {ip} needs an interface zone, e.g. {ip}%eth0"),
+        )),
         (Ok(ip), None) => Ok(Some(SocketAddr::new(ip, port))),
         (Ok(IpAddr::V6(ip)), Some(zone)) => Ok(Some(SocketAddr::V6(SocketAddrV6::new(
             ip,
@@ -1430,6 +1435,30 @@ mod tests {
                     .await
                     .is_err(),
                 "{host} should be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_rejects_link_local_without_zone() {
+        for host in ["fe80::2", "[fe80::2]", "febf::1"] {
+            let err = resolve_host(host, 5201, AddressFamily::DualStack)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{host}");
+            let ip = host.trim_matches(['[', ']']);
+            assert_eq!(
+                err.to_string(),
+                format!("link-local address {ip} needs an interface zone, e.g. {ip}%eth0")
+            );
+        }
+        // Just outside fe80::/10, and site-local/ULA, need no zone.
+        for host in ["fec0::1", "fd00::1", "fe7f::1"] {
+            assert!(
+                resolve_host(host, 5201, AddressFamily::DualStack)
+                    .await
+                    .is_ok(),
+                "{host}"
             );
         }
     }
