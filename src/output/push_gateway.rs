@@ -383,7 +383,7 @@ impl PushGatewayClient {
         unreachable!("the final attempt always returns")
     }
 
-    /// Push metrics with a single HTTP POST request
+    /// Send one request; the caller owns retries.
     async fn push_with_retry(&self, url: &str, metrics: &str) -> anyhow::Result<()> {
         let response = self
             .client
@@ -689,7 +689,7 @@ fn snapshot_gauge(output: &mut String, metric: &str, labels: &str, value: impl s
     if !output.contains(&header) {
         writeln!(
             output,
-            "# HELP xfr_last_test_{metric} Last completed test {metric}\n{}",
+            "# HELP xfr_last_test_{metric} Most recently pushed test snapshot {metric}\n{}",
             header.trim_end()
         )
         .expect("writing to String cannot fail");

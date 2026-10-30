@@ -815,6 +815,12 @@ names remain as given. Different peers, protocols, requested directions and path
 labels stay separate. A TUI restart retains the finished run's protocol/direction
 when choosing its group.
 
+Stable groups reflect the snapshots accepted by the ingestion endpoint, rather
+than guaranteeing measurement completion order. Pending deliveries or overlapping
+processes can arrive out of order. When chronological ordering matters, serialize
+runs for each grouping identity and wait for confirmed delivery before starting
+the next. An unconfirmed delivery can still reach the backend.
+
 Snapshots use only `xfr_last_test_*` gauges: `bytes`, `throughput_mbps`,
 `duration_seconds`, `streams`, TCP RTT/retransmits/window, and the directional UDP
 families described above. They contain no per-stream rows, test UUID labels or

@@ -616,7 +616,7 @@ async fn stable_backend_fixtures() {
     let output = std::env::var("XFR_STABLE_FIXTURES").expect("fixture output path");
     let base: xfr::protocol::TestResult = serde_json::from_value(serde_json::json!({
         "id":"fixture", "bytes_total":900,"duration_ms":1000,"throughput_mbps":0.0072,
-        "streams":[{"id":0,"bytes":900,"throughput_mbps":0.0072}],
+        "streams":[{"id":0,"bytes":123,"throughput_mbps":0.5}],
         "tcp_info":{"rtt_us":1250,"rtt_var_us":100,"cwnd":65536,"retransmits":4},
         "bytes_sent":300,"bytes_received":600,"throughput_send_mbps":0.0024,"throughput_recv_mbps":0.0048,
         "udp_stats_send":{"packets_sent":10,"packets_received":9,"lost":1,"lost_percent":10.0,"jitter_ms":1.0,"out_of_order":0},

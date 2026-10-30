@@ -365,6 +365,15 @@ def run_stable(gateway, storage, victoria, fixtures):
             name, labels = match.groups()
             labels = dict(re.findall(r'(\w+)="([^"]*)"', labels or ""))
             expected[(name, tuple(sorted(labels.items())))] = float(value)
+        # Check the exporter against finalized result fields, not its own payload.
+        result = fixture["result"]
+        for metric, value in {
+            "bytes": result["bytes_total"],
+            "throughput_mbps": result["throughput_mbps"],
+            "duration_seconds": result["duration_ms"] / 1000,
+            "streams": len(result["streams"]),
+        }.items():
+            assert expected[("xfr_last_test_" + metric, ())] == value, (metric, value)
         identity = tuple(
             fixture[k]
             for k in ("instance", "server", "protocol", "test_direction", "path")
@@ -408,7 +417,15 @@ def run_stable(gateway, storage, victoria, fixtures):
             for key, value in expected.items():
                 if key not in actual:
                     raise MissingMetric
-                if not float_matches_storage(actual[key], value, victoria):
+                floating = key[0].endswith(
+                    ("throughput_mbps", "duration_seconds", "lost_percent", "jitter_ms")
+                )
+                matches = (
+                    float_matches_storage(actual[key], value, victoria)
+                    if floating
+                    else actual[key] == value
+                )
+                if not matches:
                     # Reused groups may still expose the preceding snapshot while forwarding.
                     if previous.get((identity, key)) == actual[key]:
                         return False
