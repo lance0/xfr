@@ -42,6 +42,7 @@ for older peers and client source ports.
 - TCP, UDP, QUIC, and Linux MPTCP; parallel streams and bidirectional tests.
 - Plain text, JSON, streaming JSON, and CSV output for automation.
 - Saved configuration, LAN discovery, result comparison, and optional Prometheus metrics.
+- Push final client results to a Prometheus Pushgateway or vmagent: `xfr <host> --push-gateway <url>`.
 - Both TUIs report status through OSC 7501; unsupported terminals ignore it.
 
 <a id="vs-iperf3"></a>
