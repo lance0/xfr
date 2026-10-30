@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **PSK mismatches say which side is missing the key** — a client with `--psk` against a server without one failed with `PSK session but no server nonce` (TCP/UDP) or `QUIC PSK session key was not derived` (QUIC). It now reads `the server does not use a pre-shared key; remove --psk/--psk-file or configure the server with one`. The opposite case now reads `authentication failed: the server requires a pre-shared key (set --psk/--psk-file)`, matching the wrong-key message. Client-side only; no protocol change.
+- **`-n` durations measure the transfer** — a TCP upload of a few megabytes reported `Duration: 0.10s`, because the server stopped its clock at the client's `Finish`, which trails the last byte by the client's 100 ms stream-setup pause. The server now stops at receive EOF. In the other direction the server stopped at its last write into the kernel (or QUIC) send buffer, so a paced `-R -b 100M -n 20M` reported 1.46 s and 114.6 Mbps; TCP and QUIC senders now wait for the peer to acknowledge the last byte (1.65 s, 101.9 Mbps). JSON `duration_ms` follows.
 
 ### Library API (pre-1.0 break)
 - Struct-literal constructors must supply the new public field `config::ClientDefaults.port`. The struct implements `Default`, so literals ending in `..Default::default()` are unaffected.

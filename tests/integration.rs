@@ -4771,6 +4771,32 @@ mod byte_budget {
             result.duration_ms
         );
     }
+
+    /// Duration runs to the last byte's delivery. A paced sender finishes its
+    /// writes while the send buffer still holds megabytes; ending the clock
+    /// there overstated download throughput.
+    #[tokio::test]
+    async fn paced_duration_covers_delivery() {
+        let port = get_test_port();
+        let _server = start_test_server(port).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        const BITRATE: u64 = 32_000_000;
+        let expected_ms = BUDGET * 8 * 1000 / BITRATE; // ~1048 ms
+        for protocol in [Protocol::Tcp, Protocol::Quic] {
+            for direction in [Direction::Upload, Direction::Download] {
+                let mut config = budget_config(port, protocol, direction, 1);
+                config.bitrate = Some(BITRATE);
+                let result = run_budget_test(config).await;
+                assert_eq!(result.bytes_total, BUDGET, "{protocol:?} {direction:?}");
+                assert!(
+                    (expected_ms * 9 / 10..expected_ms * 2).contains(&result.duration_ms),
+                    "{protocol:?} {direction:?}: {} ms for {expected_ms} ms of paced data",
+                    result.duration_ms
+                );
+            }
+        }
+    }
 }
 
 /// LAN-2321: with many unpaced TCP streams, the senders used to monopolize

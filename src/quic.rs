@@ -552,6 +552,14 @@ pub async fn send_quic_data(
     if let Err(e) = send.finish() {
         debug!("QUIC stream finish after send loop: {}", e);
     }
+    // `-n`: the transfer ends when the peer has ACKed the last byte, not when
+    // it entered quinn's send buffer.
+    if budget.is_some() && !*cancel.borrow() {
+        tokio::select! {
+            _ = send.stopped() => {}
+            _ = cancel.changed() => {}
+        }
+    }
     Ok(())
 }
 

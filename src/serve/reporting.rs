@@ -177,6 +177,9 @@ pub(super) struct Reporting {
     start: Instant,
     paused_total: Duration,
     pause_start: Option<Instant>,
+    /// Active time at which a `-n` transfer was complete, when that preceded
+    /// the end of the loop (the client's `Finish` trails the last byte).
+    transfer_end: Option<Duration>,
     codec: Option<ControlWriter>,
     current: Option<Frame>,
     pending: Option<String>,
@@ -188,7 +191,9 @@ impl Reporting {
     /// Active test duration so far. Read it before `finish`, so terminal
     /// flushing does not count as test time.
     pub(super) fn duration_ms(&self) -> u64 {
-        active_elapsed(self.start, self.paused_total, self.pause_start).as_millis() as u64
+        self.transfer_end
+            .unwrap_or_else(|| active_elapsed(self.start, self.paused_total, self.pause_start))
+            .as_millis() as u64
     }
 
     /// Finish the exact in-flight frame before any terminal messages. A timeout
@@ -273,6 +278,10 @@ async fn run_inner<W: AsyncWrite + Unpin>(
     let mut client_finished = false;
     let mut server_send_done = false;
     let mut drain_until = None;
+    // `-n` completion times, so the reported duration ends at the last byte
+    // rather than at whichever control message arrived last.
+    let mut received_at: Option<Duration> = None;
+    let mut sent_at: Option<Duration> = None;
 
     loop {
         let elapsed = active_elapsed(start, paused_total, pause_start);
@@ -308,21 +317,33 @@ async fn run_inner<W: AsyncWrite + Unpin>(
                 warn!(id = config.id, protocol = ?config.protocol,
                     "drain window expired after client Finish; the tail may not have arrived");
                 client_finished = true;
+                received_at.get_or_insert(active_elapsed(start, paused_total, pause_start));
                 drain_until = None;
                 if budget_transfer_complete(config.direction, client_finished, server_send_done) {
                     break;
                 }
             }
-            _ = recv_done_rx.recv(), if drain_until.is_some() => {
-                debug!(id = config.id, "drained after Finish, ending test");
-                client_finished = true;
-                drain_until = None;
-                if budget_transfer_complete(config.direction, client_finished, server_send_done) {
-                    break;
+            // TCP and QUIC receive loops can reach EOF before the client's
+            // Finish arrives; that, not the Finish, is when the upload ended.
+            // UDP has no EOF (its channel is closed from the start).
+            _ = recv_done_rx.recv(), if drain_until.is_some()
+                || (config.byte_budget_test
+                    && config.protocol != Protocol::Udp
+                    && received_at.is_none()) =>
+            {
+                received_at.get_or_insert(active_elapsed(start, paused_total, pause_start));
+                if drain_until.is_some() {
+                    debug!(id = config.id, "drained after Finish, ending test");
+                    client_finished = true;
+                    drain_until = None;
+                    if budget_transfer_complete(config.direction, client_finished, server_send_done) {
+                        break;
+                    }
                 }
             }
             _ = sending_done_rx.recv(), if config.end_on_server_send && !server_send_done => {
                 server_send_done = true;
+                sent_at = Some(active_elapsed(start, paused_total, pause_start));
                 if budget_transfer_complete(config.direction, client_finished, server_send_done) {
                     debug!(id = config.id, "byte budget delivered, ending test");
                     break;
@@ -405,6 +426,18 @@ async fn run_inner<W: AsyncWrite + Unpin>(
         }
     }
 
+    let transfer_end = if cancelled
+        || !config.byte_budget_test
+        || !budget_transfer_complete(config.direction, client_finished, server_send_done)
+    {
+        None
+    } else {
+        match config.direction {
+            Direction::Upload => received_at,
+            Direction::Download => sent_at,
+            Direction::Bidir => received_at.max(sent_at),
+        }
+    };
     let finish_deadline = tokio::time::Instant::now()
         + if cancelled {
             CANCEL_FLUSH_TIMEOUT
@@ -430,6 +463,7 @@ async fn run_inner<W: AsyncWrite + Unpin>(
         start,
         paused_total,
         pause_start,
+        transfer_end,
         codec: Some(codec),
         current,
         pending,
@@ -694,6 +728,7 @@ mod tests {
                     start: Instant::now(),
                     paused_total: Duration::ZERO,
                     pause_start: None,
+                    transfer_end: None,
                     codec: Some(codec),
                     current: Some(current),
                     pending: (!cancelled).then(|| "pending interval".to_owned()),
@@ -735,6 +770,7 @@ mod tests {
             start: Instant::now(),
             paused_total: Duration::ZERO,
             pause_start: None,
+            transfer_end: None,
             codec: Some(codec),
             current: Some(current),
             pending: None,
@@ -790,6 +826,41 @@ mod tests {
             let frame = reporting.current.unwrap();
             assert!(frame.offset > 0 && !frame.complete());
             assert_eq!(reporter.stats.total_bytes(), 12_345);
+        }
+    }
+
+    /// A `-n` test ends at its last byte: receive EOF that precedes the
+    /// client's Finish, or the server's own send completing later in bidir.
+    #[tokio::test(start_paused = true)]
+    async fn byte_budget_duration_ends_at_last_byte_not_finish() {
+        for direction in [Direction::Upload, Direction::Bidir] {
+            // Returns at t = 1 s, once the first interval frame blocks.
+            let mut reporter = blocked_reporter(Protocol::Tcp, direction, Duration::ZERO).await;
+            // Every receive stream reached EOF: the channel closes.
+            drop(std::mem::replace(
+                &mut reporter.receiving_done,
+                mpsc::channel(1).0,
+            ));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if direction == Direction::Bidir {
+                reporter.sending_done.send(()).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            reporter
+                .commands
+                .send(ControlCommand::Finish)
+                .await
+                .unwrap();
+            let reporting = (&mut reporter.task).await.unwrap().unwrap();
+            let expected = match direction {
+                Direction::Bidir => 1_300,
+                _ => 1_000,
+            };
+            let duration_ms = reporting.duration_ms();
+            assert!(
+                (expected..expected + 50).contains(&duration_ms),
+                "{direction:?}: {duration_ms} ms"
+            );
         }
     }
 
