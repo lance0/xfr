@@ -1063,7 +1063,9 @@ mod tests {
                 for (name, expected) in [("job", job), ("site", site)] {
                     let encoded_name = format!("{name}@base64");
                     let pair = groups
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .find(|pair| pair[0] == name || pair[0] == encoded_name)
                         .unwrap();
                     let actual = if pair[0] == encoded_name {

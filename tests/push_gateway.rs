@@ -809,37 +809,56 @@ async fn stable_backend_fixtures() {
     std::fs::write(output, serde_json::to_string(&fixtures).unwrap()).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn invalid_push_options_fail_before_connecting() {
-    for flags in [
-        vec!["--push-label", "host=home"],
-        vec!["--push-job", "mesh"],
-        vec!["--push-gateway", "http://127.0.0.1:1", "--push-job", "mesh"],
-        vec![
-            "--push-gateway",
-            "http://127.0.0.1:1",
-            "--push-label",
-            "role=wrong",
-        ],
-        vec![
-            "--push-gateway",
-            "http://127.0.0.1:1",
-            "--push-label",
-            "host=a",
-            "--push-label",
-            "host=b",
-        ],
+    let config_directory = tempfile::tempdir().unwrap();
+    for (flags, expected) in [
+        (
+            vec!["--push-label", "host=home"],
+            "push labels and job require a push gateway",
+        ),
+        (
+            vec!["--push-job", "mesh"],
+            "push labels and job require a push gateway",
+        ),
+        (
+            vec!["--push-gateway", "http://127.0.0.1:1", "--push-job", "mesh"],
+            "stable push job requires a nonempty instance label",
+        ),
+        (
+            vec![
+                "--push-gateway",
+                "http://127.0.0.1:1",
+                "--push-label",
+                "role=wrong",
+            ],
+            "invalid or reserved push label name \"role\"",
+        ),
+        (
+            vec![
+                "--push-gateway",
+                "http://127.0.0.1:1",
+                "--push-label",
+                "host=a",
+                "--push-label",
+                "host=b",
+            ],
+            "duplicate push label \"host\"",
+        ),
     ] {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args(["127.0.0.1", "-p", "1", "--no-update-check", "--json"])
             .args(flags)
+            .env("XDG_CONFIG_HOME", config_directory.path())
             .env_remove("XFR_PUSH_GATEWAY")
             .output()
             .await
             .unwrap();
         assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("push"), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
         assert!(!stderr.contains("Connection refused"), "{stderr}");
     }
 }
