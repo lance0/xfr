@@ -69,6 +69,18 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
     })
 }
 
+async fn stop_udp_ipv6_server_with_diagnostics(
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    if !server.is_finished() {
+        server.abort();
+    }
+    match server.await {
+        Err(error) if error.is_cancelled() => {}
+        outcome => eprintln!("UDP IPv6 test server completed: {outcome:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_cli_json_output_is_parseable_without_quiet() {
     let port = get_test_port();
@@ -2472,6 +2484,10 @@ async fn test_udp_ipv4_explicit() {
 
 #[tokio::test]
 async fn test_udp_ipv6_explicit() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("xfr=debug")
+        .with_test_writer()
+        .try_init();
     // Test that UDP works with explicit IPv6 address
     let port = get_test_port();
 
@@ -2486,12 +2502,15 @@ async fn test_udp_ipv6_explicit() {
         ..Default::default()
     };
 
-    tokio::spawn(async move {
-        let server = Server::new(config);
-        let _ = server.run().await;
-    });
+    let server = tokio::spawn(async move { Server::new(config).run().await });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
+    if server.is_finished() {
+        panic!(
+            "test_udp_ipv6_explicit server exited during startup: {:?}",
+            server.await
+        );
+    }
 
     // Client connects to IPv6 address - socket should match server's family
     let config = ClientConfig {
@@ -2521,6 +2540,10 @@ async fn test_udp_ipv6_explicit() {
 
     let client = Client::new(config);
     let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    if !matches!(&result, Ok(Ok(_))) {
+        eprintln!("test_udp_ipv6_explicit client failed: {result:?}");
+    }
+    stop_udp_ipv6_server_with_diagnostics(server).await;
 
     assert!(result.is_ok(), "UDP IPv6 test should complete");
     let result = result.unwrap();
@@ -2533,6 +2556,10 @@ async fn test_udp_ipv6_explicit() {
 
 #[tokio::test]
 async fn test_udp_cport_dualstack_ipv6_target() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("xfr=debug")
+        .with_test_writer()
+        .try_init();
     // Regression test: --cport in dual-stack mode should work with IPv6 targets.
     // Control TCP bind starts as 0.0.0.0:PORT and must be re-familied to [::]:PORT.
     let port = get_test_port();
@@ -2548,12 +2575,15 @@ async fn test_udp_cport_dualstack_ipv6_target() {
         ..Default::default()
     };
 
-    tokio::spawn(async move {
-        let server = Server::new(server_cfg);
-        let _ = server.run().await;
-    });
+    let server = tokio::spawn(async move { Server::new(server_cfg).run().await });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
+    if server.is_finished() {
+        panic!(
+            "test_udp_cport_dualstack_ipv6_target server exited during startup: {:?}",
+            server.await
+        );
+    }
 
     let config = ClientConfig {
         host: "::1".to_string(),
@@ -2582,6 +2612,10 @@ async fn test_udp_cport_dualstack_ipv6_target() {
 
     let client = Client::new(config);
     let result = timeout(Duration::from_secs(10), client.run(None)).await;
+    if !matches!(&result, Ok(Ok(_))) {
+        eprintln!("test_udp_cport_dualstack_ipv6_target client failed: {result:?}");
+    }
+    stop_udp_ipv6_server_with_diagnostics(server).await;
 
     assert!(result.is_ok(), "UDP --cport IPv6 test should complete");
     let result = result.unwrap();
