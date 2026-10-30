@@ -844,6 +844,12 @@ impl Client {
         writer
             .write_all(format!("{}\n", client_hello_json).as_bytes())
             .await?;
+        debug!(
+            local = ?writer.as_ref().local_addr(),
+            peer = ?writer.as_ref().peer_addr(),
+            hello_bytes = client_hello_json.len() + 1,
+            "Client Hello write completed"
+        );
 
         // Read server hello (bounded to prevent DoS)
         read_bounded_line(&mut reader, &mut line).await?;

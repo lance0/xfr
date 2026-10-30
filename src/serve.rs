@@ -976,16 +976,14 @@ async fn handle_new_connection(
 
     // Read first line with adaptive timeout: short by default to resist slow-loris,
     // but extended for high fan-out active tests where DataHello bursts may retransmit.
+    let mut bytes_read = 0;
     let line = tokio::time::timeout(
         initial_timeout,
-        read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH),
+        read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH, &mut bytes_read),
     )
     .await
     .map_err(|_| {
-        anyhow::anyhow!(
-            "Initial read timeout ({initial_timeout:?}) from {}",
-            peer_addr
-        )
+        first_line_timeout_diagnostic(&stream, "Initial read timeout", initial_timeout, bytes_read)
     })??;
 
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
@@ -1071,10 +1069,27 @@ async fn handle_new_connection(
     Ok(())
 }
 
+fn first_line_timeout_diagnostic(
+    stream: &TcpStream,
+    stage: &str,
+    limit: Duration,
+    bytes_read: usize,
+) -> anyhow::Error {
+    // Native MSG_PEEK bypasses Tokio's cached readiness without consuming bytes.
+    let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 4096];
+    let queued = socket2::SockRef::from(stream).peek(&mut buffer);
+    anyhow::anyhow!(
+        "{stage} ({limit:?}): local={:?}, peer={:?}, bytes_read={bytes_read}, native_peek={queued:?}",
+        stream.local_addr(),
+        stream.peer_addr(),
+    )
+}
+
 /// Read first line without buffering (to avoid losing data after DataHello)
 async fn read_first_line_unbuffered(
     stream: &mut TcpStream,
     max_len: usize,
+    bytes_read: &mut usize,
 ) -> anyhow::Result<String> {
     use tokio::io::AsyncReadExt;
     let mut line = Vec::with_capacity(256);
@@ -1082,6 +1097,7 @@ async fn read_first_line_unbuffered(
 
     loop {
         let n = stream.read(&mut buf).await?;
+        *bytes_read += n;
         if n == 0 {
             return Err(anyhow::anyhow!("Connection closed"));
         }
@@ -1165,12 +1181,15 @@ async fn route_connection(
     security: &SecurityContext,
 ) -> anyhow::Result<()> {
     // Read first line without buffering to avoid losing data bytes after DataHello
+    let mut bytes_read = 0;
     let line = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH),
+        read_first_line_unbuffered(&mut stream, MAX_LINE_LENGTH, &mut bytes_read),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Handshake timeout"))??;
+    .map_err(|_| {
+        first_line_timeout_diagnostic(&stream, "Handshake timeout", HANDSHAKE_TIMEOUT, bytes_read)
+    })??;
 
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
@@ -3916,6 +3935,86 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn first_line_timeout_keeps_partial_byte_count_after_cancellation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut receiver, _) = listener.accept().await.unwrap();
+        let partial = b"p";
+        sender.write_all(partial).await.unwrap();
+        let mut queued = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.peek(&mut queued))
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        // Pause after the byte arrives; a readiness notification may be spurious.
+        tokio::time::pause();
+
+        let mut bytes_read = 0;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_first_line_unbuffered(&mut receiver, MAX_LINE_LENGTH, &mut bytes_read),
+        )
+        .await;
+        assert!(outcome.is_err());
+        assert_eq!(bytes_read, partial.len());
+        let diagnostic = first_line_timeout_diagnostic(
+            &receiver,
+            "Initial read timeout",
+            Duration::from_secs(1),
+            bytes_read,
+        )
+        .to_string();
+        assert!(diagnostic.contains("bytes_read=1"), "{diagnostic}");
+    }
+
+    #[tokio::test]
+    async fn first_line_timeout_native_peek_reports_queued_bytes_without_consuming() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut receiver, peer) = listener.accept().await.unwrap();
+        sender.write_all(b"h").await.unwrap();
+        let mut queued = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.peek(&mut queued))
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        let diagnostic = first_line_timeout_diagnostic(
+            &receiver,
+            "Initial read timeout",
+            Duration::from_secs(1),
+            0,
+        )
+        .to_string();
+        assert!(diagnostic.contains("native_peek=Ok(1)"), "{diagnostic}");
+        assert!(
+            diagnostic.contains(&format!("local=Ok({})", receiver.local_addr().unwrap())),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&format!("peer=Ok({peer})")),
+            "{diagnostic}"
+        );
+        let mut received = [0; 1];
+        tokio::time::timeout(Duration::from_secs(1), receiver.read_exact(&mut received))
+            .await
+            .expect("native peek must leave the queued bytes readable")
+            .unwrap();
+        assert_eq!(&received, b"h");
+    }
 
     #[test]
     fn budget_completion_needs_whichever_side_sends() {
