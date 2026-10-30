@@ -14,6 +14,9 @@ use tracing::{debug, error, warn};
 use crate::protocol::{Direction, Protocol, TcpInfoSnapshot, TestResult, UdpStats};
 use crate::stats::TestStats;
 
+/// Total delivery budget per push, retries included.
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(5);
+
 /// Validate operator labels without permitting overrides of exporter-owned dimensions.
 pub fn validate_push_labels(labels: &BTreeMap<String, String>) -> anyhow::Result<()> {
     for name in labels.keys() {
@@ -86,7 +89,17 @@ impl PushGatewayClient {
     }
 
     fn new_with_timeout(url: String, timeout: std::time::Duration) -> anyhow::Result<Self> {
-        let url = reqwest::Url::parse(&url)?;
+        let url = reqwest::Url::parse(&url).map_err(|e| {
+            // Never echo credentials: mask anything that may be userinfo.
+            let shown = match url.rfind('@') {
+                Some(at) => {
+                    let start = url.find("://").map_or(0, |i| i + 3).min(at);
+                    format!("{}***{}", &url[..start], &url[at..])
+                }
+                None => url.clone(),
+            };
+            anyhow::anyhow!("invalid push gateway URL {shown:?}: {e}")
+        })?;
         anyhow::ensure!(
             matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
             "push gateway URL must use HTTP or HTTPS and include a host"
@@ -179,7 +192,7 @@ impl PushGatewayClient {
         }
         let metrics = self.format_metrics(stats);
         if let Err(error) = self.push_metrics(&stats.test_id, &metrics).await {
-            error!("Failed to push metrics: {error:#}");
+            warn!("Failed to push metrics: {error:#}");
         }
     }
 
@@ -192,12 +205,7 @@ impl PushGatewayClient {
         } else {
             self.format_result(result)
         };
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.push_metrics(&result.id, &metrics),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("metrics delivery timed out after 5 seconds"))?
+        self.push_metrics(&result.id, &metrics).await
     }
 
     fn format_result(&self, result: &TestResult) -> String {
@@ -357,12 +365,23 @@ impl PushGatewayClient {
         Ok(url)
     }
 
+    /// Deliver with retries, bounded by [`DELIVERY_DEADLINE`] in total.
     async fn push_metrics(&self, test_id: &str, metrics: &str) -> anyhow::Result<()> {
         let url = self.push_url(test_id)?;
+        tokio::time::timeout(DELIVERY_DEADLINE, self.push_attempts(url.as_str(), metrics))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "metrics delivery timed out after {} seconds",
+                    DELIVERY_DEADLINE.as_secs()
+                )
+            })?
+    }
 
-        // Retry up to three times, with the caller bounding the full delivery.
+    async fn push_attempts(&self, url: &str, metrics: &str) -> anyhow::Result<()> {
+        // Retry up to three times, with push_metrics bounding the full delivery.
         for attempt in 1..=3 {
-            match self.push_with_retry(url.as_str(), metrics).await {
+            match self.push_with_retry(url, metrics).await {
                 Ok(_) => {
                     debug!("Pushed metrics (attempt {})", attempt);
                     return Ok(());
@@ -477,7 +496,7 @@ impl PushGatewayClient {
         elapsed_ms: u64,
         bytes_total: u64,
         throughput_mbps: f64,
-        streams: impl ExactSizeIterator<Item = (u8, u64, f64, u64)>,
+        streams: impl Iterator<Item = (u8, u64, f64, u64)>,
         tcp_info: Option<&TcpInfoSnapshot>,
         udp_stats: impl Iterator<Item = &'a UdpStats>,
     ) -> String {
@@ -528,49 +547,38 @@ impl PushGatewayClient {
         );
         write_sample(&mut output, "xfr_duration_seconds", duration_secs);
 
-        // Per-stream metrics: headers emitted once, samples once per stream.
-        if streams.len() > 0 {
-            write_family_header(
-                &mut output,
-                "xfr_stream_bytes_total",
-                "Per-stream total bytes transferred",
-                "counter",
-            );
-            write_family_header(
-                &mut output,
-                "xfr_stream_throughput_mbps",
-                "Per-stream average throughput in Mbps",
-                "gauge",
-            );
-            write_family_header(
-                &mut output,
-                "xfr_stream_retransmits_total",
-                "Per-stream TCP retransmits",
-                "counter",
-            );
-
-            for (stream_id, bytes, stream_throughput, retransmits) in streams {
-                let stream_bytes = bytes as f64;
-                let stream_retransmits = retransmits as f64;
-
-                writeln!(
-                    output,
-                    "xfr_stream_bytes_total{{test_id=\"{}\",stream_id=\"{}\"}} {}",
-                    test_id, stream_id, stream_bytes
-                )
-                .expect("writing to String cannot fail");
-                writeln!(
-                    output,
-                    "xfr_stream_throughput_mbps{{test_id=\"{}\",stream_id=\"{}\"}} {}",
-                    test_id, stream_id, stream_throughput
-                )
-                .expect("writing to String cannot fail");
-                writeln!(
-                    output,
-                    "xfr_stream_retransmits_total{{test_id=\"{}\",stream_id=\"{}\"}} {}",
-                    test_id, stream_id, stream_retransmits
-                )
-                .expect("writing to String cannot fail");
+        // Per-stream metrics: each family's header, then its sample for every stream.
+        let streams: Vec<_> = streams.collect();
+        if !streams.is_empty() {
+            for (i, (name, help, metric_type)) in [
+                (
+                    "xfr_stream_bytes_total",
+                    "Per-stream total bytes transferred",
+                    "counter",
+                ),
+                (
+                    "xfr_stream_throughput_mbps",
+                    "Per-stream average throughput in Mbps",
+                    "gauge",
+                ),
+                (
+                    "xfr_stream_retransmits_total",
+                    "Per-stream TCP retransmits",
+                    "counter",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                write_family_header(&mut output, name, help, metric_type);
+                for &(stream_id, bytes, stream_throughput, retransmits) in &streams {
+                    let value = [bytes as f64, stream_throughput, retransmits as f64][i];
+                    writeln!(
+                        output,
+                        "{name}{{test_id=\"{test_id}\",stream_id=\"{stream_id}\"}} {value}"
+                    )
+                    .expect("writing to String cannot fail");
+                }
             }
         }
 
@@ -1171,15 +1179,15 @@ xfr_throughput_mbps 0
 xfr_duration_seconds 0
 # HELP xfr_stream_bytes_total Per-stream total bytes transferred
 # TYPE xfr_stream_bytes_total counter
+xfr_stream_bytes_total{test_id="fixture",stream_id="0"} 1000000
+xfr_stream_bytes_total{test_id="fixture",stream_id="1"} 2000000
 # HELP xfr_stream_throughput_mbps Per-stream average throughput in Mbps
 # TYPE xfr_stream_throughput_mbps gauge
+xfr_stream_throughput_mbps{test_id="fixture",stream_id="0"} 0
+xfr_stream_throughput_mbps{test_id="fixture",stream_id="1"} 0
 # HELP xfr_stream_retransmits_total Per-stream TCP retransmits
 # TYPE xfr_stream_retransmits_total counter
-xfr_stream_bytes_total{test_id="fixture",stream_id="0"} 1000000
-xfr_stream_throughput_mbps{test_id="fixture",stream_id="0"} 0
 xfr_stream_retransmits_total{test_id="fixture",stream_id="0"} 0
-xfr_stream_bytes_total{test_id="fixture",stream_id="1"} 2000000
-xfr_stream_throughput_mbps{test_id="fixture",stream_id="1"} 0
 xfr_stream_retransmits_total{test_id="fixture",stream_id="1"} 0
 # HELP xfr_tcp_rtt_microseconds TCP round-trip time in microseconds
 # TYPE xfr_tcp_rtt_microseconds gauge
@@ -1262,6 +1270,56 @@ xfr_udp_lost_percent 5
             "timeout should fire quickly, but took {:?}",
             elapsed
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_push_to_stalled_gateway_has_total_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            // Accept every attempt and never respond.
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let stats = TestStats::new("stalled".into(), 1);
+        let start = tokio::time::Instant::now();
+        super::maybe_push_metrics_for_peer(
+            &Some(format!("http://{addr}")),
+            &stats,
+            Some("127.0.0.1".parse().unwrap()),
+            None,
+            &Default::default(),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "server push took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_gateway_url_is_named_without_credentials() {
+        let error = PushGatewayClient::new("not a url".into())
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid push gateway URL \"not a url\": relative URL without a base"
+        );
+        let error = PushGatewayClient::new("http://user:secret@bad host/".into())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            !error.contains("secret") && !error.contains("user"),
+            "{error}"
+        );
+        assert!(error.contains("\"http://***@bad host/\""), "{error}");
     }
 
     #[test]
