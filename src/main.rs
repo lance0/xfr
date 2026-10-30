@@ -2555,16 +2555,15 @@ async fn restart_tui_run(
     app: &mut App,
     run: &mut Option<TuiRun>,
     config: &ClientConfig,
-    metrics: &mut ClientMetrics,
 ) -> Result<()> {
     if let Some(current) = run.take() {
         app.log("Restarting, waiting for current test to stop...");
         terminal.draw(|f| draw(f, app))?;
-        let test = current.test;
+        // A run that finished on its own was already taken and pushed. This
+        // one was cut short by the restart, so its result is not pushed:
+        // it would replace the last full measurement with a truncated one.
         match cancel_tui_run(current, Duration::from_secs(3)).await {
-            Some(Ok(result)) => {
-                metrics.queue(&result, test);
-            }
+            Some(Ok(_)) => {}
             Some(Err(e)) => {
                 app.log(format!("Previous test ended while restarting: {}", e));
             }
@@ -2715,7 +2714,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     // `restart_tui_run` may draw a transient "restarting"
                     // frame directly. Its replacement must not be skipped
                     // against the fingerprint from before that draw.
@@ -2807,7 +2806,7 @@ async fn run_tui_loop(
                     fallback_bytes = 0;
                     fallback_elapsed_ms = 0;
                     print_json_on_exit = false;
-                    restart_tui_run(terminal, &mut app, &mut run, config, metrics).await?;
+                    restart_tui_run(terminal, &mut app, &mut run, config).await?;
                     last_drawn = None;
                 }
                 KeyCode::Char('t') => {
