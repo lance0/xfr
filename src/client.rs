@@ -2914,6 +2914,15 @@ impl Client {
             break 'control Err(anyhow::anyhow!("Connection closed without result"));
         };
         control_handle.abort();
+        // Whatever arm noticed it, a silent server surfaces as quinn's bare
+        // "timed out"; say what happened instead.
+        let test_result = match connection.close_reason() {
+            Some(quinn::ConnectionError::TimedOut) if test_result.is_err() => Err(anyhow::anyhow!(
+                "connection lost: the server stopped responding (nothing heard for {}s)",
+                quic::QUIC_IDLE_TIMEOUT.as_secs()
+            )),
+            _ => test_result,
+        };
 
         // Cancel any stream work that may still be in flight
         let _ = cancel_tx.send(true);

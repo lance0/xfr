@@ -194,7 +194,7 @@ Disable zero\-copy TCP sends (use regular buffered writes)
 Probe the path MTU instead of running a throughput test: walks UDP payload sizes with the don't\-fragment flag set and reports the largest size surviving in each direction. Implies UDP; requires a server with mtu_probe_v1 support (xfr >= 0.9.17)
 .TP
 .BI \-\-connect\-timeout " DURATION"
-Fail if the control connection, including hostname resolution and the TCP connect or QUIC handshake, takes longer than this (e.g. 5s). Without it, a dead or filtered server or a stuck DNS lookup is bounded only by OS defaults
+Fail if the control connection, including hostname resolution and the TCP connect or QUIC handshake, takes longer than this (e.g. 5s). Without it, a dead or filtered server or a stuck DNS lookup is bounded only by OS defaults; a QUIC handshake gives up after 5s
 .TP
 .BI \-\-push\-gateway " URL"
 Push the final client result to a Prometheus Pushgateway or vmagent import URL.

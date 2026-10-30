@@ -419,7 +419,7 @@ struct Cli {
     /// Fail if the control connection (hostname resolution plus TCP connect
     /// or QUIC handshake) takes longer than this (e.g. 5s). Without it, a dead
     /// or filtered server or a stuck DNS lookup is bounded only by OS
-    /// defaults, which can be minutes.
+    /// defaults, which can be minutes; a QUIC handshake gives up after 5s.
     #[arg(long, value_parser = parse_nonzero_duration, value_name = "DURATION")]
     #[arg(help_heading = "Connection Options")]
     connect_timeout: Option<Duration>,
