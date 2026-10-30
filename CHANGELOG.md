@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`xfr discover` brackets IPv6 answers** — `fe80::2%eth0:5201` now prints as `[fe80::2%eth0]:5201`, which can be passed to `xfr` as a target with its port.
 
+### Fixed
+- **PSK mismatches say which side is missing the key** — a client with `--psk` against a server without one failed with `PSK session but no server nonce` (TCP/UDP) or `QUIC PSK session key was not derived` (QUIC). It now reads `the server does not use a pre-shared key; remove --psk/--psk-file or configure the server with one`. The opposite case now reads `authentication failed: the server requires a pre-shared key (set --psk/--psk-file)`, matching the wrong-key message. Client-side only; no protocol change.
+
 ### Library API (pre-1.0 break)
 - Struct-literal constructors must supply the new public field `config::ClientDefaults.port`. The struct implements `Default`, so literals ending in `..Default::default()` are unaffected.
 

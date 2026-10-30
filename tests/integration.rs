@@ -1052,6 +1052,33 @@ async fn test_psk_auth_failure() {
     }
 }
 
+fn psk_mismatch_config(port: u16, protocol: Protocol, psk: Option<String>) -> ClientConfig {
+    ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+        udp_payload_size: None,
+    }
+}
+
 #[tokio::test]
 async fn test_psk_auth_missing_client_key() {
     let port = get_test_port();
@@ -1066,40 +1093,44 @@ async fn test_psk_auth_missing_client_key() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let config = ClientConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        protocol: Protocol::Tcp,
-        streams: 1,
-        duration: Duration::from_secs(2),
-        direction: Direction::Upload,
-        bitrate: None,
-        tcp_nodelay: false,
-        window_size: None,
-        tcp_congestion: None,
-        psk: None, // No PSK provided
-        address_family: xfr::net::AddressFamily::default(),
-        bind_addr: None,
-        sequential_ports: false,
-        mptcp: false,
-        random_payload: false,
-        zerocopy: ZerocopyMode::Off,
-        dscp: None,
-        mtu_probe: false,
-        connect_timeout: None,
-        byte_budget: None,
-        udp_payload_size: None,
-    };
+    for protocol in [Protocol::Tcp, Protocol::Quic] {
+        let client = Client::new(psk_mismatch_config(port, protocol, None));
+        let result = timeout(Duration::from_secs(10), client.run(None)).await;
+        let error = result
+            .expect("should complete (not timeout)")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "authentication failed: the server requires a pre-shared key (set --psk/--psk-file)",
+            "{protocol:?}"
+        );
+    }
+}
 
-    let client = Client::new(config);
-    let result = timeout(Duration::from_secs(10), client.run(None)).await;
+#[tokio::test]
+async fn test_psk_client_key_against_server_without_psk() {
+    let port = get_test_port();
+    let _server = start_test_server(port).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert!(result.is_ok(), "Test should complete (not timeout)");
-    let result = result.unwrap();
-    assert!(
-        result.is_err(),
-        "Should fail when server requires auth but client has no PSK"
-    );
+    for protocol in [Protocol::Tcp, Protocol::Udp, Protocol::Quic] {
+        let client = Client::new(psk_mismatch_config(
+            port,
+            protocol,
+            Some("client-secret".to_string()),
+        ));
+        let result = timeout(Duration::from_secs(10), client.run(None)).await;
+        let error = result
+            .expect("should complete (not timeout)")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "the server does not use a pre-shared key; remove --psk/--psk-file or configure the server with one",
+            "{protocol:?}"
+        );
+    }
 }
 
 #[tokio::test]
