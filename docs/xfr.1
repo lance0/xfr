@@ -52,7 +52,7 @@ are not affected.
 .SH CLIENT OPTIONS
 .TP
 .BI \-p ", " \-\-port " PORT"
-Server port (default: the port in a \fIhost\fR:\fIport\fR or [\fIIPv6\fR]:\fIport\fR target, else \fBport\fR from the [client] config section, else 5201). A target port that disagrees with \-p is an error. A bare IPv6 address (::1, fe80::1%eth0) has no port; bracket it to add one. Environment: XFR_PORT
+Server port. The port comes from a \fIhost\fR:\fIport\fR target, then \-p/\-\-port, then XFR_PORT, then \fBport\fR in the [client] config section, then 5201. Bracket IPv6 addresses to add a port ([::1]:5202, [fe80::1%eth0]:5202); [::1], [fe80::1%eth0] and bare ::1 or fe80::1%eth0 have no port. A target port that disagrees with \-p is an error; XFR_PORT yields to the target. Port 0 is rejected. Environment: XFR_PORT
 .TP
 .BI \-t ", " \-\-time " DURATION"
 Test duration (default: 10s, or 60s with \fB\-\-probe\-mtu\fR and no \fB\-t\fR). Bare integers are seconds; supports units: s, m, h. 0 runs until interrupted. Environment: XFR_DURATION

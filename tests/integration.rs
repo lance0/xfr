@@ -147,7 +147,8 @@ async fn test_cli_host_port_target() {
         Duration::from_secs(15),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args([&format!("127.0.0.1:{port}"), "-t", "1sec", "--json"])
-            .env_remove("XFR_PORT")
+            // XFR_PORT yields to the target's port instead of conflicting.
+            .env("XFR_PORT", "1")
             .kill_on_drop(true)
             .output(),
     )

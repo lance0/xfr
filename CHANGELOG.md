@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Client port from config or the target** — `[client] port` sets the port clients connect to, so a server moved off 5201 (for example because iperf3 holds it) no longer needs `-p` on every run. Targets also accept `host:port`, `[IPv6]:port` and `[fe80::1%eth0]:port`; a bare IPv6 address such as `::1` stays a host with no port. Precedence is target port, then `-p`/`XFR_PORT`, then `[client] port`, then 5201; a target port that disagrees with `-p` is an error, and `[client] port = 0` is rejected (#273).
+- **Client port from config or the target** — `[client] port` sets the port clients connect to, so a server moved off 5201 (for example because iperf3 holds it) no longer needs `-p` on every run. Targets also accept `host:port`, `[IPv6]:port` and `[fe80::1%eth0]:port`; `[::1]` and a bare IPv6 address such as `::1` or `fe80::1%eth0` are hosts with no port. The port comes from a `host:port` target, then `-p`/`--port`, then `XFR_PORT`, then `[client] port`, then 5201. A target port that disagrees with `-p`/`--port` is an error; `XFR_PORT` yields to the target. Port 0 is rejected from every source (#273).
 
 ### Changed
 - **`xfr discover` brackets IPv6 answers** — `fe80::2%eth0:5201` now prints as `[fe80::2%eth0]:5201`, which can be passed to `xfr` as a target with its port.

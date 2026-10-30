@@ -399,7 +399,7 @@ xfr reads defaults from:
 [client]
 duration_secs = 10
 parallel_streams = 1          # 1-128; explicit -P 1 overrides the config default
-# port = 5201                 # server port to connect to; host:port and -p override it
+# port = 5201                 # server port; a host:port target, -p or XFR_PORT overrides it
 tcp_nodelay = false
 window_size = "1M"           # TCP/UDP socket buffer size (SO_SNDBUF/SO_RCVBUF), e.g. "512K", "2M"
 # bitrate = "100M"            # target bitrate; accepts the same units as --bitrate
@@ -476,11 +476,12 @@ For `xfr serve`, `--port` takes precedence over `XFR_PORT`, which takes preceden
 `server.port` in the config file. If none is set, the server uses port 5201. An explicit
 port of 5201 also overrides the config file.
 
-For a client, the port comes from a `host:port` target (`xfr 10.0.0.5:5202`,
-`xfr [::1]:5202`, `xfr [fe80::1%eth0]:5202`), then `-p`/`XFR_PORT`, then
-`[client] port`, then 5201. A target port that disagrees with `-p` is an error.
-A bare IPv6 address such as `::1` or `fe80::1%eth0` has no port; bracket it to add
-one. `[client] port = 0` is rejected.
+For a client, the port comes from a `host:port` target, then `-p`/`--port`, then
+`XFR_PORT`, then `[client] port`, then 5201. Targets take the forms `10.0.0.5:5202`,
+`example.com:5202`, `[::1]:5202` and `[fe80::1%eth0]:5202`. `[::1]`, `[fe80::1%eth0]`
+and a bare IPv6 address such as `::1` or `fe80::1%eth0` have no port; bracket the
+address to add one. A target port that disagrees with `-p`/`--port` is an error;
+`XFR_PORT` yields to the target. Port 0 is rejected from every source.
 
 ### Environment Variables
 
@@ -956,7 +957,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--port` | `-p` | 5201 | Server port; for a client, a `host:port` target or `[client] port` also sets it |
+| `--port` | `-p` | 5201 | Server port. Client precedence: a `host:port` target, then `-p`/`--port`, then `XFR_PORT`, then `[client] port`, then 5201 |
 | `--time` | `-t` | 10s | Test duration (use 0 for infinite) |
 | `--bytes` | `-n` | none | Transfer a fixed number of bytes instead of running for a fixed time (e.g. `1G`; K/M/G are binary). Total across all streams; `-t` becomes an upper bound if also given |
 | `--udp` | `-u` | false | UDP mode |

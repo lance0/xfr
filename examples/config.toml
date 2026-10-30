@@ -8,7 +8,7 @@ duration_secs = 10
 # Default number of parallel streams
 parallel_streams = 1
 
-# Default server port; a host:port target or -p overrides it
+# Default server port; a host:port target, -p or XFR_PORT overrides it
 # port = 5201
 
 # Enable TCP_NODELAY by default

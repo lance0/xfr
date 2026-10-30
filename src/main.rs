@@ -296,10 +296,14 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     omit: Option<u64>,
 
-    /// Server port (default: host:port, config value, or 5201)
+    /// Server port [default: 5201]. Also set by a host:port target, XFR_PORT, or [client] port
     #[arg(short, long, env = "XFR_PORT")]
     #[arg(help_heading = "Connection Options")]
     port: Option<u16>,
+
+    /// Whether `port` was typed as `-p`/`--port` rather than read from XFR_PORT.
+    #[arg(skip)]
+    port_on_command_line: bool,
 
     /// Disable Nagle algorithm
     #[arg(long)]
@@ -696,12 +700,13 @@ fn resolve_parallel_streams(cli_parallel: Option<u8>, config_parallel: Option<u8
     Ok(streams)
 }
 
-/// A `host:port` target wins, then an explicit `-p`/`XFR_PORT` (even when it
-/// equals DEFAULT_PORT), then `[client] port`. A target port that disagrees
-/// with `-p` is an error rather than a silent pick.
+/// Precedence: a `host:port` target, then a command-line `-p` (even when it
+/// equals DEFAULT_PORT), then `XFR_PORT`, then `[client] port`. A target port
+/// that disagrees with a command-line `-p` is an error rather than a silent pick.
 fn resolve_client_port(
     target_port: Option<u16>,
     cli_port: Option<u16>,
+    env_port: Option<u16>,
     config_port: Option<u16>,
 ) -> Result<u16> {
     if let (Some(target), Some(cli)) = (target_port, cli_port) {
@@ -710,16 +715,20 @@ fn resolve_client_port(
             "target port {target} conflicts with -p/--port {cli}"
         );
     }
-    match target_port.or(cli_port) {
-        Some(port) => Ok(port),
-        None => {
-            anyhow::ensure!(
-                config_port != Some(0),
-                "client.port must be between 1 and 65535 (got 0)"
-            );
-            Ok(config_port.unwrap_or(DEFAULT_PORT))
-        }
-    }
+    let (port, source) = [
+        (target_port, "the target"),
+        (cli_port, "-p/--port"),
+        (env_port, "XFR_PORT"),
+        (config_port, "client.port"),
+    ]
+    .into_iter()
+    .find_map(|(port, source)| Some((port?, source)))
+    .unwrap_or((DEFAULT_PORT, "the default"));
+    anyhow::ensure!(
+        port != 0,
+        "port must be between 1 and 65535 (got 0 from {source})"
+    );
+    Ok(port)
 }
 
 fn resolve_window_size(
@@ -938,10 +947,13 @@ fn resolve_server_address_family(
     resolve_address_family(ipv4_only, ipv6_only, config_value, "server.address_family")
 }
 
-/// Split `host:port` or `[host]:port` into host and port. Anything else,
-/// including a bare IPv6 address (`::1`, `fe80::1%eth0`) or `[::1]`, is all
-/// host with no port.
+/// Split `host:port` or `[host]:port` into host and port, and unbracket
+/// `[host]`. Anything else, including a bare IPv6 address (`::1`,
+/// `fe80::1%eth0`), is all host with no port.
 fn split_host_port(s: &str) -> anyhow::Result<(&str, Option<u16>)> {
+    if let Some(host) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return Ok((host, None));
+    }
     let (host, port) = match s.strip_prefix('[').and_then(|r| r.split_once("]:")) {
         Some(split) => split,
         None => match s.split_once(':') {
@@ -1188,7 +1200,9 @@ fn parse_cli() -> Cli {
                 .exit();
         }
     }
-    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
+    cli
 }
 
 #[tokio::main]
@@ -1662,7 +1676,13 @@ async fn main() -> Result<()> {
             validate_bind_address(bind_addr, protocol, streams, cport.is_some())?;
 
             let (host, target_port) = split_host_port(host)?;
-            let port = resolve_client_port(target_port, cli.port, file_config.client.port)?;
+            let (cli_port, env_port) = if cli.port_on_command_line {
+                (cli.port, None)
+            } else {
+                (None, cli.port)
+            };
+            let port =
+                resolve_client_port(target_port, cli_port, env_port, file_config.client.port)?;
 
             let config = ClientConfig {
                 host: host.to_string(),
@@ -3931,45 +3951,49 @@ mod tests {
     }
 
     #[test]
-    fn client_port_resolves_cli_then_config_then_default() {
-        use clap::{CommandFactory, FromArgMatches};
-
+    fn client_port_resolves_target_cli_env_config_then_default() {
         let explicit = Cli::try_parse_from(["xfr", "host", "-p", "5201"]).unwrap();
-        // Isolate the fallback case from an XFR_PORT set by the test runner.
-        let matches = Cli::command()
-            .mut_arg("port", |arg| arg.env(None::<&str>))
-            .try_get_matches_from(["xfr", "host"])
-            .unwrap();
-        let unset = Cli::from_arg_matches(&matches).unwrap();
-        assert_eq!(unset.port, None);
         assert_eq!(
-            resolve_client_port(None, explicit.port, Some(5202)).unwrap(),
+            resolve_client_port(None, explicit.port, None, Some(5202)).unwrap(),
             DEFAULT_PORT
         );
         assert_eq!(
-            resolve_client_port(None, unset.port, Some(5202)).unwrap(),
+            resolve_client_port(None, None, None, Some(5202)).unwrap(),
             5202
         );
         assert_eq!(
-            resolve_client_port(None, unset.port, None).unwrap(),
+            resolve_client_port(None, None, None, None).unwrap(),
             DEFAULT_PORT
         );
-        // A host:port target beats config and must agree with an explicit -p.
+        // XFR_PORT beats config and yields to a host:port target without conflict.
         assert_eq!(
-            resolve_client_port(Some(6000), None, Some(5202)).unwrap(),
-            6000
+            resolve_client_port(None, None, Some(5203), Some(5202)).unwrap(),
+            5203
         );
         assert_eq!(
-            resolve_client_port(Some(6000), Some(6000), Some(5202)).unwrap(),
+            resolve_client_port(Some(6000), None, Some(5201), Some(5202)).unwrap(),
             6000
         );
-        let error = resolve_client_port(Some(6000), Some(6001), None).unwrap_err();
+        // A target port beats config and must agree with a command-line -p.
+        assert_eq!(
+            resolve_client_port(Some(6000), Some(6000), None, Some(5202)).unwrap(),
+            6000
+        );
+        let error = resolve_client_port(Some(6000), Some(6001), None, None).unwrap_err();
         assert!(error.to_string().contains("6000") && error.to_string().contains("6001"));
-        // Port 0 from config is rejected by key; an override sidesteps it.
-        let error = resolve_client_port(None, None, Some(0)).unwrap_err();
-        assert!(error.to_string().contains("client.port"));
+        // Port 0 is rejected from whichever source supplied it.
+        for (ports, source) in [
+            ([Some(0), None, None, None], "the target"),
+            ([None, Some(0), None, None], "-p/--port"),
+            ([None, None, Some(0), None], "XFR_PORT"),
+            ([None, None, None, Some(0)], "client.port"),
+        ] {
+            let [target, cli, env, config] = ports;
+            let error = resolve_client_port(target, cli, env, config).unwrap_err();
+            assert!(error.to_string().contains(source), "{error}");
+        }
         assert_eq!(
-            resolve_client_port(None, Some(5202), Some(0)).unwrap(),
+            resolve_client_port(None, Some(5202), None, Some(0)).unwrap(),
             5202
         );
     }
@@ -3983,7 +4007,8 @@ mod tests {
             ("example.com:5202", "example.com", Some(5202)),
             ("[::1]:5202", "::1", Some(5202)),
             ("[fe80::1%eth0]:5202", "fe80::1%eth0", Some(5202)),
-            ("[::1]", "[::1]", None),
+            ("[::1]", "::1", None),
+            ("[fe80::1%eth0]", "fe80::1%eth0", None),
             ("::1", "::1", None),
             ("2001:db8::1", "2001:db8::1", None),
             ("fe80::1%eth0", "fe80::1%eth0", None),
