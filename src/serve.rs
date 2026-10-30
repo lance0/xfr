@@ -2809,6 +2809,10 @@ async fn run_test<W: AsyncWrite + Unpin>(
         .await;
         control_handle.abort();
         let mut reports = reporting_result?;
+        // Capture the data duration before stopping the handlers: UDP
+        // receivers linger briefly for reordered stragglers, and that wait
+        // is not test time.
+        let duration_ms = reports.duration_ms();
 
         // Signal handlers to stop
         if let Some(test) = active_tests.lock().await.get(id) {
@@ -2854,8 +2858,6 @@ async fn run_test<W: AsyncWrite + Unpin>(
             _ => {}
         }
 
-        // Capture the data duration before any terminal control flushing.
-        let duration_ms = reports.duration_ms();
         let bytes_total = stats.total_bytes();
         let throughput_mbps = if duration_ms > 0 {
             (bytes_total as f64 * 8.0) / (duration_ms as f64 / 1000.0) / 1_000_000.0
