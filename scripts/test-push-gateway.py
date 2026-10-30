@@ -324,11 +324,11 @@ def stable_backend_fixtures():
 
 
 def run_stable(gateway, storage, victoria, fixtures):
-    job = "xfr-stable-smoke"
     previous = {}
     repeated_keys = None
     identities = set()
     for index, fixture in enumerate(fixtures):
+        job = fixture["job"]
         method, path, _ = fixture["request"].split()
         path = path.removeprefix("/api/v1/import/prometheus")
         assert method == ("POST" if fixture["tag"] == "legacy" else "PUT")
@@ -348,11 +348,7 @@ def run_stable(gateway, storage, victoria, fixtures):
             pass
         if fixture["tag"] == "legacy":
             wait_for(
-                lambda fixture=fixture: bool(
-                    read_samples(
-                        storage, "xfr_test_" + fixture["result"]["id"], victoria
-                    )
-                ),
+                lambda job=job: bool(read_samples(storage, job, victoria)),
                 "legacy/stable coexistence",
             )
             continue
@@ -380,7 +376,7 @@ def run_stable(gateway, storage, victoria, fixtures):
         )
         identities.add(identity)
 
-        def delivered(identity=identity, expected=expected):
+        def delivered(identity=identity, expected=expected, job=job):
             rows = read_samples(storage, job, victoria)
             selected = []
             for name, labels, value in rows:
@@ -454,11 +450,14 @@ def run_stable(gateway, storage, victoria, fixtures):
             "udp-all-lost",
         ):
             if fixture["tag"] == "missing-tcp":
-                query = 'xfr_last_test_tcp_rtt_microseconds{job="xfr-stable-smoke",protocol="tcp"} and (xfr_last_test_tcp_info_available{job="xfr-stable-smoke",protocol="tcp"} == 1)'
+                selector = f'job={json.dumps(job)},protocol="tcp"'
+                query = f"xfr_last_test_tcp_rtt_microseconds{{{selector}}} and (xfr_last_test_tcp_info_available{{{selector}}} == 1)"
             elif fixture["tag"] == "udp-all-lost":
-                query = 'xfr_last_test_udp_direction_jitter_ms{job="xfr-stable-smoke",test_direction="bidir"} and (xfr_last_test_udp_direction_jitter_available{job="xfr-stable-smoke",test_direction="bidir"} == 1)'
+                selector = f'job={json.dumps(job)},test_direction="bidir"'
+                query = f"xfr_last_test_udp_direction_jitter_ms{{{selector}}} and (xfr_last_test_udp_direction_jitter_available{{{selector}}} == 1)"
             else:
-                query = 'xfr_last_test_udp_direction_lost_percent{job="xfr-stable-smoke",test_direction="bidir"} and (xfr_last_test_udp_direction_quality_available{job="xfr-stable-smoke",test_direction="bidir"} == 1)'
+                selector = f'job={json.dumps(job)},test_direction="bidir"'
+                query = f"xfr_last_test_udp_direction_lost_percent{{{selector}}} and (xfr_last_test_udp_direction_quality_available{{{selector}}} == 1)"
 
             def masked(query=query):
                 with urlopen(
@@ -470,7 +469,7 @@ def run_stable(gateway, storage, victoria, fixtures):
                     return not json.load(response)["data"]["result"]
 
             wait_for(masked, "availability mask excludes retained optional values")
-    assert len(identities) == 7, identities
+    assert len(identities) == 9, identities
     print(
         f"PASS {'vmagent -> VictoriaMetrics' if victoria else 'Pushgateway'} stable repeated snapshots, identities and availability"
     )

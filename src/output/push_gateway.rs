@@ -341,7 +341,7 @@ impl PushGatewayClient {
             for (name, value) in std::iter::once(("job", job))
                 .chain(labels.iter().map(|(k, v)| (k.as_str(), v.clone())))
             {
-                if value.is_empty() || value.contains('/') {
+                if value.is_empty() || value.contains('/') || matches!(value.as_str(), "." | "..") {
                     path.push(&format!("{name}@base64"));
                     path.push(&if value.is_empty() {
                         "=".into()
@@ -1023,6 +1023,58 @@ mod tests {
         );
         assert!(bidir.contains("xfr_udp_direction_packets_lost{direction=\"upload\"} 1\n"));
         assert!(!bidir.contains("xfr_udp_direction_packets_lost{direction=\"download\"}"));
+    }
+
+    #[test]
+    fn grouping_round_trips_literal_dot_values() {
+        use crate::protocol::{Direction, Protocol};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use std::collections::BTreeMap;
+        for job in [".", ".."] {
+            for site in [".", ".."] {
+                let client = PushGatewayClient::new(
+                    "http://localhost/proxy/api/v1/import/prometheus/?extra_label=zone%3Dmesh"
+                        .into(),
+                )
+                .unwrap()
+                .with_server("mesh-server", 5201)
+                .with_test(Protocol::Tcp, Direction::Upload)
+                .with_labels(BTreeMap::from([
+                    ("instance".into(), "home".into()),
+                    ("site".into(), site.into()),
+                ]))
+                .unwrap()
+                .with_job(job.into())
+                .unwrap();
+                client.validate().unwrap();
+                let url = client.push_url("unused-uuid").unwrap();
+                assert!(
+                    url.path()
+                        .starts_with("/proxy/api/v1/import/prometheus/metrics/")
+                );
+                assert_eq!(url.query(), Some("extra_label=zone%3Dmesh"));
+                let segments: Vec<_> = url.path_segments().unwrap().collect();
+                let groups = &segments[segments
+                    .iter()
+                    .position(|segment| *segment == "metrics")
+                    .unwrap()
+                    + 1..];
+                assert!(groups.len().is_multiple_of(2), "{url}");
+                for (name, expected) in [("job", job), ("site", site)] {
+                    let encoded_name = format!("{name}@base64");
+                    let pair = groups
+                        .chunks_exact(2)
+                        .find(|pair| pair[0] == name || pair[0] == encoded_name)
+                        .unwrap();
+                    let actual = if pair[0] == encoded_name {
+                        String::from_utf8(URL_SAFE_NO_PAD.decode(pair[1]).unwrap()).unwrap()
+                    } else {
+                        pair[1].to_string()
+                    };
+                    assert_eq!(actual, expected, "{name} lost in {url}");
+                }
+            }
+        }
     }
 
     #[test]

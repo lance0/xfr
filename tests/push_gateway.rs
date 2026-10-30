@@ -696,6 +696,22 @@ async fn stable_backend_fixtures() {
     ));
     for (tag, protocol, direction, instance, server, path) in [
         (
+            "dot-job",
+            Protocol::Tcp,
+            Direction::Upload,
+            "dot-single",
+            "mesh-server",
+            "..",
+        ),
+        (
+            "dotdot-job",
+            Protocol::Tcp,
+            Direction::Upload,
+            "dot-double",
+            "mesh-server",
+            ".",
+        ),
+        (
             "instance",
             Protocol::Tcp,
             Direction::Upload,
@@ -758,6 +774,12 @@ async fn stable_backend_fixtures() {
     let (url, pushes) = gateway(vec![202; cases.len()]).await;
     let mut metadata = Vec::new();
     for (tag, protocol, direction, instance, server, path, result) in cases {
+        let job = match tag {
+            "dot-job" => ".".to_string(),
+            "dotdot-job" => "..".to_string(),
+            "legacy" => format!("xfr_test_{}", result.id),
+            _ => "xfr-stable-smoke".to_string(),
+        };
         let mut client = PushGatewayClient::new(url.clone())
             .unwrap()
             .with_labels(BTreeMap::from([
@@ -769,10 +791,10 @@ async fn stable_backend_fixtures() {
             .with_server(server, 5201)
             .with_test(protocol, direction);
         if tag != "legacy" {
-            client = client.with_job("xfr-stable-smoke".into()).unwrap();
+            client = client.with_job(job.clone()).unwrap();
         }
         client.push_test_result(&result).await.unwrap();
-        metadata.push(serde_json::json!({"tag":tag,"protocol":protocol,"test_direction":direction,"instance":instance,"server":format!("{server}:5201"),"path":path,"result":result}));
+        metadata.push(serde_json::json!({"job":job,"tag":tag,"protocol":protocol,"test_direction":direction,"instance":instance,"server":format!("{server}:5201"),"path":path,"result":result}));
     }
     let pushes = pushes.await.unwrap();
     let fixtures: Vec<_> = metadata
