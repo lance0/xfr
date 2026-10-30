@@ -89,11 +89,56 @@ pub(crate) fn require_owner_only_permissions(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn service_credential_permissions(
+    owner: u32,
+    mode: u32,
+    regular: bool,
+    acl: &[u8],
+    uid: u32,
+) -> bool {
+    let mut expected = [
+        2, 0, 0, 0, // POSIX ACL version 2
+        1, 0, 4, 0, 255, 255, 255, 255, // owner: read
+        2, 0, 4, 0, 0, 0, 0, 0, // named service user: read
+        4, 0, 0, 0, 255, 255, 255, 255, // owning group: none
+        16, 0, 4, 0, 255, 255, 255, 255, // mask: read
+        32, 0, 0, 0, 255, 255, 255, 255, // other: none
+    ];
+    expected[16..20].copy_from_slice(&uid.to_le_bytes());
+    owner == 0 && mode & 0o7777 == 0o440 && regular && acl == expected
+}
+
+#[cfg(target_os = "linux")]
+fn is_service_credential(file: &std::fs::File, metadata: &std::fs::Metadata) -> bool {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut acl = [0; 44];
+    // The ACL mask makes systemd's named-user read grant appear as group-readable.
+    let size = unsafe {
+        libc::fgetxattr(
+            file.as_raw_fd(),
+            c"system.posix_acl_access".as_ptr(),
+            acl.as_mut_ptr().cast(),
+            acl.len(),
+        )
+    };
+    size == acl.len() as isize
+        && service_credential_permissions(
+            metadata.uid(),
+            metadata.mode(),
+            metadata.is_file(),
+            &acl,
+            unsafe { libc::geteuid() },
+        )
+}
+
 /// Read PSK from file, trimming whitespace.
 ///
 /// On Unix, rejects files that are readable or writable by anyone other than
-/// the owner (mode bits for group/other are set), because such permissions
-/// would let other users on the host read the pre-shared key.
+/// the owner. Linux also accepts the root-owned read-only ACL pattern used by
+/// systemd credentials, granting read access only to the effective service UID.
 pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
     use anyhow::Context;
 
@@ -107,7 +152,15 @@ pub fn read_psk_file(path: &std::path::Path) -> anyhow::Result<String> {
         let metadata = file
             .metadata()
             .with_context(|| format!("failed to inspect PSK file {}", path.display()))?;
-        require_owner_only_permissions(path, &metadata, "PSK file")?;
+        if let Err(error) = require_owner_only_permissions(path, &metadata, "PSK file") {
+            #[cfg(target_os = "linux")]
+            let credential = is_service_credential(&file, &metadata);
+            #[cfg(not(target_os = "linux"))]
+            let credential = false;
+            if !credential {
+                return Err(error);
+            }
+        }
     }
 
     let mut content = String::new();
@@ -224,15 +277,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("leaky.psk");
         fs::write(&path, "super-secret-key").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-
-        let err = read_psk_file(&path).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("overly broad permissions"),
-            "error should flag permissions: {}",
-            msg
-        );
+        for mode in [0o440, 0o644, 0o660] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            let err = read_psk_file(&path).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("overly broad permissions"), "{mode:o}: {msg}");
+        }
     }
 
     #[test]
@@ -243,10 +293,65 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secure.psk");
         fs::write(&path, "owner-only-key\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        for mode in [0o600, 0o400] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            let psk = read_psk_file(&path).unwrap();
+            assert_eq!(psk, "owner-only-key");
+        }
+    }
 
-        let psk = read_psk_file(&path).unwrap();
-        assert_eq!(psk, "owner-only-key");
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn service_credential_accepts_only_the_read_only_service_acl() {
+        let acl = [
+            2, 0, 0, 0, 1, 0, 4, 0, 255, 255, 255, 255, 2, 0, 4, 0, 232, 3, 0, 0, 4, 0, 0, 0, 255,
+            255, 255, 255, 16, 0, 4, 0, 255, 255, 255, 255, 32, 0, 0, 0, 255, 255, 255, 255,
+        ];
+        assert!(service_credential_permissions(
+            0, 0o100440, true, &acl, 1000
+        ));
+        for (owner, mode, regular, uid) in [
+            (1000, 0o440, true, 1000),
+            (0, 0o640, true, 1000),
+            (0, 0o444, true, 1000),
+            (0, 0o450, true, 1000),
+            (0, 0o2440, true, 1000),
+            (0, 0o440, false, 1000),
+            (0, 0o440, true, 1001),
+        ] {
+            assert!(!service_credential_permissions(
+                owner, mode, regular, &acl, uid
+            ));
+        }
+        for index in 0..acl.len() {
+            let mut changed = acl;
+            changed[index] ^= 1;
+            assert!(
+                !service_credential_permissions(0, 0o440, true, &changed, 1000),
+                "changed ACL byte {index} must fail"
+            );
+        }
+        for invalid in [acl[..43].to_vec(), [acl.as_slice(), &[0; 8]].concat()] {
+            assert!(!service_credential_permissions(
+                0, 0o440, true, &invalid, 1000
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn psk_symlink_permissions_are_checked_on_the_target() {
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("key");
+        let link = dir.path().join("link");
+        fs::write(&target, "symlink-test-key").unwrap();
+        symlink(&target, &link).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_psk_file(&link).is_err());
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_psk_file(&link).unwrap(), "symlink-test-key");
     }
 
     #[test]

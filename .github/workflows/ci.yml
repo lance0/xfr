@@ -40,6 +40,21 @@ jobs:
       - name: Run tests
         run: cargo test --locked ${{ matrix.features }}
 
+  systemd-credentials:
+    name: Systemd PSK credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ACL tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y acl
+      - name: Build client and server
+        run: cargo build --locked
+      - name: Verify DynamicUser credentials and unsafe-file controls
+        run: ./scripts/test-systemd-credentials.sh target/debug/xfr
+
   clippy:
     name: Clippy (${{ matrix.features }})
     runs-on: ubuntu-latest
