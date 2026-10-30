@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Updated `ctutils` to 0.4.6** — closes [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385) (#275). v0.12.1 shipped `ctutils` 0.4.2, which `digest` (HMAC-SHA256) and `universal-hash` (Poly1305 in ChaCha20-Poly1305) use for constant-time tag comparison. Before 0.4.4, its `const fn` mask helpers could compile to a branch on common platforms, and its `u128` comparisons branched on 32-bit targets; branching on secret values can leak them through timing. xfr's MAC and AEAD tag checks compare `[u8]` slices through the `cmov`-backed path, not those helpers, so the exposure is believed to be theoretical. Lockfile-only; no source or API changes.
+
 ### Added
 - **Portable push labels and bounded client snapshots** — client/server `--push-label` and TOML `push_labels` merge by key; client-only `--push-job` reuses aggregate `xfr_last_test_*` gauges without UUID or stream labels. An explicit `instance` distinguishes source peers, complete-group replacement removes omitted Pushgateway samples, and availability gauges mask old optional values in VictoriaMetrics. Legacy exports remain the default; server bounded grouping is separate.
 - **Directional UDP push metrics** — new `xfr_udp_direction_*` gauges export upload/download bytes, throughput, and each receiver's loss/jitter. Directions are client-relative; server download traffic is labeled as a sender view. Missing observations stay absent, legacy metrics are unchanged, and TUI restarts retain the completed run's protocol/direction. Library callers opt in with `PushGatewayClient::with_test`.
@@ -17,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Second Ctrl-C only forces exit while stopping a measurement** — after a real result is finalized, Ctrl-C skips outstanding metric delivery and preserves the successful exit status and saved result.
+- **Server timeouts waiting for a connection's first line say how far it got** — `Initial read timeout (...) from <peer>` and the bare `Handshake timeout` now read `Initial read timeout (5s): local=Ok(...), peer=Ok(...), bytes_read=N, native_peek=Ok(M)` (likewise `Handshake timeout (30s): ...`), giving both endpoints, the bytes of a partial line already read, and how many bytes are queued unread on the socket. The queued count is a non-consuming peek. Log filters matching the old wording need updating. The client logs its Hello write, with both endpoints, at debug level (#282).
+
+### Maintenance
+- **Dependency refresh** — `tokio` 1.54.1, `serde_json` 1.0.154, `mdns-sd` 0.21.6, `toml` 1.1.8, `base64` 0.22 → 0.23, `sha2` 0.11.1 and `libc` 0.2.191 (#274); `taiki-e/install-action` 2.87.30 in CI (#269).
+
+### Documentation
+- **Homebrew installs lead with the core formula** — xfr is in Homebrew core, so the README and `docs/INSTALL.md` now give `brew install xfr`; the `lance0/tap` tap remains available (#272).
+
+### Library API (pre-1.0 break)
+- Struct-literal constructors must supply new public fields: `config::ClientDefaults.{push_gateway, push_labels, push_job}` and `config::ServerDefaults.push_labels`. Both structs implement `Default`, so literals ending in `..Default::default()` are unaffected.
 
 ## [0.12.1] - 2026-10-21
 
