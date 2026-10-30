@@ -207,10 +207,10 @@ without losing the completed result. TUI delivery runs in the background and
 finishes after the summary is printed on exit. Invalid URLs fail before the test
 .TP
 .BI \-\-push\-label " KEY=VALUE"
-Attach an operator label; repeat for multiple labels. CLI values override [client] push_labels by key. Duplicate CLI keys and exporter-owned names are rejected.
+Attach an operator label; repeat for multiple labels. CLI values override [client] push_labels by key. Duplicate CLI keys and exporter-owned names are rejected. Requires a push gateway; [client] push_labels is ignored without one.
 .TP
 .BI \-\-push\-job " NAME"
-Use bounded aggregate client snapshots under a stable job. Requires an explicit nonempty instance push label. Exports xfr_last_test_* gauges without per-stream or UUID labels; use availability gauges when querying optional values. Server pushes remain per-test.
+Use bounded aggregate client snapshots under a stable job. Config: [client] push_job; the CLI value overrides it, and both require a push gateway (the config value is ignored without one). Requires an explicit nonempty instance push label. Exports xfr_last_test_* gauges without per-stream or UUID labels; use availability gauges when querying optional values. Server pushes remain per-test.
 .TP
 .BI \-\-completions " SHELL"
 Generate shell completions: bash, zsh, fish, powershell, elvish
@@ -229,7 +229,7 @@ Enable TUI dashboard showing active tests
 Maximum test duration (server-side limit)
 .TP
 .BI \-\-push\-gateway " URL"
-Prometheus push gateway URL (e.g., http://pushgateway:9091). Adds role="server"
+Prometheus Pushgateway or vmagent import URL (e.g., http://pushgateway:9091). Adds role="server"
 and client="peer IP" grouping labels. Environment: XFR_PUSH_GATEWAY;
 config: [server] push_gateway. Jobs remain named xfr_test_<test_id> and are not
 automatically deleted. Server pushes retain up to three 30-second attempts

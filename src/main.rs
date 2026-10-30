@@ -178,7 +178,7 @@ struct Cli {
     #[arg(value_name = "HOST")]
     host: Option<String>,
 
-    /// Push the final result to a Prometheus Pushgateway URL
+    /// Push the final result to a Prometheus Pushgateway or vmagent import URL
     #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
     #[arg(help_heading = "Output Options")]
     push_gateway: Option<String>,
@@ -457,7 +457,7 @@ enum Commands {
         #[arg(help_heading = "Server Options")]
         prometheus: Option<u16>,
 
-        /// Prometheus push gateway URL (e.g., http://pushgateway:9091)
+        /// Prometheus Pushgateway or vmagent import URL (e.g., http://pushgateway:9091)
         #[arg(long, env = "XFR_PUSH_GATEWAY", hide_env_values = true)]
         #[arg(help_heading = "Server Options")]
         push_gateway: Option<String>,

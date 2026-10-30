@@ -458,13 +458,17 @@ Push results after each test (useful for CI):
 # Server configured to push on test completion
 xfr serve --push-gateway http://pushgateway:9091
 
-# Or push from client-side script
-xfr <host> --json --no-tui | jq -r '
-  "xfr_throughput_mbps \(.throughput_mbps)\n" +
-  "xfr_bytes_total \(.bytes_total)\n" +
-  "xfr_tcp_retransmits_total \(.tcp_info.retransmits // 0)"
-' | curl --data-binary @- http://pushgateway:9091/metrics/job/xfr/instance/$(hostname)
+# Or push the client's final result (one job per test)
+xfr <host> --json --no-tui --push-gateway http://pushgateway:9091
+
+# Scheduled runs: one bounded snapshot per source peer, replaced each run
+xfr <host> --json --no-tui --push-gateway http://pushgateway:9091 \
+  --push-job mesh --push-label instance=$(hostname) --push-label site=lab
 ```
+
+`--push-job` requires an `instance` label. See
+[Operator labels and bounded scheduled snapshots](FEATURES.md#operator-labels-and-bounded-scheduled-snapshots)
+for the label rules and grouping keys.
 
 The built-in Push Gateway payload uses an `xfr_duration_seconds` gauge. The
 live scrape endpoint is a separate metric contract and uses the
@@ -519,7 +523,7 @@ export XFR_DURATION=30s        # Test duration (-t)
 export XFR_LOG_LEVEL=debug     # Log level (--log-level)
 export XFR_LOG_FILE=/var/log/xfr.log  # Log file (--log-file)
 export XFR_PSK=my-secret-key   # Pre-shared key (--psk)
-export XFR_PUSH_GATEWAY=http://pushgateway:9091  # Push gateway URL (serve only)
+export XFR_PUSH_GATEWAY=http://pushgateway:9091  # Push gateway URL (client and serve)
 export XFR_TIMESTAMP_FORMAT=iso8601  # Timestamp format (--timestamp-format)
 ```
 

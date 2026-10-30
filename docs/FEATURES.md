@@ -795,7 +795,8 @@ Unicode, slashes, quotes and newlines are supported. Names must use ASCII letter
 digits and underscores, starting with a letter or underscore. `__*`, `U__*` and
 exporter-owned names (`job`, `role`, `server`, `client`, `protocol`,
 `test_direction`, `direction`, `view`, `test_id`, `stream_id`) are reserved.
-Labels or a job without a gateway are rejected before networking.
+`--push-label` or `--push-job` without a gateway is rejected before networking;
+config labels and job are ignored until a gateway is configured.
 
 Client-only `--push-job NAME` (or `[client] push_job`) selects a bounded,
 aggregate-only snapshot instead of per-test jobs. It requires an explicit,
@@ -850,8 +851,8 @@ creates another group. Stored history still follows backend retention.
 For fully bounded scheduled ingestion, use these authoritative client snapshots
 and disable server per-test pushes. Server pushes retain per-test jobs: an
 observed peer IP cannot identify distinct clients behind NAT, and static server
-labels cannot supply a remote logical identity. That separate server capability
-is tracked in LAN-2664. Use legacy mode when per-stream debugging is needed.
+labels cannot supply a remote logical identity, so servers have no stable-job
+mode. Use legacy mode when per-stream debugging is needed.
 
 Library callers can use `with_labels`, `with_job`, `with_server`, `with_test` and
 `validate` before starting a client measurement, then `push_test_result` after
