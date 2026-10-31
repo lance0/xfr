@@ -1184,12 +1184,16 @@ fn generate_completions(shell: &str) {
     generate(shell, &mut cmd, "xfr", &mut std::io::stdout());
 }
 
+fn write_stdout(args: std::fmt::Arguments) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_fmt(args).and_then(|()| stdout.flush())
+}
+
 /// `print!` that ends the process quietly when stdout is a closed pipe
 /// (`xfr discover | head -1`), where `print!` panics. Flushes, so callers
 /// need no flush of their own.
 fn print_stdout(args: std::fmt::Arguments) {
-    let mut stdout = io::stdout().lock();
-    if let Err(e) = stdout.write_fmt(args).and_then(|()| stdout.flush()) {
+    if let Err(e) = write_stdout(args) {
         if e.kind() == io::ErrorKind::BrokenPipe {
             std::process::exit(0);
         }
@@ -2232,7 +2236,13 @@ async fn run_client_plain(
         output_plain(&result, config.mptcp)
     };
 
-    print_stdout(format_args!("{}\n", output_str));
+    // The measurement is complete: a reader that closed stdout must not
+    // discard its requested result file or skip metric delivery.
+    if let Err(e) = write_stdout(format_args!("{}\n", output_str))
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
+    }
 
     // Don't save incomplete fallback results to file — only save real server results
     if !interrupted && let Some(path) = output {

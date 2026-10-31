@@ -182,6 +182,66 @@ async fn client(port: u16, gateway: &str, host: &str, flags: &[&str]) -> std::pr
 }
 
 #[tokio::test]
+async fn closed_summary_stdout_preserves_saved_result_and_metrics() {
+    let (url, pushes) = gateway(vec![202]).await;
+    let (port, server) = server(None).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.json");
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            .args([
+                "127.0.0.1",
+                "-p",
+                &port.to_string(),
+                "-t",
+                "1",
+                "-b",
+                "2M",
+                "--json",
+                "--no-update-check",
+                "--push-gateway",
+                &url,
+                "--output",
+            ])
+            .arg(&path)
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+            .wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.abort();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let saved: xfr::protocol::TestResult = serde_json::from_slice(
+        &std::fs::read(&path).expect("a closed stdout must not discard the completed result"),
+    )
+    .unwrap();
+    assert!(saved.bytes_total > 0);
+    let pushes = timeout(Duration::from_secs(2), pushes)
+        .await
+        .expect("a closed stdout must not skip requested metrics delivery")
+        .unwrap();
+    assert_eq!(pushes.len(), 1);
+    assert_eq!(
+        sample(&pushes[0].1, "xfr_bytes_total"),
+        saved.bytes_total as f64
+    );
+    assert_eq!(
+        sample(&pushes[0].1, "xfr_throughput_mbps"),
+        saved.throughput_mbps
+    );
+}
+
+#[tokio::test]
 async fn finalized_snapshot_values_are_not_recomputed() {
     let (url, pushes) = gateway(vec![202]).await;
     let result = serde_json::from_value(serde_json::json!({
