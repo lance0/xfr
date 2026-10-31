@@ -2,7 +2,7 @@
 
 use std::process::Command;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -10,8 +10,11 @@ use xfr::client::{Client, ClientConfig, ZerocopyMode};
 use xfr::protocol::{Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
 
-// Use different ports for each test to avoid conflicts
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
+// Each test gets its own port (and may use port + 1), 10 apart from the next.
+const TEST_PORT_START: u16 = 16000;
+// The suite takes about 100 ports per run; leave room for growth.
+const TEST_PORT_COUNT: usize = 256;
+static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn test_cli_diff_invalid_threshold_cannot_report_ok() {
@@ -66,21 +69,36 @@ fn test_cli_discover_closed_stdout_exits_quietly() {
 }
 
 fn get_test_port() -> u16 {
-    next_available_test_port(&PORT_COUNTER)
+    // Probe the whole range once, up front. Probing on demand raced with
+    // tests that spawn `xfr`: a child forked mid-probe holds copies of the
+    // probe sockets until exec, so the server's bind right after the probe
+    // could fail with EADDRINUSE. Now a leaked probe can only mark a port
+    // busy, and ports are handed out in probe order, long after theirs closed.
+    static PORTS: OnceLock<Vec<u16>> = OnceLock::new();
+    let ports = PORTS.get_or_init(|| free_test_ports(TEST_PORT_START, TEST_PORT_COUNT));
+    let index = NEXT_TEST_PORT.fetch_add(1, Ordering::SeqCst);
+    *ports.get(index).unwrap_or_else(|| {
+        panic!("all {TEST_PORT_COUNT} pre-verified test ports are in use; raise TEST_PORT_COUNT")
+    })
 }
 
-fn next_available_test_port(counter: &AtomicU16) -> u16 {
-    for _ in 0..100 {
-        let port = counter.fetch_add(10, Ordering::SeqCst);
-        // Counter ranges keep our tests apart, but another process can own a
-        // candidate. In particular, macOS identityservicesd uses UDP 16400.
-        // The QUIC listener's required SO_REUSEPORT can let its bind succeed
-        // anyway, leaving the handshake to time out on the shared port.
-        if test_port_is_available(port) {
-            return port;
-        }
-    }
-    panic!("could not find a free TCP/UDP test port");
+/// The first `count` ports from `start`, 10 apart, that nothing else holds.
+fn free_test_ports(start: u16, count: usize) -> Vec<u16> {
+    // The fixed range keeps our tests apart, but another process can own a
+    // candidate. In particular, macOS identityservicesd uses UDP 16400.
+    // The QUIC listener's required SO_REUSEPORT can let its bind succeed
+    // anyway, leaving the handshake to time out on the shared port.
+    let ports: Vec<u16> = (start..u16::MAX)
+        .step_by(10)
+        .filter(|&port| test_port_is_available(port))
+        .take(count)
+        .collect();
+    assert_eq!(
+        ports.len(),
+        count,
+        "could not find {count} free TCP/UDP test ports"
+    );
+    ports
 }
 
 /// Build chroots and containers often have no IPv6. The IPv6 probes always
@@ -128,15 +146,13 @@ fn test_port_is_available(port: u16) -> bool {
 #[test]
 fn test_port_allocator_skips_an_occupied_udp_port() {
     for ip in test_port_probe_ips() {
-        // Stay inside the test range so the allocator's +10 steps cannot wrap
-        // past 65535. Ports ending in 5 never collide with PORT_COUNTER's
-        // `port` / `port + 1` pairs used by concurrently running tests.
-        let (occupied, port) = (16005..17005)
+        // Ports ending in 5 never collide with the `port` / `port + 1` pairs
+        // handed to concurrently running tests.
+        let (occupied, port) = (TEST_PORT_START + 5..TEST_PORT_START + 1005)
             .step_by(10)
             .find_map(|port| Some((std::net::UdpSocket::bind((ip, port)).ok()?, port)))
             .expect("no free UDP port to occupy");
-        let allocated = next_available_test_port(&AtomicU16::new(port));
-        assert_ne!(allocated, port, "occupied {ip}");
+        assert_ne!(free_test_ports(port, 1), [port], "occupied {ip}");
         drop(occupied);
     }
 }
