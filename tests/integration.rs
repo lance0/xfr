@@ -1,6 +1,7 @@
 //! Integration tests for xfr
 
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -82,13 +83,27 @@ fn next_available_test_port(counter: &AtomicU16) -> u16 {
     panic!("could not find a free TCP/UDP test port");
 }
 
-fn test_port_is_available(port: u16) -> bool {
-    for ip in [
+/// Build chroots and containers often have no IPv6. The IPv6 probes always
+/// fail there, which would reject every port, IPv4-only tests too.
+fn ipv6_loopback_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::net::UdpSocket::bind("[::1]:0").is_ok())
+}
+
+fn test_port_probe_ips() -> Vec<std::net::IpAddr> {
+    let mut ips = vec![
         std::net::Ipv4Addr::UNSPECIFIED.into(),
         std::net::Ipv4Addr::LOCALHOST.into(),
-        std::net::Ipv6Addr::UNSPECIFIED.into(),
-        std::net::Ipv6Addr::LOCALHOST.into(),
-    ] {
+    ];
+    if ipv6_loopback_available() {
+        ips.push(std::net::Ipv6Addr::UNSPECIFIED.into());
+        ips.push(std::net::Ipv6Addr::LOCALHOST.into());
+    }
+    ips
+}
+
+fn test_port_is_available(port: u16) -> bool {
+    for ip in test_port_probe_ips() {
         // Windows permits a wildcard bind beside a specific-address bind.
         // Probe loopback too, releasing our wildcard sockets before doing so.
         let mut reservations = Vec::new();
@@ -112,11 +127,17 @@ fn test_port_is_available(port: u16) -> bool {
 
 #[test]
 fn test_port_allocator_skips_an_occupied_udp_port() {
-    for address in ["0.0.0.0:0", "127.0.0.1:0", "[::]:0", "[::1]:0"] {
-        let occupied = std::net::UdpSocket::bind(address).unwrap();
-        let port = occupied.local_addr().unwrap().port();
+    for ip in test_port_probe_ips() {
+        // Stay inside the test range so the allocator's +10 steps cannot wrap
+        // past 65535. Ports ending in 5 never collide with PORT_COUNTER's
+        // `port` / `port + 1` pairs used by concurrently running tests.
+        let (occupied, port) = (16005..17005)
+            .step_by(10)
+            .find_map(|port| Some((std::net::UdpSocket::bind((ip, port)).ok()?, port)))
+            .expect("no free UDP port to occupy");
         let allocated = next_available_test_port(&AtomicU16::new(port));
-        assert_ne!(allocated, port, "occupied {address}");
+        assert_ne!(allocated, port, "occupied {ip}");
+        drop(occupied);
     }
 }
 
