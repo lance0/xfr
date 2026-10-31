@@ -1001,9 +1001,9 @@ xfr discover -v              # Every address of each server
 Searching for xfr servers...
 
 Found 3 server(s):
-  192.168.1.20:5201 (lab-a.local.) xfr/0.13.0
-  [fe80::2%eth0]:5201 (lab-b.local.) xfr/0.13.0
-  [fe80::7%enp3s0]:5201 (lab-c.local.) xfr/0.13.0 (+2 more link-local, see -v)
+  192.168.1.20:5201 (lab-a.local.) xfr/0.14.0
+  [fe80::2%eth0]:5201 (lab-b.local.) xfr/0.14.0
+  [fe80::7%enp3s0]:5201 (lab-c.local.) xfr/0.14.0 (+2 more link-local, see -v)
 ```
 
 Each server is listed once, with the address to pass to `xfr`: IPv4 first

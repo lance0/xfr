@@ -296,7 +296,7 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     omit: Option<u64>,
 
-    /// Server port [default: 5201]. Also set by a host:port target, XFR_PORT, or [client] port
+    /// Server port [default: 5201]. For a client, a host:port target wins, then -p, then XFR_PORT, then [client] port
     #[arg(short, long, env = "XFR_PORT")]
     #[arg(help_heading = "Connection Options")]
     port: Option<u16>,
