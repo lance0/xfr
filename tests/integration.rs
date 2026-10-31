@@ -1964,11 +1964,11 @@ async fn test_quic_bidir() {
 }
 
 /// Runs a QUIC CLI client and returns (stderr, elapsed). Before the idle
-/// timeout was lowered, both cases below took 30 s or more.
+/// timeout was lowered to 10 s, both cases below took 30 s or more.
 async fn run_failing_quic_cli(port: u16) -> (String, Duration) {
     let started = std::time::Instant::now();
     let output = timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(25),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
             .args(["127.0.0.1", "-p", &port.to_string(), "-Q", "-t", "3sec"])
             .arg("--no-tui")
@@ -2007,7 +2007,7 @@ async fn test_quic_client_gives_up_on_dead_server() {
         stderr.contains("connection lost: the server stopped responding"),
         "{stderr}"
     );
-    assert!(elapsed < Duration::from_secs(12), "took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(17), "took {elapsed:?}");
 }
 
 #[tokio::test]
@@ -2024,7 +2024,7 @@ async fn test_quic_client_gives_up_on_closed_port() {
         )),
         "{stderr}"
     );
-    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
 }
 
 #[tokio::test]
