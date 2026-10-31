@@ -65,7 +65,53 @@ fn test_cli_discover_closed_stdout_exits_quietly() {
 }
 
 fn get_test_port() -> u16 {
-    PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
+    next_available_test_port(&PORT_COUNTER)
+}
+
+fn next_available_test_port(counter: &AtomicU16) -> u16 {
+    for _ in 0..100 {
+        let port = counter.fetch_add(10, Ordering::SeqCst);
+        // Counter ranges keep our tests apart, but another process can own a
+        // candidate. In particular, macOS identityservicesd uses UDP 16400.
+        // The QUIC listener's required SO_REUSEPORT can let its bind succeed
+        // anyway, leaving the handshake to time out on the shared port.
+        if test_port_is_available(port) {
+            return port;
+        }
+    }
+    panic!("could not find a free TCP/UDP test port");
+}
+
+fn test_port_is_available(port: u16) -> bool {
+    let mut reservations = Vec::new();
+    for ip in [
+        std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::Ipv6Addr::UNSPECIFIED.into(),
+    ] {
+        let addr = std::net::SocketAddr::new(ip, port);
+        let domain = socket2::Domain::for_address(addr);
+        for kind in [socket2::Type::STREAM, socket2::Type::DGRAM] {
+            let Ok(socket) = socket2::Socket::new(domain, kind, None) else {
+                return false;
+            };
+            if addr.is_ipv6() && socket.set_only_v6(true).is_err() {
+                return false;
+            }
+            if socket.bind(&addr.into()).is_err() {
+                return false;
+            }
+            reservations.push(socket);
+        }
+    }
+    true
+}
+
+#[test]
+fn test_port_allocator_skips_an_occupied_udp_port() {
+    let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port();
+    let allocated = next_available_test_port(&AtomicU16::new(port));
+    assert_ne!(allocated, port);
 }
 
 async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
@@ -4531,7 +4577,14 @@ async fn test_legacy_udp_fallback_allocates_ports() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     socket.connect(("127.0.0.1", data_ports[0])).await.unwrap();
     let mut packet = vec![0u8; 1400];
+    // Timer coalescing or a busy runner can stretch 200 five-millisecond
+    // sleeps past the server's two-second test, closing the data port while
+    // we're still sending. Stop after one second even if fewer packets fit.
+    let send_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     for seq in 0..200u64 {
+        if tokio::time::Instant::now() >= send_deadline {
+            break;
+        }
         let header = xfr::udp::UdpPacketHeader {
             sequence: seq,
             timestamp_us: seq * 1000,
