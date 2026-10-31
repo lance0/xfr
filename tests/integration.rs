@@ -10,8 +10,10 @@ use xfr::client::{Client, ClientConfig, ZerocopyMode};
 use xfr::protocol::{Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
 
-// Each test gets its own port (and may use port + 1), 10 apart from the next.
+// Each test gets a block of TEST_PORT_SPAN ports, `port..port + 4`, with
+// allocations 10 apart. `test_tcp_cport_multi_stream` binds `cport + 3`.
 const TEST_PORT_START: u16 = 16000;
+const TEST_PORT_SPAN: u16 = 4;
 // The suite takes about 100 ports per run; leave room for growth.
 const TEST_PORT_COUNT: usize = 256;
 static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(0);
@@ -88,9 +90,9 @@ fn free_test_ports(start: u16, count: usize) -> Vec<u16> {
     // candidate. In particular, macOS identityservicesd uses UDP 16400.
     // The QUIC listener's required SO_REUSEPORT can let its bind succeed
     // anyway, leaving the handshake to time out on the shared port.
-    let ports: Vec<u16> = (start..u16::MAX)
+    let ports: Vec<u16> = (start..u16::MAX - TEST_PORT_SPAN)
         .step_by(10)
-        .filter(|&port| test_port_is_available(port))
+        .filter(|&port| (port..port + TEST_PORT_SPAN).all(test_port_is_available))
         .take(count)
         .collect();
     assert_eq!(
@@ -145,15 +147,17 @@ fn test_port_is_available(port: u16) -> bool {
 
 #[test]
 fn test_port_allocator_skips_an_occupied_udp_port() {
+    // Blocks starting at ports ending in 5 (5..=8) never overlap the blocks
+    // (0..=3) handed to concurrently running tests.
     for ip in test_port_probe_ips() {
-        // Ports ending in 5 never collide with the `port` / `port + 1` pairs
-        // handed to concurrently running tests.
-        let (occupied, port) = (TEST_PORT_START + 5..TEST_PORT_START + 1005)
-            .step_by(10)
-            .find_map(|port| Some((std::net::UdpSocket::bind((ip, port)).ok()?, port)))
-            .expect("no free UDP port to occupy");
-        assert_ne!(free_test_ports(port, 1), [port], "occupied {ip}");
-        drop(occupied);
+        for offset in [0, TEST_PORT_SPAN - 1] {
+            let (occupied, port) = (TEST_PORT_START + 5..TEST_PORT_START + 1005)
+                .step_by(10)
+                .find_map(|port| Some((std::net::UdpSocket::bind((ip, port + offset)).ok()?, port)))
+                .expect("no free UDP port to occupy");
+            assert_ne!(free_test_ports(port, 1), [port], "occupied {ip} +{offset}");
+            drop(occupied);
+        }
     }
 }
 
