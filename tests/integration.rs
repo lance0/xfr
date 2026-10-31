@@ -1,7 +1,8 @@
 //! Integration tests for xfr
 
 use std::process::Command;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -9,8 +10,13 @@ use xfr::client::{Client, ClientConfig, ZerocopyMode};
 use xfr::protocol::{Direction, Protocol};
 use xfr::serve::{Server, ServerConfig};
 
-// Use different ports for each test to avoid conflicts
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(16000);
+// Each test gets a block of TEST_PORT_SPAN ports, `port..port + 4`, with
+// allocations 10 apart. `test_tcp_cport_multi_stream` binds `cport + 3`.
+const TEST_PORT_START: u16 = 16000;
+const TEST_PORT_SPAN: u16 = 4;
+// The suite takes about 100 ports per run; leave room for growth.
+const TEST_PORT_COUNT: usize = 256;
+static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn test_cli_diff_invalid_threshold_cannot_report_ok() {
@@ -65,7 +71,94 @@ fn test_cli_discover_closed_stdout_exits_quietly() {
 }
 
 fn get_test_port() -> u16 {
-    PORT_COUNTER.fetch_add(10, Ordering::SeqCst)
+    // Probe the whole range once, up front. Probing on demand raced with
+    // tests that spawn `xfr`: a child forked mid-probe holds copies of the
+    // probe sockets until exec, so the server's bind right after the probe
+    // could fail with EADDRINUSE. Now a leaked probe can only mark a port
+    // busy, and ports are handed out in probe order, long after theirs closed.
+    static PORTS: OnceLock<Vec<u16>> = OnceLock::new();
+    let ports = PORTS.get_or_init(|| free_test_ports(TEST_PORT_START, TEST_PORT_COUNT));
+    let index = NEXT_TEST_PORT.fetch_add(1, Ordering::SeqCst);
+    *ports.get(index).unwrap_or_else(|| {
+        panic!("all {TEST_PORT_COUNT} pre-verified test ports are in use; raise TEST_PORT_COUNT")
+    })
+}
+
+/// The first `count` ports from `start`, 10 apart, that nothing else holds.
+fn free_test_ports(start: u16, count: usize) -> Vec<u16> {
+    // The fixed range keeps our tests apart, but another process can own a
+    // candidate. In particular, macOS identityservicesd uses UDP 16400.
+    // The QUIC listener's required SO_REUSEPORT can let its bind succeed
+    // anyway, leaving the handshake to time out on the shared port.
+    let ports: Vec<u16> = (start..u16::MAX - TEST_PORT_SPAN)
+        .step_by(10)
+        .filter(|&port| (port..port + TEST_PORT_SPAN).all(test_port_is_available))
+        .take(count)
+        .collect();
+    assert_eq!(
+        ports.len(),
+        count,
+        "could not find {count} free TCP/UDP test ports"
+    );
+    ports
+}
+
+/// Build chroots and containers often have no IPv6. The IPv6 probes always
+/// fail there, which would reject every port, IPv4-only tests too.
+fn ipv6_loopback_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::net::UdpSocket::bind("[::1]:0").is_ok())
+}
+
+fn test_port_probe_ips() -> Vec<std::net::IpAddr> {
+    let mut ips = vec![
+        std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::Ipv4Addr::LOCALHOST.into(),
+    ];
+    if ipv6_loopback_available() {
+        ips.push(std::net::Ipv6Addr::UNSPECIFIED.into());
+        ips.push(std::net::Ipv6Addr::LOCALHOST.into());
+    }
+    ips
+}
+
+fn test_port_is_available(port: u16) -> bool {
+    for ip in test_port_probe_ips() {
+        // Windows permits a wildcard bind beside a specific-address bind.
+        // Probe loopback too, releasing our wildcard sockets before doing so.
+        let mut reservations = Vec::new();
+        let addr = std::net::SocketAddr::new(ip, port);
+        let domain = socket2::Domain::for_address(addr);
+        for kind in [socket2::Type::STREAM, socket2::Type::DGRAM] {
+            let Ok(socket) = socket2::Socket::new(domain, kind, None) else {
+                return false;
+            };
+            if addr.is_ipv6() && socket.set_only_v6(true).is_err() {
+                return false;
+            }
+            if socket.bind(&addr.into()).is_err() {
+                return false;
+            }
+            reservations.push(socket);
+        }
+    }
+    true
+}
+
+#[test]
+fn test_port_allocator_skips_an_occupied_udp_port() {
+    // Blocks starting at ports ending in 5 (5..=8) never overlap the blocks
+    // (0..=3) handed to concurrently running tests.
+    for ip in test_port_probe_ips() {
+        for offset in [0, TEST_PORT_SPAN - 1] {
+            let (occupied, port) = (TEST_PORT_START + 5..TEST_PORT_START + 1005)
+                .step_by(10)
+                .find_map(|port| Some((std::net::UdpSocket::bind((ip, port + offset)).ok()?, port)))
+                .expect("no free UDP port to occupy");
+            assert_ne!(free_test_ports(port, 1), [port], "occupied {ip} +{offset}");
+            drop(occupied);
+        }
+    }
 }
 
 async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
@@ -4531,7 +4624,14 @@ async fn test_legacy_udp_fallback_allocates_ports() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     socket.connect(("127.0.0.1", data_ports[0])).await.unwrap();
     let mut packet = vec![0u8; 1400];
+    // Timer coalescing or a busy runner can stretch 200 five-millisecond
+    // sleeps past the server's two-second test, closing the data port while
+    // we're still sending. Stop after one second even if fewer packets fit.
+    let send_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     for seq in 0..200u64 {
+        if tokio::time::Instant::now() >= send_deadline {
+            break;
+        }
         let header = xfr::udp::UdpPacketHeader {
             sequence: seq,
             timestamp_us: seq * 1000,
