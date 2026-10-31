@@ -89,13 +89,15 @@ pub(crate) const QUIC_CLOSE_SHUTDOWN: VarInt = VarInt::from_u32(1);
 pub(crate) const QUIC_CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// How long the client waits without hearing anything from the server before
 /// it gives up, both while connecting and mid-test. Quinn's 30 s default kept
-/// a client hanging that long after the server vanished. QUIC negotiates the
-/// smaller of the two peers' values, so this also applies to the server side
-/// of a connection from this client.
-pub(crate) const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// a client hanging that long after the server vanished. 5 s was too short:
+/// on a 1.2 s RTT link with 20% loss, PTO exponential backoff leaves a healthy
+/// connection silent for longer than that. QUIC negotiates the smaller of the
+/// two peers' values, so this also applies to the server side of a connection
+/// from this client.
+pub(crate) const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Client keep-alive, well inside `QUIC_IDLE_TIMEOUT`, so a paused or idle
-/// test still exchanges packets (the server's 5 s keep-alive alone would race
-/// the idle timeout).
+/// test still exchanges packets (the server's 5 s keep-alive alone leaves
+/// little margin when keep-alives are lost).
 const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 /// TLS exporter label for binding application PSK authentication to the QUIC
 /// connection. RFC 9266 defines this exact label; it is wire-stable.

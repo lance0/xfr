@@ -1096,7 +1096,7 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--zerocopy` | `-Z` | true (TCP) | Zero-copy TCP sends via sendfile(2), like iperf3 -Z (Linux; lowers sender CPU overhead). On by default; explicit `-Z` warns when zero-copy can't take effect |
 | `--no-zerocopy` | | false | Disable zero-copy TCP sends (use regular buffered writes) |
 | `--probe-mtu` | | false | Probe the path MTU per direction instead of running a throughput test (UDP + DF bit; requires server `mtu_probe_v1` support) |
-| `--connect-timeout` | | none | Fail if the control connection, including hostname resolution, takes longer than this (e.g. `5s`); without it, dead servers and stuck DNS lookups are bounded only by OS defaults (a QUIC handshake gives up after 5s) |
+| `--connect-timeout` | | none | Fail if the control connection, including hostname resolution, takes longer than this (e.g. `5s`); without it, dead servers and stuck DNS lookups are bounded only by OS defaults (a QUIC handshake gives up after 10s) |
 | `--json` | | false | JSON output |
 | `--json-stream` | | false | JSON per interval (not with `-q`) |
 | `--csv` | | false | CSV output |
