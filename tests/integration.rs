@@ -83,11 +83,15 @@ fn next_available_test_port(counter: &AtomicU16) -> u16 {
 }
 
 fn test_port_is_available(port: u16) -> bool {
-    let mut reservations = Vec::new();
     for ip in [
         std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::Ipv4Addr::LOCALHOST.into(),
         std::net::Ipv6Addr::UNSPECIFIED.into(),
+        std::net::Ipv6Addr::LOCALHOST.into(),
     ] {
+        // Windows permits a wildcard bind beside a specific-address bind.
+        // Probe loopback too, releasing our wildcard sockets before doing so.
+        let mut reservations = Vec::new();
         let addr = std::net::SocketAddr::new(ip, port);
         let domain = socket2::Domain::for_address(addr);
         for kind in [socket2::Type::STREAM, socket2::Type::DGRAM] {
@@ -108,10 +112,12 @@ fn test_port_is_available(port: u16) -> bool {
 
 #[test]
 fn test_port_allocator_skips_an_occupied_udp_port() {
-    let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = occupied.local_addr().unwrap().port();
-    let allocated = next_available_test_port(&AtomicU16::new(port));
-    assert_ne!(allocated, port);
+    for address in ["0.0.0.0:0", "127.0.0.1:0", "[::]:0", "[::1]:0"] {
+        let occupied = std::net::UdpSocket::bind(address).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let allocated = next_available_test_port(&AtomicU16::new(port));
+        assert_ne!(allocated, port, "occupied {address}");
+    }
 }
 
 async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
