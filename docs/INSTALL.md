@@ -151,20 +151,24 @@ The binary is about 9 MB. Run it from `/tmp` as above, or copy it to
 `/usr/bin` if the overlay has room (`df -h /overlay`).
 
 The client needs nothing else. `xfr serve` on the router is reachable from
-the LAN zone as-is, since the default LAN zone accepts input. A zone that
-rejects input, such as `wan`, needs a rule for TCP and UDP 5201 (or your
-`--port`); set a PSK (`--psk`/`--psk-file`) before opening it there:
+the LAN zone as-is, since the default LAN zone accepts input. Clients in a
+zone that rejects input, such as a guest network or a VPN, need a rule for
+TCP and UDP 5201 (or your `--port`). Replace `guest` with the zone the
+clients come from:
 
 ```sh
 uci add firewall rule
 uci set firewall.@rule[-1].name='Allow-xfr'
-uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].src='guest'
 uci set firewall.@rule[-1].dest_port='5201'
 uci set firewall.@rule[-1].proto='tcp udp'
 uci set firewall.@rule[-1].target='ACCEPT'
 uci commit firewall
 /etc/init.d/firewall reload
 ```
+
+Avoid opening the port on `wan`; if you must, set a PSK (`--psk`/`--psk-file`)
+first.
 
 ### Optional Features
 
