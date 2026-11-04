@@ -120,6 +120,52 @@ Available via [pkgsrc](https://pkgsrc.se/net/xfr):
 pkgin install xfr
 ```
 
+### OpenWrt
+
+There is no OpenWrt package (`opkg`/`apk`). The static musl release binaries
+run unchanged on OpenWrt, which has no glibc, so pick the `-musl` build for
+the router's package architecture, never the `-gnu` one:
+
+| OpenWrt architecture | Release binary |
+|----------------------|----------------|
+| `aarch64_*` (e.g. `aarch64_cortex-a53`) | `xfr-aarch64-unknown-linux-musl.tar.gz` |
+| ARMv7 with an FPU, i.e. `vfpv3`, `vfpv4` or `neon` in the name (e.g. `arm_cortex-a7_neon-vfpv4`, `arm_cortex-a9_vfpv3-d16`) | `xfr-armv7-unknown-linux-musleabihf.tar.gz` |
+| `x86_64` | `xfr-x86_64-unknown-linux-musl.tar.gz` |
+
+ARM architectures without an FPU suffix (plain `arm_cortex-a9`, `arm_arm926ej-s`)
+and MIPS (`mips_*`, `mipsel_*`) have no release binary; MIPS is a tier 3 Rust
+target without a prebuilt standard library.
+
+```sh
+# Show the package architecture
+. /etc/openwrt_release && echo "$DISTRIB_ARCH"
+
+# Example: aarch64; /tmp is RAM, so the binary is gone after a reboot
+cd /tmp
+wget https://github.com/lance0/xfr/releases/latest/download/xfr-aarch64-unknown-linux-musl.tar.gz
+tar xzf xfr-aarch64-unknown-linux-musl.tar.gz
+./xfr --version
+```
+
+The binary is about 9 MB. Run it from `/tmp` as above, or copy it to
+`/usr/bin` if the overlay has room (`df -h /overlay`).
+
+The client needs nothing else. `xfr serve` on the router is reachable from
+the LAN zone as-is, since the default LAN zone accepts input. A zone that
+rejects input, such as `wan`, needs a rule for TCP and UDP 5201 (or your
+`--port`); set a PSK (`--psk`/`--psk-file`) before opening it there:
+
+```sh
+uci add firewall rule
+uci set firewall.@rule[-1].name='Allow-xfr'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].dest_port='5201'
+uci set firewall.@rule[-1].proto='tcp udp'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci commit firewall
+/etc/init.d/firewall reload
+```
+
 ### Optional Features
 
 | Feature | Default | Description |
@@ -164,6 +210,7 @@ xfr --completions elvish > ~/.elvish/lib/xfr.elv
 | macOS Intel | Build with `cargo install xfr`; no release binary |
 | Android (Termux) | ARM64 release binary; cross-built, not runtime-tested in CI |
 | NetBSD | Community pkgsrc package; not runtime-tested in CI |
+| OpenWrt | Static musl release binaries; not runtime-tested in CI |
 | Windows | Experimental; WSL2 recommended; native builds lack TCP_INFO metrics. See [contributor checks](../CONTRIBUTING.md#testing) for validation scope |
 
 CI and release builds do not qualify every protocol, terminal, or network setup.
