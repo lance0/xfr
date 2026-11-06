@@ -1346,7 +1346,7 @@ mod tests {
             let timestamp = &app.history.front().unwrap().timestamp;
             match format {
                 TimestampFormat::Iso8601 => {
-                    assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
+                    assert!(timestamp.parse::<jiff::Timestamp>().is_ok());
                 }
                 TimestampFormat::Unix => assert!(timestamp.parse::<f64>().unwrap() > 1e9),
                 TimestampFormat::Relative => unreachable!(),
