@@ -142,13 +142,22 @@ target without a prebuilt standard library.
 
 # Example: aarch64; /tmp is RAM, so the binary is gone after a reboot
 cd /tmp
-wget https://github.com/lance0/xfr/releases/latest/download/xfr-aarch64-unknown-linux-musl.tar.gz
+# -O: OpenWrt's wget would otherwise name the file after GitHub's redirect target
+wget -O xfr-aarch64-unknown-linux-musl.tar.gz https://github.com/lance0/xfr/releases/latest/download/xfr-aarch64-unknown-linux-musl.tar.gz
 tar xzf xfr-aarch64-unknown-linux-musl.tar.gz
 ./xfr --version
 ```
 
 The binary is about 9 MB. Run it from `/tmp` as above, or copy it to
 `/usr/bin` if the overlay has room (`df -h /overlay`).
+
+Only the client TUI checks GitHub for a new release, in the background;
+`xfr serve` and plain, JSON or CSV output never do. To turn the check off, set
+`XFR_NO_UPDATE_CHECK=1` or pass `--no-update-check`, a global flag that goes
+before any subcommand. Neither makes the binary smaller. Only a source build
+with `cargo build --release --no-default-features` compiles the checker out,
+and that also drops mDNS discovery (`xfr discover` and the server's mDNS
+announcement).
 
 The client needs nothing else. `xfr serve` on the router is reachable from
 the LAN zone as-is, since the default LAN zone accepts input. Clients in a
