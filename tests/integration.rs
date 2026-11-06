@@ -282,10 +282,8 @@ async fn test_cli_quic_reverse_teardown_logs_no_errors() {
     let port = get_test_port();
     // A separate server process: an in-process server on the test's
     // single-threaded runtime closes too slowly to race the client's reads.
-    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut server = tokio::process::Command::from(xfr_command())
         .args(["serve", "-p", &port.to_string()])
-        .env_remove("XFR_CONFIG")
-        .env_remove("XFR_LOG_LEVEL")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -306,11 +304,9 @@ async fn test_cli_quic_reverse_teardown_logs_no_errors() {
     for _ in 0..5 {
         let output = timeout(
             Duration::from_secs(20),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            tokio::process::Command::from(xfr_command())
                 .args(["127.0.0.1", "-p", &port.to_string()])
                 .args(["-Q", "-R", "-P", "8", "-t", "1sec", "--json"])
-                .env_remove("XFR_CONFIG")
-                .env_remove("XFR_LOG_LEVEL")
                 .kill_on_drop(true)
                 .output(),
         )
