@@ -202,6 +202,10 @@ jobs:
             triple: aarch64-unknown-linux-musl
             os: ubuntu-latest
             tool: zigbuild
+          - target: armv7-unknown-linux-musleabihf
+            triple: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            tool: zigbuild
           - target: aarch64-linux-android
             triple: aarch64-linux-android
             os: ubuntu-latest

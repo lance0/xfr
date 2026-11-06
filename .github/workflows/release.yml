@@ -52,6 +52,11 @@ jobs:
             triple: aarch64-unknown-linux-musl
             os: ubuntu-latest
             tool: zigbuild
+          # Linux armv7 hard-float — static musl (OpenWrt and other 32-bit ARM routers/SBCs)
+          - target: armv7-unknown-linux-musleabihf
+            triple: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            tool: zigbuild
           # Android aarch64 (Termux) — NDK target, cross from git main
           - target: aarch64-linux-android
             triple: aarch64-linux-android

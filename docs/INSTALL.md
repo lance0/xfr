@@ -49,6 +49,7 @@ Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
 |----------|--------|
 | Linux x86_64 | `xfr-x86_64-unknown-linux-musl.tar.gz` |
 | Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` (or `-musl` for fully static) |
+| Linux ARMv7 (32-bit, hard-float) | `xfr-armv7-unknown-linux-musleabihf.tar.gz` (fully static) |
 | macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | Use `cargo install xfr` |
 | Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
@@ -160,6 +161,7 @@ xfr --completions elvish > ~/.elvish/lib/xfr.elv
 | Platform | Status |
 |----------|--------|
 | Linux x86_64/ARM64 | Release binaries; CI tests run on Ubuntu x86_64 |
+| Linux ARMv7 | Static musl release binary; cross-built, not runtime-tested in CI |
 | macOS Apple Silicon | Release binary; CI tests run on macOS |
 | macOS Intel | Build with `cargo install xfr`; no release binary |
 | Android (Termux) | ARM64 release binary; cross-built, not runtime-tested in CI |
