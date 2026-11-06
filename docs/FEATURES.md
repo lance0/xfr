@@ -1017,7 +1017,9 @@ how many others `-v` lists; try them in turn. A server on the same host is
 the exception: its link-local addresses are this host's own, so each is shown
 only with the interface that owns it.
 
-Servers automatically register with mDNS when started.
+Servers automatically register with mDNS when started. The instance name is
+the hostname, with the port appended when it is not 5201 (`lab-a (5202)`), so
+several servers on one host each have their own name.
 
 ## Result Comparison
 

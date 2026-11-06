@@ -2,6 +2,8 @@
 //! binaries one at a time, so this loopback saturation never overlaps the
 //! latency-sensitive integration tests.
 
+mod common;
+use common::xfr_command;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -23,7 +25,7 @@ const PORT: u16 = 17000;
 async fn test_tcp_many_streams_all_carry_data() {
     const STREAMS: usize = 64;
     let port = PORT.to_string();
-    let _server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let _server = tokio::process::Command::from(xfr_command())
         .args(["serve", "-p", &port, "--no-mdns"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -39,7 +41,7 @@ async fn test_tcp_many_streams_all_carry_data() {
         args.extend(direction);
         let output = timeout(
             Duration::from_secs(30),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            tokio::process::Command::from(xfr_command())
                 .args(&args)
                 .kill_on_drop(true)
                 .output(),
