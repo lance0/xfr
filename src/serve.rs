@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use self::events::{ActiveTestInfo, ServerEvent};
 use crate::acl::{Acl, AclConfig};
 use crate::auth::{self, AuthConfig};
 use crate::net::{self, AddressFamily};
@@ -22,10 +23,10 @@ use crate::quic;
 use crate::rate_limit::{RateLimitConfig, RateLimitGuard, RateLimiter};
 use crate::stats::TestStats;
 use crate::tcp::{self, TcpConfig};
-use crate::tui::server::{ActiveTestInfo, ServerEvent};
 use crate::udp;
 use tokio::sync::mpsc;
 
+pub mod events;
 #[cfg(test)]
 mod quic_backpressure_tests;
 mod reporting;

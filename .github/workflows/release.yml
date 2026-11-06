@@ -31,7 +31,7 @@ jobs:
         run: cargo audit
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.target }}${{ matrix.suffix }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,6 +57,20 @@ jobs:
             triple: armv7-unknown-linux-musleabihf
             os: ubuntu-latest
             tool: zigbuild
+          # Minimal router builds: no TUI, mDNS discovery, update check or
+          # Prometheus endpoint. Published as xfr-<target>-minimal.tar.gz.
+          - target: armv7-unknown-linux-musleabihf
+            triple: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            tool: zigbuild
+            suffix: -minimal
+            features: --no-default-features
+          - target: aarch64-unknown-linux-musl
+            triple: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: zigbuild
+            suffix: -minimal
+            features: --no-default-features
           # Android aarch64 (Termux) — NDK target, cross from git main
           - target: aarch64-linux-android
             triple: aarch64-linux-android
@@ -109,7 +123,7 @@ jobs:
 
       - name: Build (zigbuild)
         if: matrix.tool == 'zigbuild'
-        run: cargo zigbuild --release --locked --target ${{ matrix.triple }} --features prometheus
+        run: cargo zigbuild --release --locked --target ${{ matrix.triple }} ${{ matrix.features || '--features prometheus' }}
 
       - name: Build (cross)
         if: matrix.tool == 'cross'
@@ -127,13 +141,13 @@ jobs:
         shell: bash
         run: |
           bin="$(bash scripts/verify-target-binary.sh '${{ matrix.target }}' '${{ matrix.triple }}' release)"
-          tar czvf "xfr-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" xfr
+          tar czvf "xfr-${{ matrix.target }}${{ matrix.suffix }}.tar.gz" -C "$(dirname "$bin")" xfr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: xfr-${{ matrix.target }}
-          path: xfr-${{ matrix.target }}.tar.gz
+          name: xfr-${{ matrix.target }}${{ matrix.suffix }}
+          path: xfr-${{ matrix.target }}${{ matrix.suffix }}.tar.gz
 
   # Container publish is intentionally NOT a dependency of the `release` job.
   # Binaries + crates.io are the primary release surface, so a GHCR

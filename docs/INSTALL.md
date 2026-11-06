@@ -50,6 +50,7 @@ Download from [GitHub Releases](https://github.com/lance0/xfr/releases):
 | Linux x86_64 | `xfr-x86_64-unknown-linux-musl.tar.gz` |
 | Linux ARM64 | `xfr-aarch64-unknown-linux-gnu.tar.gz` (or `-musl` for fully static) |
 | Linux ARMv7 (32-bit, hard-float) | `xfr-armv7-unknown-linux-musleabihf.tar.gz` (fully static) |
+| Routers and other small systems | `xfr-armv7-unknown-linux-musleabihf-minimal.tar.gz`, `xfr-aarch64-unknown-linux-musl-minimal.tar.gz` (see [OpenWrt](#openwrt)) |
 | macOS Apple Silicon | `xfr-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | Use `cargo install xfr` |
 | Android (Termux) | `xfr-aarch64-linux-android.tar.gz` |
@@ -170,13 +171,19 @@ tar xzf xfr-aarch64-unknown-linux-musl.tar.gz
 The binary is about 9 MB. Run it from `/tmp` as above, or copy it to
 `/usr/bin` if the overlay has room (`df -h /overlay`).
 
+For less flash, ARMv7 and aarch64 also have `-minimal` builds of about 7.4 MB,
+such as `xfr-aarch64-unknown-linux-musl-minimal.tar.gz`. They have no TUI (the
+client uses plain output and `serve --tui` runs the plain server), no mDNS
+discovery (`xfr discover` and the server's announcement), no update check and
+no Prometheus endpoint. Push Gateway support stays. `install.sh` installs the
+full build, so download these by hand.
+
 Only the client TUI checks GitHub for a new release, in the background;
 `xfr serve` and plain, JSON or CSV output never do. To turn the check off, set
 `XFR_NO_UPDATE_CHECK=1` or pass `--no-update-check`, a global flag that goes
-before any subcommand. Neither makes the binary smaller. Only a source build
-with `cargo build --release --no-default-features` compiles the checker out,
-and that also drops mDNS discovery (`xfr discover` and the server's mDNS
-announcement).
+before any subcommand. Neither makes the binary smaller; the `-minimal` builds
+leave the checker out, as does a source build with
+`cargo build --release --no-default-features`.
 
 The client needs nothing else. `xfr serve` on the router is reachable from
 the LAN zone as-is, since the default LAN zone accepts input. Clients in a
@@ -203,7 +210,8 @@ first.
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `discovery` | Yes | mDNS LAN discovery (`xfr discover`) |
-| `update-check` | Yes | Background release notification; see [update settings](FEATURES.md#update-notifications) |
+| `tui` | Yes | Client and server dashboards; without it the client always uses plain output |
+| `update-check` | Yes | Background release notification, needs `tui`; see [update settings](FEATURES.md#update-notifications) |
 | `prometheus` | No | Prometheus metrics HTTP endpoint |
 
 ```bash
