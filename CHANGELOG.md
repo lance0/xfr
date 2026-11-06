@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No stray QUIC `connection lost` errors** — when the QUIC connection ended, each data stream logged its own `ERROR QUIC receive error: connection lost` (or `send error`) ahead of the client's final error, and a successful `-Q -R -P 8` run could print them at teardown with exit status 0. Data stream errors after the connection has closed now log at debug level; the control path still reports why the test ended.
 - **IPv6 targets are bracketed in `Connecting to`** — `xfr ::1` logged `Connecting to ::1:5201...` and then `Connected to [::1]:5201`. The log line, the `--connect-timeout` error and the TUI's connecting status and target now print `[::1]:5201`.
 
+### Changed
+- **`chrono` replaced by `jiff`** — the only runtime use was formatting `--timestamp-format iso8601` timestamps. `jiff` is built without its time zone database since xfr only prints UTC, and the release binary is about 20 KB smaller. The output is byte-identical, including the truncated millisecond fraction, and a test now pins it.
+
 ## [0.14.0] - 2026-10-31
 
 ### Added

@@ -634,8 +634,13 @@ impl TimestampFormat {
             TimestampFormat::Iso8601 => {
                 let elapsed = now.duration_since(test_start);
                 let wall_time = system_start + elapsed;
-                let datetime = chrono::DateTime::<chrono::Utc>::from(wall_time);
-                datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+                // `{:.3}` prints RFC 3339 with exactly three fractional digits,
+                // truncated (not rounded). It is far smaller in the binary than
+                // `strftime`. Out of jiff's range (years -9999..=9999) is
+                // unreachable for a real clock; fall back to the epoch.
+                let ts =
+                    jiff::Timestamp::try_from(wall_time).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+                format!("{ts:.3}")
             }
             TimestampFormat::Unix => {
                 let elapsed = now.duration_since(test_start);
@@ -888,6 +893,48 @@ impl ControlMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso8601_timestamps_are_pinned() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // Expected strings captured from the chrono implementation
+        // (`%Y-%m-%dT%H:%M:%S%.3fZ`); the fraction truncates, never rounds.
+        let cases = [
+            (UNIX_EPOCH, "1970-01-01T00:00:00.000Z"),
+            (
+                UNIX_EPOCH + Duration::from_secs(1_767_268_800),
+                "2026-01-01T12:00:00.000Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::new(1_767_268_800, 500_000),
+                "2026-01-01T12:00:00.000Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::new(1_767_268_800, 999_999_999),
+                "2026-01-01T12:00:00.999Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::new(1_709_208_000, 123_456_789),
+                "2024-02-29T12:00:00.123Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::new(4_102_444_799, 999_000_000),
+                "2099-12-31T23:59:59.999Z",
+            ),
+            (
+                UNIX_EPOCH + Duration::from_secs(4_107_542_400),
+                "2100-03-01T00:00:00.000Z",
+            ),
+            (
+                UNIX_EPOCH - Duration::from_micros(500),
+                "1969-12-31T23:59:59.999Z",
+            ),
+        ];
+        let now = std::time::Instant::now();
+        for (wall, expected) in cases {
+            assert_eq!(TimestampFormat::Iso8601.format(now, now, wall), expected);
+        }
+    }
 
     #[test]
     fn directional_udp_progress_flattens_counts_and_preserves_unknown_jitter() {

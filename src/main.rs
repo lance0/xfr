@@ -3253,7 +3253,12 @@ mod tests {
         );
         assert_eq!(app.timestamp_format, TimestampFormat::Iso8601);
         assert!(
-            chrono::DateTime::parse_from_rfc3339(&app.history.front().unwrap().timestamp).is_ok()
+            app.history
+                .front()
+                .unwrap()
+                .timestamp
+                .parse::<jiff::Timestamp>()
+                .is_ok()
         );
 
         handle_tui_settings_key(&mut app, test_key(KeyCode::Char('l')));
