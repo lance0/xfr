@@ -40,7 +40,8 @@ check() {
 
 check "armv7 hard-float"   armv7l "$work/cpuinfo-hard" "$work/none"     "$glibc" armv7-unknown-linux-musleabihf
 check "armv7 soft-float"   armv7l "$work/cpuinfo-soft" "$work/none"     "$glibc" refused
-check "armv6"              armv6l "$work/cpuinfo-hard" "$work/none"     "$glibc" refused
+check "armv7 big-endian"   armv7b "$work/cpuinfo-hard" "$work/none"     "$glibc" refused
+check "armv6"             armv6l "$work/cpuinfo-hard" "$work/none"     "$glibc" refused
 check "aarch64 glibc"      aarch64 "$work/cpuinfo-hard" "$work/ld-linux" "$glibc" aarch64-unknown-linux-gnu
 check "aarch64 musl"       aarch64 "$work/cpuinfo-hard" "$work/none"     "$glibc" aarch64-unknown-linux-musl
 check "aarch64 gcompat"    aarch64 "$work/cpuinfo-hard" "$work/ld-linux" "musl libc (aarch64)" aarch64-unknown-linux-musl

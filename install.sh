@@ -45,8 +45,9 @@ case "$OS" in
             TARGET="aarch64-unknown-linux-musl"
           fi
           ;;
-        armv7*|armv8l)
-          # The ARMv7 build is hard-float (musleabihf); it can't run without an FPU
+        armv7l|armv8l)
+          # The ARMv7 build is little-endian and hard-float (musleabihf); big-endian
+          # armv7b falls through to unsupported, and it can't run without an FPU
           if grep -i '^features' "$CPUINFO" 2>/dev/null | grep -qwE 'vfp[a-z0-9]*|neon'; then
             TARGET="armv7-unknown-linux-musleabihf"
           else

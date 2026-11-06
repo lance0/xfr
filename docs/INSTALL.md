@@ -144,11 +144,13 @@ and MIPS (`mips_*`, `mipsel_*`) have no release binary; MIPS is a tier 3 Rust
 target without a prebuilt standard library.
 
 The install script handles this choice and refuses ARMv7 CPUs without an FPU.
-It installs to `/usr/bin` on the overlay; pipe into `INSTALL_DIR=/tmp sh`
-instead to keep it in RAM:
+On OpenWrt it installs to `/usr/bin` by default, which is on the flash
+overlay. The example below sets `INSTALL_DIR=/tmp` to keep the binary in RAM
+instead (gone after a reboot); drop it to install to `/usr/bin` if the overlay
+has room:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/lance0/xfr/master/install.sh | INSTALL_DIR=/tmp sh
 ```
 
 To pick the binary by hand:
