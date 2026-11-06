@@ -56,7 +56,10 @@ pub fn client_status(app: &App) -> (&'static str, Option<u8>, String) {
         return (
             "working",
             None,
-            format!("Connecting to {}:{}", app.host, app.port),
+            format!(
+                "Connecting to {}",
+                crate::net::host_port(&app.host, app.port)
+            ),
         );
     }
     match app.state {

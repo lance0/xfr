@@ -1,6 +1,7 @@
 //! Integration tests for xfr
 
-use std::process::Command;
+mod common;
+use common::xfr_command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -31,7 +32,7 @@ fn test_cli_diff_invalid_threshold_cannot_report_ok() {
         std::fs::write(path, result.to_string()).unwrap();
     }
     for threshold in ["NaN", "inf", "-1"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = xfr_command()
             .arg("diff")
             .arg(&baseline_path)
             .arg(&current_path)
@@ -43,7 +44,7 @@ fn test_cli_diff_invalid_threshold_cannot_report_ok() {
         assert!(output.stdout.is_empty());
     }
     for threshold in ["0", "5", "12.5"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = xfr_command()
             .arg("diff")
             .arg(&baseline_path)
             .arg(&current_path)
@@ -60,7 +61,7 @@ fn test_cli_diff_invalid_threshold_cannot_report_ok() {
 fn test_cli_discover_closed_stdout_exits_quietly() {
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["discover", "--timeout", "0"])
         .stdout(writer)
         .output()
@@ -197,7 +198,7 @@ async fn test_cli_json_output_is_parseable_without_quiet() {
     for mode in ["--json", "--json-stream"] {
         let output = timeout(
             Duration::from_secs(15),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            tokio::process::Command::from(xfr_command())
                 .args([
                     "127.0.0.1",
                     "-p",
@@ -253,7 +254,7 @@ async fn test_cli_host_port_target() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let output = timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args([&format!("127.0.0.1:{port}"), "-t", "1sec", "--json"])
             // XFR_PORT yields to the target's port instead of conflicting.
             .env("XFR_PORT", "1")
@@ -273,6 +274,51 @@ async fn test_cli_host_port_target() {
     server.abort();
 }
 
+/// A clean QUIC download ends with the server closing the connection; the
+/// client's data streams see that as "connection lost" and used to log it as
+/// an ERROR on a run that succeeded (LAN-2739).
+#[tokio::test]
+async fn test_cli_quic_reverse_teardown_logs_no_errors() {
+    let port = get_test_port();
+    // A separate server process: an in-process server on the test's
+    // single-threaded runtime closes too slowly to race the client's reads.
+    let mut server = tokio::process::Command::from(xfr_command())
+        .args(["serve", "-p", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
+            assert!(server.try_wait().unwrap().is_none(), "server exited");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    for _ in 0..5 {
+        let output = timeout(
+            Duration::from_secs(20),
+            tokio::process::Command::from(xfr_command())
+                .args(["127.0.0.1", "-p", &port.to_string()])
+                .args(["-Q", "-R", "-P", "8", "-t", "1sec", "--json"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(!stderr.contains("ERROR"), "{stderr}");
+    }
+}
+
 #[tokio::test]
 async fn test_cli_config_flag_sets_server_and_client_port() {
     let port = get_test_port();
@@ -282,13 +328,10 @@ async fn test_cli_config_flag_sets_server_and_client_port() {
     std::fs::write(&server_config, format!("[server]\nport = {port}\n")).unwrap();
     std::fs::write(&client_config, format!("[client]\nport = {port}\n")).unwrap();
 
-    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut server = tokio::process::Command::from(xfr_command())
         .arg("serve")
         .arg("--config")
         .arg(&server_config)
-        .env_remove("XFR_CONFIG")
-        .env_remove("XFR_PORT")
-        .env_remove("XFR_LOG_LEVEL")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -309,14 +352,12 @@ async fn test_cli_config_flag_sets_server_and_client_port() {
 
     let output = timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .arg("--config")
             .arg(&client_config)
             .args(["127.0.0.1", "-t", "1sec", "--json"])
             // --config outranks XFR_CONFIG.
             .env("XFR_CONFIG", dir.path().join("missing.toml"))
-            .env_remove("XFR_PORT")
-            .env_remove("XFR_LOG_LEVEL")
             .kill_on_drop(true)
             .output(),
     )
@@ -357,10 +398,9 @@ async fn test_cli_unreadable_search_path_config() {
     let run = |args: Vec<String>| {
         timeout(
             Duration::from_secs(15),
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+            tokio::process::Command::from(xfr_command())
                 .args(args)
                 .env("XDG_CONFIG_HOME", dir.path())
-                .env_remove("XFR_CONFIG")
                 .kill_on_drop(true)
                 .output(),
         )
@@ -1969,7 +2009,7 @@ async fn run_failing_quic_cli(port: u16) -> (String, Duration) {
     let started = std::time::Instant::now();
     let output = timeout(
         Duration::from_secs(25),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args(["127.0.0.1", "-p", &port.to_string(), "-Q", "-t", "3sec"])
             .arg("--no-tui")
             .kill_on_drop(true)
@@ -1988,7 +2028,7 @@ async fn run_failing_quic_cli(port: u16) -> (String, Duration) {
 #[tokio::test]
 async fn test_quic_client_gives_up_on_dead_server() {
     let port = get_test_port();
-    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut server = tokio::process::Command::from(xfr_command())
         .args(["serve", "-p", &port.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -3777,7 +3817,7 @@ async fn test_cli_without_terminal_falls_back_to_plain_output() {
     // No --no-tui: piped stdout and a null stdin must select plain output.
     let output = timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1sec"])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -3811,7 +3851,7 @@ fn test_cli_unsavable_output_fails_before_connecting() {
         (missing.as_path(), "directory does not exist"),
         (dir.path(), "is a directory"),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = xfr_command()
             .args(["127.0.0.1", "-p", &port.to_string(), "-t", "30sec"])
             .arg("--no-tui")
             .arg("-o")
@@ -3838,7 +3878,7 @@ async fn test_cli_csv_output_file_is_csv() {
     let path = dir.path().join("data.csv");
     let output = timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1", "--no-tui"])
             .arg("--csv")
             .arg("-o")
@@ -3903,10 +3943,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
             "tip: put serve options after the subcommand: xfr serve --port 9000",
         ),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
-            .args(args)
-            .output()
-            .unwrap();
+        let output = xfr_command().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -3917,7 +3954,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
     }
 
     // Options subcommands use, and env-backed client options, still work.
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["--theme", "nord", "--log-level", "warn", "diff"])
         .arg(&result_path)
         .arg(&result_path)
@@ -3938,7 +3975,7 @@ fn test_cli_client_options_rejected_with_subcommands() {
 #[test]
 fn test_cli_help_hides_secret_env_values() {
     for args in [&["--help"][..], &["serve", "--help"][..]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = xfr_command()
             .args(args)
             .env("XFR_PSK", "psk-s3cret")
             .env("XFR_PUSH_GATEWAY", "http://user:s3cret@gw:9091")
@@ -3953,7 +3990,7 @@ fn test_cli_help_hides_secret_env_values() {
 
 #[test]
 fn test_cli_json_stream_conflicts_with_quiet() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["127.0.0.1", "--json-stream", "-q", "--no-tui"])
         .output()
         .unwrap();
@@ -3965,14 +4002,14 @@ fn test_cli_json_stream_conflicts_with_quiet() {
 #[test]
 fn test_cli_mptcp_conflicts() {
     // --mptcp conflicts with --udp
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["127.0.0.1", "--mptcp", "--udp", "--no-tui"])
         .output()
         .expect("failed to run xfr binary");
     assert!(!output.status.success());
 
     // --mptcp conflicts with --quic
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["127.0.0.1", "--mptcp", "--quic", "--no-tui"])
         .output()
         .expect("failed to run xfr binary");
@@ -3981,7 +4018,7 @@ fn test_cli_mptcp_conflicts() {
 
 #[test]
 fn test_cli_cport_overflow_error_message() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["127.0.0.1", "-u", "--cport", "65535", "-P", "2", "--no-tui"])
         .output()
         .expect("failed to run xfr binary");
@@ -4001,7 +4038,7 @@ fn test_cli_cport_overflow_error_message() {
 
 #[test]
 fn test_cli_tcp_cport_overflow_error_message() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["127.0.0.1", "--cport", "65535", "-P", "2", "--no-tui"])
         .output()
         .expect("failed to run xfr binary");
@@ -4182,7 +4219,7 @@ async fn test_serve_bind_ipv6_quic() {
 /// --bind with mismatched -4/-6 should error at the CLI level
 #[test]
 fn test_serve_bind_family_mismatch_ipv4_with_ipv6_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["serve", "--bind", "127.0.0.1", "-6"])
         .output()
         .expect("failed to run xfr binary");
@@ -4202,7 +4239,7 @@ fn test_serve_bind_family_mismatch_ipv4_with_ipv6_flag() {
 /// --bind with mismatched -4/-6 should error at the CLI level (reverse case)
 #[test]
 fn test_serve_bind_family_mismatch_ipv6_with_ipv4_flag() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["serve", "--bind", "::1", "-4"])
         .output()
         .expect("failed to run xfr binary");
@@ -4222,7 +4259,7 @@ fn test_serve_bind_family_mismatch_ipv6_with_ipv4_flag() {
 /// --bind :: (unspecified) should be rejected
 #[test]
 fn test_serve_bind_rejects_unspecified_ipv6() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["serve", "--bind", "::"])
         .output()
         .expect("failed to run xfr binary");
@@ -4242,7 +4279,7 @@ fn test_serve_bind_rejects_unspecified_ipv6() {
 /// --bind 0.0.0.0 (unspecified) should be rejected
 #[test]
 fn test_serve_bind_rejects_unspecified_ipv4() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = xfr_command()
         .args(["serve", "--bind", "0.0.0.0"])
         .output()
         .expect("failed to run xfr binary");
@@ -4852,21 +4889,36 @@ async fn test_tcp_psk_cancel_infinite_duration() {
 
     let client = Client::new(config);
 
-    // Poll the run future so it connects and installs the cancel channel,
-    // then cancel after 500ms.  The run must resolve within 2s of the cancel
-    // — if the server's AEAD control reader is broken, the cancel is never
-    // observed and the infinite test hangs until the timeout fails the test.
+    // Let data flow for 500ms, then keep polling the run future until
+    // `cancel()` is accepted: it errors until the TestAck installs the cancel
+    // channel, and a cancel sent before that is lost, so a PSK handshake
+    // slower than 500ms on a loaded runner used to hang the infinite test
+    // (LAN-2738).  The run must resolve within 2s of the accepted cancel — if
+    // the server's AEAD control reader is broken, the cancel is never
+    // observed and the timeout fails the test.
     let mut run_future = std::pin::pin!(client.run(None));
     tokio::select! {
         res = &mut run_future => panic!("run ended before cancel: {res:?}"),
         _ = tokio::time::sleep(Duration::from_millis(500)) => {}
     }
-    let _ = client.cancel();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while client.cancel().is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "handshake did not complete within 5.5s"
+        );
+        tokio::select! {
+            res = &mut run_future => panic!("run ended before cancel: {res:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
 
+    let cancelled_at = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut run_future).await;
     assert!(
         result.is_ok(),
-        "PSK cancel should resolve within 2s — if it times out the AEAD control reader is broken"
+        "PSK cancel should resolve within 2s (gave up after {:?}) — if it times out the AEAD control reader is broken",
+        cancelled_at.elapsed()
     );
 }
 
