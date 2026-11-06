@@ -1,5 +1,7 @@
 //! End-to-end push coverage, also run by the normal all/no-default-features CI jobs.
 
+mod common;
+use common::xfr_command;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
@@ -156,7 +158,7 @@ async fn final_json_reader_accepts_extra_stream_intervals_and_pretty_json() {
 async fn client(port: u16, gateway: &str, host: &str, flags: &[&str]) -> std::process::Output {
     timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args([
                 host,
                 "-p",
@@ -191,7 +193,7 @@ async fn closed_summary_stdout_preserves_saved_result_and_metrics() {
     drop(reader);
     let output = timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        tokio::process::Command::from(xfr_command())
             .args([
                 "127.0.0.1",
                 "-p",
@@ -414,10 +416,8 @@ async fn client_cli_environment_and_config_precedence() {
             "invalid-config-url"
         };
         std::fs::write(config_dir.join("config.toml"), format!("[client]\npush_gateway = {config_url:?}\n[server]\npush_gateway = \"invalid-server-url\"\n")).unwrap();
-        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"));
+        let mut cmd = tokio::process::Command::from(xfr_command());
         cmd.env("XDG_CONFIG_HOME", dir.path())
-            .env_remove("XFR_PUSH_GATEWAY")
-            .env_remove("XFR_CONFIG")
             .args([
                 "127.0.0.1",
                 "-p",
@@ -564,7 +564,7 @@ async fn stalled_gateway_preserves_result(interrupt: bool, cancel_measurement: b
     let (port, server) = server(None).await;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("result.json");
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut child = tokio::process::Command::from(xfr_command())
         .args([
             "127.0.0.1",
             "-p",
@@ -912,12 +912,11 @@ async fn invalid_push_options_fail_before_connecting() {
             "duplicate push label \"host\"",
         ),
     ] {
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = tokio::process::Command::from(xfr_command())
             .args(["127.0.0.1", "-p", "1", "--no-update-check", "--json"])
             .args(flags)
             .arg("--config")
             .arg(&empty_config)
-            .env_remove("XFR_PUSH_GATEWAY")
             .output()
             .await
             .unwrap();
@@ -940,12 +939,10 @@ async fn config_push_options_without_gateway_are_ignored() {
     )
     .unwrap();
     let (port, running) = server(None).await;
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = tokio::process::Command::from(xfr_command())
         .args(["127.0.0.1", "-p", &port.to_string(), "-t", "1", "-b", "1M"])
         .args(["--json", "--no-update-check"])
         .env("XDG_CONFIG_HOME", directory.path())
-        .env_remove("XFR_PUSH_GATEWAY")
-        .env_remove("XFR_CONFIG")
         .output()
         .await
         .unwrap();
@@ -957,11 +954,9 @@ async fn config_push_options_without_gateway_are_ignored() {
     running.abort();
 
     let port = SERVER_PORT.fetch_add(1, Ordering::SeqCst);
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let mut child = tokio::process::Command::from(xfr_command())
         .args(["serve", "-p", &port.to_string(), "--no-mdns"])
         .env("XDG_CONFIG_HOME", directory.path())
-        .env_remove("XFR_PUSH_GATEWAY")
-        .env_remove("XFR_CONFIG")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -976,11 +971,9 @@ async fn config_push_options_without_gateway_are_ignored() {
     .await
     .unwrap();
 
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let output = tokio::process::Command::from(xfr_command())
         .args(["serve", "--push-label", "site=lab"])
         .env("XDG_CONFIG_HOME", directory.path())
-        .env_remove("XFR_PUSH_GATEWAY")
-        .env_remove("XFR_CONFIG")
         .output()
         .await
         .unwrap();
@@ -1004,7 +997,7 @@ async fn stable_client_labels_merge_cli_over_config() {
         "[client]\npush_gateway = {url:?}\npush_job = \"config-job\"\npush_labels = {{ instance = \"config\", site = \"lab\" }}\n"
     )).unwrap();
     for extra in [vec![], vec!["--push-job", "cli-job"]] {
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+        let output = tokio::process::Command::from(xfr_command())
             .args([
                 "127.0.0.1",
                 "-p",
@@ -1020,8 +1013,6 @@ async fn stable_client_labels_merge_cli_over_config() {
             ])
             .args(extra)
             .env("XDG_CONFIG_HOME", directory.path())
-            .env_remove("XFR_PUSH_GATEWAY")
-            .env_remove("XFR_CONFIG")
             .output()
             .await
             .unwrap();
@@ -1047,7 +1038,7 @@ async fn stable_client_labels_merge_cli_over_config() {
 async fn server_cli_push_labels_are_portable() {
     let (url, pushes) = gateway(vec![202]).await;
     let port = SERVER_PORT.fetch_add(1, Ordering::SeqCst);
-    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_xfr"))
+    let child = tokio::process::Command::from(xfr_command())
         .args([
             "serve",
             "-p",
