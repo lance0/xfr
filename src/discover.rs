@@ -103,18 +103,38 @@ const DNS_LABEL_MAX: usize = 63;
 
 #[cfg(any(feature = "discovery", test))]
 fn dns_label(name: &str) -> String {
+    fit_label(name, DNS_LABEL_MAX)
+}
+
+/// The mDNS instance name for a server on `port`. Servers on one host share
+/// a hostname, and mDNS needs instance names unique per service type, so a
+/// non-default port is appended (`box (5202)`). The default port keeps the
+/// plain hostname that earlier versions advertised.
+#[cfg(any(feature = "discovery", test))]
+fn instance_name(raw_hostname: &str, port: u16) -> String {
+    if port == crate::protocol::DEFAULT_PORT {
+        return dns_label(raw_hostname);
+    }
+    let suffix = format!(" ({port})");
+    let host = fit_label(raw_hostname, DNS_LABEL_MAX - suffix.len());
+    format!("{host}{suffix}")
+}
+
+/// `name` trimmed and clamped to `max` bytes.
+#[cfg(any(feature = "discovery", test))]
+fn fit_label(name: &str, max: usize) -> String {
     let name = name.trim();
     if name.is_empty() {
         return "xfr-server".to_string();
     }
-    if name.len() <= DNS_LABEL_MAX {
+    if name.len() <= max {
         return name.to_string();
     }
 
     // '-' + 4 hex from FNV-1a keeps two 64-byte names that share a 63-byte
     // prefix from advertising the same instance.
     let suffix = format!("-{:04x}", fnv1a_16(name.as_bytes()));
-    let mut end = DNS_LABEL_MAX - suffix.len();
+    let mut end = max - suffix.len();
     while end > 0 && !name.is_char_boundary(end) {
         end -= 1;
     }
@@ -171,9 +191,9 @@ mod mdns_impl {
         let mdns = ServiceDaemon::new()?;
         let receiver = mdns.browse(SERVICE_TYPE)?;
 
-        // One entry per host and port: servers on one host share an instance
-        // name, so a name can resolve to several ports. Answers accumulate
-        // across resolutions.
+        // One entry per host and port: older servers on one host share
+        // an instance name, so a name can resolve to several ports. Answers
+        // accumulate across resolutions.
         let mut found: Vec<(Vec<DiscoveredAddress>, DiscoveredServer)> = Vec::new();
         let mut receiving: Vec<InterfaceId> = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
@@ -300,9 +320,10 @@ mod mdns_impl {
             );
         }
 
+        let instance = instance_name(&raw_hostname, port);
         let service = ServiceInfo::new(
             SERVICE_TYPE,
-            &hostname,
+            &instance,
             &format!("{}.local.", hostname),
             "",
             port,
@@ -311,7 +332,7 @@ mod mdns_impl {
         .enable_addr_auto();
 
         mdns.register(service)?;
-        info!("Registered mDNS service: {}", hostname);
+        info!("Registered mDNS service: {}", instance);
 
         Ok(mdns)
     }
@@ -373,8 +394,8 @@ impl std::fmt::Display for DiscoveredServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        DNS_LABEL_MAX, DiscoveredAddress, DiscoveredServer, dns_label, is_our_hostname,
-        usable_addresses,
+        DNS_LABEL_MAX, DiscoveredAddress, DiscoveredServer, dns_label, instance_name,
+        is_our_hostname, usable_addresses,
     };
 
     fn addr(ip: &str, zone: Option<&str>) -> DiscoveredAddress {
@@ -651,6 +672,20 @@ mod tests {
         assert_eq!(dns_label("   "), "xfr-server");
     }
 
+    #[test]
+    fn instance_name_carries_a_non_default_port() {
+        assert_eq!(instance_name("box", 5201), "box");
+        assert_eq!(instance_name("box", 5202), "box (5202)");
+        assert_ne!(instance_name("box", 5202), instance_name("box", 5203));
+
+        let raw = "x".repeat(64);
+        let a = instance_name(&raw, 65535);
+        let b = instance_name(&raw, 65534);
+        assert!(a.len() <= DNS_LABEL_MAX, "{a:?} is {} bytes", a.len());
+        assert!(a.ends_with(" (65535)"));
+        assert_ne!(a, b);
+    }
+
     #[cfg(feature = "discovery")]
     #[test]
     fn sanitized_64_byte_name_has_encodable_labels() {
@@ -659,10 +694,10 @@ mod tests {
         let hostname = dns_label(&"x".repeat(64));
         let info = ServiceInfo::new(
             "_xfr._tcp.local.",
-            &hostname,
+            &instance_name(&"x".repeat(64), 65535),
             &format!("{}.local.", hostname),
             "",
-            5201,
+            65535,
             [("version", "test")].as_ref(),
         )
         .unwrap();
