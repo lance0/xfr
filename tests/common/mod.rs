@@ -17,8 +17,8 @@ pub fn xfr_command() -> Command {
             command.env_remove(key);
         }
     }
-    // ponytail: the directory outlives the child under target/tmp until
-    // `cargo clean`; a guard type would have to thread through every caller.
+    // The directory is kept under target/tmp until `cargo clean`; a cleanup
+    // guard would have to be threaded through every caller.
     let home = tempfile::Builder::new()
         .prefix("xfr-env-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
