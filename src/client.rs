@@ -783,7 +783,10 @@ impl Client {
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         self.config.validate()?;
-        info!("Connecting to {}:{}...", self.config.host, self.config.port);
+        info!(
+            "Connecting to {}...",
+            net::host_port(&self.config.host, self.config.port)
+        );
 
         if self.config.protocol != Protocol::Tcp && self.config.tcp_congestion.is_some() {
             warn!(
@@ -816,9 +819,8 @@ impl Client {
         let (stream, peer_addr) = match self.config.connect_timeout {
             Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
                 anyhow::anyhow!(
-                    "Timed out connecting to {}:{} after {:?} (--connect-timeout)",
-                    self.config.host,
-                    self.config.port,
+                    "Timed out connecting to {} after {:?} (--connect-timeout)",
+                    net::host_port(&self.config.host, self.config.port),
                     limit
                 )
             })??,
@@ -2347,8 +2349,6 @@ impl Client {
         &self,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
-        use tokio::io::BufReader;
-
         // Reset pause state from any previous run
         *self.server_supports_pause.lock() = None;
         *self.pause_tx.lock() = None;
@@ -2381,14 +2381,38 @@ impl Client {
         let (endpoint, connection) = match self.config.connect_timeout {
             Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
                 anyhow::anyhow!(
-                    "Timed out connecting to {}:{} after {:?} (--connect-timeout)",
-                    self.config.host,
-                    self.config.port,
+                    "Timed out connecting to {} after {:?} (--connect-timeout)",
+                    net::host_port(&self.config.host, self.config.port),
                     limit
                 )
             })??,
             None => connect.await?,
         };
+
+        let result = self
+            .run_quic_session(&endpoint, &connection, progress_tx)
+            .await;
+        // Whatever phase noticed it (control handshake, data, or waiting
+        // for the result), a silent server surfaces as quinn's bare
+        // "timed out"; say what happened instead.
+        match connection.close_reason() {
+            Some(quinn::ConnectionError::TimedOut) if result.is_err() => Err(anyhow::anyhow!(
+                "connection lost: the server stopped responding (nothing heard for {}s)",
+                quic::QUIC_IDLE_TIMEOUT.as_secs()
+            )),
+            _ => result,
+        }
+    }
+
+    /// Everything after the QUIC connection is up: control handshake, data
+    /// streams, and the result.
+    async fn run_quic_session(
+        &self,
+        endpoint: &quinn::Endpoint,
+        connection: &quinn::Connection,
+        progress_tx: Option<mpsc::Sender<TestProgress>>,
+    ) -> anyhow::Result<TestResult> {
+        use tokio::io::BufReader;
 
         // Open control stream (bidirectional)
         let (mut ctrl_send, ctrl_recv) = connection.open_bi().await?;
@@ -2467,7 +2491,7 @@ impl Client {
                             "Server does not support quic_channel_binding_v1 — refusing QUIC PSK session"
                         ));
                     }
-                    let session_psk = quic::derive_psk_session_key(&connection, psk)?;
+                    let session_psk = quic::derive_psk_session_key(connection, psk)?;
 
                     let response = auth::compute_response_with_key(&challenge.nonce, &session_psk);
                     let auth_msg = ControlMessage::auth_response(response);
@@ -2672,10 +2696,12 @@ impl Client {
                                 )
                                 .await
                                 {
-                                    error!("QUIC send error: {}", e);
+                                    quic::log_stream_error(&conn, "QUIC send error", e);
                                 }
                             }
-                            Err(e) => error!("Failed to open send stream: {}", e),
+                            Err(e) => {
+                                quic::log_stream_error(&conn, "Failed to open send stream", e)
+                            }
                         }
                     }
                     Direction::Download => {
@@ -2685,10 +2711,12 @@ impl Client {
                                 if let Err(e) =
                                     quic::receive_quic_data(recv, stream_stats, cancel).await
                                 {
-                                    error!("QUIC receive error: {}", e);
+                                    quic::log_stream_error(&conn, "QUIC receive error", e);
                                 }
                             }
-                            Err(e) => error!("Failed to accept receive stream: {}", e),
+                            Err(e) => {
+                                quic::log_stream_error(&conn, "Failed to accept receive stream", e)
+                            }
                         }
                     }
                     Direction::Bidir => {
@@ -2700,6 +2728,8 @@ impl Client {
                                 let send_cancel = cancel.clone();
                                 let recv_cancel = cancel;
                                 let send_pause = pause;
+                                let send_conn = conn.clone();
+                                let recv_conn = conn.clone();
 
                                 let send_handle = tokio::spawn(async move {
                                     if let Err(e) = quic::send_quic_data(
@@ -2713,7 +2743,11 @@ impl Client {
                                     )
                                     .await
                                     {
-                                        error!("QUIC bidir send error: {}", e);
+                                        quic::log_stream_error(
+                                            &send_conn,
+                                            "QUIC bidir send error",
+                                            e,
+                                        );
                                     }
                                 });
 
@@ -2721,13 +2755,19 @@ impl Client {
                                     if let Err(e) =
                                         quic::receive_quic_data(recv, recv_stats, recv_cancel).await
                                     {
-                                        error!("QUIC bidir receive error: {}", e);
+                                        quic::log_stream_error(
+                                            &recv_conn,
+                                            "QUIC bidir receive error",
+                                            e,
+                                        );
                                     }
                                 });
 
                                 let _ = tokio::join!(send_handle, recv_handle);
                             }
-                            Err(e) => error!("Failed to open bidir stream: {}", e),
+                            Err(e) => {
+                                quic::log_stream_error(&conn, "Failed to open bidir stream", e)
+                            }
                         }
                     }
                 }
@@ -2928,15 +2968,6 @@ impl Client {
             break 'control Err(anyhow::anyhow!("Connection closed without result"));
         };
         control_handle.abort();
-        // Whatever arm noticed it, a silent server surfaces as quinn's bare
-        // "timed out"; say what happened instead.
-        let test_result = match connection.close_reason() {
-            Some(quinn::ConnectionError::TimedOut) if test_result.is_err() => Err(anyhow::anyhow!(
-                "connection lost: the server stopped responding (nothing heard for {}s)",
-                quic::QUIC_IDLE_TIMEOUT.as_secs()
-            )),
-            _ => test_result,
-        };
 
         // Cancel any stream work that may still be in flight
         let _ = cancel_tx.send(true);
@@ -4367,5 +4398,65 @@ mod tests {
                 assert!(config.validate().is_ok());
             }
         }
+    }
+
+    /// A server that goes silent during the control handshake must get the
+    /// same "stopped responding" error as one that goes silent mid-test, not
+    /// quinn's bare "connection lost: timed out" (LAN-2745).
+    #[tokio::test]
+    async fn quic_server_silent_during_handshake_reports_stopped_responding() {
+        let (cert, key) = quic::generate_self_signed_cert().unwrap();
+        let mut crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert, key)
+            .unwrap();
+        crypto.alpn_protocols = vec![b"xfr".to_vec()];
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(crypto).unwrap(),
+        ));
+        // QUIC uses the smaller idle timeout of the two peers; keep it short.
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(Some(Duration::from_secs(1).try_into().unwrap()));
+        server_config.transport_config(Arc::new(transport));
+
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        // The fake server gets its own runtime so it can freeze it outright:
+        // once the client's Hello arrives, nothing (not even an ACK) goes back.
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let endpoint =
+                    quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+                addr_tx.send(endpoint.local_addr().unwrap()).unwrap();
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let (_send, recv) = connection.accept_bi().await.unwrap();
+                let mut line = String::new();
+                read_bounded_line(&mut tokio::io::BufReader::new(recv), &mut line)
+                    .await
+                    .unwrap();
+                std::thread::sleep(Duration::from_secs(3));
+            });
+        });
+
+        let addr = addr_rx.await.unwrap();
+        let client = Client::new(ClientConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            protocol: Protocol::Quic,
+            ..Default::default()
+        });
+        let error = tokio::time::timeout(Duration::from_secs(8), client.run(None))
+            .await
+            .expect("client must give up on a silent server")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("connection lost: the server stopped responding"),
+            "{error}"
+        );
+        server.join().unwrap();
     }
 }

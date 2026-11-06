@@ -1228,6 +1228,17 @@ pub fn normalize_addr(addr: SocketAddr) -> SocketAddr {
     }
 }
 
+/// `host:port` for display, bracketing an IPv6 literal (`[::1]:5201`) the
+/// way `SocketAddr` prints it.
+pub fn host_port(host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Normalize an IP address for comparison.
 ///
 /// Converts IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to their IPv4 form.
@@ -1279,6 +1290,15 @@ mod tests {
 
         let dual = AddressFamily::DualStack.bind_addr(5201);
         assert!(dual.is_ipv6()); // Dual-stack uses IPv6 socket
+    }
+
+    #[test]
+    fn host_port_brackets_ipv6_literals() {
+        assert_eq!(host_port("::1", 5201), "[::1]:5201");
+        assert_eq!(host_port("[::1]", 5201), "[::1]:5201");
+        assert_eq!(host_port("fe80::1%eth0", 5201), "[fe80::1%eth0]:5201");
+        assert_eq!(host_port("127.0.0.1", 5201), "127.0.0.1:5201");
+        assert_eq!(host_port("example.com", 5201), "example.com:5201");
     }
 
     #[test]

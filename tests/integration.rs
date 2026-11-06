@@ -274,6 +274,51 @@ async fn test_cli_host_port_target() {
     server.abort();
 }
 
+/// A clean QUIC download ends with the server closing the connection; the
+/// client's data streams see that as "connection lost" and used to log it as
+/// an ERROR on a run that succeeded (LAN-2739).
+#[tokio::test]
+async fn test_cli_quic_reverse_teardown_logs_no_errors() {
+    let port = get_test_port();
+    // A separate server process: an in-process server on the test's
+    // single-threaded runtime closes too slowly to race the client's reads.
+    let mut server = tokio::process::Command::from(xfr_command())
+        .args(["serve", "-p", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
+            assert!(server.try_wait().unwrap().is_none(), "server exited");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    for _ in 0..5 {
+        let output = timeout(
+            Duration::from_secs(20),
+            tokio::process::Command::from(xfr_command())
+                .args(["127.0.0.1", "-p", &port.to_string()])
+                .args(["-Q", "-R", "-P", "8", "-t", "1sec", "--json"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(!stderr.contains("ERROR"), "{stderr}");
+    }
+}
+
 #[tokio::test]
 async fn test_cli_config_flag_sets_server_and_client_port() {
     let port = get_test_port();

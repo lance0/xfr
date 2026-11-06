@@ -171,12 +171,7 @@ impl PushGatewayClient {
 
     /// Identify the client push by the target host and listening port.
     pub fn with_server(self, host: &str, port: u16) -> Self {
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let server = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
+        let server = crate::net::host_port(host, port);
         self.with_endpoint("server", &server, "client")
     }
 

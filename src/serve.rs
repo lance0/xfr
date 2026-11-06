@@ -1433,13 +1433,15 @@ async fn handle_quic_client(
     // Handle authentication if required
     let mut transport = crate::control_crypto::ProtectedControl::plaintext();
 
+    let client_has_psk = client_nonce.is_some();
     if let Some((nonce, server_hello_json)) = auth_nonce {
-        tokio::time::timeout(
+        let read = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             read_bounded_line(&mut ctrl_reader, &mut line),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
+        .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))?;
+        explain_psk_hangup(read.map(drop), &line, client_has_psk, true)?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -1459,7 +1461,9 @@ async fn handle_quic_client(
                     // data, leaving the client only "closed by peer: 0".
                     let _ = ctrl_send.finish();
                     let _ = tokio::time::timeout(quic::QUIC_CLOSE_GRACE, ctrl_send.stopped()).await;
-                    return Err(anyhow::anyhow!("Authentication failed"));
+                    return Err(anyhow::anyhow!(
+                        "authentication failed: PSK mismatch (the client sent a different pre-shared key)"
+                    ));
                 }
 
                 // Install AEAD-protected control channel.
@@ -1501,12 +1505,13 @@ async fn handle_quic_client(
     }
 
     // Read test start (with timeout)
-    tokio::time::timeout(
+    let read = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         transport.read_message(&mut ctrl_reader, &mut line),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
+    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))?;
+    explain_psk_hangup(read, &line, client_has_psk, security.psk.is_some())?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -1753,10 +1758,13 @@ async fn handle_client_with_first_message(
     // Handle auth response if needed
     let mut transport = crate::control_crypto::ProtectedControl::plaintext();
 
+    let client_has_psk = client_nonce.is_some();
     if let Some((nonce, server_hello_json)) = auth_nonce {
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
-            .await
-            .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))??;
+        let read =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, read_bounded_line(&mut reader, &mut line))
+                .await
+                .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for auth"))?;
+        explain_psk_hangup(read.map(drop), &line, client_has_psk, true)?;
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
@@ -1772,7 +1780,9 @@ async fn handle_client_with_first_message(
                     writer
                         .write_all(format!("{}\n", error.serialize()?).as_bytes())
                         .await?;
-                    return Err(anyhow::anyhow!("Authentication failed"));
+                    return Err(anyhow::anyhow!(
+                        "authentication failed: PSK mismatch (the client sent a different pre-shared key)"
+                    ));
                 }
 
                 // Install AEAD-protected control channel.
@@ -1828,6 +1838,7 @@ async fn handle_client_with_first_message(
         active_tests,
         server_max_duration,
         security,
+        client_has_psk,
         client_supports_single_port,
         client_supports_udp_feedback,
         client_supports_single_port_udp,
@@ -1845,6 +1856,7 @@ async fn handle_test_request(
     active_tests: Arc<Mutex<HashMap<String, ActiveTest>>>,
     server_max_duration: Option<Duration>,
     security: &SecurityContext,
+    client_has_psk: bool,
     client_supports_single_port: bool,
     client_supports_udp_feedback: bool,
     client_supports_single_port_udp: bool,
@@ -1852,12 +1864,13 @@ async fn handle_test_request(
 ) -> anyhow::Result<()> {
     let mut line = String::new();
     // Read test request (with timeout)
-    tokio::time::timeout(
+    let read = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         transport.read_message(&mut reader, &mut line),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))??;
+    .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for test start"))?;
+    explain_psk_hangup(read, &line, client_has_psk, security.psk.is_some())?;
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
     match msg {
@@ -2203,7 +2216,7 @@ async fn run_quic_test(
                         )
                         .await
                     {
-                        debug!("QUIC send ended: {}", e);
+                        quic::log_stream_error(&conn, "QUIC send error", e);
                     }
                 }
                 Direction::Bidir => {
@@ -2226,11 +2239,12 @@ async fn run_quic_test(
                         let send_cancel = cancel.clone();
                         let recv_cancel = cancel;
                         let send_pause = pause;
+                        let send_conn = conn.clone();
 
                         let send_handle = tokio::spawn(async move {
                             // Send half only — see spawn_tcp_handlers.
                             let _sending_done = sending_done;
-                            let _ = quic::send_quic_data(
+                            if let Err(e) = quic::send_quic_data(
                                 send,
                                 send_stats,
                                 duration,
@@ -2239,7 +2253,10 @@ async fn run_quic_test(
                                 send_pause,
                                 budget,
                             )
-                            .await;
+                            .await
+                            {
+                                quic::log_stream_error(&send_conn, "QUIC bidir send error", e);
+                            }
                         });
 
                         let recv_handle = tokio::spawn(async move {
@@ -2969,6 +2986,35 @@ async fn run_test<W: AsyncWrite + Unpin>(
             Err(e)
         }
     }
+}
+
+/// A client whose PSK setup disagrees with ours hangs up right after the
+/// server hello (it tells its own user why), so the next handshake read sees
+/// only EOF or "connection lost". Name the mismatch instead. The client's
+/// Hello carries a `client_nonce` exactly when it has a PSK.
+fn explain_psk_hangup(
+    read: anyhow::Result<()>,
+    line: &str,
+    client_has_psk: bool,
+    server_has_psk: bool,
+) -> anyhow::Result<()> {
+    if read.is_err() || line.is_empty() {
+        match (client_has_psk, server_has_psk) {
+            (false, true) => {
+                return Err(anyhow::anyhow!(
+                    "authentication failed: the client sent no pre-shared key"
+                ));
+            }
+            (true, false) => {
+                return Err(anyhow::anyhow!(
+                    "the client uses a pre-shared key but this server does not; \
+                     configure the server with --psk/--psk-file or remove it from the client"
+                ));
+            }
+            _ => {}
+        }
+    }
+    read
 }
 
 /// Read a line with bounded length to prevent memory DoS
@@ -4668,6 +4714,93 @@ mod tests {
         assert!(error.to_string().contains("waiting for control stream"));
         assert_eq!(semaphore.available_permits(), 1);
         connection.close(0u32.into(), b"test complete");
+    }
+
+    /// Run one client against one server handler and return the error the
+    /// server logs for it.
+    async fn server_error_for(
+        protocol: Protocol,
+        server_psk: Option<&str>,
+        client_psk: Option<&str>,
+    ) -> String {
+        let security = SecurityContext {
+            psk: server_psk.map(str::to_string),
+            acl: AclConfig::default().build().unwrap(),
+            preset_acl: None,
+            rate_limiter: None,
+            address_family: AddressFamily::V4Only,
+            bind_addr: None,
+            tui_tx: None,
+            push_gateway_url: None,
+            push_labels: std::collections::BTreeMap::new(),
+            capabilities: crate::protocol::supported_capabilities(),
+            udp_hello_routes: None,
+        };
+        let active_tests = Arc::new(Mutex::new(HashMap::new()));
+        let (address, server) = if protocol == Protocol::Quic {
+            let (cert, key) = quic::generate_self_signed_cert().unwrap();
+            let endpoint = quic::create_server_endpoint(
+                "127.0.0.1:0".parse().unwrap(),
+                AddressFamily::V4Only,
+                cert,
+                key,
+                None,
+            )
+            .unwrap();
+            let address = endpoint.local_addr().unwrap();
+            let server = async move {
+                let incoming = endpoint.accept().await.unwrap();
+                let peer = incoming.remote_address();
+                handle_quic_client(incoming, peer, active_tests, None, &security).await
+            };
+            (address, futures::FutureExt::boxed_local(server))
+        } else {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                route_connection(stream, peer, active_tests, 0, None, &security).await
+            };
+            (address, futures::FutureExt::boxed_local(server))
+        };
+        let client = crate::client::Client::new(crate::client::ClientConfig {
+            host: address.ip().to_string(),
+            port: address.port(),
+            protocol,
+            psk: client_psk.map(str::to_string),
+            ..Default::default()
+        });
+        let (server_result, client_result) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client.run(None))
+        })
+        .await
+        .expect("PSK mismatch must end the handshake promptly");
+        assert!(client_result.is_err(), "{protocol:?}: client must fail");
+        server_result.unwrap_err().to_string()
+    }
+
+    /// LAN-2739: a PSK mismatch used to log a bare "EOF while parsing a
+    /// value" (TCP) or "connection lost" (QUIC) on the server.
+    #[tokio::test]
+    async fn psk_mismatch_names_the_cause_on_the_server() {
+        for protocol in [Protocol::Tcp, Protocol::Quic] {
+            assert_eq!(
+                server_error_for(protocol, Some("server-secret"), None).await,
+                "authentication failed: the client sent no pre-shared key",
+                "{protocol:?}"
+            );
+            assert_eq!(
+                server_error_for(protocol, Some("server-secret"), Some("wrong-secret")).await,
+                "authentication failed: PSK mismatch (the client sent a different pre-shared key)",
+                "{protocol:?}"
+            );
+            assert_eq!(
+                server_error_for(protocol, None, Some("client-secret")).await,
+                "the client uses a pre-shared key but this server does not; \
+                 configure the server with --psk/--psk-file or remove it from the client",
+                "{protocol:?}"
+            );
+        }
     }
 
     #[tokio::test]

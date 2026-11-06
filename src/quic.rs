@@ -427,7 +427,20 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
-/// Send data over a QUIC stream
+/// Log a data stream's error. Once the whole connection is gone, every
+/// stream fails with the same "connection lost" that the control path
+/// reports as the test's error, so that is debug-level; a stream failing on a
+/// live connection gets an ERROR line.
+pub(crate) fn log_stream_error(conn: &Connection, what: &str, e: impl std::fmt::Display) {
+    if conn.close_reason().is_some() {
+        debug!("{what}: {e}");
+    } else {
+        error!("{what}: {e}");
+    }
+}
+
+/// Send data over a QUIC stream. Errors are returned, not logged: callers
+/// log them with `log_stream_error`.
 pub async fn send_quic_data(
     mut send: SendStream,
     stats: Arc<StreamStats>,
@@ -547,12 +560,11 @@ pub async fn send_quic_data(
                         // Treat a peer-initiated stop as clean teardown only when we
                         // are already cancelling or very close to the configured end
                         // time (mirrors the TCP send path). A mid-test stop still
-                        // surfaces as an error.
+                        // surfaces as an error (the caller logs it).
                         if *cancel.borrow() || deadline_reached || (peer_closed && near_deadline) {
                             debug!("QUIC send ended by peer during teardown: {}", e);
                             break;
                         }
-                        error!("QUIC send error: {}", e);
                         return Err(e.into());
                     }
                 }
