@@ -62,17 +62,6 @@ fn psk_not_used_error() -> anyhow::Error {
     )
 }
 
-/// Once the whole QUIC connection is gone, every data stream fails with the
-/// same "connection lost" that the control path reports as the test's error;
-/// only a stream failing on a live connection is worth an ERROR line.
-fn log_quic_stream_error(conn: &quinn::Connection, what: &str, e: impl std::fmt::Display) {
-    if conn.close_reason().is_some() {
-        debug!("{what}: {e}");
-    } else {
-        error!("{what}: {e}");
-    }
-}
-
 fn stream_join_timeout(streams: u8) -> Duration {
     let scaled =
         Duration::from_millis(u64::from(streams).saturating_mul(STREAM_JOIN_TIMEOUT_PER_STREAM_MS));
@@ -2707,10 +2696,12 @@ impl Client {
                                 )
                                 .await
                                 {
-                                    log_quic_stream_error(&conn, "QUIC send error", e);
+                                    quic::log_stream_error(&conn, "QUIC send error", e);
                                 }
                             }
-                            Err(e) => log_quic_stream_error(&conn, "Failed to open send stream", e),
+                            Err(e) => {
+                                quic::log_stream_error(&conn, "Failed to open send stream", e)
+                            }
                         }
                     }
                     Direction::Download => {
@@ -2720,11 +2711,11 @@ impl Client {
                                 if let Err(e) =
                                     quic::receive_quic_data(recv, stream_stats, cancel).await
                                 {
-                                    log_quic_stream_error(&conn, "QUIC receive error", e);
+                                    quic::log_stream_error(&conn, "QUIC receive error", e);
                                 }
                             }
                             Err(e) => {
-                                log_quic_stream_error(&conn, "Failed to accept receive stream", e)
+                                quic::log_stream_error(&conn, "Failed to accept receive stream", e)
                             }
                         }
                     }
@@ -2752,7 +2743,7 @@ impl Client {
                                     )
                                     .await
                                     {
-                                        log_quic_stream_error(
+                                        quic::log_stream_error(
                                             &send_conn,
                                             "QUIC bidir send error",
                                             e,
@@ -2764,7 +2755,7 @@ impl Client {
                                     if let Err(e) =
                                         quic::receive_quic_data(recv, recv_stats, recv_cancel).await
                                     {
-                                        log_quic_stream_error(
+                                        quic::log_stream_error(
                                             &recv_conn,
                                             "QUIC bidir receive error",
                                             e,
@@ -2775,7 +2766,7 @@ impl Client {
                                 let _ = tokio::join!(send_handle, recv_handle);
                             }
                             Err(e) => {
-                                log_quic_stream_error(&conn, "Failed to open bidir stream", e)
+                                quic::log_stream_error(&conn, "Failed to open bidir stream", e)
                             }
                         }
                     }

@@ -2216,7 +2216,7 @@ async fn run_quic_test(
                         )
                         .await
                     {
-                        debug!("QUIC send ended: {}", e);
+                        quic::log_stream_error(&conn, "QUIC send error", e);
                     }
                 }
                 Direction::Bidir => {
@@ -2239,11 +2239,12 @@ async fn run_quic_test(
                         let send_cancel = cancel.clone();
                         let recv_cancel = cancel;
                         let send_pause = pause;
+                        let send_conn = conn.clone();
 
                         let send_handle = tokio::spawn(async move {
                             // Send half only — see spawn_tcp_handlers.
                             let _sending_done = sending_done;
-                            let _ = quic::send_quic_data(
+                            if let Err(e) = quic::send_quic_data(
                                 send,
                                 send_stats,
                                 duration,
@@ -2252,7 +2253,10 @@ async fn run_quic_test(
                                 send_pause,
                                 budget,
                             )
-                            .await;
+                            .await
+                            {
+                                quic::log_stream_error(&send_conn, "QUIC bidir send error", e);
+                            }
                         });
 
                         let recv_handle = tokio::spawn(async move {

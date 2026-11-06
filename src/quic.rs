@@ -52,7 +52,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::Sha256;
 use socket2::{Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::net::AddressFamily;
 use crate::stats::StreamStats;
@@ -427,7 +427,20 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
-/// Send data over a QUIC stream
+/// Log a data stream's error. Once the whole connection is gone, every
+/// stream fails with the same "connection lost" that the control path
+/// reports as the test's error, so that is debug-level; a stream failing on a
+/// live connection gets an ERROR line.
+pub(crate) fn log_stream_error(conn: &Connection, what: &str, e: impl std::fmt::Display) {
+    if conn.close_reason().is_some() {
+        debug!("{what}: {e}");
+    } else {
+        error!("{what}: {e}");
+    }
+}
+
+/// Send data over a QUIC stream. Errors are returned, not logged: callers
+/// log them with `log_stream_error`.
 pub async fn send_quic_data(
     mut send: SendStream,
     stats: Arc<StreamStats>,
