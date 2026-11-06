@@ -79,9 +79,9 @@ release binaries, Docker, AUR, Termux, Nix, pkgsrc, and source builds.
 
 ## Platform Support
 
-Release binaries cover Linux x86_64/ARM64, macOS Apple Silicon, and Android
-ARM64. macOS Intel can build from crates.io; NetBSD has a community pkgsrc
-package. Native Windows remains experimental; WSL2 is recommended.
+Release binaries cover Linux x86_64/ARM64/ARMv7, macOS Apple Silicon, and
+Android ARM64. macOS Intel can build from crates.io; NetBSD has a community
+pkgsrc package. Native Windows remains experimental; WSL2 is recommended.
 
 CI covers Ubuntu, macOS, and Windows. Packaging and CI coverage do not
 establish runtime qualification for every platform or

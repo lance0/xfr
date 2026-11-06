@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Linux ARMv7 release binary** — releases now include `xfr-armv7-unknown-linux-musleabihf.tar.gz`, a static musl build for 32-bit ARM hard-float systems such as OpenWrt routers (`arm_cortex-a7`, `arm_cortex-a9`, `arm_cortex-a15`) and 32-bit Raspberry Pi OS on a Pi 2 or newer. Cross-built with cargo-zigbuild like the other Linux targets; not runtime-tested in CI.
+- **Linux ARMv7 release binary** — releases now include `xfr-armv7-unknown-linux-musleabihf.tar.gz`, a static musl build for 32-bit ARM hard-float systems such as OpenWrt routers (`arm_cortex-a7_neon-vfpv4`, `arm_cortex-a9_vfpv3-d16`, `arm_cortex-a15_neon-vfpv4`) and 32-bit Raspberry Pi OS on a Pi 2 or newer. Cross-built with cargo-zigbuild like the other Linux targets; not runtime-tested in CI.
 
 ## [0.14.0] - 2026-10-31
 
