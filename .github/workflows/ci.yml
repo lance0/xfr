@@ -57,6 +57,15 @@ jobs:
       - name: Verify DynamicUser credentials and unsafe-file controls
         run: ./scripts/test-systemd-credentials.sh target/debug/xfr
 
+  install-script:
+    name: install.sh asset selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pick the right release asset per arch/libc/FPU
+        run: ./scripts/test-install-arch.sh
+
   clippy:
     name: Clippy (${{ matrix.features }})
     runs-on: ubuntu-latest
