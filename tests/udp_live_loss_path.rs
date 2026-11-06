@@ -8,6 +8,8 @@
 //! field on a struct ripple, server-side delta math, client decode) shows
 //! up as a single failing assertion against the rendered app state.
 
+#![cfg(feature = "tui")]
+
 use xfr::client::TestProgress;
 use xfr::protocol::{AggregateInterval, ControlMessage};
 use xfr::stats::TestStats;

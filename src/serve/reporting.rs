@@ -11,10 +11,10 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use super::events::ServerEvent;
 use crate::control_crypto::ControlWriter;
 use crate::protocol::{ControlMessage, Direction, Protocol};
 use crate::stats::{IntervalStats, TestStats};
-use crate::tui::server::ServerEvent;
 
 use super::{
     ActiveTest, ControlCommand, STATS_INTERVAL, budget_transfer_complete, finish_drain_grace,

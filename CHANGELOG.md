@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`tui` cargo feature** — the client and server dashboards can now be left out of a build. The feature is on by default, so `cargo install xfr` and the regular release binaries are unchanged. Without it the client always uses plain output and `xfr serve --tui` warns and runs the plain server. `update-check` now needs `tui`, since only the client TUI runs the check.
+- **Minimal release binaries for routers** — releases now include `xfr-armv7-unknown-linux-musleabihf-minimal.tar.gz` and `xfr-aarch64-unknown-linux-musl-minimal.tar.gz`, built with `--no-default-features`: about 7.4 MB instead of about 9.4 MB, with no TUI, mDNS discovery, update check or Prometheus endpoint.
+
+### Library API (pre-1.0 break)
+- `ServerEvent` and `ActiveTestInfo` moved to `serve::events`. They stay available from `tui::server`, but `xfr::tui` only exists with the `tui` feature.
+
 ## [0.14.1] - 2026-11-06
 
 ### Added

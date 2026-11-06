@@ -34,7 +34,7 @@
 //! - [`protocol`] - Control protocol messages
 //! - [`tcp`], [`udp`], [`quic`] - Transport implementations
 //! - [`stats`] - Statistics collection
-//! - [`tui`] - Terminal UI rendering
+//! - `tui` - Terminal UI rendering (`tui` feature)
 
 pub mod acl;
 pub mod auth;
@@ -57,6 +57,7 @@ pub mod serve;
 pub mod stats;
 pub mod tcp;
 pub mod tcp_info;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod udp;
 pub mod update;

@@ -8,12 +8,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "tui")]
 use crossterm::ExecutableCommand;
+#[cfg(feature = "tui")]
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+#[cfg(feature = "tui")]
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+#[cfg(feature = "tui")]
 use ratatui::Terminal;
+#[cfg(feature = "tui")]
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -38,13 +43,19 @@ struct OutputOptions {
     interval_secs: f64,
     timestamp_format: TimestampFormat,
 }
+#[cfg(feature = "tui")]
 use xfr::client::PauseResult;
 use xfr::protocol::{DEFAULT_PORT, Direction, Protocol, TimestampFormat};
 use xfr::serve::{Server, ServerConfig};
+#[cfg(feature = "tui")]
 use xfr::tui::app::AppState;
+#[cfg(feature = "tui")]
 use xfr::tui::program_status::{StatusReporter, client_status};
+#[cfg(feature = "tui")]
 use xfr::tui::server::{ServerApp, ServerEvent, draw as server_draw};
+#[cfg(feature = "tui")]
 use xfr::tui::settings::SettingsAction;
+#[cfg(feature = "tui")]
 use xfr::tui::{App, draw};
 
 /// Initialize logging with optional file output
@@ -686,7 +697,8 @@ fn client_json_output(cli: &Cli, file_config: &xfr::config::Config) -> bool {
 /// Probe mode always uses plain output: there is no live throughput to graph,
 /// the run lasts seconds, and the deliverable is the per-size table.
 fn client_uses_tui(cli: &Cli, file_config: &xfr::config::Config, terminal: bool) -> bool {
-    terminal
+    cfg!(feature = "tui")
+        && terminal
         && !(cli.no_tui
             || file_config.client.no_tui.unwrap_or(false)
             || client_json_output(cli, file_config)
@@ -1311,7 +1323,11 @@ async fn main() -> Result<()> {
                 .or(file_config.server.log_level.as_ref())
                 .or(cli.log_level.as_ref())
                 .or(file_config.client.log_level.as_ref());
-            (file, level, *server_tui && terminal)
+            (
+                file,
+                level,
+                cfg!(feature = "tui") && *server_tui && terminal,
+            )
         }
         Some(Commands::Diff { .. }) | Some(Commands::Discover { .. }) => {
             let file = cli
@@ -1495,9 +1511,12 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            if server_tui && !terminal {
+            if server_tui && !cfg!(feature = "tui") {
+                warn!("this build has no TUI (`tui` feature off); running the plain server");
+            } else if server_tui && !terminal {
                 warn!("--tui needs a terminal; running the plain server");
             }
+            #[cfg(feature = "tui")]
             if server_tui && terminal {
                 // Same precedence as the client TUI: --theme > saved pref >
                 // NO_COLOR-derived default. There is no server section for a
@@ -1505,10 +1524,11 @@ async fn main() -> Result<()> {
                 // choice across from the client.
                 let prefs = xfr::prefs::Prefs::load().with_overrides(cli.theme.as_deref(), None);
                 run_server_tui(config, prefs.theme_name(), push_labels).await?;
-            } else {
-                let server = Server::new(config).with_push_labels(push_labels)?;
-                server.run_until(shutdown_signal()).await?;
+                return Ok(());
             }
+
+            let server = Server::new(config).with_push_labels(push_labels)?;
+            server.run_until(shutdown_signal()).await?;
         }
 
         Some(Commands::Diff {
@@ -1853,10 +1873,8 @@ async fn main() -> Result<()> {
                 timestamp_format,
             };
 
-            if !tui_enabled {
-                // Plain/JSON/CSV mode
-                run_client_plain(config, output_opts, cli.output).await?;
-            } else {
+            #[cfg(feature = "tui")]
+            if tui_enabled {
                 // TUI mode - load prefs with overrides
                 // Priority: CLI flag > config file > saved prefs > default
                 let prefs = xfr::prefs::Prefs::load()
@@ -1894,7 +1912,11 @@ async fn main() -> Result<()> {
                 {
                     let _ = final_prefs.save();
                 }
+                return Ok(());
             }
+
+            // Plain/JSON/CSV mode
+            run_client_plain(config, output_opts, cli.output).await?;
         }
     }
 
@@ -2358,10 +2380,12 @@ fn build_fallback_result(cumulative_bytes: u64, elapsed_ms: u64) -> xfr::protoco
     }
 }
 
+#[cfg(feature = "tui")]
 /// RAII guard that restores raw mode and leaves the alternate screen on drop,
 /// ensuring terminal recovery even if the TUI event loop panics or exits early.
 struct TerminalGuard;
 
+#[cfg(feature = "tui")]
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
@@ -2369,6 +2393,7 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[cfg(feature = "tui")]
 async fn run_client_tui(
     mut config: ClientConfig,
     output: Option<PathBuf>,
@@ -2452,6 +2477,7 @@ async fn run_client_tui(
     }
 }
 
+#[cfg(feature = "tui")]
 struct TuiRun {
     test: (Protocol, Direction),
     client: Arc<Client>,
@@ -2459,11 +2485,13 @@ struct TuiRun {
     progress_rx: mpsc::Receiver<TestProgress>,
 }
 
+#[cfg(feature = "tui")]
 /// How long the TUI waits for the server's final Result after a quit before
 /// giving up and showing a locally-built summary (issue #159). Matches the
 /// --no-tui Ctrl+C fallback.
 const TUI_CANCEL_WAIT: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "tui")]
 /// `(result, prefs, print_json_on_exit, partial)`; `partial` marks a
 /// fallback summary built from local counters because the server never
 /// answered the cancel.
@@ -2474,6 +2502,7 @@ type TuiLoopExit = (
     bool,
 );
 
+#[cfg(feature = "tui")]
 /// Fallback summary for a quit the server never acknowledged, from locally
 /// accumulated counters. `None` when nothing was transferred — there is no
 /// summary worth showing.
@@ -2481,6 +2510,7 @@ fn tui_fallback_result(bytes: u64, elapsed_ms: u64) -> Option<xfr::protocol::Tes
     (bytes > 0).then(|| build_fallback_result(bytes, elapsed_ms))
 }
 
+#[cfg(feature = "tui")]
 fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
     let client = Arc::new(Client::new(tui_run_config(config)));
     let client_for_task = client.clone();
@@ -2494,6 +2524,7 @@ fn spawn_tui_run(config: &ClientConfig) -> TuiRun {
     }
 }
 
+#[cfg(feature = "tui")]
 fn tui_run_config(config: &ClientConfig) -> ClientConfig {
     // Keep the user's transport-specific preferences in the settings
     // config so switching back restores them. Only the active run drops
@@ -2514,11 +2545,13 @@ fn tui_run_config(config: &ClientConfig) -> ClientConfig {
     active
 }
 
+#[cfg(feature = "tui")]
 async fn finish_tui_run(run: TuiRun) -> Result<xfr::protocol::TestResult> {
     let TuiRun { handle, .. } = run;
     handle.await?
 }
 
+#[cfg(feature = "tui")]
 async fn cancel_tui_run(
     run: TuiRun,
     timeout: Duration,
@@ -2535,12 +2568,14 @@ async fn cancel_tui_run(
     }
 }
 
+#[cfg(feature = "tui")]
 async fn abort_tui_run(run: TuiRun) {
     let TuiRun { handle, .. } = run;
     handle.abort();
     let _ = handle.await;
 }
 
+#[cfg(feature = "tui")]
 fn poll_update_check(
     app: &mut App,
     update_rx: &std::sync::mpsc::Receiver<Option<String>>,
@@ -2565,12 +2600,14 @@ fn poll_update_check(
     }
 }
 
+#[cfg(feature = "tui")]
 fn remember_tui_theme(prefs: &mut xfr::prefs::Prefs, app: &App) {
     if let Some(theme) = app.changed_theme_name() {
         prefs.theme = Some(theme.to_string());
     }
 }
 
+#[cfg(feature = "tui")]
 fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> SettingsAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('s') => {
@@ -2606,6 +2643,7 @@ fn handle_tui_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> Se
     }
 }
 
+#[cfg(feature = "tui")]
 fn apply_tui_settings(config: &mut ClientConfig, app: &mut App) {
     config.streams = app.settings.streams;
     config.protocol = app.settings.protocol;
@@ -2622,6 +2660,7 @@ fn apply_tui_settings(config: &mut ClientConfig, app: &mut App) {
     );
 }
 
+#[cfg(feature = "tui")]
 fn log_tui_quic_ignored_options(app: &mut App, config: &ClientConfig) {
     if config.protocol != Protocol::Quic {
         return;
@@ -2651,6 +2690,7 @@ fn log_tui_quic_ignored_options(app: &mut App, config: &ClientConfig) {
     }
 }
 
+#[cfg(feature = "tui")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiQuitAction {
     Noop,
@@ -2661,21 +2701,25 @@ enum TuiQuitAction {
     Ignore,
 }
 
+#[cfg(feature = "tui")]
 fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
     (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         || key.code == KeyCode::Char('\x03')
 }
 
+#[cfg(feature = "tui")]
 /// Settings owns every key while open, except interrupts, which must still
 /// reach the normal cancel path.
 fn settings_captures_key(settings_visible: bool, key: &crossterm::event::KeyEvent) -> bool {
     settings_visible && !is_ctrl_c(key)
 }
 
+#[cfg(feature = "tui")]
 fn server_tui_quit_key(key: &crossterm::event::KeyEvent) -> bool {
     key.code == KeyCode::Char('q') || is_ctrl_c(key)
 }
 
+#[cfg(feature = "tui")]
 fn tui_quit_action(
     key: &crossterm::event::KeyEvent,
     state: AppState,
@@ -2708,6 +2752,7 @@ fn tui_quit_action(
     }
 }
 
+#[cfg(feature = "tui")]
 async fn restart_tui_run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -2738,6 +2783,7 @@ async fn restart_tui_run(
     Ok(())
 }
 
+#[cfg(feature = "tui")]
 #[allow(clippy::too_many_arguments)]
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -3056,6 +3102,7 @@ async fn run_tui_loop(
     }
 }
 
+#[cfg(feature = "tui")]
 async fn run_server_tui(
     mut config: ServerConfig,
     theme_name: &str,
@@ -3185,6 +3232,7 @@ async fn run_server_tui(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tui")]
     #[tokio::test]
     async fn tui_run_keeps_context_when_settings_change_before_restart() {
         let mut config = ClientConfig {
@@ -3236,10 +3284,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     fn test_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn settings_timestamp_keys_update_the_history_format() {
         let mut app = App::default();
@@ -3554,10 +3604,12 @@ mod tests {
         assert_eq!(cli.time, Some(Duration::from_secs(10)));
     }
 
+    #[cfg(feature = "tui")]
     fn ctrl_c_key() -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_interrupts_preserve_cancel_and_exit_actions() {
         for key in [ctrl_c_key(), test_key(KeyCode::Char('\x03'))] {
@@ -3578,6 +3630,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_settings_lets_interrupts_through() {
         for key in [ctrl_c_key(), test_key(KeyCode::Char('\x03'))] {
@@ -3598,6 +3651,7 @@ mod tests {
         assert!(!server_tui_quit_key(&test_key(KeyCode::Esc)));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_protocol_changes_keep_udp_length_as_a_preference() {
         let mut config = ClientConfig {
@@ -3624,6 +3678,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_protocol_changes_scope_tcp_only_send_options() {
         let mut config = ClientConfig {
@@ -3649,6 +3704,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_switch_to_tcp_uses_the_cli_zerocopy_preference() {
         use clap::Parser;
@@ -3683,6 +3739,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_protocol_changes_recompute_fixed_port_assignment() {
         let mut config = ClientConfig {
@@ -3703,6 +3760,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_stream_count_changes_recompute_fixed_port_assignment() {
         let mut config = ClientConfig {
@@ -3716,6 +3774,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_ephemeral_binds_keep_independent_ports() {
         for bind_addr in [None, Some("127.0.0.1:0".parse().unwrap())] {
@@ -3731,6 +3790,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_quit_action_ignores_non_quit_keys() {
         assert_eq!(
@@ -3744,6 +3804,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_quit_action_starts_graceful_cancel_for_running_test() {
         assert_eq!(
@@ -3761,6 +3822,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_quit_action_keeps_repeated_q_graceful_while_cancel_pending() {
         assert_eq!(
@@ -3773,6 +3835,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_fallback_result_only_when_data_was_collected() {
         // Nothing transferred -> no summary worth showing ("Test cancelled.").
@@ -3785,6 +3848,7 @@ mod tests {
         assert!((result.throughput_mbps - 4.0).abs() < 1e-9);
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_quit_action_exits_when_run_is_done_or_missing() {
         assert_eq!(
@@ -3807,6 +3871,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_quit_action_preserves_error_exit() {
         assert_eq!(
@@ -4206,6 +4271,7 @@ mod tests {
         assert_eq!(cli.theme.as_deref(), Some("default"));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn automatic_theme_is_not_saved_without_an_explicit_edit() {
         for theme in ["default", "monochrome"] {
@@ -4250,6 +4316,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn untouched_explicit_theme_preferences_are_preserved() {
         for theme in ["default", "dracula", "mono"] {

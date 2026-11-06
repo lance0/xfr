@@ -36,8 +36,8 @@ tokio = { version = "1.44", features = ["full", "net", "time", "sync", "rt-multi
 futures = "0.3"
 
 # TUI
-ratatui = "0.30"
-crossterm = "0.29"
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.29", optional = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -105,12 +105,16 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 
 [features]
-default = ["discovery", "update-check"]
+default = ["discovery", "tui", "update-check"]
 prometheus = ["dep:prometheus", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 discovery = ["dep:mdns-sd"]
+# Client and server dashboards. On by default; without it the client always
+# uses plain output, for small builds such as routers.
+tui = ["dep:ratatui", "dep:crossterm"]
 # Background check for a newer release via the GitHub API. On by default;
 # package builds can drop the phone-home code with `--no-default-features`.
-update-check = ["dep:update-informer"]
+# Only the client TUI runs the check, so this needs `tui`.
+update-check = ["tui", "dep:update-informer"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
