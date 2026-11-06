@@ -4844,21 +4844,36 @@ async fn test_tcp_psk_cancel_infinite_duration() {
 
     let client = Client::new(config);
 
-    // Poll the run future so it connects and installs the cancel channel,
-    // then cancel after 500ms.  The run must resolve within 2s of the cancel
-    // — if the server's AEAD control reader is broken, the cancel is never
-    // observed and the infinite test hangs until the timeout fails the test.
+    // Let data flow for 500ms, then keep polling the run future until
+    // `cancel()` is accepted: it errors until the TestAck installs the cancel
+    // channel, and a cancel sent before that is lost, so a PSK handshake
+    // slower than 500ms on a loaded runner used to hang the infinite test
+    // (LAN-2738).  The run must resolve within 2s of the accepted cancel — if
+    // the server's AEAD control reader is broken, the cancel is never
+    // observed and the timeout fails the test.
     let mut run_future = std::pin::pin!(client.run(None));
     tokio::select! {
         res = &mut run_future => panic!("run ended before cancel: {res:?}"),
         _ = tokio::time::sleep(Duration::from_millis(500)) => {}
     }
-    let _ = client.cancel();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while client.cancel().is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "handshake did not complete within 5.5s"
+        );
+        tokio::select! {
+            res = &mut run_future => panic!("run ended before cancel: {res:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
 
+    let cancelled_at = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut run_future).await;
     assert!(
         result.is_ok(),
-        "PSK cancel should resolve within 2s — if it times out the AEAD control reader is broken"
+        "PSK cancel should resolve within 2s (gave up after {:?}) — if it times out the AEAD control reader is broken",
+        cancelled_at.elapsed()
     );
 }
 
