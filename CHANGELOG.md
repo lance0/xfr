@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Linux ARMv7 release binary** — releases now include `xfr-armv7-unknown-linux-musleabihf.tar.gz`, a static musl build for 32-bit ARM hard-float systems such as OpenWrt routers (`arm_cortex-a7_neon-vfpv4`, `arm_cortex-a9_vfpv3-d16`, `arm_cortex-a15_neon-vfpv4`) and 32-bit Raspberry Pi OS on a Pi 2 or newer. Cross-built with cargo-zigbuild like the other Linux targets; not runtime-tested in CI.
 
+### Fixed
+- **Servers on one host advertise distinct mDNS instance names** — every `xfr serve` on a host registered the same instance name, its hostname, so with servers on several ports one name resolved to several ports. mDNS expects instance names to be unique per service type on a link, and other responders could rename or flap on the duplicates. A server on a port other than 5201 now appends it (`lancebox (5202)`), still clamped to the 63-byte DNS label limit; the default port keeps the plain hostname. `xfr discover` output is unchanged and still lists older servers, which keep the shared name, once per port.
+
 ## [0.14.0] - 2026-10-31
 
 ### Added
