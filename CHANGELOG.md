@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Linux ARMv7 release binary** — releases now include `xfr-armv7-unknown-linux-musleabihf.tar.gz`, a static musl build for 32-bit ARM hard-float systems such as OpenWrt routers (`arm_cortex-a7_neon-vfpv4`, `arm_cortex-a9_vfpv3-d16`, `arm_cortex-a15_neon-vfpv4`) and 32-bit Raspberry Pi OS on a Pi 2 or newer. Cross-built with cargo-zigbuild like the other Linux targets; not runtime-tested in CI.
 
+### Fixed
+- **A QUIC server that goes silent during the handshake gets the friendly error** — if the connection idled out before the test started (Hello, auth, or `TestStart`/`TestAck`), the client failed with a bare `connection lost` / `Caused by: timed out`. It now prints `connection lost: the server stopped responding (nothing heard for 10s)`, the same as a server that goes silent mid-test.
+- **The server names PSK mismatches** — a client without a PSK against a server with one, or the other way round, logged `Client error <peer>: EOF while parsing a value at line 1 column 0` (TCP) or `QUIC client error <peer>: connection lost` (QUIC). The server now logs `authentication failed: the client sent no pre-shared key` or `the client uses a pre-shared key but this server does not; configure the server with --psk/--psk-file or remove it from the client`. A wrong key now logs `authentication failed: PSK mismatch (the client sent a different pre-shared key)` instead of `Authentication failed`. Server log only; no protocol change.
+- **No stray QUIC `connection lost` errors** — when the QUIC connection ended, each data stream logged its own `ERROR QUIC receive error: connection lost` (or `send error`) ahead of the client's final error, and a successful `-Q -R -P 8` run could print them at teardown with exit status 0. Data stream errors after the connection has closed now log at debug level; the control path still reports why the test ended.
+- **IPv6 targets are bracketed in `Connecting to`** — `xfr ::1` logged `Connecting to ::1:5201...` and then `Connected to [::1]:5201`. The log line, the `--connect-timeout` error and the TUI's connecting status and target now print `[::1]:5201`.
+
 ## [0.14.0] - 2026-10-31
 
 ### Added

@@ -283,7 +283,7 @@ fn draw_configuration(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Line::from(vec![
             Span::styled("  Target:    ", Style::default().fg(theme.text_dim)),
             Span::styled(
-                format!("{}:{}", app.host, app.port),
+                crate::net::host_port(&app.host, app.port),
                 Style::default().fg(theme.text),
             ),
         ]),

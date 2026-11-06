@@ -52,7 +52,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::Sha256;
 use socket2::{Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::net::AddressFamily;
 use crate::stats::StreamStats;
@@ -547,12 +547,11 @@ pub async fn send_quic_data(
                         // Treat a peer-initiated stop as clean teardown only when we
                         // are already cancelling or very close to the configured end
                         // time (mirrors the TCP send path). A mid-test stop still
-                        // surfaces as an error.
+                        // surfaces as an error (the caller logs it).
                         if *cancel.borrow() || deadline_reached || (peer_closed && near_deadline) {
                             debug!("QUIC send ended by peer during teardown: {}", e);
                             break;
                         }
-                        error!("QUIC send error: {}", e);
                         return Err(e.into());
                     }
                 }
