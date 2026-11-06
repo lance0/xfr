@@ -89,6 +89,12 @@ sudo cp target/release/xfr /usr/local/bin/
 curl -fsSL https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
 ```
 
+The script picks the release binary for Linux x86_64, ARM64 (the static
+`-musl` build on systems without glibc, such as Alpine and OpenWrt), hard-float
+ARMv7, macOS Apple Silicon, and Termux. It works with `curl` or `wget` and
+installs to `/usr/local/bin` (`/usr/bin` on OpenWrt, `$PREFIX/bin` on Termux);
+set `INSTALL_DIR` to change that.
+
 ### Termux (Android)
 
 Download the `aarch64-linux-android` binary from [releases](https://github.com/lance0/xfr/releases), or build from source:
@@ -136,6 +142,16 @@ the router's package architecture, never the `-gnu` one:
 ARM architectures without an FPU suffix (plain `arm_cortex-a9`, `arm_arm926ej-s`)
 and MIPS (`mips_*`, `mipsel_*`) have no release binary; MIPS is a tier 3 Rust
 target without a prebuilt standard library.
+
+The install script handles this choice and refuses ARMv7 CPUs without an FPU.
+It installs to `/usr/bin` on the overlay; pipe into `INSTALL_DIR=/tmp sh`
+instead to keep it in RAM:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/lance0/xfr/master/install.sh | sh
+```
+
+To pick the binary by hand:
 
 ```sh
 # Show the package architecture

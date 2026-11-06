@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Linux ARMv7 release binary** — releases now include `xfr-armv7-unknown-linux-musleabihf.tar.gz`, a static musl build for 32-bit ARM hard-float systems such as OpenWrt routers (`arm_cortex-a7_neon-vfpv4`, `arm_cortex-a9_vfpv3-d16`, `arm_cortex-a15_neon-vfpv4`) and 32-bit Raspberry Pi OS on a Pi 2 or newer. Cross-built with cargo-zigbuild like the other Linux targets; not runtime-tested in CI.
 
+### Fixed
+- **`install.sh` works on OpenWrt, Alpine and ARMv7** — it rejected `armv7l` and always installed the glibc ARM64 build, which can't run without a glibc loader. It now installs `armv7-unknown-linux-musleabihf` on ARMv7 CPUs that report `vfp` or `neon` in `/proc/cpuinfo` (and refuses soft-float ones), and the static `aarch64-unknown-linux-musl` build on ARM64 systems with no glibc loader or a musl `ldd`. OpenWrt also broke it on every architecture: busybox `tr` turned `Linux` into `Linlx`, the release tag was misparsed from the API's one-line JSON, and there was no `curl` or `sudo`. It now falls back to `wget` with explicit output names, skips `sudo` when run as root, and installs to `/usr/bin` on OpenWrt, where `/usr/local/bin` isn't on `PATH`.
+
 ## [0.14.0] - 2026-10-31
 
 ### Added
