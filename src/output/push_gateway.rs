@@ -1142,6 +1142,9 @@ mod tests {
         }
         stats.streams[0].add_bytes_sent(1_000_000);
         stats.streams[1].add_bytes_sent(2_000_000);
+        // Real senders count the final snapshot's retransmits into the stream
+        // (tcp::send_data) before the snapshot is stored.
+        stats.streams[0].add_retransmits(5);
         stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
             retransmits: 5,
             rtt_us: 1200,
@@ -1182,7 +1185,7 @@ xfr_stream_throughput_mbps{test_id="fixture",stream_id="0"} 0
 xfr_stream_throughput_mbps{test_id="fixture",stream_id="1"} 0
 # HELP xfr_stream_retransmits_total Per-stream TCP retransmits
 # TYPE xfr_stream_retransmits_total counter
-xfr_stream_retransmits_total{test_id="fixture",stream_id="0"} 0
+xfr_stream_retransmits_total{test_id="fixture",stream_id="0"} 5
 xfr_stream_retransmits_total{test_id="fixture",stream_id="1"} 0
 # HELP xfr_tcp_rtt_microseconds TCP round-trip time in microseconds
 # TYPE xfr_tcp_rtt_microseconds gauge
@@ -1210,6 +1213,26 @@ xfr_udp_jitter_ms 1.5
 xfr_udp_lost_percent 5
 "#
         );
+    }
+
+    #[test]
+    fn stream_retransmits_sum_to_tcp_retransmits() {
+        let stats = TestStats::new("sum".into(), 2);
+        for (stream, retransmits) in stats.streams.iter().zip([2, 3]) {
+            stream.add_retransmits(retransmits);
+            stream.set_final_tcp_info(TcpInfoSnapshot {
+                retransmits,
+                rtt_us: 1000,
+                rtt_var_us: 100,
+                cwnd: 65536,
+                bytes_acked: None,
+            });
+        }
+        let client = PushGatewayClient::new("http://localhost".into()).unwrap();
+        let text = client.format_metrics(&stats);
+        assert!(text.contains("xfr_stream_retransmits_total{test_id=\"sum\",stream_id=\"0\"} 2\n"));
+        assert!(text.contains("xfr_stream_retransmits_total{test_id=\"sum\",stream_id=\"1\"} 3\n"));
+        assert!(text.contains("\nxfr_tcp_retransmits_total 5\n"), "{text}");
     }
 
     #[test]

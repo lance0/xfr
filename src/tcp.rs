@@ -1207,9 +1207,67 @@ pub async fn receive_data_half(
     Ok(read_half)
 }
 
+/// Finish a bidir stream from its halves' results (`None` = that half failed).
+/// Stores the send half's clamp-time TCP_INFO snapshot whenever the send half
+/// succeeded, even if the receive half failed: send_data_half has already
+/// counted its retransmits into `stats`, so dropping the snapshot would leave
+/// the aggregate below the per-stream count. Re-reading TCP_INFO after
+/// reunite would see a later bytes_acked than the clamped bytes_sent.
+/// Returns the reunited socket when both halves came back.
+pub(crate) fn finish_bidir_halves(
+    stats: &StreamStats,
+    send: Option<(OwnedWriteHalf, Option<crate::protocol::TcpInfoSnapshot>)>,
+    recv: Option<OwnedReadHalf>,
+) -> Option<TcpStream> {
+    let (write_half, send_tcp_info) = send?;
+    if let Some(info) = send_tcp_info {
+        stats.set_final_tcp_info(info);
+    }
+    recv?.reunite(write_half).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bidir_finish_keeps_send_snapshot_when_receive_fails() {
+        async fn halves() -> (OwnedReadHalf, OwnedWriteHalf, TcpStream) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+            let (read_half, write_half) = client.unwrap().into_split();
+            (read_half, write_half, accepted.unwrap().0)
+        }
+        let snapshot = crate::protocol::TcpInfoSnapshot {
+            retransmits: 7,
+            rtt_us: 1000,
+            rtt_var_us: 100,
+            cwnd: 10,
+            bytes_acked: None,
+        };
+        let stored = |stats: &StreamStats| stats.final_tcp_info().map(|i| i.retransmits);
+
+        // Receive half failed: the snapshot is still kept.
+        let stats = StreamStats::new(0);
+        let (_read, write, _peer) = halves().await;
+        let joined = finish_bidir_halves(&stats, Some((write, Some(snapshot.clone()))), None);
+        assert!(joined.is_none());
+        assert_eq!(stored(&stats), Some(7));
+
+        // Both halves succeeded: kept and reunited.
+        let stats = StreamStats::new(0);
+        let (read, write, _peer) = halves().await;
+        let joined = finish_bidir_halves(&stats, Some((write, Some(snapshot))), Some(read));
+        assert!(joined.is_some());
+        assert_eq!(stored(&stats), Some(7));
+
+        // Send half failed: nothing to store.
+        let stats = StreamStats::new(0);
+        let (read, _write, _peer) = halves().await;
+        assert!(finish_bidir_halves(&stats, None, Some(read)).is_none());
+        assert_eq!(stored(&stats), None);
+    }
 
     #[test]
     fn test_default_config_leaves_kernel_autotune_alone() {

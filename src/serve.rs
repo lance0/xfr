@@ -3301,17 +3301,13 @@ async fn spawn_tcp_handlers(
                         .await
                     });
 
-                    // Wait for both to complete. Use the clamp-time TCP_INFO snapshot
-                    // returned by send_data_half rather than re-reading post-reunite.
+                    // Wait for both to complete, then keep the send snapshot.
                     let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                    if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
-                        (send_result, recv_result)
-                    {
-                        if let Some(info) = send_tcp_info {
-                            stream_stats.set_final_tcp_info(info);
-                        }
-                        let _ = read_half.reunite(write_half);
-                    }
+                    tcp::finish_bidir_halves(
+                        &stream_stats,
+                        send_result.ok().and_then(Result::ok),
+                        recv_result.ok().and_then(Result::ok),
+                    );
                 }
             }
 
@@ -3522,14 +3518,11 @@ async fn spawn_tcp_stream_handlers(
                             });
 
                             let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                            if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
-                                (send_result, recv_result)
-                            {
-                                if let Some(info) = send_tcp_info {
-                                    stream_stats.set_final_tcp_info(info);
-                                }
-                                let _ = read_half.reunite(write_half);
-                            }
+                            tcp::finish_bidir_halves(
+                                &stream_stats,
+                                send_result.ok().and_then(Result::ok),
+                                recv_result.ok().and_then(Result::ok),
+                            );
                         }
                     }
 
