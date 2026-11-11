@@ -3330,14 +3330,16 @@ async fn spawn_tcp_handlers(
 
                     // Wait for both to complete. Use the clamp-time TCP_INFO snapshot
                     // returned by send_data_half rather than re-reading post-reunite.
+                    // Store it even if the receive half failed: send_data_half
+                    // already counted its retransmits into the stream.
                     let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                    if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
-                        (send_result, recv_result)
-                    {
+                    if let Ok(Ok((write_half, send_tcp_info))) = send_result {
                         if let Some(info) = send_tcp_info {
                             stream_stats.set_final_tcp_info(info);
                         }
-                        let _ = read_half.reunite(write_half);
+                        if let Ok(Ok(read_half)) = recv_result {
+                            let _ = read_half.reunite(write_half);
+                        }
                     }
                 }
             }
@@ -3548,14 +3550,16 @@ async fn spawn_tcp_stream_handlers(
                                 .await
                             });
 
+                            // Keep the send snapshot even if the receive half
+                            // failed — see spawn_tcp_handlers.
                             let (send_result, recv_result) = tokio::join!(send_handle, recv_handle);
-                            if let (Ok(Ok((write_half, send_tcp_info))), Ok(Ok(read_half))) =
-                                (send_result, recv_result)
-                            {
+                            if let Ok(Ok((write_half, send_tcp_info))) = send_result {
                                 if let Some(info) = send_tcp_info {
                                     stream_stats.set_final_tcp_info(info);
                                 }
-                                let _ = read_half.reunite(write_half);
+                                if let Ok(Ok(read_half)) = recv_result {
+                                    let _ = read_half.reunite(write_half);
+                                }
                             }
                         }
                     }
