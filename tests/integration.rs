@@ -956,6 +956,58 @@ async fn test_mtu_probe() {
 }
 
 #[tokio::test]
+async fn test_mtu_probe_with_psk() {
+    let port = get_test_port();
+    let psk = "probe-mtu-psk-secret".to_string();
+    let _server = start_secure_server(port, Some(psk.clone()), None, vec![], vec![]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Udp,
+        streams: 1,
+        duration: Duration::from_secs(60),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: Some(psk),
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: true,
+        connect_timeout: None,
+        byte_budget: None,
+        udp_payload_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(30), client.run(None)).await;
+
+    assert!(
+        result.is_ok(),
+        "PSK probe should complete well under deadline"
+    );
+    let result = result.unwrap().expect("PSK probe should succeed");
+    let report = result.mtu_probe.expect("result must carry a probe report");
+    assert_eq!(
+        report.forward_max_payload,
+        Some(xfr::probe::MAX_PROBE_PAYLOAD),
+    );
+    assert_eq!(
+        report.reverse_max_payload,
+        Some(xfr::probe::MAX_PROBE_PAYLOAD),
+    );
+}
+
+#[tokio::test]
 async fn test_udp_download() {
     let port = get_test_port();
     let _server = start_test_server(port).await;
@@ -2383,6 +2435,60 @@ async fn test_acl_deny() {
     assert!(result.is_ok(), "Test should complete (not timeout)");
     let result = result.unwrap();
     assert!(result.is_err(), "Connection should be denied by ACL");
+}
+
+#[tokio::test]
+async fn test_acl_allow_and_deny_precedence() {
+    let port = get_test_port();
+    // Broad allow on 127.0.0.0/8, specific deny on 127.0.0.1/32
+    let _server = start_secure_server(
+        port,
+        None,
+        None,
+        vec!["127.0.0.0/8".to_string()],
+        vec!["127.0.0.1/32".to_string()],
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let config = ClientConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        protocol: Protocol::Tcp,
+        streams: 1,
+        duration: Duration::from_secs(2),
+        direction: Direction::Upload,
+        bitrate: None,
+        tcp_nodelay: false,
+        window_size: None,
+        tcp_congestion: None,
+        psk: None,
+        address_family: xfr::net::AddressFamily::default(),
+        bind_addr: None,
+        sequential_ports: false,
+        mptcp: false,
+        random_payload: false,
+        zerocopy: ZerocopyMode::Off,
+        dscp: None,
+        mtu_probe: false,
+        connect_timeout: None,
+        byte_budget: None,
+        udp_payload_size: None,
+    };
+
+    let client = Client::new(config);
+    let result = timeout(Duration::from_secs(5), client.run(None)).await;
+
+    assert!(result.is_ok(), "Test should complete (not timeout)");
+    let err = result
+        .unwrap()
+        .expect_err("Deny rule must take precedence over allow rule");
+    assert!(
+        err.to_string()
+            .contains("connection closed by server before handshake"),
+        "unexpected error: {err}"
+    );
 }
 
 // ============================================================================

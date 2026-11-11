@@ -70,8 +70,7 @@ parking_lot = "0.12"
 humantime = "2"
 tempfile = "3.10"
 uuid = { version = "1", features = ["v4"] }
-hostname = "0.4"
-once_cell = "1"
+hostname = { version = "0.4", optional = true }
 jiff = { version = "0.2.39", default-features = false, features = ["std"] }
 
 # Push gateway
@@ -107,7 +106,7 @@ libc = "0.2"
 [features]
 default = ["discovery", "tui", "update-check"]
 prometheus = ["dep:prometheus", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
-discovery = ["dep:mdns-sd"]
+discovery = ["dep:mdns-sd", "dep:hostname"]
 # Client and server dashboards. On by default; without it the client always
 # uses plain output, for small builds such as routers.
 tui = ["dep:ratatui", "dep:crossterm"]

@@ -716,7 +716,10 @@ pub async fn resolve_host(
 ) -> io::Result<Vec<SocketAddr>> {
     let addrs: Vec<SocketAddr> = match parse_ip_literal(host, port)? {
         Some(addr) => vec![addr],
-        None => tokio::net::lookup_host((host, port)).await?.collect(),
+        None => tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| io::Error::new(e.kind(), format!("could not resolve host '{host}': {e}")))?
+            .collect(),
     };
 
     if addrs.is_empty() {
@@ -2063,5 +2066,18 @@ mod tests {
         assert!(is_mptcp_unavailable_error(&e));
         let wrapped = wrap_mptcp_error(e, true);
         assert_eq!(wrapped.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_error_names_host() {
+        let bad_host = "nonexistent-host-that-does-not-resolve.invalid";
+        let err = resolve_host(bad_host, 5201, AddressFamily::DualStack)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("could not resolve host '{bad_host}':")),
+            "unexpected error message: {err}"
+        );
     }
 }

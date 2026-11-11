@@ -1322,7 +1322,7 @@ xfr_udp_lost_percent 5
         let stats = TestStats::new("test".to_string(), 2);
         stats.streams[0].add_bytes_sent(1_000_000);
         stats.streams[1].add_bytes_sent(2_000_000);
-        stats.add_tcp_info(TcpInfoSnapshot {
+        stats.streams[0].set_final_tcp_info(TcpInfoSnapshot {
             retransmits: 5,
             rtt_us: 1200,
             rtt_var_us: 300,

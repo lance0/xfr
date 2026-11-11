@@ -528,6 +528,10 @@ impl ClientConfig {
             );
             udp::validate_payload_size(usize::from(size))?;
         }
+        anyhow::ensure!(
+            !self.mtu_probe || self.streams == 1,
+            "--probe-mtu cannot be combined with multiple streams"
+        );
         if let Some(psk) = self.psk.as_deref() {
             auth::validate_psk(psk)?;
         }
@@ -880,7 +884,26 @@ impl Client {
         );
 
         // Read server hello (bounded to prevent DoS)
-        read_bounded_line(&mut reader, &mut line).await?;
+        if let Err(e) = read_bounded_line(&mut reader, &mut line).await {
+            if matches!(
+                e.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+                Some(
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::BrokenPipe
+                )
+            ) {
+                return Err(anyhow::anyhow!(
+                    "connection closed by server before handshake (rejected by ACL, rate limit, or connection limit?)"
+                ));
+            }
+            return Err(e);
+        }
+        if line.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "connection closed by server before handshake (rejected by ACL, rate limit, or connection limit?)"
+            ));
+        }
         let raw_server_hello = line.trim().to_string();
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
@@ -936,6 +959,11 @@ impl Client {
 
                     // Read auth result
                     read_bounded_line(&mut reader, &mut line).await?;
+                    if line.trim().is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "connection closed by server during handshake"
+                        ));
+                    }
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
@@ -1114,6 +1142,11 @@ impl Client {
 
         // Read test ack
         transport.read_message(&mut reader, &mut line).await?;
+        if line.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "connection closed by server during handshake"
+            ));
+        }
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         let (data_ports, udp_token) = match msg {
@@ -1180,6 +1213,7 @@ impl Client {
                 .run_mtu_probe_exchange(
                     &mut reader,
                     &mut writer,
+                    &mut transport,
                     &test_id,
                     server_ip,
                     &data_ports,
@@ -2035,6 +2069,7 @@ impl Client {
         &self,
         reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
         writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        transport: &mut crate::control_crypto::ProtectedControl,
         test_id: &str,
         server_ip: SocketAddr,
         data_ports: &[u16],
@@ -2080,9 +2115,8 @@ impl Client {
             id: test_id.to_string(),
             reason: "MTU probe complete".to_string(),
         };
-        writer
-            .write_all(format!("{}\n", cancel_msg.serialize()?).as_bytes())
-            .await?;
+        let cancel_json = cancel_msg.serialize()?;
+        transport.write_message(writer, &cancel_json).await?;
 
         // Drain control messages (Intervals that accumulated during the
         // probe, the Cancelled ack) until the Result lands. If the test
@@ -2091,10 +2125,10 @@ impl Client {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut result = loop {
             line.clear();
-            let n = tokio::time::timeout_at(deadline, read_bounded_line(reader, &mut line))
+            tokio::time::timeout_at(deadline, transport.read_message(reader, &mut line))
                 .await
                 .map_err(|_| anyhow::anyhow!("Timeout waiting for probe result"))??;
-            if n == 0 {
+            if line.trim().is_empty() {
                 return Err(anyhow::anyhow!("Connection closed before probe result"));
             }
             match ControlMessage::deserialize(line.trim())? {
@@ -2437,6 +2471,11 @@ impl Client {
 
         // Read server hello (bounded to prevent DoS)
         read_bounded_line(&mut ctrl_reader, &mut line).await?;
+        if line.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "connection closed by server before handshake (rejected by ACL, rate limit, or connection limit?)"
+            ));
+        }
         let raw_server_hello = line.trim().to_string();
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
@@ -2501,6 +2540,11 @@ impl Client {
 
                     // Read auth result
                     read_bounded_line(&mut ctrl_reader, &mut line).await?;
+                    if line.trim().is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "connection closed by server during handshake"
+                        ));
+                    }
                     let auth_result: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
                     match auth_result {
@@ -2613,6 +2657,11 @@ impl Client {
 
         // Read test ack
         transport.read_message(&mut ctrl_reader, &mut line).await?;
+        if line.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "connection closed by server during handshake"
+            ));
+        }
         let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
         match msg {
