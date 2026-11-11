@@ -67,7 +67,11 @@ impl AddressFamily {
 /// diverge (Linux=false, macOS/Windows=true).
 ///
 /// For **IPv4**: V6ONLY is irrelevant (no-op).
-fn set_v6only_for_addr(socket: &Socket, addr: SocketAddr, family: AddressFamily) -> io::Result<()> {
+pub(crate) fn set_v6only_for_addr(
+    socket: &Socket,
+    addr: SocketAddr,
+    family: AddressFamily,
+) -> io::Result<()> {
     if addr.is_ipv4() {
         return Ok(());
     }
