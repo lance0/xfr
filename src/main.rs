@@ -829,6 +829,7 @@ struct ResolvedClientNetworkOptions {
 }
 
 /// Resolve client transport and output defaults with CLI values taking precedence.
+#[allow(clippy::too_many_arguments)]
 fn resolve_client_network_options(
     cli_bitrate: Option<u64>,
     cli_congestion: Option<String>,
