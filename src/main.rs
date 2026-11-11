@@ -835,9 +835,13 @@ fn resolve_client_network_options(
     cli_interval: Option<f64>,
     cli_bind: Option<String>,
     cli_cport: Option<u16>,
+    probe_mtu: bool,
     defaults: &xfr::config::ClientDefaults,
 ) -> Result<ResolvedClientNetworkOptions, String> {
+    // MTU probing paces itself, so a config bitrate is ignored there and
+    // must not be parsed (a bad value would otherwise block the probe).
     let bitrate = match cli_bitrate {
+        _ if probe_mtu => None,
         Some(bitrate) => Some(bitrate),
         None => defaults
             .bitrate
@@ -1687,19 +1691,17 @@ async fn main() -> Result<()> {
 
             let random_payload = effective_random_payload(&cli);
             let zerocopy = effective_zerocopy(&cli);
-            let mut network_options = resolve_client_network_options(
+            let network_options = resolve_client_network_options(
                 cli.bitrate,
                 cli.congestion.clone(),
                 cli.dscp.clone(),
                 cli.interval,
                 cli.bind.clone(),
                 cli.cport,
+                cli.probe_mtu,
                 &file_config.client,
             )
             .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
-            if cli.probe_mtu {
-                network_options.bitrate = None;
-            }
 
             let tcp_nodelay = cli.tcp_nodelay || file_config.client.tcp_nodelay.unwrap_or(false);
 
@@ -3556,7 +3558,8 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_client_network_options(None, None, None, None, None, None, &defaults).unwrap(),
+            resolve_client_network_options(None, None, None, None, None, None, false, &defaults)
+                .unwrap(),
             ResolvedClientNetworkOptions {
                 bitrate: Some(100_000_000),
                 congestion: Some("bbr".into()),
@@ -3588,6 +3591,7 @@ mod tests {
                 Some(1.0),
                 Some("10.0.0.10".into()),
                 Some(5203),
+                false,
                 &defaults,
             )
             .unwrap(),
@@ -3609,8 +3613,21 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            resolve_client_network_options(None, None, None, None, None, None, &defaults).is_err()
+            resolve_client_network_options(None, None, None, None, None, None, false, &defaults)
+                .is_err()
         );
+    }
+
+    #[test]
+    fn resolve_client_network_options_probe_mtu_skips_config_bitrate() {
+        let defaults = xfr::config::ClientDefaults {
+            bitrate: Some("fast".into()),
+            ..Default::default()
+        };
+        let resolved =
+            resolve_client_network_options(None, None, None, None, None, None, true, &defaults)
+                .unwrap();
+        assert_eq!(resolved.bitrate, None);
     }
 
     #[test]
@@ -3666,12 +3683,22 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                resolve_client_network_options(None, None, None, None, None, None, &defaults)
-                    .is_err()
+                resolve_client_network_options(
+                    None, None, None, None, None, None, false, &defaults
+                )
+                .is_err()
             );
-            let options =
-                resolve_client_network_options(None, None, None, Some(1.0), None, None, &defaults)
-                    .unwrap();
+            let options = resolve_client_network_options(
+                None,
+                None,
+                None,
+                Some(1.0),
+                None,
+                None,
+                false,
+                &defaults,
+            )
+            .unwrap();
             assert_eq!(options.interval_secs, 1.0);
         }
     }
