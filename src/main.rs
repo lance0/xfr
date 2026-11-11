@@ -75,17 +75,8 @@ fn init_logging(
     match (log_file, suppress_console) {
         (Some(file_path), true) => {
             // TUI mode with file logging: file only, no console
-            let expanded_path = expand_log_path(file_path);
-            let parent = expanded_path.parent().filter(|p| !p.as_os_str().is_empty());
-            if let Some(dir) = parent {
-                std::fs::create_dir_all(dir)?;
-            }
-            let file_appender = tracing_appender::rolling::daily(
-                parent.unwrap_or_else(|| std::path::Path::new(".")),
-                expanded_path
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
-            );
+            let (dir, name) = prepare_log_file(file_path)?;
+            let file_appender = tracing_appender::rolling::daily(dir, name);
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             let file_layer = tracing_subscriber::fmt::layer()
                 .with_target(false)
@@ -99,17 +90,8 @@ fn init_logging(
         }
         (Some(file_path), false) => {
             // Normal mode with file logging: console + file
-            let expanded_path = expand_log_path(file_path);
-            let parent = expanded_path.parent().filter(|p| !p.as_os_str().is_empty());
-            if let Some(dir) = parent {
-                std::fs::create_dir_all(dir)?;
-            }
-            let file_appender = tracing_appender::rolling::daily(
-                parent.unwrap_or_else(|| std::path::Path::new(".")),
-                expanded_path
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
-            );
+            let (dir, name) = prepare_log_file(file_path)?;
+            let file_appender = tracing_appender::rolling::daily(dir, name);
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             let file_layer = tracing_subscriber::fmt::layer()
                 .with_target(false)
@@ -158,6 +140,25 @@ async fn shutdown_signal() {
         return;
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Expand `file_path`, create its parent directory if it names one, and
+/// return the (directory, file name) pair for the rolling appender. A bare
+/// file name has an empty parent, which means the current directory.
+fn prepare_log_file(file_path: &str) -> io::Result<(PathBuf, std::ffi::OsString)> {
+    let expanded = expand_log_path(file_path);
+    let dir = match expanded.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            dir.to_path_buf()
+        }
+        None => PathBuf::from("."),
+    };
+    let name = expanded
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log"))
+        .to_os_string();
+    Ok((dir, name))
 }
 
 fn expand_log_path(file_path: &str) -> PathBuf {
@@ -1279,13 +1280,40 @@ fn resolve_server_log_option<'a>(
     cli_or_env.or(server_cfg).or(client_cfg)
 }
 
+/// `(log_file, log_level)` for `xfr serve`, given the `serve` subcommand's own
+/// `--log-file`/`--log-level` values.
+fn resolve_server_logging<'a>(
+    cli: &'a Cli,
+    serve_log_file: Option<&'a String>,
+    serve_log_level: Option<&'a String>,
+    config: &'a Config,
+) -> (Option<&'a String>, Option<&'a String>) {
+    let file = resolve_server_log_option(
+        cli.log_file.as_ref(),
+        cli.log_file_on_command_line,
+        serve_log_file,
+        cli.serve_log_file_on_command_line,
+        config.server.log_file.as_ref(),
+        config.client.log_file.as_ref(),
+    );
+    let level = resolve_server_log_option(
+        cli.log_level.as_ref(),
+        cli.log_level_on_command_line,
+        serve_log_level,
+        cli.serve_log_level_on_command_line,
+        config.server.log_level.as_ref(),
+        config.client.log_level.as_ref(),
+    );
+    (file, level)
+}
+
 /// Parse the command line, rejecting client options given alongside a
 /// subcommand. Only options typed on the command line count: env-backed
 /// options (`XFR_DURATION`, `XFR_PSK`, `XFR_PORT`, ...) and defaults must
 /// not break `xfr serve` for users who export them.
 fn parse_cli() -> Cli {
+    use clap::CommandFactory;
     use clap::parser::ValueSource;
-    use clap::{CommandFactory, FromArgMatches};
 
     let mut cmd = Cli::command();
     let matches = cmd.get_matches_mut();
@@ -1319,7 +1347,16 @@ fn parse_cli() -> Cli {
                 .exit();
         }
     }
-    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    cli_from_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
+/// Build `Cli` from parsed matches, recording which env-backed options were
+/// typed on the command line.
+fn cli_from_matches(matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
+    use clap::FromArgMatches;
+    use clap::parser::ValueSource;
+
+    let mut cli = Cli::from_arg_matches(matches)?;
     cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
     cli.config_from_env = matches.value_source("config") == Some(ValueSource::EnvVariable);
     cli.log_file_on_command_line =
@@ -1332,7 +1369,7 @@ fn parse_cli() -> Cli {
         cli.serve_log_level_on_command_line =
             serve_matches.value_source("log_level") == Some(ValueSource::CommandLine);
     }
-    cli
+    Ok(cli)
 }
 
 #[tokio::main]
@@ -1378,22 +1415,8 @@ async fn main() -> Result<()> {
             tui: server_tui,
             ..
         }) => {
-            let file = resolve_server_log_option(
-                cli.log_file.as_ref(),
-                cli.log_file_on_command_line,
-                log_file.as_ref(),
-                cli.serve_log_file_on_command_line,
-                file_config.server.log_file.as_ref(),
-                file_config.client.log_file.as_ref(),
-            );
-            let level = resolve_server_log_option(
-                cli.log_level.as_ref(),
-                cli.log_level_on_command_line,
-                log_level.as_ref(),
-                cli.serve_log_level_on_command_line,
-                file_config.server.log_level.as_ref(),
-                file_config.client.log_level.as_ref(),
-            );
+            let (file, level) =
+                resolve_server_logging(&cli, log_file.as_ref(), log_level.as_ref(), &file_config);
             (
                 file,
                 level,
@@ -5060,17 +5083,56 @@ mod tests {
 
     #[test]
     fn bare_log_filename_resolves_parent_to_none_and_current_dir_for_appender() {
-        let expanded = expand_log_path("xfr.log");
-        let parent = expanded.parent().filter(|p| !p.as_os_str().is_empty());
-        assert!(parent.is_none());
-        assert_eq!(
-            parent.unwrap_or_else(|| std::path::Path::new(".")),
-            std::path::Path::new(".")
-        );
+        let (dir, name) = prepare_log_file("xfr.log").unwrap();
+        assert_eq!(dir, std::path::Path::new("."));
+        assert_eq!(name, "xfr.log");
 
-        let nested = expand_log_path("logs/xfr.log");
-        let nested_parent = nested.parent().filter(|p| !p.as_os_str().is_empty());
-        assert_eq!(nested_parent, Some(std::path::Path::new("logs")));
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("logs").join("xfr.log");
+        let (dir, name) = prepare_log_file(nested.to_str().unwrap()).unwrap();
+        assert_eq!(dir, tmp.path().join("logs"));
+        assert!(dir.is_dir());
+        assert_eq!(name, "xfr.log");
+    }
+
+    #[test]
+    fn serve_log_level_precedence_through_cli_parser() {
+        use clap::CommandFactory;
+
+        let config: Config = toml::from_str("[server]\nlog_level = \"warn\"\n").unwrap();
+        let level = |argv: &[&str]| {
+            let matches = Cli::command().try_get_matches_from(argv).unwrap();
+            let cli = cli_from_matches(&matches).unwrap();
+            let Some(Commands::Serve {
+                log_file,
+                log_level,
+                ..
+            }) = &cli.command
+            else {
+                panic!("expected serve");
+            };
+            resolve_server_logging(&cli, log_file.as_ref(), log_level.as_ref(), &config)
+                .1
+                .cloned()
+        };
+
+        assert_eq!(
+            level(&[
+                "xfr",
+                "--log-level",
+                "info",
+                "serve",
+                "--log-level",
+                "debug"
+            ])
+            .as_deref(),
+            Some("debug")
+        );
+        assert_eq!(
+            level(&["xfr", "--log-level", "info", "serve"]).as_deref(),
+            Some("info")
+        );
+        assert_eq!(level(&["xfr", "serve"]).as_deref(), Some("warn"));
     }
 
     #[test]
