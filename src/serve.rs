@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::JoinHandle;
@@ -3043,35 +3043,8 @@ fn explain_psk_hangup(
 async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut String,
-) -> anyhow::Result<usize> {
-    buf.clear();
-    let mut total = 0;
-    loop {
-        let bytes = reader.fill_buf().await?;
-        if bytes.is_empty() {
-            return Ok(total);
-        }
-
-        if let Some(newline_pos) = bytes.iter().position(|&b| b == b'\n') {
-            let to_read = newline_pos + 1;
-            if total + to_read > MAX_LINE_LENGTH {
-                return Err(anyhow::anyhow!("Line exceeds maximum length"));
-            }
-            // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
-            buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
-            reader.consume(to_read);
-            return Ok(total + to_read);
-        }
-
-        let len = bytes.len();
-        if total + len > MAX_LINE_LENGTH {
-            return Err(anyhow::anyhow!("Line exceeds maximum length"));
-        }
-        // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
-        buf.push_str(&String::from_utf8_lossy(bytes));
-        reader.consume(len);
-        total += len;
-    }
+) -> anyhow::Result<()> {
+    crate::control_crypto::read_bounded_line(reader, buf, MAX_LINE_LENGTH).await
 }
 
 /// Parsed control message from the client during a test.
@@ -4036,6 +4009,18 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn handshake_line_keeps_multibyte_char_split_across_reads() {
+        // A one-byte buffer forces every UTF-8 continuation byte into its own fill.
+        let mut reader =
+            tokio::io::BufReader::with_capacity(1, "h\u{e9}llo \u{1f600}\nnext".as_bytes());
+        let mut line = String::new();
+        super::read_bounded_line(&mut reader, &mut line)
+            .await
+            .unwrap();
+        assert_eq!(line, "h\u{e9}llo \u{1f600}\n");
+    }
 
     #[tokio::test]
     async fn first_line_timeout_keeps_partial_byte_count_after_cancellation() {

@@ -476,8 +476,23 @@ async fn read_plaintext_line<R>(reader: &mut R, line_buf: &mut String) -> anyhow
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
+    read_bounded_line(reader, line_buf, 1024 * 1024).await
+}
+
+/// Read one newline-terminated line of at most `max_len` bytes.
+///
+/// Bytes are collected before decoding, so a multi-byte UTF-8 character
+/// split across two buffer fills survives intact. At EOF whatever was read
+/// so far (possibly nothing) is returned as `Ok`.
+pub(crate) async fn read_bounded_line<R>(
+    reader: &mut R,
+    line_buf: &mut String,
+    max_len: usize,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     use tokio::io::AsyncBufReadExt;
-    const MAX_LINE_LENGTH: usize = 1024 * 1024;
     line_buf.clear();
     let mut raw = Vec::new();
     loop {
@@ -488,7 +503,7 @@ where
         }
         if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
             let to_read = pos + 1;
-            if raw.len() + to_read > MAX_LINE_LENGTH {
+            if raw.len() + to_read > max_len {
                 return Err(anyhow!("Line exceeds maximum length"));
             }
             raw.extend_from_slice(&bytes[..to_read]);
@@ -497,7 +512,7 @@ where
             return Ok(());
         }
         let len = bytes.len();
-        if raw.len() + len > MAX_LINE_LENGTH {
+        if raw.len() + len > max_len {
             return Err(anyhow!("Line exceeds maximum length"));
         }
         raw.extend_from_slice(bytes);
