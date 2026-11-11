@@ -320,17 +320,19 @@ pub struct StreamStats {
     pub start_time: Instant,
     pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
+    pub interval_retransmits_total: AtomicU64,
     pub last_bytes: AtomicU64,
     pub last_bytes_sent: AtomicU64,
     pub last_bytes_received: AtomicU64,
-    pub last_retransmits: AtomicU64,
-    // UDP stats (updated live by receiver; progress pair guarded by mutex)
+    pub last_tcp_retransmits: AtomicU64,
+    // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64,
-    udp_progress: Mutex<(u64, u64)>, // (packets_received, packets_lost)
     pub last_udp_lost: AtomicU64,
+    udp_progress: Mutex<UdpIntervalProgress>,
+    udp_send_errors: Mutex<Option<UdpSendErrors>>,
     // Raw fd for live TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
-    pub final_tcp_info: Mutex<Option<TcpInfoSnapshot>>,
+    final_tcp_info: Mutex<Option<TcpInfoSnapshot>>,
 }
 ```
 
