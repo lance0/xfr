@@ -5102,7 +5102,14 @@ mod tests {
 
         let config: Config = toml::from_str("[server]\nlog_level = \"warn\"\n").unwrap();
         let level = |argv: &[&str]| {
-            let matches = Cli::command().try_get_matches_from(argv).unwrap();
+            // Isolate the cases from an XFR_LOG_LEVEL set by the test runner.
+            let matches = Cli::command()
+                .mut_arg("log_level", |arg| arg.env(None::<&str>))
+                .mut_subcommand("serve", |command| {
+                    command.mut_arg("log_level", |arg| arg.env(None::<&str>))
+                })
+                .try_get_matches_from(argv)
+                .unwrap();
             let cli = cli_from_matches(&matches).unwrap();
             let Some(Commands::Serve {
                 log_file,
