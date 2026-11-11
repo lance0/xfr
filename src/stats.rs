@@ -190,7 +190,9 @@ impl StreamStats {
     }
 
     pub fn retransmits(&self) -> u64 {
-        self.retransmits.load(Ordering::Relaxed)
+        self.retransmits
+            .load(Ordering::Relaxed)
+            .max(self.interval_retransmits_total.load(Ordering::Relaxed))
     }
 
     pub fn throughput_mbps(&self) -> f64 {
@@ -374,8 +376,6 @@ pub struct TestStats {
     pub test_id: String,
     pub streams: Vec<Arc<StreamStats>>,
     pub start_time: Instant,
-    /// Per-stream TCP info snapshots (indexed by stream_id)
-    pub tcp_info: Mutex<Vec<TcpInfoSnapshot>>,
     /// Per-stream UDP stats (indexed by stream_id)
     pub udp_stats: Mutex<Vec<UdpStats>>,
 }
@@ -389,7 +389,6 @@ impl TestStats {
             test_id,
             streams,
             start_time: Instant::now(),
-            tcp_info: Mutex::new(Vec::new()),
             udp_stats: Mutex::new(Vec::new()),
         }
     }
@@ -624,16 +623,6 @@ impl TestStats {
             .iter()
             .map(|s| s.bytes_received.load(Ordering::Relaxed))
             .sum()
-    }
-
-    pub fn add_tcp_info(&self, info: TcpInfoSnapshot) {
-        self.tcp_info.lock().push(info);
-    }
-
-    /// Get final TCP info (last snapshot represents post-transfer state)
-    pub fn get_tcp_info(&self) -> Option<TcpInfoSnapshot> {
-        let infos = self.tcp_info.lock();
-        infos.last().cloned()
     }
 
     /// Poll local TCP_INFO across all streams for live client-side metrics.

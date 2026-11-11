@@ -7,17 +7,22 @@ use std::path::Path;
 
 use ipnetwork::IpNetwork;
 
-/// Normalize IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to IPv4
-fn normalize_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                IpAddr::V4(v4)
+use crate::net::normalize_ip;
+
+/// Normalize IPv4-mapped IPv6 networks (`::ffff:x.x.x.x/96..=128`) to IPv4 networks
+fn normalize_network(net: IpNetwork) -> IpNetwork {
+    match net {
+        IpNetwork::V6(v6) if v6.prefix() >= 96 => {
+            if let Some(v4) = v6.ip().to_ipv4_mapped() {
+                IpNetwork::V4(
+                    ipnetwork::Ipv4Network::new(v4, v6.prefix() - 96)
+                        .expect("prefix 96..=128 maps to 0..=32"),
+                )
             } else {
-                ip
+                net
             }
         }
-        _ => ip,
+        _ => net,
     }
 }
 
@@ -40,11 +45,11 @@ impl Acl {
     pub fn from_rules(allow: Vec<String>, deny: Vec<String>) -> anyhow::Result<Self> {
         let allow = allow
             .into_iter()
-            .map(|s| s.parse::<IpNetwork>())
+            .map(|s| s.parse::<IpNetwork>().map(normalize_network))
             .collect::<Result<Vec<_>, _>>()?;
         let deny = deny
             .into_iter()
-            .map(|s| s.parse::<IpNetwork>())
+            .map(|s| s.parse::<IpNetwork>().map(normalize_network))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { allow, deny })
     }
@@ -74,7 +79,7 @@ impl Acl {
                 anyhow::bail!("Invalid ACL line: {}", line);
             }
 
-            let network: IpNetwork = parts[1].parse()?;
+            let network = normalize_network(parts[1].parse()?);
             match parts[0].to_lowercase().as_str() {
                 "allow" => allow.push(network),
                 "deny" => deny.push(network),
@@ -87,12 +92,12 @@ impl Acl {
 
     /// Add an allow rule
     pub fn allow(&mut self, network: IpNetwork) {
-        self.allow.push(network);
+        self.allow.push(normalize_network(network));
     }
 
     /// Add a deny rule
     pub fn deny(&mut self, network: IpNetwork) {
-        self.deny.push(network);
+        self.deny.push(normalize_network(network));
     }
 
     /// Check if an IP address is allowed
@@ -255,5 +260,29 @@ mod tests {
         // Unmatched address
         let unmatched = "172.16.0.1".parse().unwrap();
         assert_eq!(acl.matched_rule(unmatched), None);
+    }
+
+    #[test]
+    fn test_ipv4_mapped_ipv6_rules_and_precedence() {
+        let acl = Acl::from_rules(
+            vec!["::ffff:192.168.0.0/112".to_string()],
+            vec!["::ffff:192.168.1.0/120".to_string()],
+        )
+        .unwrap();
+
+        // Allowed IPv4 and IPv4-mapped IPv6
+        assert!(acl.is_allowed("192.168.2.10".parse().unwrap()));
+        assert!(acl.is_allowed("::ffff:192.168.2.10".parse().unwrap()));
+
+        // Denied subnet takes precedence over broader allow rule for both forms
+        assert!(!acl.is_allowed("192.168.1.10".parse().unwrap()));
+        assert!(!acl.is_allowed("::ffff:192.168.1.10".parse().unwrap()));
+        assert_eq!(
+            acl.matched_rule("192.168.1.10".parse().unwrap()),
+            Some("deny 192.168.1.0/24".to_string())
+        );
+
+        // Outside allow rule is default-denied
+        assert!(!acl.is_allowed("10.0.0.1".parse().unwrap()));
     }
 }

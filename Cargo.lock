@@ -4082,7 +4082,6 @@ dependencies = [
  "jiff",
  "libc",
  "mdns-sd",
- "once_cell",
  "parking_lot",
  "prometheus",
  "quinn",

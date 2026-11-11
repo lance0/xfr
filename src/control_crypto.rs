@@ -397,52 +397,8 @@ impl ProtectedControl {
         R: tokio::io::AsyncBufRead + Unpin,
     {
         match self {
-            Self::Plaintext => {
-                use tokio::io::AsyncBufReadExt;
-                line_buf.clear();
-                let mut total = 0;
-                loop {
-                    const MAX_LINE_LENGTH: usize = 1024 * 1024;
-                    let bytes = reader.fill_buf().await?;
-                    if bytes.is_empty() {
-                        return Ok(());
-                    }
-                    if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
-                        let to_read = pos + 1;
-                        if total + to_read > MAX_LINE_LENGTH {
-                            return Err(anyhow!("Line exceeds maximum length"));
-                        }
-                        line_buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
-                        reader.consume(to_read);
-                        return Ok(());
-                    }
-                    let len = bytes.len();
-                    if total + len > MAX_LINE_LENGTH {
-                        return Err(anyhow!("Line exceeds maximum length"));
-                    }
-                    line_buf.push_str(&String::from_utf8_lossy(bytes));
-                    reader.consume(len);
-                    total += len;
-                }
-            }
-            Self::Protected { recv, .. } => {
-                use tokio::io::AsyncReadExt;
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf).await?;
-                let len = u32::from_be_bytes(len_buf) as usize;
-                const MAX_FRAME: usize = 1024 * 1024;
-                if len > MAX_FRAME {
-                    return Err(anyhow!("protected frame too large: {len} bytes"));
-                }
-                let mut payload = vec![0u8; len];
-                reader.read_exact(&mut payload).await?;
-                let plaintext = recv.open(&payload)?;
-                // Store the decrypted message in `line_buf` so callers can
-                // deserialize it the same way as plaintext.
-                line_buf.clear();
-                line_buf.push_str(&String::from_utf8_lossy(&plaintext));
-                Ok(())
-            }
+            Self::Plaintext => read_plaintext_line(reader, line_buf).await,
+            Self::Protected { recv, .. } => read_protected_frame(reader, recv, line_buf).await,
         }
     }
 
@@ -510,52 +466,67 @@ impl ControlReader {
         R: tokio::io::AsyncBufRead + Unpin,
     {
         match self {
-            Self::Plaintext => {
-                use tokio::io::AsyncBufReadExt;
-                line_buf.clear();
-                let mut total = 0;
-                loop {
-                    const MAX_LINE_LENGTH: usize = 1024 * 1024;
-                    let bytes = reader.fill_buf().await?;
-                    if bytes.is_empty() {
-                        return Ok(());
-                    }
-                    if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
-                        let to_read = pos + 1;
-                        if total + to_read > MAX_LINE_LENGTH {
-                            return Err(anyhow!("Line exceeds maximum length"));
-                        }
-                        line_buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
-                        reader.consume(to_read);
-                        return Ok(());
-                    }
-                    let len = bytes.len();
-                    if total + len > MAX_LINE_LENGTH {
-                        return Err(anyhow!("Line exceeds maximum length"));
-                    }
-                    line_buf.push_str(&String::from_utf8_lossy(bytes));
-                    reader.consume(len);
-                    total += len;
-                }
-            }
-            Self::Protected { recv } => {
-                use tokio::io::AsyncReadExt;
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf).await?;
-                let len = u32::from_be_bytes(len_buf) as usize;
-                const MAX_FRAME: usize = 1024 * 1024;
-                if len > MAX_FRAME {
-                    return Err(anyhow!("protected frame too large: {len} bytes"));
-                }
-                let mut payload = vec![0u8; len];
-                reader.read_exact(&mut payload).await?;
-                let plaintext = recv.open(&payload)?;
-                line_buf.clear();
-                line_buf.push_str(&String::from_utf8_lossy(&plaintext));
-                Ok(())
-            }
+            Self::Plaintext => read_plaintext_line(reader, line_buf).await,
+            Self::Protected { recv } => read_protected_frame(reader, recv, line_buf).await,
         }
     }
+}
+
+async fn read_plaintext_line<R>(reader: &mut R, line_buf: &mut String) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    const MAX_LINE_LENGTH: usize = 1024 * 1024;
+    line_buf.clear();
+    let mut raw = Vec::new();
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            line_buf.push_str(&String::from_utf8_lossy(&raw));
+            return Ok(());
+        }
+        if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
+            let to_read = pos + 1;
+            if raw.len() + to_read > MAX_LINE_LENGTH {
+                return Err(anyhow!("Line exceeds maximum length"));
+            }
+            raw.extend_from_slice(&bytes[..to_read]);
+            reader.consume(to_read);
+            line_buf.push_str(&String::from_utf8_lossy(&raw));
+            return Ok(());
+        }
+        let len = bytes.len();
+        if raw.len() + len > MAX_LINE_LENGTH {
+            return Err(anyhow!("Line exceeds maximum length"));
+        }
+        raw.extend_from_slice(bytes);
+        reader.consume(len);
+    }
+}
+
+async fn read_protected_frame<R>(
+    reader: &mut R,
+    recv: &mut ControlCodec,
+    line_buf: &mut String,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    const MAX_FRAME: usize = 1024 * 1024;
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME {
+        return Err(anyhow!("protected frame too large: {len} bytes"));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    let plaintext = recv.open(&payload)?;
+    line_buf.clear();
+    line_buf.push_str(&String::from_utf8_lossy(&plaintext));
+    Ok(())
 }
 
 impl ControlWriter {
@@ -906,5 +877,16 @@ mod tests {
         assert!(!constant_time_eq(b"secret-longer", b"secret"));
         assert!(!constant_time_eq(b"", b"non-empty"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[tokio::test]
+    async fn plaintext_read_preserves_multibyte_utf8_across_buffer_boundaries() {
+        let line = "{\"message\":\"hello 🌍\"}\n";
+        // Capacity 20 splits the 4-byte '🌍' (at bytes 18..22) across two fill_buf() chunks.
+        let mut input = tokio::io::BufReader::with_capacity(20, line.as_bytes());
+        let mut reader = ControlReader::Plaintext;
+        let mut decoded = String::new();
+        reader.read_message(&mut input, &mut decoded).await.unwrap();
+        assert_eq!(decoded, line);
     }
 }

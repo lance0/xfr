@@ -129,6 +129,11 @@ impl ServerConfig {
             self.rate_limit.max_per_ip.is_none() || self.rate_limit.window_secs > 0,
             "rate limit window must be at least 1 second when rate limiting is enabled"
         );
+        anyhow::ensure!(
+            self.max_duration
+                .is_none_or(|d| d >= Duration::from_secs(1)),
+            "max_duration must be at least 1 second"
+        );
         Ok(())
     }
 }
@@ -618,7 +623,11 @@ impl Server {
         // Single-port UDP (issue #63): advertise the capability only when
         // the running kernel demonstrably routes connected-socket traffic
         // past a same-port wildcard (SO_REUSEPORT group semantics vary).
-        let single_port_udp_ok = net::single_port_udp_self_test(self.config.address_family).await;
+        let effective_family = match self.config.bind_addr {
+            Some(IpAddr::V4(_)) => AddressFamily::V4Only,
+            _ => self.config.address_family,
+        };
+        let single_port_udp_ok = net::single_port_udp_self_test(effective_family).await;
         let udp_bind_addr = if let Some(ip) = self.config.bind_addr {
             SocketAddr::new(ip, self.config.port)
         } else {
@@ -816,26 +825,29 @@ impl Server {
                     };
 
                     // Check rate limit
-                    if let Some(ref limiter) = quic_rate_limiter
-                        && let Err(e) = limiter.check(peer_ip)
-                    {
-                        warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
-                        if let Some(tx) = &quic_security.tui_tx {
-                            let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                    let rate_limit_guard = if let Some(ref limiter) = quic_rate_limiter {
+                        if let Err(e) = limiter.check(peer_ip) {
+                            warn!("QUIC rate limit exceeded for {}: {}", peer_addr, e);
+                            if let Some(tx) = &quic_security.tui_tx {
+                                let _ = tx.try_send(ServerEvent::ConnectionBlocked);
+                            }
+                            continue;
                         }
-                        continue;
-                    }
+                        Some(RateLimitGuard::new(limiter.clone(), peer_ip))
+                    } else {
+                        None
+                    };
 
                     info!("QUIC client connected: {}", peer_addr);
 
                     let security = quic_security.clone();
                     let active_tests = quic_active_tests.clone();
-                    let rate_limiter = quic_rate_limiter.clone();
                     let shutdown_tx = quic_shutdown_tx.clone();
                     let one_off = quic_one_off;
 
                     let handle = tokio::spawn(async move {
                         let _permit = permit; // Held until task completes
+                        let _rate_guard = rate_limit_guard;
 
                         let result = handle_quic_client(
                             incoming,
@@ -845,11 +857,6 @@ impl Server {
                             &security,
                         )
                         .await;
-
-                        // Release rate limit slot
-                        if let Some(limiter) = &rate_limiter {
-                            limiter.release(peer_ip);
-                        }
 
                         match &result {
                             Ok(()) => true,
@@ -1342,6 +1349,9 @@ async fn handle_quic_client(
     )
     .await
     .map_err(|_| anyhow::anyhow!("Handshake timeout waiting for hello"))??;
+    if line.trim().is_empty() {
+        return Err(anyhow::anyhow!("client closed connection before hello"));
+    }
     let raw_client_hello = line.trim().to_string();
     let msg: ControlMessage = ControlMessage::deserialize(line.trim())?;
 
@@ -2119,7 +2129,11 @@ async fn run_quic_test(
             direction: direction.to_string(),
             streams,
             started: std::time::Instant::now(),
-            duration_secs: duration.as_secs() as u32,
+            duration_secs: if duration.is_zero() {
+                0
+            } else {
+                duration.as_secs().max(1) as u32
+            },
             bytes: 0,
             throughput_mbps: 0.0,
         }));
@@ -2640,7 +2654,11 @@ async fn run_test<W: AsyncWrite + Unpin>(
             direction: direction.to_string(),
             streams,
             started: std::time::Instant::now(),
-            duration_secs: duration.as_secs() as u32,
+            duration_secs: if duration.is_zero() {
+                0
+            } else {
+                duration.as_secs().max(1) as u32
+            },
             bytes: 0,
             throughput_mbps: 0.0,
         }));
@@ -3015,6 +3033,9 @@ fn explain_psk_hangup(
             _ => {}
         }
     }
+    if read.is_ok() && line.trim().is_empty() {
+        return Err(anyhow::anyhow!("client closed connection during handshake"));
+    }
     read
 }
 
@@ -3171,7 +3192,6 @@ async fn spawn_tcp_handlers(
         let cancel = cancel.clone();
         let pause = pause.clone();
         let stream_stats = stats.streams[i].clone();
-        let test_stats = stats.clone();
         let congestion = congestion.clone();
         let budget = budget.clone();
         let sending_done = sending_done.clone();
@@ -3211,11 +3231,6 @@ async fn spawn_tcp_handlers(
                 stream_stats.set_tcp_info_fd(stream.as_raw_fd());
             }
 
-            // Capture TCP_INFO before transfer starts
-            if let Some(info) = tcp::get_stream_tcp_info(&stream) {
-                test_stats.add_tcp_info(info);
-            }
-
             match direction {
                 Direction::Upload => {
                     // Server receives data
@@ -3225,8 +3240,7 @@ async fn spawn_tcp_handlers(
                         .await
                     {
                         Ok(Some(info)) => {
-                            stream_stats.set_final_tcp_info(info.clone());
-                            test_stats.add_tcp_info(info);
+                            stream_stats.set_final_tcp_info(info);
                         }
                         Ok(None) => {}
                         Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
@@ -3250,8 +3264,7 @@ async fn spawn_tcp_handlers(
                     .await
                     {
                         Ok(Some(info)) => {
-                            stream_stats.set_final_tcp_info(info.clone());
-                            test_stats.add_tcp_info(info);
+                            stream_stats.set_final_tcp_info(info);
                         }
                         Ok(None) => {}
                         Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
@@ -3322,8 +3335,7 @@ async fn spawn_tcp_handlers(
                         (send_result, recv_result)
                     {
                         if let Some(info) = send_tcp_info {
-                            stream_stats.set_final_tcp_info(info.clone());
-                            test_stats.add_tcp_info(info);
+                            stream_stats.set_final_tcp_info(info);
                         }
                         let _ = read_half.reunite(write_half);
                     }
@@ -3420,7 +3432,6 @@ async fn spawn_tcp_stream_handlers(
                 let cancel = cancel.clone();
                 let pause = pause.clone();
                 let stream_stats = stats.streams[i].clone();
-                let test_stats = stats.clone();
 
                 let congestion = congestion.clone();
                 let budget = budget.clone();
@@ -3441,11 +3452,6 @@ async fn spawn_tcp_stream_handlers(
                     {
                         use std::os::unix::io::AsRawFd;
                         stream_stats.set_tcp_info_fd(stream.as_raw_fd());
-                    }
-
-                    // Capture TCP_INFO before transfer starts
-                    if let Some(info) = tcp::get_stream_tcp_info(&stream) {
-                        test_stats.add_tcp_info(info);
                     }
 
                     // Apply DSCP/TOS marking if requested by client
@@ -3469,8 +3475,7 @@ async fn spawn_tcp_stream_handlers(
                             .await
                             {
                                 Ok(Some(info)) => {
-                                    stream_stats.set_final_tcp_info(info.clone());
-                                    test_stats.add_tcp_info(info);
+                                    stream_stats.set_final_tcp_info(info);
                                 }
                                 Ok(None) => {}
                                 Err(e) => tracing::warn!("Stream {} receive error: {}", i, e),
@@ -3492,8 +3497,7 @@ async fn spawn_tcp_stream_handlers(
                             .await
                             {
                                 Ok(Some(info)) => {
-                                    stream_stats.set_final_tcp_info(info.clone());
-                                    test_stats.add_tcp_info(info);
+                                    stream_stats.set_final_tcp_info(info);
                                 }
                                 Ok(None) => {}
                                 Err(e) => tracing::warn!("Stream {} send error: {}", i, e),
@@ -3549,8 +3553,7 @@ async fn spawn_tcp_stream_handlers(
                                 (send_result, recv_result)
                             {
                                 if let Some(info) = send_tcp_info {
-                                    stream_stats.set_final_tcp_info(info.clone());
-                                    test_stats.add_tcp_info(info);
+                                    stream_stats.set_final_tcp_info(info);
                                 }
                                 let _ = read_half.reunite(write_half);
                             }
@@ -4838,7 +4841,6 @@ mod tests {
         let config = ServerConfig {
             port,
             bind_addr: Some("127.0.0.1".parse().unwrap()),
-            address_family: AddressFamily::V4Only,
             ..Default::default()
         };
 

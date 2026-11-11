@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "prometheus")]
 use std::net::SocketAddr;
 #[cfg(feature = "prometheus")]
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 #[cfg(feature = "prometheus")]
 use std::time::Duration;
 
@@ -19,8 +19,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 #[cfg(feature = "prometheus")]
 use hyper_util::rt::{TokioIo, TokioTimer};
-#[cfg(feature = "prometheus")]
-use once_cell::sync::Lazy;
 #[cfg(feature = "prometheus")]
 use prometheus::{
     Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntGauge, Opts,
@@ -205,7 +203,7 @@ impl XfrMetrics {
 }
 
 #[cfg(feature = "prometheus")]
-static METRICS: Lazy<XfrMetrics> = Lazy::new(XfrMetrics::new);
+static METRICS: LazyLock<XfrMetrics> = LazyLock::new(XfrMetrics::new);
 
 #[cfg(feature = "prometheus")]
 pub struct MetricsServer {
@@ -406,7 +404,7 @@ impl XfrMetrics {
         }
 
         // TCP RTT gauge (instantaneous value)
-        if let Some(ref tcp_info) = stats.get_tcp_info() {
+        if let Some(ref tcp_info) = stats.final_local_tcp_info() {
             m.tcp_rtt_microseconds
                 .with_label_values(&[test_id])
                 .set(tcp_info.rtt_us as f64);
@@ -439,7 +437,7 @@ impl XfrMetrics {
         }
 
         // TCP retransmits counter
-        if let Some(ref tcp_info) = stats.get_tcp_info() {
+        if let Some(ref tcp_info) = stats.final_local_tcp_info() {
             m.tcp_retransmits_total
                 .with_label_values(&[test_id])
                 .inc_by(tcp_info.retransmits as f64);
@@ -482,7 +480,7 @@ mod tests {
     fn test_stats(id: &str, streams: u8) -> TestStats {
         let stats = TestStats::new(id.to_string(), streams);
         stats.streams[0].add_bytes_received(1000);
-        stats.add_tcp_info(crate::protocol::TcpInfoSnapshot {
+        stats.streams[0].set_final_tcp_info(crate::protocol::TcpInfoSnapshot {
             retransmits: 1,
             rtt_us: 100,
             rtt_var_us: 10,
@@ -534,6 +532,38 @@ mod tests {
         m.finish(&running, true);
         let text = exposition(&m);
         assert!(text.contains("xfr_stream_bytes_total{stream_id=\"0\",test_id=\"running\"} 1000"));
+    }
+
+    #[test]
+    fn finish_aggregates_multi_stream_tcp_info() {
+        let m = XfrMetrics::new();
+        let stats = TestStats::new("multi".to_string(), 2);
+        stats.streams[0].set_final_tcp_info(crate::protocol::TcpInfoSnapshot {
+            retransmits: 2,
+            rtt_us: 100,
+            rtt_var_us: 10,
+            cwnd: 1000,
+            bytes_acked: None,
+        });
+        stats.streams[1].set_final_tcp_info(crate::protocol::TcpInfoSnapshot {
+            retransmits: 3,
+            rtt_us: 200,
+            rtt_var_us: 20,
+            cwnd: 2000,
+            bytes_acked: None,
+        });
+        m.active_tests.inc();
+        m.finish(&stats, true);
+
+        let text = exposition(&m);
+        assert!(
+            text.contains("xfr_tcp_rtt_microseconds{test_id=\"multi\"} 150"),
+            "{text}"
+        );
+        assert!(
+            text.contains("xfr_tcp_retransmits_total{test_id=\"multi\"} 5"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

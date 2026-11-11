@@ -39,6 +39,7 @@ impl RateLimiter {
     ///
     /// Returns Ok(()) if allowed, Err with current count if rate limited
     pub fn check(&self, ip: IpAddr) -> Result<(), RateLimitError> {
+        let ip = crate::net::normalize_ip(ip);
         // Keep the DashMap entry guard through the admission update. Cleanup
         // therefore cannot unlink a zero-count state between lookup and
         // increment, and release will always find the state that was admitted.
@@ -62,6 +63,7 @@ impl RateLimiter {
 
     /// Release a slot when a test completes
     pub fn release(&self, ip: IpAddr) {
+        let ip = crate::net::normalize_ip(ip);
         if let Some(mut state) = self.limits.get_mut(&ip) {
             state.count = state.count.saturating_sub(1);
         }
@@ -69,6 +71,7 @@ impl RateLimiter {
 
     /// Get current count for an IP
     pub fn current_count(&self, ip: IpAddr) -> u32 {
+        let ip = crate::net::normalize_ip(ip);
         self.limits.get(&ip).map(|state| state.count).unwrap_or(0)
     }
 
@@ -287,5 +290,21 @@ mod tests {
         });
 
         assert_eq!(violations, 0, "cleanup unlinked an admission in progress");
+    }
+
+    #[test]
+    fn test_ipv4_mapped_ipv6_shares_bucket_with_ipv4() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let v4: IpAddr = "192.168.1.42".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.168.1.42".parse().unwrap();
+
+        assert!(limiter.check(v4).is_ok());
+        assert_eq!(limiter.current_count(mapped), 1);
+        assert!(limiter.check(mapped).is_err());
+
+        limiter.release(mapped);
+        assert_eq!(limiter.current_count(v4), 0);
+        assert!(limiter.check(mapped).is_ok());
+        assert_eq!(limiter.current_count(v4), 1);
     }
 }

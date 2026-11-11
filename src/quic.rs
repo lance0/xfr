@@ -50,7 +50,7 @@ use quinn::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::Sha256;
-use socket2::{Protocol, Socket, Type};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info};
 
@@ -182,9 +182,18 @@ pub fn create_server_endpoint(
     // Create the UDP socket ourselves so we can set IPV6_V6ONLY properly.
     // Quinn's Endpoint::server() uses std::net::UdpSocket::bind() which
     // doesn't configure dual-stack, breaking IPv4 on Windows (#39).
-    let socket = Socket::new(family.domain(), Type::DGRAM, Some(Protocol::UDP))?;
-    if family != AddressFamily::V4Only {
-        let v6only = family == AddressFamily::V6Only;
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if addr.is_ipv6() {
+        let v6only = if addr.ip().is_unspecified() {
+            family == AddressFamily::V6Only
+        } else {
+            true
+        };
         socket.set_only_v6(v6only)?;
         debug!("QUIC socket IPV6_V6ONLY={} for {} mode", v6only, family);
     }
