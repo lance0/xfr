@@ -76,7 +76,10 @@ fn inspect(path: &Path) -> Result<Destination> {
                 return Err(cannot_save(path, ErrorKind::NotFound, "directory"));
             }
             if path.file_name().is_none()
-                || path.as_os_str().to_string_lossy().ends_with(['/', '\\'])
+                || path
+                    .as_os_str()
+                    .to_string_lossy()
+                    .ends_with(std::path::is_separator)
             {
                 return Err(cannot_save(path, ErrorKind::IsADirectory, "file"));
             }

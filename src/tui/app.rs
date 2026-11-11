@@ -932,8 +932,7 @@ impl App {
             if self.is_infinite() || self.byte_budget.is_some() || self.cancel_deadline.is_some() {
                 Duration::from_millis(result.duration_ms)
             } else {
-                self.duration
-                    .min(Duration::from_millis(result.duration_ms).max(self.elapsed))
+                self.duration.min(Duration::from_millis(result.duration_ms))
             };
         if self.current_throughput_mbps == 0.0 {
             self.current_throughput_mbps = result.throughput_mbps;
@@ -2867,6 +2866,31 @@ mod tests {
         });
         assert_eq!(cancelled.elapsed, Duration::from_millis(2500));
         assert_eq!(cancelled.current_throughput_mbps, 15.0);
+
+        // Timed 30s run capped by the server to 3s while local wall-clock elapsed reached 5s.
+        let mut server_capped = App::default();
+        server_capped.duration = Duration::from_secs(30);
+        server_capped.elapsed = Duration::from_secs(5);
+        server_capped.on_result(TestResult {
+            id: "server-capped".to_string(),
+            duration_ms: 3000,
+            bytes_total: 600_000,
+            throughput_mbps: 1.6,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
+            zero_byte_streams: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
+        });
+        assert_eq!(server_capped.elapsed, Duration::from_secs(3));
     }
 
     #[test]

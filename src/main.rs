@@ -359,6 +359,14 @@ struct Cli {
     #[arg(skip)]
     log_level_on_command_line: bool,
 
+    /// Whether `serve --log-file` was typed on the command line rather than read from XFR_LOG_FILE.
+    #[arg(skip)]
+    serve_log_file_on_command_line: bool,
+
+    /// Whether `serve --log-level` was typed on the command line rather than read from XFR_LOG_LEVEL.
+    #[arg(skip)]
+    serve_log_level_on_command_line: bool,
+
     /// Config file to use instead of the first of xfr/config.toml in the user
     /// config directory, then /etc/xfr/config.toml
     #[arg(long, value_name = "PATH", env = "XFR_CONFIG", global = true)]
@@ -467,7 +475,7 @@ enum Commands {
         tui: bool,
 
         /// Maximum test duration (server-side limit). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`).
-        #[arg(long, value_parser = parse_nonzero_duration)]
+        #[arg(long, value_parser = parse_server_max_duration)]
         #[arg(help_heading = "Server Options")]
         max_duration: Option<Duration>,
 
@@ -614,6 +622,17 @@ fn parse_nonzero_duration(s: &str) -> Result<Duration, String> {
     let d = parse_duration(s)?;
     if d.is_zero() {
         return Err("Duration must be greater than 0".to_string());
+    }
+    Ok(d)
+}
+
+fn parse_server_max_duration(s: &str) -> Result<Duration, String> {
+    let d = parse_duration(s)?;
+    if d < Duration::from_secs(1) {
+        return Err("Maximum test duration must be at least 1 second".to_string());
+    }
+    if d.as_secs() > u64::from(u32::MAX) {
+        return Err(format!("Maximum test duration is {} seconds", u32::MAX));
     }
     Ok(d)
 }
@@ -1234,17 +1253,21 @@ const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
 /// top-level CLI (`xfr --log-level debug serve`), `serve` subcommand CLI/env
 /// (`xfr serve --log-level debug` or `XFR_LOG_LEVEL`), `[server]`, and `[client]`.
 ///
-/// A top-level CLI flag typed on the command line beats an env-populated
-/// `serve_opt` when `serve_opt` was not also overridden; any CLI/env value
-/// (`serve_opt.or(cli_top)`) beats `config.toml` (`[server]` then `[client]`).
+/// An explicit `serve` CLI flag wins first, then a top-level CLI flag typed on
+/// the command line (overriding an env-populated `serve_opt`), then any CLI/env
+/// value (`serve_opt.or(cli_top)`), and finally `config.toml` (`[server]` then
+/// `[client]`).
 fn resolve_server_log_option<'a>(
     cli_top: Option<&'a String>,
     cli_top_on_cmd: bool,
     serve_opt: Option<&'a String>,
+    serve_opt_on_cmd: bool,
     server_cfg: Option<&'a String>,
     client_cfg: Option<&'a String>,
 ) -> Option<&'a String> {
-    let cli_or_env = if cli_top_on_cmd {
+    let cli_or_env = if serve_opt_on_cmd {
+        serve_opt.or(cli_top)
+    } else if cli_top_on_cmd {
         cli_top.or(serve_opt)
     } else {
         serve_opt.or(cli_top)
@@ -1299,6 +1322,12 @@ fn parse_cli() -> Cli {
         matches.value_source("log_file") == Some(ValueSource::CommandLine);
     cli.log_level_on_command_line =
         matches.value_source("log_level") == Some(ValueSource::CommandLine);
+    if let Some(serve_matches) = matches.subcommand_matches("serve") {
+        cli.serve_log_file_on_command_line =
+            serve_matches.value_source("log_file") == Some(ValueSource::CommandLine);
+        cli.serve_log_level_on_command_line =
+            serve_matches.value_source("log_level") == Some(ValueSource::CommandLine);
+    }
     cli
 }
 
@@ -1349,6 +1378,7 @@ async fn main() -> Result<()> {
                 cli.log_file.as_ref(),
                 cli.log_file_on_command_line,
                 log_file.as_ref(),
+                cli.serve_log_file_on_command_line,
                 file_config.server.log_file.as_ref(),
                 file_config.client.log_file.as_ref(),
             );
@@ -1356,6 +1386,7 @@ async fn main() -> Result<()> {
                 cli.log_level.as_ref(),
                 cli.log_level_on_command_line,
                 log_level.as_ref(),
+                cli.serve_log_level_on_command_line,
                 file_config.server.log_level.as_ref(),
                 file_config.client.log_level.as_ref(),
             );
@@ -5017,7 +5048,7 @@ mod tests {
 
     #[test]
     fn serve_max_duration_rejects_zero() {
-        for value in ["0", "0s", "0ms"] {
+        for value in ["0", "0s", "0ms", "500ms"] {
             assert!(
                 Cli::try_parse_from(["xfr", "serve", "--max-duration", value]).is_err(),
                 "serve --max-duration {value} must be rejected"
@@ -5033,12 +5064,25 @@ mod tests {
         let server_cfg = "server_cfg".to_string();
         let client_cfg = "client_cfg".to_string();
 
+        // Explicit `serve --log-level` on the command line beats top-level `--log-level`.
+        assert_eq!(
+            resolve_server_log_option(
+                Some(&top),
+                true,
+                Some(&serve),
+                true,
+                Some(&server_cfg),
+                Some(&client_cfg)
+            ),
+            Some(&serve)
+        );
         // Command-line top-level (`xfr --log-level debug serve`) beats env-filled `serve_opt` and config.
         assert_eq!(
             resolve_server_log_option(
                 Some(&top),
                 true,
                 Some(&serve),
+                false,
                 Some(&server_cfg),
                 Some(&client_cfg)
             ),
@@ -5050,6 +5094,7 @@ mod tests {
                 Some(&top),
                 false,
                 Some(&serve),
+                false,
                 Some(&server_cfg),
                 Some(&client_cfg)
             ),
@@ -5062,6 +5107,7 @@ mod tests {
                     Some(&top),
                     on_cmd,
                     None,
+                    false,
                     Some(&server_cfg),
                     Some(&client_cfg)
                 ),
@@ -5070,15 +5116,22 @@ mod tests {
         }
         // Falls back to [server] then [client].
         assert_eq!(
-            resolve_server_log_option(None, false, None, Some(&server_cfg), Some(&client_cfg)),
+            resolve_server_log_option(
+                None,
+                false,
+                None,
+                false,
+                Some(&server_cfg),
+                Some(&client_cfg)
+            ),
             Some(&server_cfg)
         );
         assert_eq!(
-            resolve_server_log_option(None, false, None, None, Some(&client_cfg)),
+            resolve_server_log_option(None, false, None, false, None, Some(&client_cfg)),
             Some(&client_cfg)
         );
         assert_eq!(
-            resolve_server_log_option(None, false, None, None, None),
+            resolve_server_log_option(None, false, None, false, None, None),
             None
         );
     }
