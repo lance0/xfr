@@ -19,10 +19,11 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Lint both supported feature configurations.
+# Lint supported feature configurations.
 lint:
     cargo clippy --locked --all-targets --all-features -- -D warnings
     cargo clippy --locked --all-targets --no-default-features -- -D warnings
+    cargo clippy --locked --all-targets --no-default-features --features tui -- -D warnings
 
 # Test both supported feature configurations.
 test:

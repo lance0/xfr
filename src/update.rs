@@ -8,7 +8,8 @@ use std::time::Duration;
 use update_informer::{Check, registry::GitHub};
 
 /// Whether update checking was compiled in (the `update-check` feature, on by
-/// default). Package builds can drop it with `--no-default-features`.
+/// default). Package builds can drop it while keeping the rest of the default
+/// feature set with `--no-default-features --features discovery,tui`.
 pub const ENABLED: bool = cfg!(feature = "update-check");
 
 /// How the user installed xfr - used to show the appropriate update command

@@ -4,29 +4,9 @@
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-/// Events sent from server to TUI
-#[derive(Debug, Clone)]
-pub enum ServerEvent {
-    /// A new test has started
-    TestStarted(ActiveTestInfo),
-    /// Test progress update
-    TestUpdated {
-        id: String,
-        bytes: u64,
-        throughput_mbps: f64,
-    },
-    /// Test completed
-    TestCompleted { id: String, bytes: u64 },
-    /// Test failed before normal completion
-    TestFailed { id: String, bytes: u64 },
-    /// Connection blocked by ACL or rate limit
-    ConnectionBlocked,
-    /// Authentication failure
-    AuthFailure,
-}
+pub use crate::serve::events::{ActiveTestInfo, ServerEvent};
 
 use super::theme::Theme;
 use crate::stats::mbps_to_human;
@@ -37,20 +17,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 const BANDWIDTH_HISTORY: usize = 60;
-
-/// Active test info for display
-#[derive(Debug, Clone)]
-pub struct ActiveTestInfo {
-    pub id: String,
-    pub client_ip: IpAddr,
-    pub protocol: String,
-    pub direction: String,
-    pub streams: u8,
-    pub started: Instant,
-    pub duration_secs: u32,
-    pub bytes: u64,
-    pub throughput_mbps: f64,
-}
 
 /// Server dashboard state
 pub struct ServerApp {

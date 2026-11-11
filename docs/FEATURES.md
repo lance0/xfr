@@ -1067,7 +1067,7 @@ The background check can be turned off:
 
 The TUI toggle is locked and shows the reason when the checker is compiled out, an environment opt-out or `--no-update-check` applies, or `config.toml` explicitly sets `no_update_check` (including `false`). These overrides do not change the saved preference. Without an override, the toggle remains editable and persists normally.
 
-Precedence, highest first: compiled-out > env > `--no-update-check` > `config.toml` > saved TUI toggle. Package builds can compile the checker out entirely with `cargo build --no-default-features` (the `update-check` feature is on by default), which drops the `update-informer` dependency.
+Precedence, highest first: compiled-out > env > `--no-update-check` > `config.toml` > saved TUI toggle. Package builds can compile the checker out entirely while keeping the dashboards and mDNS discovery with `cargo build --no-default-features --features discovery,tui` (the `update-check` feature is on by default and needs `tui`), which drops the `update-informer` dependency.
 
 The check uses a 1-hour cache to avoid GitHub API rate limits.
 
