@@ -182,21 +182,8 @@ pub fn create_server_endpoint(
     // Create the UDP socket ourselves so we can set IPV6_V6ONLY properly.
     // Quinn's Endpoint::server() uses std::net::UdpSocket::bind() which
     // doesn't configure dual-stack, breaking IPv4 on Windows (#39).
-    let domain = if addr.is_ipv4() {
-        Domain::IPV4
-    } else {
-        Domain::IPV6
-    };
-    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    if addr.is_ipv6() {
-        let v6only = if addr.ip().is_unspecified() {
-            family == AddressFamily::V6Only
-        } else {
-            true
-        };
-        socket.set_only_v6(v6only)?;
-        debug!("QUIC socket IPV6_V6ONLY={} for {} mode", v6only, family);
-    }
+    let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    crate::net::set_v6only_for_addr(&socket, addr, family)?;
     if xfr_hello_tx.is_some() {
         // Both options must be set BEFORE bind for later same-port
         // connected sockets to be admitted to the group.

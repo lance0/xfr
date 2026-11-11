@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -3330,35 +3330,8 @@ async fn run_udp_stream_io(
 async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     buf: &mut String,
-) -> anyhow::Result<usize> {
-    buf.clear();
-    let mut total = 0;
-    loop {
-        let bytes = reader.fill_buf().await?;
-        if bytes.is_empty() {
-            return Ok(total);
-        }
-
-        if let Some(newline_pos) = bytes.iter().position(|&b| b == b'\n') {
-            let to_read = newline_pos + 1;
-            if total + to_read > MAX_LINE_LENGTH {
-                return Err(anyhow::anyhow!("Line exceeds maximum length"));
-            }
-            // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
-            buf.push_str(&String::from_utf8_lossy(&bytes[..to_read]));
-            reader.consume(to_read);
-            return Ok(total + to_read);
-        }
-
-        let len = bytes.len();
-        if total + len > MAX_LINE_LENGTH {
-            return Err(anyhow::anyhow!("Line exceeds maximum length"));
-        }
-        // Use lossy conversion to handle partial UTF-8 sequences at buffer boundaries
-        buf.push_str(&String::from_utf8_lossy(bytes));
-        reader.consume(len);
-        total += len;
-    }
+) -> anyhow::Result<()> {
+    crate::control_crypto::read_bounded_line(reader, buf, MAX_LINE_LENGTH).await
 }
 
 /// Message from the dedicated control-reader task to the client control loop.
@@ -3542,6 +3515,18 @@ fn validate_tcp_control_port(
 mod tests {
     use super::*;
     use crate::protocol::UdpIntervalProgress;
+
+    #[tokio::test]
+    async fn handshake_line_keeps_multibyte_char_split_across_reads() {
+        // A one-byte buffer forces every UTF-8 continuation byte into its own fill.
+        let mut reader =
+            tokio::io::BufReader::with_capacity(1, "h\u{e9}llo \u{1f600}\nnext".as_bytes());
+        let mut line = String::new();
+        super::read_bounded_line(&mut reader, &mut line)
+            .await
+            .unwrap();
+        assert_eq!(line, "h\u{e9}llo \u{1f600}\n");
+    }
 
     fn test_stats_with_recv_bytes(per_stream: &[u64]) -> TestStats {
         let stats = TestStats::new("t".to_string(), per_stream.len() as u8);
@@ -4268,6 +4253,7 @@ mod tests {
         let (client_r, mut client_w) = tokio::io::split(client);
         let (server_r, mut server_w) = tokio::io::split(server);
         let peer = tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
             let mut line = String::new();
             BufReader::new(server_r).read_line(&mut line).await.unwrap();
             assert!(matches!(
