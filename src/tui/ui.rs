@@ -636,16 +636,25 @@ fn draw_history(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_streams(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let block = Block::default()
-        .title(Span::styled(
-            " Streams ",
-            Style::default()
-                .fg(theme.header)
-                .add_modifier(Modifier::BOLD),
-        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
-
     let inner = block.inner(area);
+    let max_streams = inner.height as usize;
+    let title = if app.streams.len() > max_streams {
+        format!(
+            " Streams ({}, {} hidden) ",
+            app.streams.len(),
+            app.streams.len() - max_streams
+        )
+    } else {
+        " Streams ".to_string()
+    };
+    let block = block.title(Span::styled(
+        title,
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD),
+    ));
     frame.render_widget(block, area);
 
     // Find max throughput for scaling bars
@@ -1702,6 +1711,49 @@ mod small_terminal_tests {
         let buffer = terminal.backend().buffer();
         let row: String = (0..80).map(|x| buffer[(x, 1)].symbol()).collect();
         assert!(row.contains("↑ 3.0 Mbps  ↓ 5.0 Mbps"), "{row}");
+    }
+
+    #[test]
+    fn stream_panel_title_counts_hidden_streams() {
+        let mut app = App::new(
+            "localhost".into(),
+            5201,
+            crate::protocol::Protocol::Tcp,
+            crate::protocol::Direction::Upload,
+            5,
+            std::time::Duration::from_secs(10),
+            None,
+            super::super::settings::TimestampFormat::Relative,
+            Theme::default(),
+        );
+        // Height 4 gives inner height 2, so 3 of 5 streams are hidden.
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_streams(frame, &app, &app.theme, area)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let top_border: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(
+            top_border.contains(" Streams (5, 3 hidden) "),
+            "{top_border}"
+        );
+
+        // Height 7 gives inner height 5, so none are hidden.
+        let mut terminal = Terminal::new(TestBackend::new(80, 7)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_streams(frame, &app, &app.theme, area)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let top_border: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(top_border.contains(" Streams "), "{top_border}");
+        assert!(!top_border.contains("hidden"), "{top_border}");
+        app.streams.clear();
     }
 
     #[test]

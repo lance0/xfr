@@ -5,6 +5,8 @@
 use std::fs;
 use std::path::Path;
 
+use anyhow::Context;
+
 use crate::protocol::TestResult;
 use crate::stats::normalize_for_display;
 
@@ -48,17 +50,18 @@ pub struct DiffResult {
 impl DiffResult {
     pub fn format_plain(&self) -> String {
         let mut output = String::new();
+        let throughput_change = normalize_for_display(self.throughput_change_percent, 1);
 
         output.push_str(&format!(
             "Throughput: {:.1} Mbps → {:.1} Mbps ({:+.1}%)",
             normalize_for_display(self.baseline.throughput_mbps, 1),
             normalize_for_display(self.current.throughput_mbps, 1),
-            normalize_for_display(self.throughput_change_percent, 1)
+            throughput_change
         ));
 
         if self.throughput_change_percent < -self.threshold_percent {
             output.push_str(" [FAIL]");
-        } else if self.throughput_change_percent < 0.0 {
+        } else if throughput_change < 0.0 {
             output.push_str(" [WARN]");
         } else {
             output.push_str(" [OK]");
@@ -68,26 +71,28 @@ impl DiffResult {
         if let (Some(baseline_tcp), Some(current_tcp)) =
             (&self.baseline.tcp_info, &self.current.tcp_info)
         {
+            let retransmit_change = normalize_for_display(self.retransmit_change_percent, 1);
             output.push_str(&format!(
                 "Retransmits: {} → {} ({:+.1}%)",
-                baseline_tcp.retransmits, current_tcp.retransmits, self.retransmit_change_percent
+                baseline_tcp.retransmits, current_tcp.retransmits, retransmit_change
             ));
             if self.retransmit_change_percent > self.threshold_percent {
                 output.push_str(" [FAIL]");
-            } else if self.retransmit_change_percent > 0.0 {
+            } else if retransmit_change > 0.0 {
                 output.push_str(" [WARN]");
             }
             output.push('\n');
 
             let baseline_rtt_ms = baseline_tcp.rtt_us as f64 / 1000.0;
             let current_rtt_ms = current_tcp.rtt_us as f64 / 1000.0;
+            let rtt_change = normalize_for_display(self.rtt_change_percent, 1);
             output.push_str(&format!(
                 "RTT: {:.2} ms → {:.2} ms ({:+.1}%)",
-                baseline_rtt_ms, current_rtt_ms, self.rtt_change_percent
+                baseline_rtt_ms, current_rtt_ms, rtt_change
             ));
             if self.rtt_change_percent > self.threshold_percent {
                 output.push_str(" [FAIL]");
-            } else if self.rtt_change_percent > 0.0 {
+            } else if rtt_change > 0.0 {
                 output.push_str(" [WARN]");
             }
             output.push('\n');
@@ -105,8 +110,10 @@ impl DiffResult {
 }
 
 pub fn load_result(path: &Path) -> anyhow::Result<TestResult> {
-    let content = fs::read_to_string(path)?;
-    let result: TestResult = serde_json::from_str(&content)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read result file {}", path.display()))?;
+    let result: TestResult = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse result file {}", path.display()))?;
     Ok(result)
 }
 
@@ -322,6 +329,28 @@ mod tests {
             output.contains("[FAIL]"),
             "expected [FAIL] for rtt, got: {}",
             output
+        );
+    }
+
+    #[test]
+    fn sub_tenth_percent_changes_normalize_without_negative_zero_or_warn() {
+        let baseline = make_result(10_000.0, 10_000, 10_000);
+        let current = make_result(9_999.0, 9_999, 9_999);
+
+        let diff = compare(baseline, current, &DiffConfig::default());
+        let output = diff.format_plain();
+        assert!(!output.contains("-0.0%"), "got: {output}");
+        assert!(!output.contains("[WARN]"), "got: {output}");
+        assert!(output.contains("(+0.0%) [OK]"), "got: {output}");
+    }
+
+    #[test]
+    fn load_result_errors_name_the_file_path() {
+        let missing = Path::new("definitely-missing-diff-baseline.json");
+        let err = format!("{:#}", load_result(missing).unwrap_err());
+        assert!(
+            err.contains("definitely-missing-diff-baseline.json"),
+            "got: {err}"
         );
     }
 }

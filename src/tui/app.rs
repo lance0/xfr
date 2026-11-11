@@ -928,10 +928,15 @@ impl App {
 
     pub fn on_result(&mut self, result: TestResult) {
         self.state = AppState::Completed;
-        if self.is_infinite() {
-            self.elapsed = Duration::from_millis(result.duration_ms);
-        } else {
-            self.elapsed = self.duration; // Show full duration on completion
+        self.elapsed =
+            if self.is_infinite() || self.byte_budget.is_some() || self.cancel_deadline.is_some() {
+                Duration::from_millis(result.duration_ms)
+            } else {
+                self.duration
+                    .min(Duration::from_millis(result.duration_ms).max(self.elapsed))
+            };
+        if self.current_throughput_mbps == 0.0 {
+            self.current_throughput_mbps = result.throughput_mbps;
         }
         self.total_bytes = result.bytes_total;
         for reported in &result.streams {
@@ -2804,7 +2809,64 @@ mod tests {
         app.on_result(result);
         assert_eq!(app.elapsed, Duration::from_millis(3500));
         assert_eq!(app.total_bytes, 10_000);
+        assert_eq!(app.current_throughput_mbps, 22.8);
         assert_eq!(app.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn on_result_preserves_actual_elapsed_for_capped_byte_budget_and_cancelled_runs() {
+        // Capped `-n` (`-n 1M -t 30s`) finishing in 400ms before any interval report.
+        let mut app = App::default();
+        app.duration = Duration::from_secs(30);
+        app.byte_budget = Some(1_000_000);
+        app.on_result(TestResult {
+            id: "capped-n".to_string(),
+            duration_ms: 400,
+            bytes_total: 1_000_000,
+            throughput_mbps: 20.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
+            zero_byte_streams: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
+        });
+        assert_eq!(app.elapsed, Duration::from_millis(400));
+        assert_eq!(app.current_throughput_mbps, 20.0);
+
+        // Cancelled timed run finishing early at 2.5s.
+        let mut cancelled = App::default();
+        cancelled.duration = Duration::from_secs(10);
+        cancelled.cancel_deadline = Some(Instant::now() + Duration::from_secs(5));
+        cancelled.current_throughput_mbps = 15.0;
+        cancelled.on_result(TestResult {
+            id: "cancelled".to_string(),
+            duration_ms: 2500,
+            bytes_total: 500_000,
+            throughput_mbps: 16.0,
+            streams: vec![],
+            tcp_info: None,
+            udp_stats: None,
+            bytes_sent: None,
+            bytes_received: None,
+            throughput_send_mbps: None,
+            throughput_recv_mbps: None,
+            mtu_probe: None,
+            server_udp_send_errors: None,
+            client_udp_send_errors: None,
+            zero_byte_streams: None,
+            udp_stats_send: None,
+            udp_stats_recv: None,
+        });
+        assert_eq!(cancelled.elapsed, Duration::from_millis(2500));
+        assert_eq!(cancelled.current_throughput_mbps, 15.0);
     }
 
     #[test]

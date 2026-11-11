@@ -76,13 +76,12 @@ fn init_logging(
         (Some(file_path), true) => {
             // TUI mode with file logging: file only, no console
             let expanded_path = expand_log_path(file_path);
-            if let Some(parent) = expanded_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            let parent = expanded_path.parent().filter(|p| !p.as_os_str().is_empty());
+            if let Some(dir) = parent {
+                std::fs::create_dir_all(dir)?;
             }
             let file_appender = tracing_appender::rolling::daily(
-                expanded_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
+                parent.unwrap_or_else(|| std::path::Path::new(".")),
                 expanded_path
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
@@ -101,13 +100,12 @@ fn init_logging(
         (Some(file_path), false) => {
             // Normal mode with file logging: console + file
             let expanded_path = expand_log_path(file_path);
-            if let Some(parent) = expanded_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            let parent = expanded_path.parent().filter(|p| !p.as_os_str().is_empty());
+            if let Some(dir) = parent {
+                std::fs::create_dir_all(dir)?;
             }
             let file_appender = tracing_appender::rolling::daily(
-                expanded_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
+                parent.unwrap_or_else(|| std::path::Path::new(".")),
                 expanded_path
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("xfr.log")),
@@ -348,10 +346,18 @@ struct Cli {
     #[arg(help_heading = "Output Options")]
     log_file: Option<String>,
 
+    /// Whether `log_file` was typed on the command line rather than read from XFR_LOG_FILE.
+    #[arg(skip)]
+    log_file_on_command_line: bool,
+
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, env = "XFR_LOG_LEVEL")]
     #[arg(help_heading = "Output Options")]
     log_level: Option<String>,
+
+    /// Whether `log_level` was typed on the command line rather than read from XFR_LOG_LEVEL.
+    #[arg(skip)]
+    log_level_on_command_line: bool,
 
     /// Config file to use instead of the first of xfr/config.toml in the user
     /// config directory, then /etc/xfr/config.toml
@@ -461,7 +467,7 @@ enum Commands {
         tui: bool,
 
         /// Maximum test duration (server-side limit). Bare integers are seconds (`60`); unit suffixes also accepted (`60s`, `5min`).
-        #[arg(long, value_parser = parse_duration)]
+        #[arg(long, value_parser = parse_nonzero_duration)]
         #[arg(help_heading = "Server Options")]
         max_duration: Option<Duration>,
 
@@ -585,7 +591,7 @@ enum Commands {
     /// Discover xfr servers on LAN
     Discover {
         /// Discovery timeout. Bare integers are seconds (`5`); unit suffixes also accepted (`5s`, `500ms`).
-        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        #[arg(long, default_value = "5s", value_parser = parse_nonzero_duration)]
         timeout: Duration,
 
         /// List every address of each server, not just the preferred one
@@ -1224,6 +1230,28 @@ const SUBCOMMAND_COMPATIBLE_ARGS: &[&str] = &[
     "no_update_check",
 ];
 
+/// Resolve a server logging option (`--log-file` or `--log-level`) across
+/// top-level CLI (`xfr --log-level debug serve`), `serve` subcommand CLI/env
+/// (`xfr serve --log-level debug` or `XFR_LOG_LEVEL`), `[server]`, and `[client]`.
+///
+/// A top-level CLI flag typed on the command line beats an env-populated
+/// `serve_opt` when `serve_opt` was not also overridden; any CLI/env value
+/// (`serve_opt.or(cli_top)`) beats `config.toml` (`[server]` then `[client]`).
+fn resolve_server_log_option<'a>(
+    cli_top: Option<&'a String>,
+    cli_top_on_cmd: bool,
+    serve_opt: Option<&'a String>,
+    server_cfg: Option<&'a String>,
+    client_cfg: Option<&'a String>,
+) -> Option<&'a String> {
+    let cli_or_env = if cli_top_on_cmd {
+        cli_top.or(serve_opt)
+    } else {
+        serve_opt.or(cli_top)
+    };
+    cli_or_env.or(server_cfg).or(client_cfg)
+}
+
 /// Parse the command line, rejecting client options given alongside a
 /// subcommand. Only options typed on the command line count: env-backed
 /// options (`XFR_DURATION`, `XFR_PSK`, `XFR_PORT`, ...) and defaults must
@@ -1267,6 +1295,10 @@ fn parse_cli() -> Cli {
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     cli.port_on_command_line = matches.value_source("port") == Some(ValueSource::CommandLine);
     cli.config_from_env = matches.value_source("config") == Some(ValueSource::EnvVariable);
+    cli.log_file_on_command_line =
+        matches.value_source("log_file") == Some(ValueSource::CommandLine);
+    cli.log_level_on_command_line =
+        matches.value_source("log_level") == Some(ValueSource::CommandLine);
     cli
 }
 
@@ -1313,16 +1345,20 @@ async fn main() -> Result<()> {
             tui: server_tui,
             ..
         }) => {
-            let file = log_file
-                .as_ref()
-                .or(file_config.server.log_file.as_ref())
-                .or(cli.log_file.as_ref())
-                .or(file_config.client.log_file.as_ref());
-            let level = log_level
-                .as_ref()
-                .or(file_config.server.log_level.as_ref())
-                .or(cli.log_level.as_ref())
-                .or(file_config.client.log_level.as_ref());
+            let file = resolve_server_log_option(
+                cli.log_file.as_ref(),
+                cli.log_file_on_command_line,
+                log_file.as_ref(),
+                file_config.server.log_file.as_ref(),
+                file_config.client.log_file.as_ref(),
+            );
+            let level = resolve_server_log_option(
+                cli.log_level.as_ref(),
+                cli.log_level_on_command_line,
+                log_level.as_ref(),
+                file_config.server.log_level.as_ref(),
+                file_config.client.log_level.as_ref(),
+            );
             (
                 file,
                 level,
@@ -1421,8 +1457,8 @@ async fn main() -> Result<()> {
             }
 
             // Build PSK (CLI > file > config)
-            let effective_psk = if let Some(psk_path) = psk_file {
-                Some(xfr::auth::read_psk_file(&psk_path)?)
+            let effective_psk = if let Some(ref psk_path) = psk_file {
+                Some(xfr::auth::read_psk_file(psk_path)?)
             } else {
                 psk.as_ref()
                     .cloned()
@@ -1436,7 +1472,7 @@ async fn main() -> Result<()> {
 
             // PSK supplied on the command line or through the environment leaks
             // through process metadata; warn so users can migrate to --psk-file.
-            if psk.is_some() {
+            if psk_file.is_none() && psk.is_some() {
                 warn!(
                     "Using --psk or XFR_PSK exposes the pre-shared key in process metadata (ps, /proc/<pid>/environ, shell history); prefer --psk-file"
                 );
@@ -1491,6 +1527,9 @@ async fn main() -> Result<()> {
             let server_no_mdns = no_mdns || file_config.server.no_mdns.unwrap_or(false);
 
             max_duration = resolve_server_max_duration(max_duration, preset.as_ref());
+            if max_duration == Some(Duration::ZERO) {
+                anyhow::bail!("preset max_duration_secs must be at least 1 second");
+            }
 
             let config = ServerConfig {
                 port: server_port,
@@ -1510,6 +1549,7 @@ async fn main() -> Result<()> {
                 preset_allowed_clients: preset.and_then(|p| p.allowed_clients),
                 ..Default::default()
             };
+            config.validate()?;
 
             if server_tui && !cfg!(feature = "tui") {
                 warn!("this build has no TUI (`tui` feature off); running the plain server");
@@ -1616,7 +1656,7 @@ async fn main() -> Result<()> {
 
             let random_payload = effective_random_payload(&cli);
             let zerocopy = effective_zerocopy(&cli);
-            let network_options = resolve_client_network_options(
+            let mut network_options = resolve_client_network_options(
                 cli.bitrate,
                 cli.congestion.clone(),
                 cli.dscp.clone(),
@@ -1626,6 +1666,14 @@ async fn main() -> Result<()> {
                 &file_config.client,
             )
             .map_err(|e| anyhow::anyhow!("invalid [client] {e}"))?;
+            if cli.probe_mtu {
+                network_options.bitrate = None;
+            }
+
+            let tcp_nodelay = cli.tcp_nodelay || file_config.client.tcp_nodelay.unwrap_or(false);
+
+            let window_size =
+                resolve_window_size(cli.window, file_config.client.window_size.as_deref())?;
 
             if let Some(msg) = random_payload_notice(protocol, direction, cli.random, cli.zeros) {
                 eprintln!("Warning: {msg}");
@@ -1635,17 +1683,20 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: {msg}");
             }
 
-            if network_options.dscp.is_some() && protocol == xfr::protocol::Protocol::Quic {
+            if network_options.dscp.is_some()
+                && protocol == xfr::protocol::Protocol::Quic
+                && !tui_enabled
+            {
                 eprintln!("Warning: --dscp is ignored with QUIC (QUIC manages its own socket)");
             }
 
             // The QUIC paths don't implement these knobs (the server-side
             // handler drops them from TestStart); say so instead of letting
             // a rate-limited or buffer-tuned test silently run untuned.
-            if protocol == xfr::protocol::Protocol::Quic {
+            if protocol == xfr::protocol::Protocol::Quic && !tui_enabled {
                 for (set, msg) in [
                     (
-                        cli.window.is_some(),
+                        window_size.is_some(),
                         "-w/--window is ignored with QUIC (QUIC flow control manages buffering)",
                     ),
                     (
@@ -1653,7 +1704,7 @@ async fn main() -> Result<()> {
                         "--congestion is ignored with QUIC (kernel TCP CC does not apply)",
                     ),
                     (
-                        cli.tcp_nodelay,
+                        tcp_nodelay,
                         "--tcp-nodelay is ignored with QUIC (no Nagle on UDP transport)",
                     ),
                 ] {
@@ -1678,13 +1729,11 @@ async fn main() -> Result<()> {
             let duration =
                 resolve_client_duration(cli.time, cli.probe_mtu, cli.bytes, &file_config);
 
-            let streams =
-                resolve_parallel_streams(cli.parallel, file_config.client.parallel_streams)?;
-
-            let tcp_nodelay = cli.tcp_nodelay || file_config.client.tcp_nodelay.unwrap_or(false);
-
-            let window_size =
-                resolve_window_size(cli.window, file_config.client.window_size.as_deref())?;
+            let streams = if cli.probe_mtu {
+                1
+            } else {
+                resolve_parallel_streams(cli.parallel, file_config.client.parallel_streams)?
+            };
 
             let json_output = client_json_output(&cli, &file_config);
 
@@ -1722,7 +1771,7 @@ async fn main() -> Result<()> {
 
             // PSK supplied on the command line or through the environment leaks
             // through process metadata; warn so users can migrate to --psk-file.
-            if cli.psk.is_some() {
+            if cli.psk_file.is_none() && cli.psk.is_some() {
                 warn!(
                     "Using --psk or XFR_PSK exposes the pre-shared key in process metadata (ps, /proc/<pid>/environ, shell history); prefer --psk-file"
                 );
@@ -1827,6 +1876,7 @@ async fn main() -> Result<()> {
                     .map(|s| parse_dscp(s).map_err(|e| anyhow::anyhow!(e)))
                     .transpose()?,
             };
+            config.validate()?;
 
             let gateway_url = cli
                 .push_gateway
@@ -1877,7 +1927,9 @@ async fn main() -> Result<()> {
             if tui_enabled {
                 // TUI mode - load prefs with overrides
                 // Priority: CLI flag > config file > saved prefs > default
-                let prefs = xfr::prefs::Prefs::load()
+                let saved_prefs = xfr::prefs::Prefs::load();
+                let effective_prefs = saved_prefs
+                    .clone()
                     .with_overrides(cli.theme.as_deref(), file_config.client.theme.as_deref());
 
                 // Update check runs unless disabled. Precedence (higher wins):
@@ -1887,7 +1939,7 @@ async fn main() -> Result<()> {
                     env_opt_out,
                     cli.no_update_check,
                     file_config.client.no_update_check,
-                    prefs.disable_update_check,
+                    effective_prefs.disable_update_check,
                 );
                 let update_lock_reason = xfr::update::check_lock_reason(
                     env_opt_out,
@@ -1899,7 +1951,8 @@ async fn main() -> Result<()> {
                     config,
                     cli.output,
                     timestamp_format,
-                    prefs.clone(),
+                    saved_prefs.clone(),
+                    effective_prefs.theme_name(),
                     update_disabled,
                     update_lock_reason,
                     output_opts.push_gateway,
@@ -1907,8 +1960,8 @@ async fn main() -> Result<()> {
                 .await?;
 
                 // Save prefs if changed
-                if final_prefs.theme != prefs.theme
-                    || final_prefs.disable_update_check != prefs.disable_update_check
+                if final_prefs.theme != saved_prefs.theme
+                    || final_prefs.disable_update_check != saved_prefs.disable_update_check
                 {
                     let _ = final_prefs.save();
                 }
@@ -2394,11 +2447,13 @@ impl Drop for TerminalGuard {
 }
 
 #[cfg(feature = "tui")]
+#[allow(clippy::too_many_arguments)]
 async fn run_client_tui(
     mut config: ClientConfig,
     output: Option<PathBuf>,
     timestamp_format: TimestampFormat,
     prefs: xfr::prefs::Prefs,
+    initial_theme: &str,
     update_disabled: bool,
     update_lock_reason: Option<&'static str>,
     push_gateway: Option<PushGatewayClient>,
@@ -2425,6 +2480,7 @@ async fn run_client_tui(
         &mut config,
         timestamp_format,
         prefs,
+        initial_theme,
         update_disabled,
         update_lock_reason,
         &mut metrics,
@@ -2791,6 +2847,7 @@ async fn run_tui_loop(
     config: &mut ClientConfig,
     timestamp_format: TimestampFormat,
     mut prefs: xfr::prefs::Prefs,
+    initial_theme: &str,
     update_disabled: bool,
     update_lock_reason: Option<&'static str>,
     metrics: &mut ClientMetrics,
@@ -2814,7 +2871,7 @@ async fn run_tui_loop(
         config.duration,
         config.bitrate,
         timestamp_format,
-        prefs.theme_name(),
+        initial_theme,
     );
     // A `-n` run measures progress in bytes, not seconds.
     app.byte_budget = config.byte_budget;
@@ -4941,5 +4998,139 @@ mod tests {
         assert_eq!(parse_dscp("af21").unwrap(), 72);
         // Unknown name
         assert!(parse_dscp("BOGUS").is_err());
+    }
+
+    #[test]
+    fn bare_log_filename_resolves_parent_to_none_and_current_dir_for_appender() {
+        let expanded = expand_log_path("xfr.log");
+        let parent = expanded.parent().filter(|p| !p.as_os_str().is_empty());
+        assert!(parent.is_none());
+        assert_eq!(
+            parent.unwrap_or_else(|| std::path::Path::new(".")),
+            std::path::Path::new(".")
+        );
+
+        let nested = expand_log_path("logs/xfr.log");
+        let nested_parent = nested.parent().filter(|p| !p.as_os_str().is_empty());
+        assert_eq!(nested_parent, Some(std::path::Path::new("logs")));
+    }
+
+    #[test]
+    fn serve_max_duration_and_discover_timeout_reject_zero() {
+        for value in ["0", "0s", "0ms"] {
+            assert!(
+                Cli::try_parse_from(["xfr", "serve", "--max-duration", value]).is_err(),
+                "serve --max-duration {value} must be rejected"
+            );
+            assert!(
+                Cli::try_parse_from(["xfr", "discover", "--timeout", value]).is_err(),
+                "discover --timeout {value} must be rejected"
+            );
+        }
+        assert!(Cli::try_parse_from(["xfr", "serve", "--max-duration", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["xfr", "discover", "--timeout", "1"]).is_ok());
+    }
+
+    #[test]
+    fn resolve_server_log_option_prioritizes_cli_and_env_over_config() {
+        let top = "top".to_string();
+        let serve = "serve".to_string();
+        let server_cfg = "server_cfg".to_string();
+        let client_cfg = "client_cfg".to_string();
+
+        // Command-line top-level (`xfr --log-level debug serve`) beats env-filled `serve_opt` and config.
+        assert_eq!(
+            resolve_server_log_option(
+                Some(&top),
+                true,
+                Some(&serve),
+                Some(&server_cfg),
+                Some(&client_cfg)
+            ),
+            Some(&top)
+        );
+        // Subcommand CLI or env beats config when top-level was not typed on command line.
+        assert_eq!(
+            resolve_server_log_option(
+                Some(&top),
+                false,
+                Some(&serve),
+                Some(&server_cfg),
+                Some(&client_cfg)
+            ),
+            Some(&serve)
+        );
+        // Top-level CLI or env still beats server_cfg and client_cfg when serve_opt is None.
+        for on_cmd in [true, false] {
+            assert_eq!(
+                resolve_server_log_option(
+                    Some(&top),
+                    on_cmd,
+                    None,
+                    Some(&server_cfg),
+                    Some(&client_cfg)
+                ),
+                Some(&top)
+            );
+        }
+        // Falls back to [server] then [client].
+        assert_eq!(
+            resolve_server_log_option(None, false, None, Some(&server_cfg), Some(&client_cfg)),
+            Some(&server_cfg)
+        );
+        assert_eq!(
+            resolve_server_log_option(None, false, None, None, Some(&client_cfg)),
+            Some(&client_cfg)
+        );
+        assert_eq!(
+            resolve_server_log_option(None, false, None, None, None),
+            None
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn cli_or_config_theme_override_does_not_leak_into_saved_prefs_without_theme_edit() {
+        let saved_prefs = xfr::prefs::Prefs {
+            theme: Some("dracula".into()),
+            ..Default::default()
+        };
+        let effective_prefs = saved_prefs
+            .clone()
+            .with_overrides(Some("nord"), Some("matrix"));
+        assert_eq!(effective_prefs.theme_name(), "nord");
+
+        let mut prefs = saved_prefs.clone();
+        let mut app = App::with_theme_name(
+            "localhost".into(),
+            5201,
+            Protocol::Tcp,
+            Direction::Upload,
+            1,
+            Duration::from_secs(10),
+            None,
+            TimestampFormat::Relative,
+            effective_prefs.theme_name(),
+        );
+
+        // Toggling Update check in Settings does not promote the CLI `--theme nord` override into prefs.
+        app.settings.visible = true;
+        app.settings.selected_index = 3; // Update check
+        handle_tui_settings_key(&mut app, test_key(KeyCode::Right));
+        remember_tui_theme(&mut prefs, &app);
+        if app.settings.update_check_touched {
+            prefs.disable_update_check = Some(!app.settings.update_check);
+        }
+        assert_eq!(prefs.theme.as_deref(), Some("dracula"));
+        assert_eq!(prefs.disable_update_check, Some(true));
+
+        // Cycling themes all the way back to the CLI override ("nord") is an explicit choice and DOES save.
+        for _ in 0..xfr::tui::Theme::list().len() {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_name(), "nord");
+        remember_tui_theme(&mut prefs, &app);
+        assert_eq!(prefs.theme.as_deref(), Some("nord"));
+        assert_ne!(prefs.theme, saved_prefs.theme);
     }
 }

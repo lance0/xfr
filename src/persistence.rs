@@ -72,6 +72,14 @@ fn inspect(path: &Path) -> Result<Destination> {
             Ok(Destination::File(metadata.permissions()))
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
+            if path.as_os_str().is_empty() {
+                return Err(cannot_save(path, ErrorKind::NotFound, "directory"));
+            }
+            if path.file_name().is_none()
+                || path.as_os_str().to_string_lossy().ends_with(['/', '\\'])
+            {
+                return Err(cannot_save(path, ErrorKind::IsADirectory, "file"));
+            }
             if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()) {
                 return Err(io::Error::new(
                     ErrorKind::NotFound,
@@ -428,5 +436,16 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
         check_destination(&fifo).unwrap();
         check_destination(Path::new("/dev/null")).unwrap();
+    }
+
+    #[test]
+    fn check_destination_rejects_empty_and_trailing_slash_paths() {
+        assert!(check_destination(Path::new("")).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let trailing = format!("{}/newdir/", dir.path().display());
+        let err = check_destination(Path::new(&trailing))
+            .unwrap_err()
+            .to_string();
+        assert!(err.ends_with(": is a directory"), "{err}");
     }
 }
