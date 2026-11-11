@@ -87,6 +87,23 @@ fn local_stop_deadline(
     }
 }
 
+/// Await one connect/handshake step unless the user cancels first. Until
+/// TestStart is sent the server has no test to stop, so a cancel simply
+/// ends the run. A closed request channel is not a cancel.
+async fn unless_cancelled<T, E: Into<anyhow::Error>>(
+    cancel_request: &watch::Receiver<bool>,
+    step: impl std::future::Future<Output = Result<T, E>>,
+) -> anyhow::Result<T> {
+    let mut cancel_request = cancel_request.clone();
+    tokio::select! {
+        biased;
+        Ok(_) = cancel_request.wait_for(|requested| *requested) => {
+            Err(anyhow::anyhow!("Test cancelled before it started"))
+        }
+        result = step => result.map_err(Into::into),
+    }
+}
+
 fn start_control_cancel_wait(
     now: tokio::time::Instant,
     deadline: &mut tokio::time::Instant,
@@ -787,6 +804,10 @@ impl Client {
         progress_tx: Option<mpsc::Sender<TestProgress>>,
     ) -> anyhow::Result<TestResult> {
         self.config.validate()?;
+        // Accept a cancel from here on: a Ctrl-C during connect or the
+        // handshake must not be dropped just because TestAck hasn't arrived.
+        let (cancel_request_tx, cancel_request_rx) = watch::channel(false);
+        *self.cancel_request_tx.lock() = Some(cancel_request_tx);
         info!(
             "Connecting to {}...",
             net::host_port(&self.config.host, self.config.port)
@@ -809,7 +830,7 @@ impl Client {
 
         // Use QUIC transport if selected
         if self.config.protocol == Protocol::Quic {
-            return self.run_quic(progress_tx).await;
+            return self.run_quic(progress_tx, cancel_request_rx).await;
         }
 
         let control_bind_addr = control_bind_addr(&self.config);
@@ -820,6 +841,7 @@ impl Client {
             control_bind_addr,
             self.config.mptcp,
         );
+        let connect = unless_cancelled(&cancel_request_rx, connect);
         let (stream, peer_addr) = match self.config.connect_timeout {
             Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
                 anyhow::anyhow!(
@@ -835,7 +857,8 @@ impl Client {
             validate_tcp_control_port(stream.local_addr()?, &self.config)?;
         }
 
-        self.run_test(stream, peer_addr, progress_tx).await
+        self.run_test(stream, peer_addr, progress_tx, cancel_request_rx)
+            .await
     }
 
     async fn run_test(
@@ -843,6 +866,7 @@ impl Client {
         stream: TcpStream,
         server_ip: SocketAddr,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
+        mut cancel_request_rx: watch::Receiver<bool>,
     ) -> anyhow::Result<TestResult> {
         // Reset pause state from any previous run
         *self.server_supports_pause.lock() = None;
@@ -873,9 +897,11 @@ impl Client {
             None => ControlMessage::client_hello(),
         };
         let client_hello_json = hello.serialize()?;
-        writer
-            .write_all(format!("{}\n", client_hello_json).as_bytes())
-            .await?;
+        unless_cancelled(
+            &cancel_request_rx,
+            writer.write_all(format!("{}\n", client_hello_json).as_bytes()),
+        )
+        .await?;
         debug!(
             local = ?writer.as_ref().local_addr(),
             peer = ?writer.as_ref().peer_addr(),
@@ -884,7 +910,12 @@ impl Client {
         );
 
         // Read server hello (bounded to prevent DoS)
-        if let Err(e) = read_bounded_line(&mut reader, &mut line).await {
+        if let Err(e) = unless_cancelled(
+            &cancel_request_rx,
+            read_bounded_line(&mut reader, &mut line),
+        )
+        .await
+        {
             if matches!(
                 e.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
                 Some(
@@ -953,12 +984,18 @@ impl Client {
 
                     let response = auth::compute_response(&challenge.nonce, psk);
                     let auth_msg = ControlMessage::auth_response(response);
-                    writer
-                        .write_all(format!("{}\n", auth_msg.serialize()?).as_bytes())
-                        .await?;
+                    unless_cancelled(
+                        &cancel_request_rx,
+                        writer.write_all(format!("{}\n", auth_msg.serialize()?).as_bytes()),
+                    )
+                    .await?;
 
                     // Read auth result
-                    read_bounded_line(&mut reader, &mut line).await?;
+                    unless_cancelled(
+                        &cancel_request_rx,
+                        read_bounded_line(&mut reader, &mut line),
+                    )
+                    .await?;
                     if line.trim().is_empty() {
                         return Err(anyhow::anyhow!(
                             "connection closed by server during handshake"
@@ -1136,9 +1173,13 @@ impl Client {
             byte_budget: self.config.byte_budget,
             udp_payload_size,
         };
-        transport
-            .write_message(&mut writer, &test_start.serialize()?)
-            .await?;
+        // Last point a cancel can end the run outright. Once TestStart is
+        // out, the control loop below sends Cancel after TestAck instead.
+        unless_cancelled(
+            &cancel_request_rx,
+            transport.write_message(&mut writer, &test_start.serialize()?),
+        )
+        .await?;
 
         // Read test ack
         transport.read_message(&mut reader, &mut line).await?;
@@ -1225,7 +1266,6 @@ impl Client {
         // Create stats
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
         let mut run_cleanup = ClientRunCleanup {
             cancel_tx: cancel_tx.clone(),
             control_reader: None,
@@ -1237,9 +1277,8 @@ impl Client {
         // late.
         let udp_progress_filter = Arc::new(UdpProgressFilter::new());
 
-        // Store cancel senders for external cancellation
+        // Store cancel sender for external cancellation
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
-        *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
         // Create pause channels
         let (pause_tx, pause_rx) = watch::channel(false);
@@ -2382,6 +2421,7 @@ impl Client {
     async fn run_quic(
         &self,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
+        cancel_request_rx: watch::Receiver<bool>,
     ) -> anyhow::Result<TestResult> {
         // Reset pause state from any previous run
         *self.server_supports_pause.lock() = None;
@@ -2412,6 +2452,7 @@ impl Client {
             let connection = quic::connect(&endpoint, addr).await?;
             anyhow::Ok((endpoint, connection))
         };
+        let connect = unless_cancelled(&cancel_request_rx, connect);
         let (endpoint, connection) = match self.config.connect_timeout {
             Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
                 anyhow::anyhow!(
@@ -2424,7 +2465,7 @@ impl Client {
         };
 
         let result = self
-            .run_quic_session(&endpoint, &connection, progress_tx)
+            .run_quic_session(&endpoint, &connection, progress_tx, cancel_request_rx)
             .await;
         // Whatever phase noticed it (control handshake, data, or waiting
         // for the result), a silent server surfaces as quinn's bare
@@ -2445,11 +2486,13 @@ impl Client {
         endpoint: &quinn::Endpoint,
         connection: &quinn::Connection,
         progress_tx: Option<mpsc::Sender<TestProgress>>,
+        mut cancel_request_rx: watch::Receiver<bool>,
     ) -> anyhow::Result<TestResult> {
         use tokio::io::BufReader;
 
         // Open control stream (bidirectional)
-        let (mut ctrl_send, ctrl_recv) = connection.open_bi().await?;
+        let (mut ctrl_send, ctrl_recv) =
+            unless_cancelled(&cancel_request_rx, connection.open_bi()).await?;
         let mut ctrl_reader = BufReader::new(ctrl_recv);
         let mut line = String::new();
 
@@ -2465,12 +2508,18 @@ impl Client {
             None => ControlMessage::client_hello(),
         };
         let client_hello_json = hello.serialize()?;
-        ctrl_send
-            .write_all(format!("{}\n", client_hello_json).as_bytes())
-            .await?;
+        unless_cancelled(
+            &cancel_request_rx,
+            ctrl_send.write_all(format!("{}\n", client_hello_json).as_bytes()),
+        )
+        .await?;
 
         // Read server hello (bounded to prevent DoS)
-        read_bounded_line(&mut ctrl_reader, &mut line).await?;
+        unless_cancelled(
+            &cancel_request_rx,
+            read_bounded_line(&mut ctrl_reader, &mut line),
+        )
+        .await?;
         if line.trim().is_empty() {
             return Err(anyhow::anyhow!(
                 "connection closed by server before handshake (rejected by ACL, rate limit, or connection limit?)"
@@ -2534,12 +2583,18 @@ impl Client {
 
                     let response = auth::compute_response_with_key(&challenge.nonce, &session_psk);
                     let auth_msg = ControlMessage::auth_response(response);
-                    ctrl_send
-                        .write_all(format!("{}\n", auth_msg.serialize()?).as_bytes())
-                        .await?;
+                    unless_cancelled(
+                        &cancel_request_rx,
+                        ctrl_send.write_all(format!("{}\n", auth_msg.serialize()?).as_bytes()),
+                    )
+                    .await?;
 
                     // Read auth result
-                    read_bounded_line(&mut ctrl_reader, &mut line).await?;
+                    unless_cancelled(
+                        &cancel_request_rx,
+                        read_bounded_line(&mut ctrl_reader, &mut line),
+                    )
+                    .await?;
                     if line.trim().is_empty() {
                         return Err(anyhow::anyhow!(
                             "connection closed by server during handshake"
@@ -2651,9 +2706,12 @@ impl Client {
             byte_budget: self.config.byte_budget,
             udp_payload_size: None,
         };
-        transport
-            .write_message(&mut ctrl_send, &test_start.serialize()?)
-            .await?;
+        // Last point a cancel can end the run outright; see run_test().
+        unless_cancelled(
+            &cancel_request_rx,
+            transport.write_message(&mut ctrl_send, &test_start.serialize()?),
+        )
+        .await?;
 
         // Read test ack
         transport.read_message(&mut ctrl_reader, &mut line).await?;
@@ -2679,14 +2737,12 @@ impl Client {
         // Create stats and cancel channels
         let stats = Arc::new(TestStats::new(test_id.clone(), self.config.streams));
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (cancel_request_tx, mut cancel_request_rx) = watch::channel(false);
         let mut run_cleanup = ClientRunCleanup {
             cancel_tx: cancel_tx.clone(),
             control_reader: None,
         };
 
         *self.cancel_tx.lock() = Some(cancel_tx.clone());
-        *self.cancel_request_tx.lock() = Some(cancel_request_tx);
 
         // Create pause channels
         let (pause_tx, pause_rx) = watch::channel(false);
