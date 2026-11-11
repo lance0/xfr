@@ -591,7 +591,7 @@ enum Commands {
     /// Discover xfr servers on LAN
     Discover {
         /// Discovery timeout. Bare integers are seconds (`5`); unit suffixes also accepted (`5s`, `500ms`).
-        #[arg(long, default_value = "5s", value_parser = parse_nonzero_duration)]
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
         timeout: Duration,
 
         /// List every address of each server, not just the preferred one
@@ -5016,19 +5016,14 @@ mod tests {
     }
 
     #[test]
-    fn serve_max_duration_and_discover_timeout_reject_zero() {
+    fn serve_max_duration_rejects_zero() {
         for value in ["0", "0s", "0ms"] {
             assert!(
                 Cli::try_parse_from(["xfr", "serve", "--max-duration", value]).is_err(),
                 "serve --max-duration {value} must be rejected"
             );
-            assert!(
-                Cli::try_parse_from(["xfr", "discover", "--timeout", value]).is_err(),
-                "discover --timeout {value} must be rejected"
-            );
         }
         assert!(Cli::try_parse_from(["xfr", "serve", "--max-duration", "1"]).is_ok());
-        assert!(Cli::try_parse_from(["xfr", "discover", "--timeout", "1"]).is_ok());
     }
 
     #[test]
