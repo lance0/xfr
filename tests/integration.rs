@@ -4924,10 +4924,12 @@ async fn test_tcp_cancel_latency_before_first_tick() {
 
     let client = Client::new(config);
 
-    // Poll the run future until the handshake completes and `cancel()` is
-    // accepted (it errors until the client has its TestAck).  The server
+    // Poll the run future until the server Hello has been read. Without a
+    // PSK the client writes TestStart in that same poll, so the cancel lands
+    // after TestStart and goes to the server as a Cancel once TestAck
+    // arrives, rather than ending the run during the handshake.  The server
     // starts its 1s stats tick only after sending TestAck, so a cancel
-    // accepted within one 20ms poll of the handshake lands well before the
+    // issued within one 20ms poll of the handshake lands well before the
     // first tick, however long the handshake took on a loaded runner.  The
     // run must resolve within 600ms of the cancel, proving the server's
     // control-reader task observed it promptly.  The old serialized-behind-
@@ -4935,25 +4937,24 @@ async fn test_tcp_cancel_latency_before_first_tick() {
     // the run would resolve at ~1s+RTT — well outside this 600ms budget.
     let mut run_future = std::pin::pin!(client.run(None));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
+    while client.server_version().is_none() {
         tokio::select! {
             res = &mut run_future => panic!("run ended before cancel: {res:?}"),
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-        }
-        if client.cancel().is_ok() {
-            break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
             "handshake did not complete within 5s"
         );
     }
+    client.cancel().expect("test should be running");
 
-    let result = tokio::time::timeout(Duration::from_millis(600), &mut run_future).await;
-    assert!(
-        result.is_ok(),
-        "run should resolve within 600ms of cancel — old serialized behavior would take ~1s"
-    );
+    let result = tokio::time::timeout(Duration::from_millis(600), &mut run_future)
+        .await
+        .expect(
+            "run should resolve within 600ms of cancel — old serialized behavior would take ~1s",
+        );
+    result.expect("server should return the cancelled test summary");
 }
 
 /// PSK cancel: the dedicated control-reader task must decrypt AEAD-protected
@@ -4995,29 +4996,22 @@ async fn test_tcp_psk_cancel_infinite_duration() {
 
     let client = Client::new(config);
 
-    // Let data flow for 500ms, then keep polling the run future until
-    // `cancel()` is accepted: it errors until the TestAck installs the cancel
-    // channel, and a cancel sent before that is lost, so a PSK handshake
-    // slower than 500ms on a loaded runner used to hang the infinite test
-    // (LAN-2738).  The run must resolve within 2s of the accepted cancel — if
-    // the server's AEAD control reader is broken, the cancel is never
-    // observed and the timeout fails the test.
-    let mut run_future = std::pin::pin!(client.run(None));
+    // Wait for the first progress update so the cancel travels over the
+    // AEAD control channel mid-test rather than landing in the handshake,
+    // where it just ends the run. A fixed 500ms sleep lost that race to a
+    // slow PSK handshake on a loaded runner (LAN-2738). The run must resolve
+    // within 2s of the cancel — if the server's AEAD control reader is
+    // broken, the cancel is never observed and the timeout fails the test.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let mut run_future = std::pin::pin!(client.run(Some(tx)));
     tokio::select! {
         res = &mut run_future => panic!("run ended before cancel: {res:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while client.cancel().is_err() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "handshake did not complete within 5.5s"
-        );
-        tokio::select! {
-            res = &mut run_future => panic!("run ended before cancel: {res:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        _ = tokio::time::sleep(Duration::from_millis(5500)) => {
+            panic!("no progress within 5.5s")
         }
+        _ = rx.recv() => {}
     }
+    client.cancel().expect("test should be running");
 
     let cancelled_at = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut run_future).await;
@@ -5026,6 +5020,46 @@ async fn test_tcp_psk_cancel_infinite_duration() {
         "PSK cancel should resolve within 2s (gave up after {:?}) — if it times out the AEAD control reader is broken",
         cancelled_at.elapsed()
     );
+}
+
+/// A cancel during connect or handshake must be accepted and end the run
+/// promptly. It used to be rejected until TestAck installed the cancel
+/// channel, so a first Ctrl-C on a slow link did nothing (LAN-2914). The
+/// TCP peer accepts and never sends a Hello; the QUIC peer never answers
+/// the handshake.
+#[tokio::test]
+async fn test_cancel_before_test_ack_is_honoured() {
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_port = tcp.local_addr().unwrap().port();
+    let _held = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = tcp.accept().await {
+            held.push(stream);
+        }
+    });
+    let quic = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let quic_port = quic.local_addr().unwrap().port();
+
+    for (protocol, port) in [(Protocol::Tcp, tcp_port), (Protocol::Quic, quic_port)] {
+        let client = Client::new(ClientConfig {
+            port,
+            protocol,
+            duration: Duration::from_secs(10),
+            ..Default::default()
+        });
+        let mut run_future = std::pin::pin!(client.run(None));
+        tokio::select! {
+            res = &mut run_future => panic!("{protocol:?}: run ended before cancel: {res:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+        client
+            .cancel()
+            .unwrap_or_else(|e| panic!("{protocol:?}: cancel during handshake rejected: {e}"));
+        let result = timeout(Duration::from_secs(2), &mut run_future)
+            .await
+            .unwrap_or_else(|_| panic!("{protocol:?}: run ignored a cancel during handshake"));
+        assert!(result.is_err(), "{protocol:?}: expected a cancelled run");
+    }
 }
 
 /// UDP pause/resume smoke test: pause and resume an infinite-duration UDP
