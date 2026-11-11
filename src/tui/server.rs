@@ -358,11 +358,15 @@ fn draw_tests_table(frame: &mut Frame, app: &ServerApp, theme: &Theme, area: Rec
             1 => Cell::from(test.protocol.as_str()),
             2 => Cell::from(test.direction.as_str()),
             3 => Cell::from(test.streams.to_string()),
-            4 => Cell::from(format!(
-                "{}s / {}s",
-                test.started.elapsed().as_secs(),
-                test.duration_secs
-            )),
+            4 => Cell::from(if test.duration_secs == 0 {
+                format!("{}s / ∞", test.started.elapsed().as_secs())
+            } else {
+                format!(
+                    "{}s / {}s",
+                    test.started.elapsed().as_secs(),
+                    test.duration_secs
+                )
+            }),
             _ => Cell::from(mbps_to_human(test.throughput_mbps)),
         }))
     });
@@ -552,6 +556,19 @@ mod tests {
         let rows = screen(&app, 80, 24);
         assert!(rows[5].contains(" Active Tests "), "{rows:?}");
         assert!(!rows.concat().contains("hidden"), "{rows:?}");
+    }
+
+    #[test]
+    fn infinite_or_byte_budget_tests_render_infinity_duration() {
+        let mut app = ServerApp::new();
+        let mut test = active_test("inf");
+        test.duration_secs = 0;
+        app.add_test(test);
+
+        let rows = screen(&app, 80, 12);
+        let all = rows.join("\n");
+        assert!(all.contains("0s / ∞"), "expected ∞ duration in:\n{all}");
+        assert!(!all.contains("0s / 0s"), "unexpected 0s / 0s in:\n{all}");
     }
 
     /// Every foreground colour the dashboard actually paints.

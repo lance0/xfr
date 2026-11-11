@@ -194,8 +194,18 @@ impl SettingsState {
         }
     }
 
+    /// Revert uncommitted test parameter edits back to the clean baseline.
+    pub fn revert_test_params(&mut self) {
+        self.streams = self.original_streams;
+        self.protocol = self.original_protocol;
+        self.duration_secs = self.original_duration_secs;
+        self.direction = self.original_direction;
+        self.bitrate = self.original_bitrate;
+    }
+
     /// Close the modal
     pub fn close(&mut self) {
+        self.revert_test_params();
         self.visible = false;
     }
 
@@ -350,7 +360,7 @@ impl SettingsState {
             0 => {
                 // Apply & Restart
                 if self.test_params_dirty() {
-                    self.close();
+                    self.visible = false;
                     SettingsAction::Restart
                 } else {
                     self.close();
@@ -548,5 +558,45 @@ mod tests {
 
         settings.mark_applied();
         assert!(!settings.test_params_dirty());
+    }
+
+    #[test]
+    fn close_reverts_unapplied_test_param_edits() {
+        let mut settings = SettingsState::new(
+            0,
+            2,
+            Protocol::Tcp,
+            Duration::from_secs(10),
+            Direction::Upload,
+            None,
+        );
+        settings.toggle();
+        assert!(settings.visible);
+
+        settings.streams = 8;
+        settings.protocol = Protocol::Quic;
+        settings.duration_secs = 30;
+        settings.direction = Direction::Bidir;
+        settings.bitrate = Some(1_000_000_000);
+        assert!(settings.test_params_dirty());
+
+        settings.close();
+        assert!(!settings.visible);
+        assert!(!settings.test_params_dirty());
+        assert_eq!(settings.streams, 2);
+        assert_eq!(settings.protocol, Protocol::Tcp);
+        assert_eq!(settings.duration_secs, 10);
+        assert_eq!(settings.direction, Direction::Upload);
+        assert_eq!(settings.bitrate, None);
+
+        // Apply & Restart must preserve the pending edits until the caller commits them.
+        settings.toggle();
+        settings.streams = 4;
+        settings.button_focused = true;
+        settings.button_index = 0;
+        assert_eq!(settings.on_enter(), SettingsAction::Restart);
+        assert!(!settings.visible);
+        assert_eq!(settings.streams, 4);
+        assert!(settings.test_params_dirty());
     }
 }
