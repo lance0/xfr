@@ -224,6 +224,12 @@ jobs:
             tool: zigbuild
             suffix: -minimal
             features: --no-default-features
+          - target: aarch64-unknown-linux-musl
+            triple: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            tool: zigbuild
+            suffix: -minimal
+            features: --no-default-features
           - target: aarch64-linux-android
             triple: aarch64-linux-android
             os: ubuntu-latest

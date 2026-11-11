@@ -238,7 +238,8 @@ Maximum test duration (server-side limit)
 Prometheus Pushgateway or vmagent import URL (e.g., http://pushgateway:9091). Adds role="server"
 and client="peer IP" grouping labels. Environment: XFR_PUSH_GATEWAY;
 config: [server] push_gateway. Jobs remain named xfr_test_<test_id> and are not
-automatically deleted. Server pushes retain up to three 30-second attempts
+automatically deleted. Server pushes share the client's five-second total
+delivery deadline including retries
 .TP
 .BI \-\-push\-label " KEY=VALUE"
 Attach an operator label; repeat for multiple labels. CLI values override [server] push_labels by key. Server jobs remain per-test.

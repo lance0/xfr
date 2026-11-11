@@ -487,6 +487,8 @@ interval_secs = 1.0           # report interval; default is 1.0 seconds
 json_output = false
 no_tui = false
 # push_gateway = "http://127.0.0.1:8429/api/v1/import/prometheus"
+# push_labels = { instance = "home", site = "lab" }
+# push_job = "mesh"
 theme = "default"            # or dracula, catppuccin, nord, matrix, etc.
 timestamp_format = "relative" # or "iso8601", "unix"
 address_family = "dual"      # "ipv4", "ipv6", or "dual"
@@ -509,6 +511,7 @@ allow = ["192.168.0.0/16", "10.0.0.0/8"]
 deny = []
 acl_file = "/path/to/acl.txt"
 push_gateway = "http://pushgateway:9091"
+# push_labels = { instance = "central", site = "lab" }
 log_file = "~/.config/xfr/xfr-server.log"
 log_level = "info"
 
@@ -854,8 +857,8 @@ history. Restarting a test does not cancel an earlier result's delivery. On
 exit, the summary is printed and saved before any outstanding pushes finish;
 Ctrl-C skips that remaining wait. HTTP errors and timeouts mean delivery was
 not confirmed; the gateway may have accepted a request whose reply was lost.
-There is no on-disk retry queue. Server pushes retain their existing three
-attempts with a 30-second timeout per attempt. Failed tests without a final
+There is no on-disk retry queue. Server pushes share the client's five-second
+total delivery deadline, retries included. Failed tests without a final
 result do not push. Invalid client gateway URLs fail before starting a test.
 
 For scheduled tests, keep a local result as well as the metrics:
@@ -1117,6 +1120,8 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 | `--log-level` | | info | Log level (error, warn, info, debug, trace) |
 | `--config` | | searched | Config file to use instead of the default search (also `XFR_CONFIG`; before or after `serve`) |
 | `--push-gateway` | | none | Prometheus Push Gateway URL (client and server) |
+| `--push-label` | | none | Attach an operator `KEY=VALUE` label to pushed metrics, repeatable (client and server) |
+| `--push-job` | | none | Bounded aggregate client snapshots under a stable job name; requires an `instance` push label (client) |
 | `--prometheus` | | none | Prometheus metrics port (server, requires feature) |
 | `--psk` | | none | Pre-shared key for authentication |
 | `--psk-file` | | none | Read PSK from file |
@@ -1134,10 +1139,10 @@ The check uses a 1-hour cache to avoid GitHub API rate limits.
 
 Server options go after `serve` (`xfr serve -p 9000`). Client options typed
 alongside `serve`, `diff` or `discover` (`xfr -p 9000 serve`) are a usage
-error; only `--theme`, `--log-file`, `--log-level`, `--no-update-check` and
+error; only `--theme`, `--config`, `--log-file`, `--log-level`, `--no-update-check` and
 `--completions` work with any subcommand, and they go before it
 (`xfr --no-update-check serve`, not `xfr serve --no-update-check`). Only
-`--theme` is also accepted after the subcommand; `serve` has its own
+`--theme` and `--config` are also accepted after the subcommand; `serve` has its own
 `--log-file` and `--log-level`, given after it. Environment variables such as
 `XFR_PORT` are not affected.
 
