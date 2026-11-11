@@ -534,6 +534,38 @@ mod tests {
         assert!(text.contains("xfr_stream_bytes_total{stream_id=\"0\",test_id=\"running\"} 1000"));
     }
 
+    #[test]
+    fn finish_aggregates_multi_stream_tcp_info() {
+        let m = XfrMetrics::new();
+        let stats = TestStats::new("multi".to_string(), 2);
+        stats.streams[0].set_final_tcp_info(crate::protocol::TcpInfoSnapshot {
+            retransmits: 2,
+            rtt_us: 100,
+            rtt_var_us: 10,
+            cwnd: 1000,
+            bytes_acked: None,
+        });
+        stats.streams[1].set_final_tcp_info(crate::protocol::TcpInfoSnapshot {
+            retransmits: 3,
+            rtt_us: 200,
+            rtt_var_us: 20,
+            cwnd: 2000,
+            bytes_acked: None,
+        });
+        m.active_tests.inc();
+        m.finish(&stats, true);
+
+        let text = exposition(&m);
+        assert!(
+            text.contains("xfr_tcp_rtt_microseconds{test_id=\"multi\"} 150"),
+            "{text}"
+        );
+        assert!(
+            text.contains("xfr_tcp_retransmits_total{test_id=\"multi\"} 5"),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn fragmented_requests_respond_and_close() {
         register_metrics();

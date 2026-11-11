@@ -130,7 +130,8 @@ impl ServerConfig {
             "rate limit window must be at least 1 second when rate limiting is enabled"
         );
         anyhow::ensure!(
-            self.max_duration.is_none_or(|d| !d.is_zero()),
+            self.max_duration
+                .is_none_or(|d| d >= Duration::from_secs(1)),
             "max_duration must be at least 1 second"
         );
         Ok(())
@@ -2128,7 +2129,11 @@ async fn run_quic_test(
             direction: direction.to_string(),
             streams,
             started: std::time::Instant::now(),
-            duration_secs: duration.as_secs() as u32,
+            duration_secs: if duration.is_zero() {
+                0
+            } else {
+                duration.as_secs().max(1) as u32
+            },
             bytes: 0,
             throughput_mbps: 0.0,
         }));
@@ -2649,7 +2654,11 @@ async fn run_test<W: AsyncWrite + Unpin>(
             direction: direction.to_string(),
             streams,
             started: std::time::Instant::now(),
-            duration_secs: duration.as_secs() as u32,
+            duration_secs: if duration.is_zero() {
+                0
+            } else {
+                duration.as_secs().max(1) as u32
+            },
             bytes: 0,
             throughput_mbps: 0.0,
         }));
