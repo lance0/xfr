@@ -159,7 +159,7 @@
 - [x] **Audit unwrap()/expect() calls** (PR #156) - audit complete: auth.rs HMAC init and the serve.rs/client.rs PSK paths already propagate errors or carry infallibility messages; the one remaining bare unwrap (control_crypto frame-header conversion) now documents why it cannot fail
 - [ ] **Audit swallowed channel sends** - ~15 `let _ =` sites on `try_send`/`send` in serve.rs (TUI event channel, cancel/shutdown signals). Most are benign watch-channel semantics, but the cancel-path ones could mask a test that didn't actually stop; classify each and log the ones that matter
 - [x] **Finish the settings-modal restart path** - Apply & Restart cancels the previous run, applies test settings, resets the TUI, and starts a fresh run in place; the event loop consumes the modal restart action
-- [ ] **Remove unused dependencies** - once_cell→OnceLock, evaluate futures, humantime (async-trait is gone: it was declared but never used)
+- [x] **Remove unused dependencies** - `once_cell` replaced with `std::sync::LazyLock` and `hostname` gated on the `discovery` feature (`async-trait` was removed earlier)
 - [x] **Join client data tasks** - Client::run now collects JoinHandles and joins with 2s timeout + abort before returning
 - [ ] **Extract shared handshake logic** - ~100+ lines duplicated between TCP and QUIC paths in both serve.rs and client.rs
 
@@ -167,7 +167,7 @@
 - [ ] **Concurrent client tests** - simulate multiple clients to verify race condition handling
 - [ ] **Fuzz testing** - fuzz control protocol JSON parsing for robustness
 - [ ] **Property-based testing** - packet sequence tracking, rate limiter invariants
-- [ ] **Expand rate limiting and ACL tests** - explicit rate-limit rejection and preset `allowed_clients` coverage now exist; remaining gaps are allow/deny precedence and IPv4-mapped IPv6 combinations
+- [x] **Expand rate limiting and ACL tests** - explicit rate-limit rejection, preset `allowed_clients`, allow/deny precedence, and IPv4-mapped IPv6 combinations covered
 - [ ] **Cancellation flow tests** - client cancel, server cancel, partial stream setup
 - [ ] **QUIC negative tests** - client opens fewer streams than requested, malformed messages
 - [ ] **Listener backlog stress test** - verify single-port mode handles many concurrent data connections
@@ -204,7 +204,7 @@
 - [x] **Test by amount** (`-n`/`--bytes`) - shipped: transfer a fixed number of bytes instead of running for a fixed time, shared across all streams, all three protocols and all three directions (`byte_budget_v1` capability). `-t` becomes an upper bound when both are given. Byte-exactness needed two things beyond the send-loop stop: a graceful close instead of the timed path's RST (which discards the send buffer), and a post-`Finish` drain on the server so a paced sender's queued tail is actually received. iperf3's `-k` (block count) is not implemented
 - [ ] **Result metadata passthrough** (`--title`, `--extra-data`) - tag JSON/CSV results with a run label or arbitrary metadata for CI log ingestion; pairs with the JSON-schema item below
 - [ ] **Get server output** (`--get-server-output`) - return server's JSON result to client (iperf3 parity)
-- [ ] **Advertise live RTT/cwnd in scripted output** - plain-text and `--json-stream` intervals already carry per-interval RTT, cwnd, and retransmits from live TCP_INFO polling; audit coverage across modes and say so in the comparison docs. Live human-readable RTT is the most-requested open iperf3 feature (esnet/iperf#1207)
+- [x] **Advertise live RTT/cwnd in scripted output** - plain-text intervals carry live `rtt` and `rtx` (with `Cwnd` in the final summary), and `--json-stream` and `--csv` intervals carry per-interval `rtt_us`, `cwnd`, and `retransmits` from live TCP_INFO polling across upload, `-R`, and `--bidir`, documented in `docs/COMPARISON.md`. Live human-readable RTT is the most-requested open iperf3 feature (esnet/iperf#1207)
 - [x] **DSCP/TOS marking** (`--dscp`) - set DSCP/TOS on client TCP/UDP sockets for QoS policy testing; QUIC ignores it. Accepts numeric (0-255) or DSCP names (EF, AF11-AF43, CS0-CS7)
 - [ ] **TCP Fast Open** (`--fast-open`) - reduce handshake latency for short tests; `setsockopt(TCP_FASTOPEN)` on server, `MSG_FASTOPEN` on client connect
 - [ ] **CC algorithm A/B comparison** (`xfr cca-compare <host>`) - run back-to-back tests with different congestion control algorithms (BBR, CUBIC, Reno, etc.) and produce side-by-side comparison (throughput, retransmits, RTT). Leverages existing `--congestion` and `xfr diff`. BBR vs CUBIC is one of the most common network testing questions
@@ -407,7 +407,7 @@ See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for documented edge cases and limitations
 
 **Potential future improvements** (from known issues):
 - [x] QUIC bitrate pacing support — shipped; `-b` now paces QUIC uploads and downloads
-- [ ] UDP reverse mode error reporting to client
+- [x] UDP reverse mode error reporting to client — shipped in v0.11.0 (`server_udp_send_errors` / `client_udp_send_errors`)
 
 ---
 

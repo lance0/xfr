@@ -12,6 +12,7 @@ src/
 ├── client.rs        # Client-side test orchestration
 ├── serve.rs         # Server-side connection handling
 ├── serve/
+│   ├── events.rs    # Server event and active-test types (shared with TUI)
 │   ├── reporting.rs # Interval reports that survive a stalled control writer
 │   ├── tcp_backpressure_tests.rs  # Stalled control writes, TCP (tests)
 │   └── quic_backpressure_tests.rs # Stalled control writes, QUIC (tests)
@@ -72,7 +73,10 @@ src/
 │  1. Connect TCP to server:5201 (control channel)                   │
 │  2. Send Hello (version 1.1, capabilities list)                     │
 │     Capabilities: tcp, udp, quic, multistream, single_port_tcp,     │
-│                   pause_resume, udp_feedback_v1                    │
+│                   pause_resume, udp_feedback_v1, zerocopy_v1,       │
+│                   mtu_probe_v1, single_port_udp_v1,                 │
+│                   protected_control_v1, quic_channel_binding_v1,    │
+│                   byte_budget_v1, udp_payload_size_v1               │
 │  3. Receive server Hello (version, auth challenge if PSK)           │
 │  4. If PSK: complete challenge-response auth                        │
 │  5. Send TestStart (protocol, streams, duration, direction)         │
@@ -112,7 +116,7 @@ Protocol version is **1.1** (major version must match for compatibility).
 Messages use a tagged enum format with a `"type"` field:
 
 ```
-{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp","pause_resume","udp_feedback_v1"]}\n
+{"type":"hello","version":"1.1","client":"xfr/x.y.z","capabilities":["tcp","udp","quic","multistream","single_port_tcp","pause_resume","udp_feedback_v1","zerocopy_v1","mtu_probe_v1","single_port_udp_v1","protected_control_v1","quic_channel_binding_v1","byte_budget_v1","udp_payload_size_v1"]}\n
 {"type":"test_start","id":"...","protocol":"tcp","streams":4,...}\n
 ```
 
@@ -120,14 +124,15 @@ Each message is serialized as compact JSON followed by a newline character.
 The receiver reads line-by-line and deserializes each line as a `ControlMessage`.
 
 Message types (see `protocol.rs`):
-- `hello` - Version and capability exchange (client sends capabilities list)
+- `hello` - Version and capability exchange (client and server send capabilities lists)
 - `auth_response` - PSK authentication
-- `auth_success` - Auth confirmation
+- `auth_success` - Auth confirmation (includes transcript `server_proof`)
 - `test_start` - Test parameters
-- `test_ack` - Test acknowledgment (includes data_ports, empty for single-port TCP)
+- `test_ack` - Test acknowledgment (includes `data_ports` or `udp_token`)
 - `data_hello` - Data connection identification (test_id, stream_index)
 - `interval` - Periodic statistics
 - `result` - Final test result
+- `pause` / `resume` - Pause and resume active data streams
 - `cancel` / `cancelled` - Test cancellation
 - `error` - Error messages
 
@@ -315,14 +320,19 @@ pub struct StreamStats {
     pub start_time: Instant,
     pub intervals: Mutex<VecDeque<IntervalStats>>,
     pub retransmits: AtomicU64,
+    pub interval_retransmits_total: AtomicU64,
     pub last_bytes: AtomicU64,
-    pub last_retransmits: AtomicU64,
+    pub last_bytes_sent: AtomicU64,
+    pub last_bytes_received: AtomicU64,
+    pub last_tcp_retransmits: AtomicU64,
     // UDP stats (updated live by receiver)
     pub udp_jitter_us: AtomicU64,
-    pub udp_lost: AtomicU64,
     pub last_udp_lost: AtomicU64,
+    udp_progress: Mutex<UdpIntervalProgress>,
+    udp_send_errors: Mutex<Option<UdpSendErrors>>,
     // Raw fd for live TCP_INFO polling (-1 = not set)
     pub tcp_info_fd: AtomicI32,
+    final_tcp_info: Mutex<Option<TcpInfoSnapshot>>,
 }
 ```
 
@@ -379,7 +389,7 @@ setsockopt(fd, SOL_SOCKET, SO_SNDBUF, 262144)?;
 setsockopt(fd, SOL_SOCKET, SO_RCVBUF, 262144)?;
 ```
 
-UDP does not apply any `SO_SNDBUF`/`SO_RCVBUF` override.
+`-w`/`--window` applies `SO_SNDBUF`/`SO_RCVBUF` to both TCP and UDP sockets on client and server.
 
 **Memory footprint:** Each TCP stream allocates the 128 KB application buffer plus whatever the kernel decides for the socket buffer (typically a few hundred KB autotuned, more if the user set `-w`). A test with `-P 8` at default settings is on the order of ~2-8 MB; high-BDP paths where the user passes `-w 16M` will use proportionally more.
 

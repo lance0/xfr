@@ -23,6 +23,7 @@ A comparison of xfr with other network bandwidth testing tools.
 | **LAN discovery** | `xfr discover` (mDNS) | No | No | No | No |
 | **Config file** | Yes (TOML) | No | No | No | No |
 | **TCP/UDP bitrate pacing** | Yes (`-b`, kernel FQ pacing on Linux) | Yes (`-b`) | Yes (`-b`) | No | ? |
+| **Live TCP RTT / cwnd / retransmits** | Yes (plain-text `rtt`/`rtx`, `--json-stream` and `--csv` `rtt_us`, `cwnd`, `retransmits` across upload, `-R`, and `--bidir` on Linux and macOS) | Partial (JSON/sender cwnd & rtx; no human-readable live RTT, `esnet/iperf#1207`) | No | No | ? |
 | **Live UDP loss under saturation** | Yes (`udp_feedback_v1`, 2 Hz on data socket; bypasses TCP control) | No (rides TCP control; bunches under load) | No | No | ? |
 | **Congestion control selection** | Yes (`--congestion`) | Yes (`--congestion`) | Yes (`-Z`) | No | ? |
 | **Authentication** | Yes (PSK) | Yes (username/password, RSA-encrypted) | No | No | ? |
@@ -33,10 +34,13 @@ A comparison of xfr with other network bandwidth testing tools.
 | **Active development** | Yes | Yes (3.19 added MPTCP and keepalives; 3.21 added UDP GSO/GRO) | Yes | Yes | Yes |
 
 The "Live UDP loss under saturation" row refers to xfr's TUI live Packet Loss
-counter and the freshness of UDP loss values. Non-TUI interval formats
-(`--json-stream`, `--csv`, and plain text) still emit rows on TCP control
-`Interval` arrival, so row cadence can bunch under extreme loss even when the
-printed loss value reflects fresher `udp_feedback_v1` data.
+counter and the freshness of UDP loss values. Download-only UDP (`-u -R`)
+builds live intervals on a local 1 Hz clock from local receive counters without
+waiting on TCP control `Interval` arrival; in upload mode, non-TUI interval
+formats (`--json-stream`, `--csv`, and plain text) emit normal interval rows on
+TCP control `Interval` arrival, while upload stalls emit `(reports stalled)`
+lines in plain text and `udp_feedback` events in `--json-stream` from fresher
+2 Hz `udp_feedback_v1` data.
 
 ## For iperf3 Users
 
@@ -50,11 +54,23 @@ xfr is designed as a drop-in replacement for iperf3 with familiar CLI flags.
 | `-c HOST` | `HOST` | Connect to server (just the hostname) |
 | `-p PORT` | `-p PORT` | Port number |
 | `-t SECS` | `-t SECS` | Test duration |
+| `-n BYTES` | `-n BYTES` | Transfer size (bytes instead of duration) |
 | `-P N` | `-P N` | Parallel streams |
 | `-R` | `-R` | Reverse direction (download) |
 | `-u` | `-u` | UDP mode |
+| `-l BYTES` | `-l BYTES` | UDP payload size (16–65507 bytes) |
 | `-b RATE` | `-b RATE` | Target bitrate |
+| `-w SIZE` | `-w SIZE` | Socket buffer size (`SO_SNDBUF`/`SO_RCVBUF` for TCP and UDP) |
+| `-Z` | `-Z` | Zero-copy TCP sends (`sendfile(2)`, on by default on Linux; `--no-zerocopy` to disable) |
+| `--cport PORT` | `--cport PORT` | Client source port (UDP, QUIC, and TCP data streams) |
+| `-B IP` | `--bind IP` (`-B` on `serve`) | Bind to a local address |
 | `-i SECS` | `-i SECS` | Report interval |
+| `-O SECS` | `--omit SECS` | Omit first N seconds (TCP ramp-up) |
+| `-C ALGO` | `--congestion ALGO` | TCP congestion control algorithm |
+| `--dscp VALUE` | `--dscp VALUE` | DSCP/TOS socket marking |
+| `-m` / `--mptcp` | `--mptcp` | Multi-Path TCP (Linux 5.6+; server auto-enables) |
+| `-4` / `-6` | `-4` / `-6` | IPv4 / IPv6 only |
+| `--connect-timeout MS` | `--connect-timeout DURATION` | Control-connection establishment timeout (e.g. `5s`, `500ms`) |
 | `-J` | `--json` | JSON output |
 | `--json-stream` | `--json-stream` | JSON streaming (one object per interval) |
 | N/A | `--csv` | CSV output |

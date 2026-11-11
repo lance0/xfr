@@ -54,3 +54,7 @@ netns:
     sudo ./test-mptcp-ns.sh
     sudo ./test-control-channel-skew.sh
     sudo ./test-mtu-probe-ns.sh
+    sudo ./test-udp-payload-ns.sh
+    sudo ./test-udp-reorder-ns.sh
+    sudo ./test-link-local-ns.sh
+    sudo ./test-udp-source-addr-ns.sh
