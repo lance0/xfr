@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Update `quinn-udp` from 0.5.15 to 0.5.16 to fix a receive-loop spin after a truncated datagram (RUSTSEC-2026-0538).
+- Update `rustix` from 1.1.4 to 1.1.6 to fix unsound handling of zero-length buffers in xattr functions (RUSTSEC-2026-0486).
+
 ## [0.15.0] - 2026-11-11
 
 ### Added
