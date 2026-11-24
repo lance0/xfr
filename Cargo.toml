@@ -54,7 +54,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 
 # Discovery
-mdns-sd = { version = "0.21", optional = true }
+mdns-sd = { version = "0.22", optional = true }
 
 # Config
 toml = "1.1"
@@ -71,7 +71,7 @@ humantime = "2"
 tempfile = "3.10"
 uuid = { version = "1", features = ["v4"] }
 hostname = { version = "0.4", optional = true }
-jiff = { version = "0.2.39", default-features = false, features = ["std"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 
 # Push gateway
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
